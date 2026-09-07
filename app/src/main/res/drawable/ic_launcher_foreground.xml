@@ -2,12 +2,20 @@
 <vector xmlns:android="http://schemas.android.com/apk/res/android"
     android:width="108dp"
     android:height="108dp"
-    android:viewportWidth="108"
-    android:viewportHeight="108">
-    <path
-        android:fillColor="#1D9BF0"
-        android:pathData="M54,28c14.4,0 26,11.6 26,26s-11.6,26 -26,26 -26,-11.6 -26,-26 11.6,-26 26,-26z" />
-    <path
-        android:fillColor="#FFFFFF"
-        android:pathData="M40,44h6.2l7.8,14.6L61.8,44H68v24h-5.4V53.2L54.8,68h-1.6l-7.8,-14.8V68H40z" />
+    android:viewportWidth="512"
+    android:viewportHeight="512">
+    <!-- Keep the book within the adaptive icon's central safe area. -->
+    <group
+        android:pivotX="256"
+        android:pivotY="256"
+        android:scaleX="0.85"
+        android:scaleY="0.85">
+        <path
+            android:fillColor="#FFFFFF"
+            android:pathData="M112,144 L244,188 V368 L112,324 Z" />
+        <path
+            android:fillColor="#FFFFFF"
+            android:fillType="evenOdd"
+            android:pathData="M268,188 L400,144 V324 L268,368 Z M284,200 V346 L384,312 V167 Z" />
+    </group>
 </vector>
