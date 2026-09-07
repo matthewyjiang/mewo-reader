@@ -31,7 +31,9 @@ Used on a phone, often in bed or on a couch, one-handed. Books come from files t
 - Import EPUB from the system file picker
 - Persist the library on device
 - Read as a vertical feed: one post per paragraph, including long ones
+- Start the feed at the first non-publisher TOC entry, not copyright or contents
 - Remember reading place per book
+- Jump to a heading from the chapter line or the reader title
 - Like a passage and keep that like
 - Search books and opened posts
 - See liked lines in one feed

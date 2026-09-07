@@ -32,10 +32,11 @@ class ReaderViewModel(
     init {
         viewModelScope.launch {
             runCatching {
-                val book = repository.book(bookId)
+                repository.book(bookId)
                     ?: repository.load().let { repository.book(bookId) }
                     ?: error("That book is gone.")
                 val posts = repository.feed(bookId)
+                val book = repository.book(bookId) ?: error("That book is gone.")
                 val likes = repository.likes(bookId)
                 val focus = focusPostId?.let { id -> posts.indexOfFirst { it.id == id } }
                     ?.takeIf { it >= 0 }

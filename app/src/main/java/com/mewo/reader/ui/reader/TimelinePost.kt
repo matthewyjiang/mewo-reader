@@ -52,6 +52,7 @@ fun TimelinePost(
     onRepost: () -> Unit,
     onShare: () -> Unit,
     onOpen: (() -> Unit)? = null,
+    onChapterClick: (() -> Unit)? = null,
 ) {
     val isHeading = post.kind == PostKind.Heading
     Row(
@@ -81,7 +82,20 @@ fun TimelinePost(
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.weight(1f),
+                    modifier = Modifier
+                        .weight(1f)
+                        .then(
+                            if (onChapterClick != null) {
+                                Modifier
+                                    .clickable(role = Role.Button, onClick = onChapterClick)
+                                    .semantics {
+                                        contentDescription = "Chapters, ${post.chapter}"
+                                        role = Role.Button
+                                    }
+                            } else {
+                                Modifier
+                            },
+                        ),
                 )
             }
             Spacer(Modifier.height(4.dp))

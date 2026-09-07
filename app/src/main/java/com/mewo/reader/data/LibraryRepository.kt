@@ -75,15 +75,22 @@ class LibraryRepository(
     suspend fun feed(id: String): List<FeedPost> = withContext(Dispatchers.IO) {
         val cacheFile = File(root, "$id/feed.json")
         if (cacheFile.exists()) {
-            return@withContext json.decodeFromString<FeedCache>(cacheFile.readText()).posts
+            val cache = json.decodeFromString<FeedCache>(cacheFile.readText())
+            if (cache.version == FEED_CACHE_VERSION) {
+                return@withContext cache.posts
+            }
         }
         val posts = opener.open(epubFile(id)) { publication ->
             extractor.extract(publication)
         }
-        cacheFile.writeText(json.encodeToString(FeedCache(posts)))
+        cacheFile.writeText(json.encodeToString(FeedCache(version = FEED_CACHE_VERSION, posts = posts)))
         mutex.withLock {
             val updated = _library.value.books.map { book ->
-                if (book.id == id) book.copy(postCount = posts.size) else book
+                if (book.id == id) {
+                    book.copy(postCount = posts.size, progressIndex = 0)
+                } else {
+                    book
+                }
             }
             writeLibrary(_library.value.copy(books = updated))
         }
@@ -157,7 +164,8 @@ class LibraryRepository(
         val cacheFile = File(root, "$id/feed.json")
         if (!cacheFile.exists()) return null
         return runCatching {
-            json.decodeFromString<FeedCache>(cacheFile.readText()).posts
+            val cache = json.decodeFromString<FeedCache>(cacheFile.readText())
+            if (cache.version == FEED_CACHE_VERSION) cache.posts else null
         }.getOrNull()
     }
 
@@ -198,6 +206,9 @@ class LibraryRepository(
         _library.update { snapshot }
     }
 }
+
+/** Bump when extract output changes so an already-opened book rebuilds its feed. */
+const val FEED_CACHE_VERSION = 4
 
 fun slug(value: String): String {
     val cleaned = value.lowercase()

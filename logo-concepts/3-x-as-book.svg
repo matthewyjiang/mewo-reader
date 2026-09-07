@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" width="512" height="512">
+  <rect width="100" height="100" fill="#000"/>
+  <path fill="#fff" fill-rule="evenodd" d="
+          M22 22 L42 22 L50 42 L58 22 L78 22 L54 50 L78 78 L58 78 L50 58 L42 78 L22 78 L46 50 Z
+          M32 30 L42 30 L50 46 L58 30 L68 30 L50 52 L68 70 L58 70 L50 54 L42 70 L32 70 L50 48 Z
+        "/>
+</svg>

@@ -21,6 +21,7 @@ data class BookRecord(
 
 @Serializable
 data class FeedCache(
+    val version: Int = 1,
     val posts: List<FeedPost> = emptyList(),
 )
 

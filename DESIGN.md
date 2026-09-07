@@ -99,7 +99,7 @@ Avatars and the FAB are circles. The empty-state add control is a pill. Posts ha
 
 ## Components
 
-**Top bar.** Home, Search, and Likes: centered bird or X, palette for Display. Reader is the post view: back, book title, palette. No elevation. Hairline under it.
+**Top bar.** Home, Search, and Likes: centered bird or X, palette for Display. Reader is the post view: back, book title, palette. The title opens the chapter sheet. No elevation. Hairline under it.
 
 **Tab bar.** Home, Search, Likes. Filled icon for the current tab. Hairline above it.
 
@@ -109,7 +109,9 @@ Avatars and the FAB are circles. The empty-state add control is a pill. Posts ha
 
 **Display sheet.** Four swatches in a 2x2: Twitter light, X light, Twitter dim, Lights out. Selecting a swatch applies it and keeps the sheet open.
 
-**Post.** Author name bold, `@handle · chapter` mute on one line, then the paragraph. Heading posts use title weight. Like, quote, and share sit in 40dp targets.
+**Chapter sheet.** Same sheet family as Display. Headline is the book title. Rows are heading posts from the feed, hairline separated. The heading you are in uses hover fill and ink. Tap jumps to that post and dismisses. Empty copy: "This book has no chapter headings." Open it from the reader title or `@handle · chapter`. No list icon. Publisher chrome (cover, copyright, contents, also-by) never reaches the feed, so it is not in this list. A prologue or author's note does.
+
+**Post.** Author name bold, `@handle · chapter` mute on one line, then the paragraph. Heading posts use title weight. Like, quote, and share sit in 40dp targets. The chapter line opens the chapter sheet.
 
 **Book row.** Same skeleton as a post. Title is the name. Progress is the body line.
 
