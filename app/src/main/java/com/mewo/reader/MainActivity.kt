@@ -4,8 +4,13 @@ import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.getValue
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.mewo.reader.ui.MewoNav
+import com.mewo.reader.ui.theme.LocalThemeController
 import com.mewo.reader.ui.theme.MewoTheme
+import com.mewo.reader.ui.theme.ThemeController
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -14,18 +19,26 @@ class MainActivity : ComponentActivity() {
         setContent {
             /*
              * THESIS: A book is a timeline. Refuse the typeset page.
-             * OWN-WORLD: Lights-out black, hairline rules, circular avatars,
-             * blue/pink actions, Atkinson body. X's grammar, this product's text.
+             * OWN-WORLD: Four display palettes, Twitter or X, light or night.
+             * Hairline rules, circular avatars, Atkinson body.
              * STORY: Import an EPUB, scroll the author as a feed, like a line.
              * FIRST VIEWPORT: Sticky "Mewo" bar, feed of books or empty timeline
-             * plus one FAB to add a file.
+             * plus one FAB to add a file. Palette opens Display.
              * FORM: X home timeline, brief-pinned, seed skipped.
              * FINISH: unreviewed and undocumented is unfinished; this build ends
              * with the finish review, the verdict, and DESIGN.md
              */
-            MewoTheme {
-                val app = application as MewoApp
-                MewoNav(repository = app.repository)
+            val app = application as MewoApp
+            val theme by app.themeStore.theme.collectAsStateWithLifecycle()
+            MewoTheme(theme = theme) {
+                CompositionLocalProvider(
+                    LocalThemeController provides ThemeController(
+                        current = theme,
+                        setTheme = app.themeStore::setTheme,
+                    ),
+                ) {
+                    MewoNav(repository = app.repository)
+                }
             }
         }
     }

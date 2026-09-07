@@ -14,7 +14,6 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -25,6 +24,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Add
 import androidx.compose.material.icons.outlined.Delete
+import androidx.compose.material.icons.outlined.Palette
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.HorizontalDivider
@@ -45,14 +45,15 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.mewo.reader.data.BookRecord
 import com.mewo.reader.ui.components.Avatar
+import com.mewo.reader.ui.components.BrandMark
 import com.mewo.reader.ui.components.MewoAppBar
-import com.mewo.reader.ui.theme.XBlue
 import java.io.File
 
 @Composable
 fun LibraryScreen(
     viewModel: LibraryViewModel,
     onOpenBook: (String) -> Unit,
+    onDisplay: () -> Unit,
 ) {
     val state by viewModel.state.collectAsStateWithLifecycle()
     val context = LocalContext.current
@@ -68,7 +69,7 @@ fun LibraryScreen(
             .background(MaterialTheme.colorScheme.background),
     ) {
         Column(Modifier.fillMaxSize()) {
-            HomeBar()
+            HomeBar(onDisplay = onDisplay)
             HorizontalDivider(color = MaterialTheme.colorScheme.outline, thickness = 0.6.dp)
             if (state.books.isEmpty() && !state.busy) {
                 EmptyTimeline(
@@ -98,12 +99,11 @@ fun LibraryScreen(
 
         FloatingActionButton(
             onClick = { picker.launch(arrayOf("application/epub+zip", "application/octet-stream")) },
-            containerColor = XBlue,
+            containerColor = MaterialTheme.colorScheme.primary,
             contentColor = MaterialTheme.colorScheme.onPrimary,
             shape = CircleShape,
             modifier = Modifier
                 .align(Alignment.BottomEnd)
-                .navigationBarsPadding()
                 .padding(end = 16.dp, bottom = 16.dp)
                 .size(56.dp),
         ) {
@@ -112,11 +112,10 @@ fun LibraryScreen(
 
         if (state.busy) {
             CircularProgressIndicator(
-                color = XBlue,
+                color = MaterialTheme.colorScheme.primary,
                 strokeWidth = 2.dp,
                 modifier = Modifier
                     .align(Alignment.BottomCenter)
-                    .navigationBarsPadding()
                     .padding(bottom = 24.dp)
                     .size(22.dp),
             )
@@ -126,7 +125,6 @@ fun LibraryScreen(
             Snackbar(
                 modifier = Modifier
                     .align(Alignment.BottomCenter)
-                    .navigationBarsPadding()
                     .padding(16.dp),
                 action = {
                     TextButton(onClick = viewModel::dismissError) {
@@ -141,14 +139,20 @@ fun LibraryScreen(
 }
 
 @Composable
-private fun HomeBar() {
-    MewoAppBar {
-        Text(
-            text = "Mewo",
-            style = MaterialTheme.typography.titleLarge,
-            modifier = Modifier.padding(horizontal = 16.dp),
-        )
-    }
+private fun HomeBar(onDisplay: () -> Unit) {
+    MewoAppBar(
+        leading = {},
+        center = { BrandMark() },
+        trailing = {
+            IconButton(onClick = onDisplay) {
+                Icon(
+                    Icons.Outlined.Palette,
+                    contentDescription = "Display",
+                    tint = MaterialTheme.colorScheme.onBackground,
+                )
+            }
+        },
+    )
 }
 
 @Composable
@@ -178,13 +182,13 @@ private fun EmptyTimeline(
             onClick = onAdd,
             modifier = Modifier
                 .clip(RoundedCornerShape(999.dp))
-                .background(XBlue)
+                .background(MaterialTheme.colorScheme.primary)
                 .padding(horizontal = 8.dp),
         ) {
             Text("Add a book", color = MaterialTheme.colorScheme.onPrimary)
         }
         TextButton(onClick = onSample) {
-            Text("Open a sample", color = XBlue)
+            Text("Open a sample", color = MaterialTheme.colorScheme.primary)
         }
     }
 }

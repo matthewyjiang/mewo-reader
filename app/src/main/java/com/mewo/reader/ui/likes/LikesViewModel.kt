@@ -1,0 +1,48 @@
+package com.mewo.reader.ui.likes
+
+import androidx.lifecycle.ViewModel
+import androidx.lifecycle.ViewModelProvider
+import androidx.lifecycle.viewModelScope
+import com.mewo.reader.data.LibraryRepository
+import com.mewo.reader.data.PostHit
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.launch
+
+data class LikesUiState(
+    val hits: List<PostHit> = emptyList(),
+    val loading: Boolean = true,
+)
+
+class LikesViewModel(
+    private val repository: LibraryRepository,
+) : ViewModel() {
+    private val _state = MutableStateFlow(LikesUiState())
+    val state: StateFlow<LikesUiState> = _state.asStateFlow()
+
+    fun refresh() {
+        viewModelScope.launch {
+            _state.update { it.copy(loading = it.hits.isEmpty()) }
+            val hits = repository.likedPosts()
+            _state.update { it.copy(hits = hits, loading = false) }
+        }
+    }
+
+    fun unlike(bookId: String, postId: String) {
+        viewModelScope.launch {
+            repository.toggleLike(bookId, postId)
+            _state.update { it.copy(hits = it.hits.filterNot { hit -> hit.post.id == postId && hit.book.id == bookId }) }
+        }
+    }
+
+    companion object {
+        fun factory(repository: LibraryRepository) = object : ViewModelProvider.Factory {
+            @Suppress("UNCHECKED_CAST")
+            override fun <T : ViewModel> create(modelClass: Class<T>): T {
+                return LikesViewModel(repository) as T
+            }
+        }
+    }
+}

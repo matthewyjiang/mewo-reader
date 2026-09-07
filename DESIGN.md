@@ -2,19 +2,31 @@
 name: Mewo
 description: An EPUB reader that presents a book as an X-style timeline
 colors:
-  black: "#000000"
-  paper: "#FFFFFF"
-  ink: "#E7E9EA"
-  ink-light: "#0F1419"
-  mute: "#71767B"
-  mute-light: "#536471"
-  line: "#2F3336"
-  line-light: "#EFF3F4"
-  hover: "#16181C"
-  hover-light: "#F7F9F9"
-  blue: "#1D9BF0"
-  pink: "#F91880"
-  green: "#00BA7C"
+  x-black: "#000000"
+  x-paper: "#FFFFFF"
+  x-ink: "#E7E9EA"
+  x-ink-light: "#0F1419"
+  x-mute: "#71767B"
+  x-mute-light: "#536471"
+  x-line: "#2F3336"
+  x-line-light: "#EFF3F4"
+  x-hover: "#16181C"
+  x-hover-light: "#F7F9F9"
+  x-blue: "#1D9BF0"
+  x-pink: "#F91880"
+  x-green: "#00BA7C"
+  twitter-dim: "#15202B"
+  twitter-ink: "#14171A"
+  twitter-mute: "#657786"
+  twitter-line: "#E1E8ED"
+  twitter-hover: "#F5F8FA"
+  twitter-dim-ink: "#F7F9F9"
+  twitter-dim-mute: "#8B98A5"
+  twitter-dim-line: "#38444D"
+  twitter-dim-hover: "#1E2732"
+  twitter-blue: "#1DA1F2"
+  twitter-like: "#E0245E"
+  twitter-green: "#17BF63"
 typography:
   display:
     fontFamily: "Atkinson Hyperlegible"
@@ -41,14 +53,14 @@ spacing:
   bar: "56dp"
 components:
   post:
-    backgroundColor: "{colors.black}"
-    textColor: "{colors.ink}"
+    backgroundColor: "{colors.x-black}"
+    textColor: "{colors.x-ink}"
     padding: "12dp 16dp"
   like-active:
-    textColor: "{colors.pink}"
+    textColor: "{colors.x-pink}"
   fab:
-    backgroundColor: "{colors.blue}"
-    textColor: "{colors.paper}"
+    backgroundColor: "{colors.x-blue}"
+    textColor: "{colors.x-paper}"
     rounded: "{rounded.fab}"
     size: "56dp"
 ---
@@ -57,11 +69,17 @@ components:
 
 ## Overview
 
-Mewo looks like X's home timeline, not a typeset book. Dark is lights-out black. Light is X's white paper. One paragraph is one post. Hairline rules, circular avatars, a four-across action row that we trimmed to quote, like, and share.
+Mewo looks like a home timeline, not a typeset book. The user picks the chrome: Twitter or X, light or night. Layout stays the same. One paragraph is one post. Hairline rules, circular avatars, a four-across action row that we trimmed to quote, like, and share.
 
 ## Colors
 
-Night reading is the default scene. Dark uses `#000000` ground and `#E7E9EA` ink. Meta text is `#71767B`. Rules are `#2F3336`. Actions: blue for add and links, pink for a liked heart, green reserved for a quoted repost. Light swaps to white paper and `#0F1419` ink. Do not use Dynamic Color. Wallpaper hues would break the timeline.
+Four display palettes. The user picks one from the Display sheet. First launch follows the system night setting and lands on an X palette.
+
+X dark is lights-out `#000000` with `#E7E9EA` ink, `#71767B` meta, `#2F3336` rules, `#1D9BF0` blue, `#F91880` likes. X light is white paper and `#0F1419` ink.
+
+Twitter dim is `#15202B` navy with `#F7F9F9` ink, `#8B98A5` meta, `#38444D` rules, `#1DA1F2` blue, `#E0245E` likes. Twitter light is white paper, `#14171A` ink, `#657786` meta, `#E1E8ED` rules.
+
+Do not use Dynamic Color. Wallpaper hues would break the timeline.
 
 ## Typography
 
@@ -69,7 +87,7 @@ Atkinson Hyperlegible for chrome and body. Display and names are 17-22sp bold. B
 
 ## Layout
 
-Phone first, edge to edge. A 56dp top bar with a 0.6dp rule under it. Feed rows are 16dp from the left, 40dp avatar, 12dp gap, then the post. The add action is one circular FAB on the library. System Back leaves the reader.
+Phone first, edge to edge. A 56dp top bar with a 0.6dp rule under it. The brand mark sits on the true center of the bar, overlaid, so side actions cannot shove it. Twitter themes use the bird (blue on light, ink on dim). X themes use the current X mark in ink. A 52dp tab bar sits on the bottom with Home, Search, and Likes. Tapping a tab switches that feed. Opening a book is the post view: back returns to the feed you came from. Feed rows are 16dp from the left, 40dp avatar, 12dp gap, then the post. Quote, like, and share sit across the post column. The add action is one circular FAB on the library, above the tab bar. System Back also leaves the reader.
 
 ## Elevation & Depth
 
@@ -81,7 +99,15 @@ Avatars and the FAB are circles. The empty-state add control is a pill. Posts ha
 
 ## Components
 
-**Top bar.** Product name or book title. No elevation. Hairline under it.
+**Top bar.** Home, Search, and Likes: centered bird or X, palette for Display. Reader is the post view: back, book title, palette. No elevation. Hairline under it.
+
+**Tab bar.** Home, Search, Likes. Filled icon for the current tab. Hairline above it.
+
+**Search.** A live field in the top bar. Book hits, then post hits from books already opened.
+
+**Likes.** One feed of every hearted line. Tap a line to jump to it in the book.
+
+**Display sheet.** Four swatches in a 2x2: Twitter light, X light, Twitter dim, Lights out. Selecting a swatch applies it and keeps the sheet open.
 
 **Post.** Author name bold, `@handle · chapter` mute on one line, then the paragraph. Heading posts use title weight. Like, quote, and share sit in 40dp targets.
 

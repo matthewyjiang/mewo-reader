@@ -33,12 +33,15 @@ Used on a phone, often in bed or on a couch, one-handed. Books come from files t
 - Read as a vertical feed: one post per paragraph, including long ones
 - Remember reading place per book
 - Like a passage and keep that like
+- Search books and opened posts
+- See liked lines in one feed
+- Pick Twitter or X display, light or dark
 - No accounts, sync, OPDS, DRM, or iOS in this version
 
 ## Brand Commitments
 
 - Name: Mewo
-- Reading surface is pinned: it should look and feel like scrolling X. Avatar, name, handle, body, action row, hairline dividers, vertical infinite scroll. Not a typeset book page.
+- Reading surface is pinned: it should look and feel like scrolling a timeline. Avatar, name, handle, body, action row, hairline dividers, vertical infinite scroll. Not a typeset book page. Chrome is Twitter or X, light or dark, chosen by the user.
 
 ## Evidence on Hand
 

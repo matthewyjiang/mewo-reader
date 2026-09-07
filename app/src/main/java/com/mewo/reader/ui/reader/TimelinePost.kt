@@ -1,6 +1,8 @@
 package com.mewo.reader.ui.reader
 
 import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -36,7 +38,7 @@ import androidx.compose.ui.unit.dp
 import com.mewo.reader.data.FeedPost
 import com.mewo.reader.data.PostKind
 import com.mewo.reader.ui.components.Avatar
-import com.mewo.reader.ui.theme.XPink
+import com.mewo.reader.ui.theme.LocalMewoColors
 import java.io.File
 
 @Composable
@@ -49,11 +51,16 @@ fun TimelinePost(
     onLike: () -> Unit,
     onRepost: () -> Unit,
     onShare: () -> Unit,
+    onOpen: (() -> Unit)? = null,
 ) {
     val isHeading = post.kind == PostKind.Heading
     Row(
         modifier = Modifier
             .fillMaxWidth()
+            .then(
+                if (onOpen != null) Modifier.clickable(role = Role.Button, onClick = onOpen)
+                else Modifier,
+            )
             .padding(start = 16.dp, end = 12.dp, top = 12.dp),
     ) {
         Avatar(name = author, coverFile = cover, size = 40.dp)
@@ -108,9 +115,11 @@ private fun ActionRow(
     onShare: () -> Unit,
 ) {
     val mute = MaterialTheme.colorScheme.onSurfaceVariant
+    val likeColor = LocalMewoColors.current.like
     val likeScale by animateFloatAsState(if (liked) 1.18f else 1f, label = "like")
     Row(
         modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.SpaceBetween,
         verticalAlignment = Alignment.CenterVertically,
     ) {
         ActionIcon(
@@ -121,7 +130,7 @@ private fun ActionRow(
         )
         ActionIcon(
             icon = if (liked) Icons.Outlined.Favorite else Icons.Outlined.FavoriteBorder,
-            tint = if (liked) XPink else mute,
+            tint = if (liked) likeColor else mute,
             label = if (liked) "Unlike" else "Like",
             onClick = onLike,
             modifier = Modifier.scale(likeScale),

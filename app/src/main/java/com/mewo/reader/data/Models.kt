@@ -42,3 +42,13 @@ enum class PostKind {
 data class LikeSet(
     val ids: Set<String> = emptySet(),
 )
+
+data class PostHit(
+    val book: BookRecord,
+    val post: FeedPost,
+)
+
+data class SearchResult(
+    val books: List<BookRecord> = emptyList(),
+    val posts: List<PostHit> = emptyList(),
+)

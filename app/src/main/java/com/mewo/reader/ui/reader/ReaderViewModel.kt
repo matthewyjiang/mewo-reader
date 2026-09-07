@@ -24,6 +24,7 @@ data class ReaderUiState(
 class ReaderViewModel(
     private val repository: LibraryRepository,
     private val bookId: String,
+    private val focusPostId: String? = null,
 ) : ViewModel() {
     private val _state = MutableStateFlow(ReaderUiState())
     val state: StateFlow<ReaderUiState> = _state.asStateFlow()
@@ -36,11 +37,14 @@ class ReaderViewModel(
                     ?: error("That book is gone.")
                 val posts = repository.feed(bookId)
                 val likes = repository.likes(bookId)
+                val focus = focusPostId?.let { id -> posts.indexOfFirst { it.id == id } }
+                    ?.takeIf { it >= 0 }
+                val start = focus ?: book.progressIndex.coerceIn(0, posts.lastIndex.coerceAtLeast(0))
                 _state.value = ReaderUiState(
                     book = book,
                     posts = posts,
                     likes = likes,
-                    startIndex = book.progressIndex.coerceIn(0, posts.lastIndex.coerceAtLeast(0)),
+                    startIndex = start,
                     loading = false,
                 )
             }.onFailure { err ->
@@ -65,12 +69,15 @@ class ReaderViewModel(
     }
 
     companion object {
-        fun factory(repository: LibraryRepository, bookId: String) =
-            object : ViewModelProvider.Factory {
-                @Suppress("UNCHECKED_CAST")
-                override fun <T : ViewModel> create(modelClass: Class<T>): T {
-                    return ReaderViewModel(repository, bookId) as T
-                }
+        fun factory(
+            repository: LibraryRepository,
+            bookId: String,
+            focusPostId: String? = null,
+        ) = object : ViewModelProvider.Factory {
+            @Suppress("UNCHECKED_CAST")
+            override fun <T : ViewModel> create(modelClass: Class<T>): T {
+                return ReaderViewModel(repository, bookId, focusPostId) as T
             }
+        }
     }
 }

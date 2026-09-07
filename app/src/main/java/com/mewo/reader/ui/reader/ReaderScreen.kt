@@ -13,6 +13,7 @@ import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.ArrowBack
+import androidx.compose.material.icons.outlined.Palette
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
@@ -32,7 +33,6 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.mewo.reader.data.FeedPost
 import com.mewo.reader.ui.components.MewoAppBar
-import com.mewo.reader.ui.theme.XBlue
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.drop
 import java.io.File
@@ -41,6 +41,7 @@ import java.io.File
 fun ReaderScreen(
     viewModel: ReaderViewModel,
     onBack: () -> Unit,
+    onDisplay: () -> Unit,
 ) {
     val state by viewModel.state.collectAsStateWithLifecycle()
     val context = LocalContext.current
@@ -52,22 +53,29 @@ fun ReaderScreen(
             .background(MaterialTheme.colorScheme.background),
     ) {
         ReaderBar(
-            title = book?.title ?: "Mewo",
+            title = book?.title ?: "Post",
             onBack = onBack,
+            onDisplay = onDisplay,
         )
         HorizontalDivider(color = MaterialTheme.colorScheme.outline, thickness = 0.6.dp)
 
         when {
             state.loading -> {
                 Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                    CircularProgressIndicator(color = XBlue, strokeWidth = 2.dp, modifier = Modifier.size(22.dp))
+                    CircularProgressIndicator(
+                        color = MaterialTheme.colorScheme.primary,
+                        strokeWidth = 2.dp,
+                        modifier = Modifier.size(22.dp),
+                    )
                 }
             }
             state.error != null -> {
                 Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                     Column(horizontalAlignment = Alignment.CenterHorizontally) {
                         Text(state.error ?: "", style = MaterialTheme.typography.bodyLarge)
-                        TextButton(onClick = onBack) { Text("Back", color = XBlue) }
+                        TextButton(onClick = onBack) {
+                            Text("Back", color = MaterialTheme.colorScheme.primary)
+                        }
                     }
                 }
             }
@@ -114,29 +122,37 @@ fun ReaderScreen(
 private fun ReaderBar(
     title: String,
     onBack: () -> Unit,
+    onDisplay: () -> Unit,
 ) {
-    MewoAppBar {
-        IconButton(onClick = onBack) {
-            Icon(
-                Icons.AutoMirrored.Outlined.ArrowBack,
-                contentDescription = "Back",
-                tint = MaterialTheme.colorScheme.onBackground,
-            )
-        }
-        Column(Modifier.weight(1f).padding(end = 16.dp)) {
+    MewoAppBar(
+        leading = {
+            IconButton(onClick = onBack) {
+                Icon(
+                    Icons.AutoMirrored.Outlined.ArrowBack,
+                    contentDescription = "Back",
+                    tint = MaterialTheme.colorScheme.onBackground,
+                )
+            }
+        },
+        center = {
             Text(
                 text = title,
                 style = MaterialTheme.typography.titleSmall,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.padding(horizontal = 56.dp),
             )
-            Text(
-                text = "Timeline",
-                style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-        }
-    }
+        },
+        trailing = {
+            IconButton(onClick = onDisplay) {
+                Icon(
+                    Icons.Outlined.Palette,
+                    contentDescription = "Display",
+                    tint = MaterialTheme.colorScheme.onBackground,
+                )
+            }
+        },
+    )
 }
 
 @Composable

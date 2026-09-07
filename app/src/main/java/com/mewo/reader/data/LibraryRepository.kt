@@ -113,6 +113,54 @@ class LibraryRepository(
         current
     }
 
+    /**
+     * Title, author, handle, plus post text from books already opened.
+     * Unopened books have no feed cache, so they only match on metadata.
+     */
+    suspend fun search(query: String): SearchResult = withContext(Dispatchers.IO) {
+        val q = query.trim()
+        if (q.isEmpty()) return@withContext SearchResult()
+        if (_library.value.books.isEmpty()) {
+            mutex.withLock { _library.value = readLibrary() }
+        }
+        val books = _library.value.books
+        val bookHits = books.filter { book ->
+            book.title.contains(q, ignoreCase = true) ||
+                book.author.contains(q, ignoreCase = true) ||
+                book.handle.contains(q, ignoreCase = true)
+        }
+        val postHits = books.flatMap { book ->
+            val posts = cachedFeed(book.id) ?: return@flatMap emptyList()
+            posts.filter { post ->
+                post.text.contains(q, ignoreCase = true) ||
+                    post.chapter.contains(q, ignoreCase = true)
+            }.map { PostHit(book, it) }
+        }
+        SearchResult(books = bookHits, posts = postHits)
+    }
+
+    suspend fun likedPosts(): List<PostHit> = withContext(Dispatchers.IO) {
+        if (_library.value.books.isEmpty()) {
+            mutex.withLock { _library.value = readLibrary() }
+        }
+        _library.value.books.flatMap { book ->
+            val ids = likes(book.id)
+            if (ids.isEmpty()) emptyList()
+            else {
+                val posts = cachedFeed(book.id) ?: emptyList()
+                posts.filter { it.id in ids }.map { PostHit(book, it) }
+            }
+        }
+    }
+
+    private fun cachedFeed(id: String): List<FeedPost>? {
+        val cacheFile = File(root, "$id/feed.json")
+        if (!cacheFile.exists()) return null
+        return runCatching {
+            json.decodeFromString<FeedCache>(cacheFile.readText()).posts
+        }.getOrNull()
+    }
+
     private suspend fun ingest(id: String, file: File, isSample: Boolean): BookRecord {
         val meta = opener.metadata(file)
         writeCover(id, meta.cover)
