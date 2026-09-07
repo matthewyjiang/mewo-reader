@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <style name="Theme.Mewo.BookLaunch" parent="Theme.Mewo">
+        <item name="android:windowBackground">@drawable/splash_book</item>
+        <item name="android:windowSplashScreenBackground">@color/mewo_black</item>
+        <item name="android:windowSplashScreenAnimatedIcon">@drawable/ic_launcher_foreground</item>
+    </style>
+    <style name="Theme.Mewo.TeddyLaunch" parent="Theme.Mewo">
+        <item name="android:windowBackground">@drawable/splash_teddy</item>
+        <item name="android:windowSplashScreenBackground">@color/mewo_black</item>
+        <item name="android:windowSplashScreenAnimatedIcon">@drawable/ic_teddy_foreground</item>
+    </style>
+</resources>

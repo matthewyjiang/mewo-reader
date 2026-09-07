@@ -12,13 +12,41 @@
         android:theme="@style/Theme.Mewo">
         <activity
             android:name=".MainActivity"
+            android:theme="@style/Theme.Mewo.Reader"
             android:exported="true"
-            android:windowSoftInputMode="adjustResize"
-            android:theme="@style/Theme.Mewo">
+            android:windowSoftInputMode="adjustResize" />
+        <activity
+            android:name=".LauncherActivity"
+            android:theme="@style/Theme.Mewo.BookLaunch"
+            android:exported="false"
+            android:relinquishTaskIdentity="true" />
+        <activity
+            android:name=".TeddyActivity"
+            android:exported="true"
+            android:theme="@style/Theme.Mewo.TeddyLaunch"
+            android:relinquishTaskIdentity="true"
+            android:windowSoftInputMode="adjustResize" />
+        <activity-alias
+            android:name=".BookLauncher"
+            android:enabled="true"
+            android:exported="true"
+            android:icon="@mipmap/ic_launcher"
+            android:targetActivity=".LauncherActivity">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
-        </activity>
+        </activity-alias>
+        <activity-alias
+            android:name=".TeddyLauncher"
+            android:enabled="false"
+            android:exported="true"
+            android:icon="@mipmap/ic_launcher_teddy"
+            android:targetActivity=".TeddyActivity">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity-alias>
     </application>
 </manifest>

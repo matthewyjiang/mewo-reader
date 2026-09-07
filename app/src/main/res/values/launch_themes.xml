@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <style name="Theme.Mewo.BookLaunch" parent="Theme.Mewo">
+        <item name="android:windowBackground">@drawable/splash_book</item>
+    </style>
+    <style name="Theme.Mewo.TeddyLaunch" parent="Theme.Mewo">
+        <item name="android:windowBackground">@drawable/splash_teddy</item>
+    </style>
+</resources>

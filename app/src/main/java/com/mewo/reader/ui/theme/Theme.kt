@@ -23,6 +23,15 @@ val LocalThemeController = staticCompositionLocalOf<ThemeController> {
     error("ThemeController missing")
 }
 
+data class MewoModeController(
+    val enabled: Boolean,
+    val setEnabled: (Boolean) -> Unit,
+)
+
+val LocalMewoMode = staticCompositionLocalOf<MewoModeController> {
+    error("MewoModeController missing")
+}
+
 fun MewoPalette.toColorScheme(): ColorScheme {
     return if (isDark) {
         darkColorScheme(

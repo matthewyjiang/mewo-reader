@@ -5,4 +5,8 @@
         <item name="android:navigationBarColor">@android:color/transparent</item>
         <item name="android:windowBackground">#000000</item>
     </style>
+    <!-- The themed entry owns the splash; don't show a second logo on handoff. -->
+    <style name="Theme.Mewo.Reader" parent="Theme.Mewo">
+        <item name="android:windowDisablePreview">true</item>
+    </style>
 </resources>

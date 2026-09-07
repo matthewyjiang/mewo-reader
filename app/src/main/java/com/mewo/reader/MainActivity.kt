@@ -8,7 +8,9 @@ import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.getValue
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.mewo.reader.ui.MewoNav
+import com.mewo.reader.ui.theme.LocalMewoMode
 import com.mewo.reader.ui.theme.LocalThemeController
+import com.mewo.reader.ui.theme.MewoModeController
 import com.mewo.reader.ui.theme.MewoTheme
 import com.mewo.reader.ui.theme.ThemeController
 
@@ -30,11 +32,16 @@ class MainActivity : ComponentActivity() {
              */
             val app = application as MewoApp
             val theme by app.themeStore.theme.collectAsStateWithLifecycle()
+            val mewoMode by app.mewoModeStore.enabled.collectAsStateWithLifecycle()
             MewoTheme(theme = theme) {
                 CompositionLocalProvider(
                     LocalThemeController provides ThemeController(
                         current = theme,
                         setTheme = app.themeStore::setTheme,
+                    ),
+                    LocalMewoMode provides MewoModeController(
+                        enabled = mewoMode,
+                        setEnabled = app.mewoModeStore::setEnabled,
                     ),
                 ) {
                     MewoNav(repository = app.repository)

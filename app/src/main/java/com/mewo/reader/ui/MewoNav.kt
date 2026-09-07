@@ -1,5 +1,8 @@
 package com.mewo.reader.ui
 
+import android.os.Build
+import androidx.activity.compose.BackHandler
+import androidx.activity.compose.LocalActivity
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
@@ -14,6 +17,7 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.navigation.NavType
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
+import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
 import androidx.navigation.navArgument
 import com.mewo.reader.data.LibraryRepository
@@ -34,6 +38,18 @@ fun MewoNav(repository: LibraryRepository) {
     val nav = rememberNavController()
     var showDisplay by rememberSaveable { mutableStateOf(false) }
     var tab by rememberSaveable { mutableStateOf(AppTab.Home) }
+    val entry by nav.currentBackStackEntryAsState()
+    val activity = LocalActivity.current
+
+    // A themed launcher entry starts the reader, rather than the home process.
+    // Preserve Android 12+ root-Back backgrounding without intercepting sheets
+    // or the reader's own navigation back to the library.
+    BackHandler(
+        enabled = Build.VERSION.SDK_INT >= Build.VERSION_CODES.S &&
+            entry?.destination?.route == "library" && !showDisplay && activity != null,
+    ) {
+        activity?.moveTaskToBack(true)
+    }
 
     fun goTab(next: AppTab) {
         tab = next

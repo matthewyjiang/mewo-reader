@@ -107,7 +107,7 @@ Avatars and the FAB are circles. The empty-state add control is a pill. Posts ha
 
 **Likes.** One feed of every hearted line. Tap a line to jump to it in the book.
 
-**Display sheet.** Four swatches in a 2x2: Twitter light, X light, Twitter dim, Lights out. Selecting a swatch applies it and keeps the sheet open.
+**Display sheet.** Four swatches in a 2x2: Twitter light, X light, Twitter dim, Lights out. Selecting a swatch applies it and keeps the sheet open. Below them, **Mewo mode** is an accessible switch that uses the supplied Teddy artwork for the launcher icon, launch screen, and home header mark without changing the palette. Off by default; turning it off restores the open-book launcher/launch logo and the theme's bird or X header. The sheet scrolls on smaller screens. The persisted Android launcher-component selection is the mode's source of truth, avoiding a separate preference that could disagree after backup restore. Launcher aliases point to short-lived themed entry activities, which hand off to the always-enabled reader activity. This keeps icon changes from dismissing the Display sheet and preserves the open book when returning from the launcher.
 
 **Chapter sheet.** Same sheet family as Display. Headline is the book title. Rows are heading posts from the feed, hairline separated. The heading you are in uses hover fill and ink. Tap jumps to that post and dismisses. Empty copy: "This book has no chapter headings." Open it from the reader title or `@handle · chapter`. No list icon. Publisher chrome (cover, copyright, contents, also-by) never reaches the feed, so it is not in this list. A prologue or author's note does.
 
