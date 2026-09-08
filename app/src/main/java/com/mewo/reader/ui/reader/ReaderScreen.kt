@@ -11,8 +11,8 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.itemsIndexed
-import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.ArrowBack
 import androidx.compose.material.icons.outlined.Palette
@@ -25,9 +25,9 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
@@ -51,7 +51,6 @@ import com.mewo.reader.ui.components.MewoAppBar
 import com.mewo.reader.ui.components.ShowWhenIdle
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.drop
-import kotlinx.coroutines.launch
 import java.io.File
 
 @Composable
@@ -103,10 +102,14 @@ fun ReaderScreen(
                 }
             }
             else -> {
-                val listState = rememberLazyListState(
-                    initialFirstVisibleItemIndex = state.startIndex,
-                )
-                val scope = rememberCoroutineScope()
+                // Remount the list at the target index so a chapter tap
+                // lands at once. scrollToItem still walks the feed.
+                var listGeneration by rememberSaveable { mutableIntStateOf(0) }
+                var listIndex by rememberSaveable { mutableIntStateOf(-1) }
+                val startAt = if (listIndex >= 0) listIndex else state.startIndex
+                val listState = rememberSaveable(listGeneration, saver = LazyListState.Saver) {
+                    LazyListState(firstVisibleItemIndex = startAt)
+                }
                 val headings = remember(state.posts) { state.posts.headingPosts() }
                 val openChapters = { showChapters = true }
                 hideOnScroll.BindListTop(listState)
@@ -154,12 +157,14 @@ fun ReaderScreen(
                         headings = headings,
                         currentIndex = current,
                         onJump = { heading ->
-                            showChapters = false
-                            hideOnScroll.show()
                             val index = state.posts.indexOfFirst { it.id == heading.id }
                             if (index >= 0) {
-                                scope.launch { listState.scrollToItem(index) }
+                                listIndex = index
+                                listGeneration += 1
+                                viewModel.saveProgress(index)
                             }
+                            hideOnScroll.show()
+                            showChapters = false
                         },
                         onDismiss = { showChapters = false },
                     )
