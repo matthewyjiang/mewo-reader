@@ -34,6 +34,7 @@ Used on a phone, often in bed or on a couch, one-handed. Books come from files t
 - Start the feed at the first non-publisher TOC entry, not copyright or contents
 - Remember reading place per book
 - Jump to a heading from the chapter line or the reader title
+- Hide the title bar and tab bar when scrolling down a feed, show them when scrolling up
 - Like a passage and keep that like
 - Search books and opened posts
 - See liked lines in one feed

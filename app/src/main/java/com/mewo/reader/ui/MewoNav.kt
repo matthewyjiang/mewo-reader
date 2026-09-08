@@ -8,6 +8,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -23,6 +24,7 @@ import androidx.navigation.navArgument
 import com.mewo.reader.data.LibraryRepository
 import com.mewo.reader.ui.components.AppTab
 import com.mewo.reader.ui.components.HomeTabBar
+import com.mewo.reader.ui.components.rememberHideOnScrollState
 import com.mewo.reader.ui.library.LibraryScreen
 import com.mewo.reader.ui.library.LibraryViewModel
 import com.mewo.reader.ui.likes.LikesScreen
@@ -38,8 +40,13 @@ fun MewoNav(repository: LibraryRepository) {
     val nav = rememberNavController()
     var showDisplay by rememberSaveable { mutableStateOf(false) }
     var tab by rememberSaveable { mutableStateOf(AppTab.Home) }
+    val chrome = rememberHideOnScrollState()
     val entry by nav.currentBackStackEntryAsState()
+    val route = entry?.destination?.route.orEmpty()
     val activity = LocalActivity.current
+    LaunchedEffect(route) {
+        if (!route.startsWith("reader")) chrome.show()
+    }
 
     // A themed launcher entry starts the reader, rather than the home process.
     // Preserve Android 12+ root-Back backgrounding without intercepting sheets
@@ -52,6 +59,7 @@ fun MewoNav(repository: LibraryRepository) {
     }
 
     fun goTab(next: AppTab) {
+        chrome.show()
         tab = next
         val route = when (next) {
             AppTab.Home -> "library"
@@ -69,6 +77,7 @@ fun MewoNav(repository: LibraryRepository) {
     }
 
     fun openBook(id: String, postId: String? = null) {
+        chrome.show()
         val dest = if (postId.isNullOrBlank()) "reader/$id" else "reader/$id?postId=$postId"
         nav.navigate(dest)
     }
@@ -91,6 +100,7 @@ fun MewoNav(repository: LibraryRepository) {
                     viewModel = vm,
                     onOpenBook = { id -> openBook(id) },
                     onDisplay = { showDisplay = true },
+                    hideOnScroll = chrome,
                 )
             }
             composable("search") {
@@ -101,6 +111,7 @@ fun MewoNav(repository: LibraryRepository) {
                     viewModel = vm,
                     onOpenBook = { id -> openBook(id) },
                     onOpenPost = { bookId, postId -> openBook(bookId, postId) },
+                    hideOnScroll = chrome,
                 )
             }
             composable("likes") {
@@ -110,6 +121,7 @@ fun MewoNav(repository: LibraryRepository) {
                 LikesScreen(
                     viewModel = vm,
                     onOpenPost = { bookId, postId -> openBook(bookId, postId) },
+                    hideOnScroll = chrome,
                 )
             }
             composable(
@@ -129,14 +141,19 @@ fun MewoNav(repository: LibraryRepository) {
                 )
                 ReaderScreen(
                     viewModel = vm,
-                    onBack = { nav.popBackStack() },
+                    onBack = {
+                        chrome.show()
+                        nav.popBackStack()
+                    },
                     onDisplay = { showDisplay = true },
+                    hideOnScroll = chrome,
                 )
             }
         }
         HomeTabBar(
             selected = tab,
             onSelect = ::goTab,
+            visible = chrome.visible,
         )
     }
     if (showDisplay) {

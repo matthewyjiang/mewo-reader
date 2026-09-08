@@ -87,7 +87,7 @@ Atkinson Hyperlegible for chrome and body. Display and names are 17-22sp bold. B
 
 ## Layout
 
-Phone first, edge to edge. A 56dp top bar with a 0.6dp rule under it. The brand mark sits on the true center of the bar, overlaid, so side actions cannot shove it. Twitter themes use the bird (blue on light, ink on dim). X themes use the current X mark in ink. A 52dp tab bar sits on the bottom with Home, Search, and Likes. Tapping a tab switches that feed. Opening a book is the post view: back returns to the feed you came from. Feed rows are 16dp from the left, 40dp avatar, 12dp gap, then the post. Quote, like, and share sit across the post column. The add action is one circular FAB on the library, above the tab bar. System Back also leaves the reader.
+Phone first, edge to edge. A 56dp top bar with a 0.6dp rule under it. The brand mark sits on the true center of the bar, overlaid, so side actions cannot shove it. Twitter themes use the bird (blue on light, ink on dim). X themes use the current X mark in ink. A 52dp tab bar sits on the bottom with Home, Search, and Likes. Tapping a tab switches that feed. Opening a book is the post view: back returns to the feed you came from. On Home, Likes, Search results, and the reader, the bars slide away when you scroll down and return when you scroll up. Search keeps its field. The status bar and gesture inset stay, so posts never sit under system chrome. TalkBack keeps the bars on. Feed rows are 16dp from the left, 40dp avatar, 12dp gap, then the post. Quote, like, and share sit across the post column. The add action is one circular FAB on the library, above the tab bar. System Back also leaves the reader.
 
 ## Elevation & Depth
 
@@ -99,9 +99,9 @@ Avatars and the FAB are circles. The empty-state add control is a pill. Posts ha
 
 ## Components
 
-**Top bar.** Home, Search, and Likes: centered bird or X, palette for Display. Reader is the post view: back, book title, palette. The title opens the chapter sheet. No elevation. Hairline under it.
+**Top bar.** Home, Search, and Likes: centered bird or X, palette for Display. Reader is the post view: back, book title, palette. The title opens the chapter sheet. No elevation. Hairline under it. Home, Likes, and the reader hide this bar on scroll down and show it on scroll up. Search keeps its field.
 
-**Tab bar.** Home, Search, Likes. Filled icon for the current tab. Hairline above it.
+**Tab bar.** Home, Search, Likes. Filled icon for the current tab. Hairline above it. Hides with the top bar on scroll. Search keeps its field and still hides this bar.
 
 **Search.** A live field in the top bar. Book hits, then post hits from books already opened.
 
@@ -109,7 +109,7 @@ Avatars and the FAB are circles. The empty-state add control is a pill. Posts ha
 
 **Display sheet.** Four swatches in a 2x2: Twitter light, X light, Twitter dim, Lights out. Selecting a swatch applies it and keeps the sheet open. Below them, **Mewo mode** is an accessible switch that uses the supplied Teddy artwork for the launcher icon, launch screen, and home header mark without changing the palette. Off by default; turning it off restores the open-book launcher/launch logo and the theme's bird or X header. The sheet scrolls on smaller screens. The persisted Android launcher-component selection is the mode's source of truth, avoiding a separate preference that could disagree after backup restore. Launcher aliases point to short-lived themed entry activities, which hand off to the always-enabled reader activity. This keeps icon changes from dismissing the Display sheet and preserves the open book when returning from the launcher.
 
-**Chapter sheet.** Same sheet family as Display. Headline is the book title. Rows are heading posts from the feed, hairline separated. The heading you are in uses hover fill and ink. Tap jumps to that post and dismisses. Empty copy: "This book has no chapter headings." Open it from the reader title or `@handle · chapter`. No list icon. Publisher chrome (cover, copyright, contents, also-by) never reaches the feed, so it is not in this list. A prologue or author's note does.
+**Chapter sheet.** Same sheet family as Display. Headline is the book title. Rows are heading posts from the feed, hairline separated. The heading you are in uses hover fill and ink. Tap jumps to that post at once, with no scroll animation, and dismisses. Empty copy: "This book has no chapter headings." Open it from the reader title or `@handle · chapter`. No list icon. Publisher chrome (cover, copyright, contents, also-by) never reaches the feed, so it is not in this list. A prologue or author's note does.
 
 **Post.** Author name bold, `@handle · chapter` mute on one line, then the paragraph. Heading posts use title weight. Like, quote, and share sit in 40dp targets. The chapter line opens the chapter sheet.
 

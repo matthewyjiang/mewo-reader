@@ -19,6 +19,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -39,14 +40,18 @@ import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.mewo.reader.data.BookRecord
 import com.mewo.reader.ui.components.Avatar
+import com.mewo.reader.ui.components.BindListTop
 import com.mewo.reader.ui.components.BrandMark
+import com.mewo.reader.ui.components.HideOnScrollState
 import com.mewo.reader.ui.components.MewoAppBar
+import com.mewo.reader.ui.components.ShowWhenIdle
 import java.io.File
 
 @Composable
@@ -54,6 +59,7 @@ fun LibraryScreen(
     viewModel: LibraryViewModel,
     onOpenBook: (String) -> Unit,
     onDisplay: () -> Unit,
+    hideOnScroll: HideOnScrollState,
 ) {
     val state by viewModel.state.collectAsStateWithLifecycle()
     val context = LocalContext.current
@@ -69,16 +75,21 @@ fun LibraryScreen(
             .background(MaterialTheme.colorScheme.background),
     ) {
         Column(Modifier.fillMaxSize()) {
-            HomeBar(onDisplay = onDisplay)
-            HorizontalDivider(color = MaterialTheme.colorScheme.outline, thickness = 0.6.dp)
+            HomeBar(onDisplay = onDisplay, visible = hideOnScroll.visible)
+            hideOnScroll.ShowWhenIdle(state.books.isEmpty())
             if (state.books.isEmpty() && !state.busy) {
                 EmptyTimeline(
                     onAdd = { picker.launch(arrayOf("application/epub+zip", "application/octet-stream")) },
                     onSample = viewModel::importSample,
                 )
             } else {
+                val listState = rememberLazyListState()
+                hideOnScroll.BindListTop(listState)
                 LazyColumn(
-                    modifier = Modifier.fillMaxSize(),
+                    state = listState,
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .nestedScroll(hideOnScroll.connection),
                     contentPadding = PaddingValues(bottom = 96.dp),
                 ) {
                     items(state.books, key = { it.id }) { book ->
@@ -139,8 +150,9 @@ fun LibraryScreen(
 }
 
 @Composable
-private fun HomeBar(onDisplay: () -> Unit) {
+private fun HomeBar(onDisplay: () -> Unit, visible: Boolean) {
     MewoAppBar(
+        visible = visible,
         leading = {},
         center = { BrandMark() },
         trailing = {

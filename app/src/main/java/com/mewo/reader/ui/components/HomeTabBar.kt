@@ -1,5 +1,6 @@
 package com.mewo.reader.ui.components
 
+import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -33,6 +34,7 @@ fun HomeTabBar(
     selected: AppTab,
     onSelect: (AppTab) -> Unit,
     modifier: Modifier = Modifier,
+    visible: Boolean = true,
 ) {
     val ink = MaterialTheme.colorScheme.onBackground
     val mute = MaterialTheme.colorScheme.onSurfaceVariant
@@ -42,41 +44,49 @@ fun HomeTabBar(
             .background(MaterialTheme.colorScheme.background)
             .navigationBarsPadding(),
     ) {
-        HorizontalDivider(color = MaterialTheme.colorScheme.outline, thickness = 0.6.dp)
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .height(52.dp),
-            horizontalArrangement = Arrangement.SpaceEvenly,
-            verticalAlignment = Alignment.CenterVertically,
+        AnimatedVisibility(
+            visible = visible,
+            enter = ChromeMotion.bottomEnter(),
+            exit = ChromeMotion.bottomExit(),
         ) {
-            TabIcon(
-                selected = selected == AppTab.Home,
-                selectedIcon = Icons.Filled.Home,
-                idleIcon = Icons.Outlined.Home,
-                label = "Home",
-                ink = ink,
-                mute = mute,
-                onClick = { onSelect(AppTab.Home) },
-            )
-            TabIcon(
-                selected = selected == AppTab.Search,
-                selectedIcon = Icons.Filled.Search,
-                idleIcon = Icons.Outlined.Search,
-                label = "Search",
-                ink = ink,
-                mute = mute,
-                onClick = { onSelect(AppTab.Search) },
-            )
-            TabIcon(
-                selected = selected == AppTab.Likes,
-                selectedIcon = Icons.Filled.Favorite,
-                idleIcon = Icons.Outlined.FavoriteBorder,
-                label = "Likes",
-                ink = ink,
-                mute = mute,
-                onClick = { onSelect(AppTab.Likes) },
-            )
+            Column {
+                HorizontalDivider(color = MaterialTheme.colorScheme.outline, thickness = 0.6.dp)
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(52.dp),
+                    horizontalArrangement = Arrangement.SpaceEvenly,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    TabIcon(
+                        selected = selected == AppTab.Home,
+                        selectedIcon = Icons.Filled.Home,
+                        idleIcon = Icons.Outlined.Home,
+                        label = "Home",
+                        ink = ink,
+                        mute = mute,
+                        onClick = { onSelect(AppTab.Home) },
+                    )
+                    TabIcon(
+                        selected = selected == AppTab.Search,
+                        selectedIcon = Icons.Filled.Search,
+                        idleIcon = Icons.Outlined.Search,
+                        label = "Search",
+                        ink = ink,
+                        mute = mute,
+                        onClick = { onSelect(AppTab.Search) },
+                    )
+                    TabIcon(
+                        selected = selected == AppTab.Likes,
+                        selectedIcon = Icons.Filled.Favorite,
+                        idleIcon = Icons.Outlined.FavoriteBorder,
+                        label = "Likes",
+                        ink = ink,
+                        mute = mute,
+                        onClick = { onSelect(AppTab.Likes) },
+                    )
+                }
+            }
         }
     }
 }

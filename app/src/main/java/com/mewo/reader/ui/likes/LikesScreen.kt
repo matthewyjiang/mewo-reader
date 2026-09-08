@@ -7,8 +7,8 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.material3.CircularProgressIndicator
-import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -16,11 +16,15 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.mewo.reader.data.FeedPost
+import com.mewo.reader.ui.components.BindListTop
+import com.mewo.reader.ui.components.HideOnScrollState
 import com.mewo.reader.ui.components.MewoAppBar
+import com.mewo.reader.ui.components.ShowWhenIdle
 import com.mewo.reader.ui.reader.TimelinePost
 import java.io.File
 
@@ -28,13 +32,16 @@ import java.io.File
 fun LikesScreen(
     viewModel: LikesViewModel,
     onOpenPost: (bookId: String, postId: String) -> Unit,
+    hideOnScroll: HideOnScrollState,
 ) {
     val state by viewModel.state.collectAsStateWithLifecycle()
     val context = LocalContext.current
     LaunchedEffect(Unit) { viewModel.refresh() }
 
     Column(Modifier.fillMaxSize()) {
+        hideOnScroll.ShowWhenIdle(state.loading || state.hits.isEmpty())
         MewoAppBar(
+            visible = hideOnScroll.visible,
             content = {
                 Text(
                     text = "Likes",
@@ -43,7 +50,6 @@ fun LikesScreen(
                 )
             },
         )
-        HorizontalDivider(color = MaterialTheme.colorScheme.outline, thickness = 0.6.dp)
 
         when {
             state.loading -> {
@@ -64,7 +70,14 @@ fun LikesScreen(
                 )
             }
             else -> {
-                LazyColumn(Modifier.fillMaxSize()) {
+                val listState = rememberLazyListState()
+                hideOnScroll.BindListTop(listState)
+                LazyColumn(
+                    state = listState,
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .nestedScroll(hideOnScroll.connection),
+                ) {
                     items(state.hits, key = { "${it.book.id}:${it.post.id}" }) { hit ->
                         TimelinePost(
                             post = hit.post,

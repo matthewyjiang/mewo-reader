@@ -17,7 +17,6 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.ArrowBack
 import androidx.compose.material.icons.outlined.Palette
 import androidx.compose.material3.CircularProgressIndicator
-import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -34,6 +33,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
@@ -45,7 +45,10 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.mewo.reader.data.FeedPost
 import com.mewo.reader.data.currentHeadingIndex
 import com.mewo.reader.data.headingPosts
+import com.mewo.reader.ui.components.BindListTop
+import com.mewo.reader.ui.components.HideOnScrollState
 import com.mewo.reader.ui.components.MewoAppBar
+import com.mewo.reader.ui.components.ShowWhenIdle
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.drop
 import kotlinx.coroutines.launch
@@ -56,6 +59,7 @@ fun ReaderScreen(
     viewModel: ReaderViewModel,
     onBack: () -> Unit,
     onDisplay: () -> Unit,
+    hideOnScroll: HideOnScrollState,
 ) {
     val state by viewModel.state.collectAsStateWithLifecycle()
     val context = LocalContext.current
@@ -67,15 +71,16 @@ fun ReaderScreen(
             .fillMaxSize()
             .background(MaterialTheme.colorScheme.background),
     ) {
+        hideOnScroll.ShowWhenIdle(state.loading || state.error != null)
         ReaderBar(
             title = book?.title ?: "Post",
+            visible = hideOnScroll.visible,
             onBack = onBack,
             onDisplay = onDisplay,
             onChapters = {
                 if (!state.loading && state.error == null) showChapters = true
             },
         )
-        HorizontalDivider(color = MaterialTheme.colorScheme.outline, thickness = 0.6.dp)
 
         when {
             state.loading -> {
@@ -104,6 +109,7 @@ fun ReaderScreen(
                 val scope = rememberCoroutineScope()
                 val headings = remember(state.posts) { state.posts.headingPosts() }
                 val openChapters = { showChapters = true }
+                hideOnScroll.BindListTop(listState)
                 LaunchedEffect(listState) {
                     snapshotFlow { listState.firstVisibleItemIndex }
                         .drop(1)
@@ -112,7 +118,9 @@ fun ReaderScreen(
                 }
                 LazyColumn(
                     state = listState,
-                    modifier = Modifier.fillMaxSize(),
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .nestedScroll(hideOnScroll.connection),
                 ) {
                     itemsIndexed(state.posts, key = { _, post -> post.id }) { _, post ->
                         TimelinePost(
@@ -147,9 +155,10 @@ fun ReaderScreen(
                         currentIndex = current,
                         onJump = { heading ->
                             showChapters = false
+                            hideOnScroll.show()
                             val index = state.posts.indexOfFirst { it.id == heading.id }
                             if (index >= 0) {
-                                scope.launch { listState.animateScrollToItem(index) }
+                                scope.launch { listState.scrollToItem(index) }
                             }
                         },
                         onDismiss = { showChapters = false },
@@ -163,11 +172,13 @@ fun ReaderScreen(
 @Composable
 private fun ReaderBar(
     title: String,
+    visible: Boolean,
     onBack: () -> Unit,
     onDisplay: () -> Unit,
     onChapters: () -> Unit,
 ) {
     MewoAppBar(
+        visible = visible,
         leading = {
             IconButton(onClick = onBack) {
                 Icon(
