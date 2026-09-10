@@ -26,6 +26,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Add
 import androidx.compose.material.icons.outlined.Delete
 import androidx.compose.material.icons.outlined.Palette
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.HorizontalDivider
@@ -37,6 +38,9 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -63,6 +67,7 @@ fun LibraryScreen(
 ) {
     val state by viewModel.state.collectAsStateWithLifecycle()
     val context = LocalContext.current
+    var pendingDelete by remember { mutableStateOf<BookRecord?>(null) }
     val picker = rememberLauncherForActivityResult(
         ActivityResultContracts.OpenDocument(),
     ) { uri: Uri? ->
@@ -97,7 +102,7 @@ fun LibraryScreen(
                             book = book,
                             cover = File(context.filesDir, "books/${book.id}/cover.jpg"),
                             onOpen = { onOpenBook(book.id) },
-                            onDelete = { viewModel.delete(book.id) },
+                            onDelete = { pendingDelete = book },
                         )
                         HorizontalDivider(
                             color = MaterialTheme.colorScheme.outline,
@@ -146,7 +151,54 @@ fun LibraryScreen(
                 Text(message)
             }
         }
+
+        pendingDelete?.let { book ->
+            RemoveBookDialog(
+                book = book,
+                onConfirm = {
+                    viewModel.delete(book.id)
+                    pendingDelete = null
+                },
+                onDismiss = { pendingDelete = null },
+            )
+        }
     }
+}
+
+@Composable
+private fun RemoveBookDialog(
+    book: BookRecord,
+    onConfirm: () -> Unit,
+    onDismiss: () -> Unit,
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        containerColor = MaterialTheme.colorScheme.surface,
+        titleContentColor = MaterialTheme.colorScheme.onBackground,
+        textContentColor = MaterialTheme.colorScheme.onSurfaceVariant,
+        title = {
+            Text(
+                text = "Remove from your library?",
+                style = MaterialTheme.typography.headlineLarge,
+            )
+        },
+        text = {
+            Text(
+                text = "This removes ${book.title}, plus likes and where you left off. You can add the EPUB again.",
+                style = MaterialTheme.typography.bodyLarge,
+            )
+        },
+        confirmButton = {
+            TextButton(onClick = onConfirm) {
+                Text("Remove", color = MaterialTheme.colorScheme.error)
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text("Keep", color = MaterialTheme.colorScheme.primary)
+            }
+        },
+    )
 }
 
 @Composable
