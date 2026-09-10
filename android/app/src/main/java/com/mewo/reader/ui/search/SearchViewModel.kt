@@ -26,11 +26,15 @@ class SearchViewModel(
     fun setQuery(query: String) {
         _state.update { it.copy(query = query) }
         viewModelScope.launch {
-            val hits = store.search(query)
-            val likes = hits.posts.map { it.book.id }.distinct()
-                .associateWith { store.likes(it) }
-            _state.update { now ->
-                if (now.query == query) now.copy(result = hits, likes = now.likes + likes) else now
+            runCatching {
+                val hits = store.search(query)
+                val likes = hits.posts.map { it.book.id }.distinct()
+                    .associateWith { store.likes(it) }
+                hits to likes
+            }.onSuccess { (hits, likes) ->
+                _state.update { now ->
+                    if (now.query == query) now.copy(result = hits, likes = now.likes + likes) else now
+                }
             }
         }
     }

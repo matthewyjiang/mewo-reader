@@ -13,7 +13,7 @@ import java.io.File
 import java.io.IOException
 import java.util.concurrent.TimeUnit
 
-class HostedException(message: String) : Exception(message)
+class HostedException(message: String, val code: Int = 0) : Exception(message)
 
 @Serializable
 data class AuthRequest(
@@ -65,10 +65,6 @@ class HostedClient(
 
     fun library(session: HostedSession): LibrarySnapshot {
         return get(session, "/v1/library")
-    }
-
-    fun book(session: HostedSession, id: String): BookRecord {
-        return get(session, "/v1/books/$id")
     }
 
     fun upload(
@@ -129,7 +125,8 @@ class HostedClient(
         return try {
             download(session, "/v1/books/$id/cover", dest)
             dest.exists() && dest.length() > 0L
-        } catch (_: HostedException) {
+        } catch (err: HostedException) {
+            if (err.code == 401) throw err
             false
         }
     }
@@ -193,7 +190,7 @@ class HostedClient(
         expectOk()
         val text = body?.string().orEmpty()
         return runCatching { json.decodeFromString<T>(text) }.getOrElse {
-            throw HostedException("Could not read the server response.")
+            throw HostedException("Could not read the server response.", code)
         }
     }
 
@@ -208,7 +205,7 @@ class HostedClient(
             .getOrNull()
             ?.takeIf { it.isNotBlank() }
             ?: "Server returned $code"
-        throw HostedException(message)
+        throw HostedException(message, code)
     }
 
     companion object {

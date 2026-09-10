@@ -26,7 +26,12 @@ class LibraryViewModel(
 
     init {
         viewModelScope.launch {
-            store.load()
+            runCatching { store.load() }
+                .onFailure { err ->
+                    _state.update {
+                        it.copy(error = err.message ?: "Could not load the library.")
+                    }
+                }
             store.library.collect { snap ->
                 _state.update { it.copy(books = snap.books) }
             }
@@ -42,7 +47,14 @@ class LibraryViewModel(
     }
 
     fun delete(id: String) {
-        viewModelScope.launch { store.delete(id) }
+        viewModelScope.launch {
+            runCatching { store.delete(id) }
+                .onFailure { err ->
+                    _state.update {
+                        it.copy(error = err.message ?: "Could not remove that book.")
+                    }
+                }
+        }
     }
 
     fun dismissError() {

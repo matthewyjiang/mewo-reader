@@ -63,7 +63,9 @@ class SwitchingLibraryStore(
 
     init {
         scope.launch {
-            kind.collect { which -> active(which).load() }
+            kind.collect { which ->
+                runCatching { active(which).load() }
+            }
         }
     }
 

@@ -5,7 +5,8 @@ pub mod error;
 pub mod models;
 pub mod routes;
 
-use crate::config::Config;
+use crate::config::{request_body_limit, Config};
+use axum::extract::DefaultBodyLimit;
 use axum::routing::{get, post};
 use axum::Router;
 use sqlx::SqlitePool;
@@ -21,6 +22,7 @@ pub struct AppState {
 }
 
 pub fn router(state: AppState) -> Router {
+    let body_limit = request_body_limit(state.max_epub_bytes);
     Router::new()
         .route("/v1/auth/register", post(routes::register))
         .route("/v1/auth/login", post(routes::login))
@@ -41,6 +43,7 @@ pub fn router(state: AppState) -> Router {
             "/v1/books/{id}/likes/{post_id}",
             post(routes::toggle_like),
         )
+        .layer(DefaultBodyLimit::max(body_limit))
         .layer(TraceLayer::new_for_http())
         .with_state(state)
 }

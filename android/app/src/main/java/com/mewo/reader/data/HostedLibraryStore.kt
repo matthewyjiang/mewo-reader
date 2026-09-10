@@ -8,7 +8,6 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -35,31 +34,55 @@ class HostedLibraryStore(
     }
     private val root = File(context.filesDir, "hosted").apply { mkdirs() }
     private val mutex = Mutex()
+    private var epoch = 0
     private val _library = MutableStateFlow(LibrarySnapshot())
     override val library: StateFlow<LibrarySnapshot> = _library.asStateFlow()
 
     init {
         scope.launch {
-            sessions.session.collect { load() }
+            var wasSignedIn = sessions.session.value.signedIn
+            sessions.session.collect { session ->
+                if (wasSignedIn && !session.signedIn) {
+                    wipeCache()
+                }
+                wasSignedIn = session.signedIn
+                runCatching { load() }
+            }
         }
     }
 
     override suspend fun load() {
         val session = sessions.session.value
         if (!session.signedIn) {
-            _library.value = LibrarySnapshot()
+            mutex.withLock {
+                _library.value = LibrarySnapshot()
+            }
             return
         }
-        runCatching {
-            val snap = withContext(Dispatchers.IO) {
+        val start = mutex.withLock { epoch }
+        val snap = withContext(Dispatchers.IO) {
+            try {
                 val remote = client.library(session)
                 remote.books.forEach { book ->
-                    ensureCover(session, book.id)
+                    val id = safeBookId(book.id) ?: return@forEach
+                    ensureCover(session, id)
                 }
-                remote
+                remote.copy(books = remote.books.filter { safeBookId(it.id) != null })
+            } catch (err: HostedException) {
+                if (err.code == 401) sessions.signOut()
+                throw err
             }
-            mutex.withLock {
+        }
+        mutex.withLock {
+            if (epoch == start) {
                 _library.value = snap
+            } else {
+                val extras = _library.value.books.filter { local ->
+                    snap.books.none { it.id == local.id }
+                }
+                _library.value = snap.copy(
+                    books = (snap.books + extras).sortedByDescending { it.importedAt },
+                )
             }
         }
     }
@@ -96,25 +119,31 @@ class HostedLibraryStore(
 
     override suspend fun delete(id: String) {
         val session = requireSession()
+        val safe = requireBookId(id)
         withContext(Dispatchers.IO) {
-            client.delete(session, id)
-            File(root, id).deleteRecursively()
+            expireOn401 { client.delete(session, safe) }
+            bookDir(safe).deleteRecursively()
         }
         mutex.withLock {
-            _library.update { snap ->
-                snap.copy(books = snap.books.filterNot { it.id == id })
-            }
+            epoch += 1
+            _library.value = _library.value.copy(
+                books = _library.value.books.filterNot { it.id == safe },
+            )
         }
     }
 
     override suspend fun book(id: String): BookRecord? = _library.value.books.find { it.id == id }
 
-    override fun coverFile(id: String): File = File(root, "$id/cover.jpg")
+    override fun coverFile(id: String): File? {
+        val safe = safeBookId(id) ?: return null
+        return File(bookDir(safe), "cover.jpg")
+    }
 
     override suspend fun feed(id: String): List<FeedPost> = withContext(Dispatchers.IO) {
         val session = requireSession()
-        val epub = ensureEpub(session, id)
-        val cacheFile = File(root, "$id/feed.json")
+        val safe = requireBookId(id)
+        val epub = ensureEpub(session, safe)
+        val cacheFile = File(bookDir(safe), "feed.json")
         if (cacheFile.exists()) {
             val cache = json.decodeFromString<FeedCache>(cacheFile.readText())
             if (cache.version == FEED_CACHE_VERSION) {
@@ -124,28 +153,33 @@ class HostedLibraryStore(
         val posts = opener.open(epub) { publication ->
             extractor.extract(publication)
         }
-        File(root, id).mkdirs()
+        bookDir(safe).mkdirs()
         cacheFile.writeText(json.encodeToString(FeedCache(version = FEED_CACHE_VERSION, posts = posts)))
-        val updated = client.patch(session, id, PatchBook(postCount = posts.size))
+        val updated = expireOn401 { client.patch(session, safe, PatchBook(postCount = posts.size)) }
         replaceBook(updated)
         posts
     }
 
     override suspend fun saveProgress(id: String, index: Int) {
         val session = requireSession()
+        val safe = requireBookId(id)
         val updated = withContext(Dispatchers.IO) {
-            client.patch(session, id, PatchBook(progressIndex = index.coerceAtLeast(0)))
+            expireOn401 {
+                client.patch(session, safe, PatchBook(progressIndex = index.coerceAtLeast(0)))
+            }
         }
         replaceBook(updated)
     }
 
     override suspend fun likes(id: String): Set<String> = withContext(Dispatchers.IO) {
-        client.likes(requireSession(), id)
+        val safe = requireBookId(id)
+        expireOn401 { client.likes(requireSession(), safe) }
     }
 
     override suspend fun toggleLike(id: String, postId: String): Set<String> =
         withContext(Dispatchers.IO) {
-            client.toggleLike(requireSession(), id, postId)
+            val safe = requireBookId(id)
+            expireOn401 { client.toggleLike(requireSession(), safe, postId) }
         }
 
     override suspend fun search(query: String): SearchResult = withContext(Dispatchers.IO) {
@@ -168,9 +202,10 @@ class HostedLibraryStore(
     }
 
     override suspend fun likedPosts(): List<PostHit> = withContext(Dispatchers.IO) {
-        val session = requireSession()
+        val session = sessions.session.value
+        if (!session.signedIn) return@withContext emptyList()
         _library.value.books.flatMap { book ->
-            val ids = client.likes(session, book.id)
+            val ids = expireOn401 { client.likes(session, book.id) }
             if (ids.isEmpty()) emptyList()
             else {
                 val posts = cachedFeed(book.id) ?: emptyList()
@@ -188,22 +223,25 @@ class HostedLibraryStore(
         val meta = opener.metadata(epub)
         val cover = File(scratch, "cover.jpg")
         writeCover(cover, meta.cover)
-        val record = client.upload(
-            session = session,
-            epub = epub,
-            cover = cover.takeIf { it.exists() },
-            title = meta.title,
-            author = meta.author,
-            handle = slug(meta.author),
-            isSample = isSample,
-        )
-        val dest = File(root, record.id).apply { mkdirs() }
+        val record = expireOn401 {
+            client.upload(
+                session = session,
+                epub = epub,
+                cover = cover.takeIf { it.exists() },
+                title = meta.title,
+                author = meta.author,
+                handle = slug(meta.author),
+                isSample = isSample,
+            )
+        }
+        val safe = requireBookId(record.id)
+        val dest = bookDir(safe).apply { mkdirs() }
         epub.copyTo(File(dest, "book.epub"), overwrite = true)
         if (cover.exists()) {
             cover.copyTo(File(dest, "cover.jpg"), overwrite = true)
         }
-        replaceBook(record)
-        return record
+        replaceBook(record.copy(id = safe))
+        return record.copy(id = safe)
     }
 
     private fun writeCover(dest: File, cover: Bitmap?) {
@@ -214,21 +252,22 @@ class HostedLibraryStore(
     }
 
     private fun ensureEpub(session: HostedSession, id: String): File {
-        val dest = File(root, "$id/book.epub")
+        val dest = File(bookDir(id), "book.epub")
         if (!dest.exists() || dest.length() == 0L) {
-            client.downloadEpub(session, id, dest)
+            expireOn401 { client.downloadEpub(session, id, dest) }
         }
         return dest
     }
 
     private fun ensureCover(session: HostedSession, id: String) {
-        val dest = coverFile(id)
+        val dest = File(bookDir(id), "cover.jpg")
         if (dest.exists() && dest.length() > 0L) return
-        client.downloadCover(session, id, dest)
+        expireOn401 { client.downloadCover(session, id, dest) }
     }
 
     private fun cachedFeed(id: String): List<FeedPost>? {
-        val cacheFile = File(root, "$id/feed.json")
+        val safe = safeBookId(id) ?: return null
+        val cacheFile = File(bookDir(safe), "feed.json")
         if (!cacheFile.exists()) return null
         return runCatching {
             val cache = json.decodeFromString<FeedCache>(cacheFile.readText())
@@ -236,10 +275,13 @@ class HostedLibraryStore(
         }.getOrNull()
     }
 
-    private fun replaceBook(record: BookRecord) {
-        _library.update { snap ->
-            val books = snap.books.filterNot { it.id == record.id } + record
-            snap.copy(books = books.sortedByDescending { it.importedAt })
+    private suspend fun replaceBook(record: BookRecord) {
+        mutex.withLock {
+            epoch += 1
+            val books = _library.value.books.filterNot { it.id == record.id } + record
+            _library.value = _library.value.copy(
+                books = books.sortedByDescending { it.importedAt },
+            )
         }
     }
 
@@ -250,7 +292,30 @@ class HostedLibraryStore(
         }
         return session
     }
+
+    private fun <T> expireOn401(block: () -> T): T {
+        return try {
+            block()
+        } catch (err: HostedException) {
+            if (err.code == 401) sessions.signOut()
+            throw err
+        }
+    }
+
+    private fun bookDir(id: String): File = File(root, id)
+
+    private fun wipeCache() {
+        root.deleteRecursively()
+        root.mkdirs()
+    }
+}
+
+fun safeBookId(id: String): String? {
+    return runCatching { UUID.fromString(id).toString() }.getOrNull()
+}
+
+fun requireBookId(id: String): String {
+    return safeBookId(id) ?: error("Bad book id.")
 }
 
 const val HOSTED_NOT_SIGNED_IN = "Sign in to the hosted library first."
-const val HOSTED_NOT_CONNECTED = HOSTED_NOT_SIGNED_IN

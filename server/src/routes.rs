@@ -1,4 +1,5 @@
 use crate::auth::{check_password, hash_password, new_token, normalize_username, verify_password, Authed};
+use crate::config::MAX_COVER_BYTES;
 use crate::db::now_ms;
 use crate::error::ApiError;
 use crate::models::{
@@ -74,15 +75,11 @@ pub async fn login(
 pub async fn logout(
     State(state): State<AppState>,
     authed: Authed,
-    headers: axum::http::HeaderMap,
 ) -> Result<axum::http::StatusCode, ApiError> {
-    let _ = authed;
-    if let Some(token) = bearer_token(&headers) {
-        sqlx::query("DELETE FROM sessions WHERE token = ?")
-            .bind(token)
-            .execute(&state.pool)
-            .await?;
-    }
+    sqlx::query("DELETE FROM sessions WHERE token = ?")
+        .bind(&authed.token)
+        .execute(&state.pool)
+        .await?;
     Ok(axum::http::StatusCode::NO_CONTENT)
 }
 
@@ -288,20 +285,18 @@ async fn issue_session(state: &AppState, user_id: &str) -> Result<String, ApiErr
     Ok(token)
 }
 
-fn bearer_token(headers: &axum::http::HeaderMap) -> Option<&str> {
-    headers
-        .get(axum::http::header::AUTHORIZATION)
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.strip_prefix("Bearer "))
+fn parse_book_id(id: &str) -> Result<Uuid, ApiError> {
+    Uuid::parse_str(id).map_err(|_| ApiError::NotFound)
 }
 
 async fn owned_book(state: &AppState, user_id: &str, id: &str) -> Result<BookRecord, ApiError> {
+    let id = parse_book_id(id)?.to_string();
     let row = sqlx::query_as::<_, BookRow>(
         "SELECT id, title, author, handle, imported_at, post_count, progress_index, is_sample
          FROM books
          WHERE id = ? AND user_id = ?",
     )
-    .bind(id)
+    .bind(&id)
     .bind(user_id)
     .fetch_optional(&state.pool)
     .await?;
@@ -362,13 +357,13 @@ async fn read_upload(state: &AppState, mut multipart: Multipart) -> Result<Parse
         while let Some(field) = multipart.next_field().await? {
             let name = field.name().unwrap_or("").to_string();
             match name.as_str() {
-                "title" => title = Some(field.text().await?.trim().to_string()),
-                "author" => author = Some(field.text().await?.trim().to_string()),
-                "handle" => handle = Some(field.text().await?.trim().to_string()),
+                "title" => title = Some(field_text(field, 512).await?),
+                "author" => author = Some(field_text(field, 256).await?),
+                "handle" => handle = Some(field_text(field, 32).await?),
                 "isSample" | "is_sample" => {
-                    let value = field.text().await?;
+                    let value = field_text(field, 16).await?;
                     is_sample = matches!(
-                        value.trim().to_ascii_lowercase().as_str(),
+                        value.to_ascii_lowercase().as_str(),
                         "1" | "true" | "yes"
                     );
                 }
@@ -379,11 +374,11 @@ async fn read_upload(state: &AppState, mut multipart: Multipart) -> Result<Parse
                 }
                 "cover" => {
                     let dest = temp_dir.join("cover.jpg");
-                    write_limited(field, &dest, state.max_epub_bytes).await?;
+                    write_limited(field, &dest, MAX_COVER_BYTES).await?;
                     cover_path = Some(dest);
                 }
                 _ => {
-                    let _ = field.bytes().await;
+                    skip_field(field, 8 * 1024).await?;
                 }
             }
         }
@@ -419,6 +414,33 @@ async fn read_upload(state: &AppState, mut multipart: Multipart) -> Result<Parse
         cover_path,
         temp_dir,
     })
+}
+
+async fn field_text(
+    field: axum::extract::multipart::Field<'_>,
+    max: usize,
+) -> Result<String, ApiError> {
+    let bytes = field.bytes().await?;
+    if bytes.len() > max {
+        return Err(ApiError::BadRequest(format!(
+            "Field is longer than {max} bytes."
+        )));
+    }
+    Ok(String::from_utf8_lossy(&bytes).trim().to_string())
+}
+
+async fn skip_field(
+    mut field: axum::extract::multipart::Field<'_>,
+    max: u64,
+) -> Result<(), ApiError> {
+    let mut written = 0u64;
+    while let Some(chunk) = field.chunk().await? {
+        written += chunk.len() as u64;
+        if written > max {
+            return Err(ApiError::BadRequest("Unknown upload field is too large.".into()));
+        }
+    }
+    Ok(())
 }
 
 async fn write_limited(

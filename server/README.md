@@ -24,7 +24,7 @@ On a phone on the same LAN, the server URL is `http://<that-machine>:8787`.
 - `MEWO_ALLOW_SIGNUP` default on. Set `0` or `false` when the box faces the internet.
 - `MEWO_MAX_EPUB_BYTES` default `67108864` (64 MiB)
 
-The cap is 64 MiB because the bundled sample is 2_886 bytes, Gutenberg War and Peace (epub3.images) is 1_824_099, and illustrated Pride and Prejudice (epub3.images) is 24_835_578. That leaves room for a heavy illustrated novel and still rejects a dump. A 413 names the budget, the limit, and the asked size.
+The cap is 64 MiB because the bundled sample is 2_886 bytes, Gutenberg War and Peace (epub3.images) is 1_824_099, and illustrated Pride and Prejudice (epub3.images) is 24_835_578. That leaves room for a heavy illustrated novel and still rejects a dump. The HTTP body limit is that cap plus 4 MiB for a cover and 64 KiB of form fields. A 413 names the budget, the limit, and the asked size.
 
 Postgres is not wired. The schema stays boring (text ids, integer millis) so that can be a URL swap later.
 

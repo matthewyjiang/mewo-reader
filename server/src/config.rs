@@ -5,6 +5,20 @@ use std::path::PathBuf;
 /// 64 MiB leaves room for a heavy illustrated novel and still rejects a dump.
 pub const DEFAULT_MAX_EPUB_BYTES: u64 = 64 * 1024 * 1024;
 
+/// Phone writes cover JPEGs at 85% quality. 4 MiB is above a large page scan
+/// and still a hard stop if someone posts a dump as "cover".
+pub const MAX_COVER_BYTES: u64 = 4 * 1024 * 1024;
+
+/// Title, author, handle, and multipart chrome on top of the two files.
+pub const MAX_FORM_OVERHEAD_BYTES: u64 = 64 * 1024;
+
+pub fn request_body_limit(max_epub_bytes: u64) -> usize {
+    max_epub_bytes
+        .saturating_add(MAX_COVER_BYTES)
+        .saturating_add(MAX_FORM_OVERHEAD_BYTES)
+        as usize
+}
+
 #[derive(Clone, Debug)]
 pub struct Config {
     pub listen: String,

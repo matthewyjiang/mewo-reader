@@ -329,6 +329,10 @@ async fn second_user_cannot_see_someone_elses_book() {
 
     let (status, _) = empty_req(&app, "GET", &format!("/v1/books/{id}"), Some(&ted)).await;
     assert_eq!(status, StatusCode::NOT_FOUND);
+    let (status, _) = empty_req(&app, "GET", &format!("/v1/books/{id}/epub"), Some(&ted)).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let (status, _) = empty_req(&app, "DELETE", &format!("/v1/books/{id}"), Some(&ted)).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
     let (status, library) = empty_req(&app, "GET", "/v1/library", Some(&ted)).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(library["books"].as_array().unwrap().len(), 0);
@@ -357,4 +361,37 @@ async fn oversized_epub_is_413() {
     let error = body["error"].as_str().unwrap();
     assert!(error.contains("MEWO_MAX_EPUB_BYTES=64"), "{error}");
     assert!(error.contains("asked 65") || error.contains("asked 200"), "{error}");
+}
+
+#[tokio::test]
+async fn epub_over_two_megabytes_is_accepted() {
+    let (app, _tmp) = app_with(true, 4 * 1024 * 1024).await;
+    let token = register(&app, "matt", "password1").await;
+    let epub = vec![0u8; 3 * 1024 * 1024];
+    let (status, book) = upload(&app, &token, "Big", "A", &epub, None, false).await;
+    assert_eq!(status, StatusCode::OK, "{book}");
+    let id = book["id"].as_str().unwrap();
+    let req = Request::builder()
+        .method("GET")
+        .uri(format!("/v1/books/{id}/epub"))
+        .header(header::AUTHORIZATION, format!("Bearer {token}"))
+        .body(Body::empty())
+        .unwrap();
+    let (status, bytes) = send(&app, req).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(bytes.len(), epub.len());
+}
+
+#[tokio::test]
+async fn bad_book_id_is_404() {
+    let (app, _tmp) = app().await;
+    let token = register(&app, "matt", "password1").await;
+    for path in [
+        "/v1/books/../secret",
+        "/v1/books/not-a-uuid",
+        "/v1/books/../secret/epub",
+    ] {
+        let (status, body) = empty_req(&app, "GET", path, Some(&token)).await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{path} {body}");
+    }
 }

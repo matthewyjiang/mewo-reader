@@ -17,6 +17,8 @@ pub enum ApiError {
     Conflict(String),
     #[error("EPUB too large: asked {asked} bytes, limit is MEWO_MAX_EPUB_BYTES={limit}")]
     PayloadTooLarge { asked: u64, limit: u64 },
+    #[error("Request body is too large.")]
+    RequestTooLarge,
     #[error("Internal error.")]
     Internal,
 }
@@ -37,8 +39,10 @@ impl From<std::io::Error> for ApiError {
 
 impl From<axum::extract::multipart::MultipartError> for ApiError {
     fn from(err: axum::extract::multipart::MultipartError) -> Self {
-        tracing::error!(error = %err, "multipart error");
-        ApiError::Internal
+        if err.status() == StatusCode::PAYLOAD_TOO_LARGE {
+            return ApiError::RequestTooLarge;
+        }
+        ApiError::BadRequest(err.body_text())
     }
 }
 
@@ -55,7 +59,9 @@ impl IntoResponse for ApiError {
             ApiError::Forbidden(_) => StatusCode::FORBIDDEN,
             ApiError::NotFound => StatusCode::NOT_FOUND,
             ApiError::Conflict(_) => StatusCode::CONFLICT,
-            ApiError::PayloadTooLarge { .. } => StatusCode::PAYLOAD_TOO_LARGE,
+            ApiError::PayloadTooLarge { .. } | ApiError::RequestTooLarge => {
+                StatusCode::PAYLOAD_TOO_LARGE
+            }
             ApiError::Internal => StatusCode::INTERNAL_SERVER_ERROR,
         };
         let body = Json(ErrorBody {

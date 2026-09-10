@@ -25,15 +25,28 @@ class LikesViewModel(
     fun refresh() {
         viewModelScope.launch {
             _state.update { it.copy(loading = it.hits.isEmpty()) }
-            val hits = store.likedPosts()
-            _state.update { it.copy(hits = hits, loading = false) }
+            runCatching { store.likedPosts() }
+                .onSuccess { hits ->
+                    _state.update { it.copy(hits = hits, loading = false) }
+                }
+                .onFailure {
+                    _state.update { it.copy(hits = emptyList(), loading = false) }
+                }
         }
     }
 
     fun unlike(bookId: String, postId: String) {
         viewModelScope.launch {
-            store.toggleLike(bookId, postId)
-            _state.update { it.copy(hits = it.hits.filterNot { hit -> hit.post.id == postId && hit.book.id == bookId }) }
+            runCatching { store.toggleLike(bookId, postId) }
+                .onSuccess {
+                    _state.update {
+                        it.copy(
+                            hits = it.hits.filterNot { hit ->
+                                hit.post.id == postId && hit.book.id == bookId
+                            },
+                        )
+                    }
+                }
         }
     }
 
