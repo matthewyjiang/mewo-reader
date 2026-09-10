@@ -26,6 +26,7 @@ import androidx.compose.ui.graphics.RectangleShape
 import androidx.compose.ui.unit.dp
 import com.mewo.reader.data.BackendKind
 import com.mewo.reader.ui.LocalBackend
+import com.mewo.reader.ui.LocalHostedAuth
 import com.mewo.reader.ui.theme.DisplaySettings
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -72,9 +73,10 @@ fun AccountDrawer(
 @Composable
 private fun AccountDrawerContent() {
     val backend = LocalBackend.current
+    val hosted = LocalHostedAuth.current
     val handle = when (backend.kind) {
         BackendKind.Local -> "@local"
-        BackendKind.Hosted -> "@hosted"
+        BackendKind.Hosted -> hosted.session.username?.let { "@$it" } ?: "@hosted"
     }
     Column(
         modifier = Modifier

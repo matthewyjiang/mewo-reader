@@ -8,11 +8,11 @@ android
 
 ## Stack
 
-delegated: Kotlin, Jetpack Compose, Readium Kotlin toolkit 3.x. Chosen because EPUB rendering is a native Android problem and Readium already parses publications into text elements we can feed.
+delegated: Kotlin, Jetpack Compose, Readium Kotlin toolkit 3.x on the phone. Rust (axum, sqlx, SQLite) for the optional hosted library. EPUB rendering is a native Android problem and Readium already parses publications into text elements we can feed. The server stores files and library state. It does not parse books.
 
 ## Users
 
-Matt and a few people he might hand an APK to. They sideload EPUB files from the device and read them.
+Matt and a few people he might hand an APK to. They sideload EPUB files from the device and read them. Hosted mode is for the same people on a server they run, each with their own account.
 
 ## Product Purpose
 
@@ -24,12 +24,12 @@ The book is a timeline. Each paragraph is a post from the author. Neighboring re
 
 ## Operating Context
 
-Used on a phone, often in bed or on a couch, one-handed. Books come from files the user already has. No account. No catalog. Share the APK, not a store listing.
+Used on a phone, often in bed or on a couch, one-handed. Books come from files the user already has, or from a hosted shelf they signed into. Local has no account. Hosted does. No catalog. Share the APK, not a store listing.
 
 ## Capabilities and Constraints
 
 - Import EPUB from the system file picker
-- Persist the library on device
+- Persist the library on device, or on a hosted server you sign into
 - Read as a vertical feed: one post per paragraph, including long ones
 - Start the feed at the first non-publisher TOC entry, not copyright or contents
 - Remember reading place per book
@@ -39,7 +39,8 @@ Used on a phone, often in bed or on a couch, one-handed. Books come from files t
 - Search books and opened posts
 - See liked lines in one feed
 - Pick Twitter or X display, light or dark
-- No accounts, sync, OPDS, DRM, or iOS in this version
+- Local shelf has no account. Hosted shelf uses username and password. The two shelves do not merge or sync.
+- No OPDS, DRM, or iOS in this version
 
 ## Brand Commitments
 
@@ -53,6 +54,6 @@ No real library, covers, or user books in the repo. Bundle a short public-domain
 ## Product Principles
 
 - The feed is the reader. If it looks like a book layout, it failed.
-- Local files only. Nothing should require a network to read.
+- Local reading does not need a network. Hosted is a second shelf you opt into.
 - One-handed phone use is the default scene.
 - Friends getting an APK should understand the app without a tour.
