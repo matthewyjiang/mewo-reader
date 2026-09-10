@@ -59,8 +59,15 @@ fun MewoAppBar(
                             .fillMaxWidth()
                             .height(56.dp),
                         verticalAlignment = Alignment.CenterVertically,
-                        content = content,
-                    )
+                    ) {
+                        leading()
+                        Row(
+                            modifier = Modifier.weight(1f),
+                            verticalAlignment = Alignment.CenterVertically,
+                            content = content,
+                        )
+                        trailing()
+                    }
                 } else {
                     Box(
                         modifier = Modifier

@@ -15,7 +15,6 @@ import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.ArrowBack
-import androidx.compose.material.icons.outlined.Palette
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -57,7 +56,6 @@ import java.io.File
 fun ReaderScreen(
     viewModel: ReaderViewModel,
     onBack: () -> Unit,
-    onDisplay: () -> Unit,
     hideOnScroll: HideOnScrollState,
 ) {
     val state by viewModel.state.collectAsStateWithLifecycle()
@@ -75,7 +73,6 @@ fun ReaderScreen(
             title = book?.title ?: "Post",
             visible = hideOnScroll.visible,
             onBack = onBack,
-            onDisplay = onDisplay,
             onChapters = {
                 if (!state.loading && state.error == null) showChapters = true
             },
@@ -179,7 +176,6 @@ private fun ReaderBar(
     title: String,
     visible: Boolean,
     onBack: () -> Unit,
-    onDisplay: () -> Unit,
     onChapters: () -> Unit,
 ) {
     MewoAppBar(
@@ -210,15 +206,6 @@ private fun ReaderBar(
                     style = MaterialTheme.typography.titleSmall,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
-                )
-            }
-        },
-        trailing = {
-            IconButton(onClick = onDisplay) {
-                Icon(
-                    Icons.Outlined.Palette,
-                    contentDescription = "Display",
-                    tint = MaterialTheme.colorScheme.onBackground,
                 )
             }
         },

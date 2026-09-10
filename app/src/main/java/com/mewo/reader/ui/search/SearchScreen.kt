@@ -38,6 +38,7 @@ import com.mewo.reader.ui.components.Avatar
 import com.mewo.reader.ui.components.BindListTop
 import com.mewo.reader.ui.components.HideOnScrollState
 import com.mewo.reader.ui.components.MewoAppBar
+import com.mewo.reader.ui.components.ProfileButton
 import com.mewo.reader.ui.components.ShowWhenIdle
 import com.mewo.reader.ui.reader.TimelinePost
 import java.io.File
@@ -47,6 +48,7 @@ fun SearchScreen(
     viewModel: SearchViewModel,
     onOpenBook: (String) -> Unit,
     onOpenPost: (bookId: String, postId: String) -> Unit,
+    onOpenAccount: () -> Unit,
     hideOnScroll: HideOnScrollState,
 ) {
     val state by viewModel.state.collectAsStateWithLifecycle()
@@ -56,6 +58,7 @@ fun SearchScreen(
 
     Column(Modifier.fillMaxSize()) {
         MewoAppBar(
+            leading = { ProfileButton(onClick = onOpenAccount) },
             content = {
                 BasicTextField(
                     value = state.query,
@@ -67,7 +70,7 @@ fun SearchScreen(
                     cursorBrush = SolidColor(MaterialTheme.colorScheme.primary),
                     modifier = Modifier
                         .weight(1f)
-                        .padding(horizontal = 16.dp)
+                        .padding(end = 16.dp)
                         .focusRequester(focus),
                     decorationBox = { inner ->
                         if (state.query.isEmpty()) {

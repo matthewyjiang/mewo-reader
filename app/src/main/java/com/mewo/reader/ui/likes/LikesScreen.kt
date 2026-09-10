@@ -24,6 +24,7 @@ import com.mewo.reader.data.FeedPost
 import com.mewo.reader.ui.components.BindListTop
 import com.mewo.reader.ui.components.HideOnScrollState
 import com.mewo.reader.ui.components.MewoAppBar
+import com.mewo.reader.ui.components.ProfileButton
 import com.mewo.reader.ui.components.ShowWhenIdle
 import com.mewo.reader.ui.reader.TimelinePost
 import java.io.File
@@ -32,6 +33,7 @@ import java.io.File
 fun LikesScreen(
     viewModel: LikesViewModel,
     onOpenPost: (bookId: String, postId: String) -> Unit,
+    onOpenAccount: () -> Unit,
     hideOnScroll: HideOnScrollState,
 ) {
     val state by viewModel.state.collectAsStateWithLifecycle()
@@ -42,11 +44,12 @@ fun LikesScreen(
         hideOnScroll.ShowWhenIdle(state.loading || state.hits.isEmpty())
         MewoAppBar(
             visible = hideOnScroll.visible,
+            leading = { ProfileButton(onClick = onOpenAccount) },
             content = {
                 Text(
                     text = "Likes",
                     style = MaterialTheme.typography.titleLarge,
-                    modifier = Modifier.padding(horizontal = 16.dp),
+                    modifier = Modifier.padding(end = 16.dp),
                 )
             },
         )

@@ -11,22 +11,17 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.selection.selectable
 import androidx.compose.foundation.selection.selectableGroup
 import androidx.compose.foundation.selection.toggleable
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Check
-import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
-import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -38,83 +33,68 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.unit.dp
 
-@OptIn(ExperimentalMaterial3Api::class)
+/** Theme swatches and Mewo mode. Lives in the account drawer. */
 @Composable
-fun DisplaySheet(
-    onDismiss: () -> Unit,
-) {
+fun DisplaySettings(modifier: Modifier = Modifier) {
     val controller = LocalThemeController.current
     val mewoMode = LocalMewoMode.current
-    val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     var iconError by remember { mutableStateOf<String?>(null) }
-    ModalBottomSheet(
-        onDismissRequest = onDismiss,
-        sheetState = sheetState,
-        containerColor = MaterialTheme.colorScheme.surface,
-        contentColor = MaterialTheme.colorScheme.onSurface,
-    ) {
+    Column(modifier = modifier.fillMaxWidth()) {
+        Text("Display", style = MaterialTheme.typography.titleMedium)
+        Spacer(Modifier.height(6.dp))
+        Text(
+            text = "Twitter kept a navy night. X went black.",
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        Spacer(Modifier.height(20.dp))
         Column(
-            modifier = Modifier
-                .fillMaxWidth()
-                .verticalScroll(rememberScrollState())
-                .padding(start = 16.dp, end = 16.dp, bottom = 28.dp),
+            modifier = Modifier.selectableGroup(),
+            verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
-            Text("Display", style = MaterialTheme.typography.headlineLarge)
-            Spacer(Modifier.height(6.dp))
-            Text(
-                text = "Twitter kept a navy night. X went black.",
-                style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-            Spacer(Modifier.height(20.dp))
-            Column(
-                modifier = Modifier.selectableGroup(),
-                verticalArrangement = Arrangement.spacedBy(12.dp),
-            ) {
-                Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                    ThemeSwatch(
-                        theme = DisplayTheme.TwitterLight,
-                        selected = controller.current == DisplayTheme.TwitterLight,
-                        onSelect = { controller.setTheme(DisplayTheme.TwitterLight) },
-                        modifier = Modifier.weight(1f),
-                    )
-                    ThemeSwatch(
-                        theme = DisplayTheme.XLight,
-                        selected = controller.current == DisplayTheme.XLight,
-                        onSelect = { controller.setTheme(DisplayTheme.XLight) },
-                        modifier = Modifier.weight(1f),
-                    )
-                }
-                Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                    ThemeSwatch(
-                        theme = DisplayTheme.TwitterDark,
-                        selected = controller.current == DisplayTheme.TwitterDark,
-                        onSelect = { controller.setTheme(DisplayTheme.TwitterDark) },
-                        modifier = Modifier.weight(1f),
-                    )
-                    ThemeSwatch(
-                        theme = DisplayTheme.XDark,
-                        selected = controller.current == DisplayTheme.XDark,
-                        onSelect = { controller.setTheme(DisplayTheme.XDark) },
-                        modifier = Modifier.weight(1f),
-                    )
-                }
+            Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                ThemeSwatch(
+                    theme = DisplayTheme.TwitterLight,
+                    selected = controller.current == DisplayTheme.TwitterLight,
+                    onSelect = { controller.setTheme(DisplayTheme.TwitterLight) },
+                    modifier = Modifier.weight(1f),
+                )
+                ThemeSwatch(
+                    theme = DisplayTheme.XLight,
+                    selected = controller.current == DisplayTheme.XLight,
+                    onSelect = { controller.setTheme(DisplayTheme.XLight) },
+                    modifier = Modifier.weight(1f),
+                )
             }
-            Spacer(Modifier.height(24.dp))
-            MewoModeRow(
-                enabled = mewoMode.enabled,
-                error = iconError,
-                onToggle = { next ->
-                    try {
-                        mewoMode.setEnabled(next)
-                        iconError = null
-                    } catch (e: Exception) {
-                        iconError = e.message?.takeIf { it.isNotBlank() }
-                            ?: "Couldn't switch the app icon."
-                    }
-                },
-            )
+            Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                ThemeSwatch(
+                    theme = DisplayTheme.TwitterDark,
+                    selected = controller.current == DisplayTheme.TwitterDark,
+                    onSelect = { controller.setTheme(DisplayTheme.TwitterDark) },
+                    modifier = Modifier.weight(1f),
+                )
+                ThemeSwatch(
+                    theme = DisplayTheme.XDark,
+                    selected = controller.current == DisplayTheme.XDark,
+                    onSelect = { controller.setTheme(DisplayTheme.XDark) },
+                    modifier = Modifier.weight(1f),
+                )
+            }
         }
+        Spacer(Modifier.height(24.dp))
+        MewoModeRow(
+            enabled = mewoMode.enabled,
+            error = iconError,
+            onToggle = { next ->
+                try {
+                    mewoMode.setEnabled(next)
+                    iconError = null
+                } catch (e: Exception) {
+                    iconError = e.message?.takeIf { it.isNotBlank() }
+                        ?: "Couldn't switch the app icon."
+                }
+            },
+        )
     }
 }
 

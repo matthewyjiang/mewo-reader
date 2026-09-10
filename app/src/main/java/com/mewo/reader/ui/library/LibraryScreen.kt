@@ -25,7 +25,6 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Add
 import androidx.compose.material.icons.outlined.Delete
-import androidx.compose.material.icons.outlined.Palette
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.FloatingActionButton
@@ -55,6 +54,7 @@ import com.mewo.reader.ui.components.BindListTop
 import com.mewo.reader.ui.components.BrandMark
 import com.mewo.reader.ui.components.HideOnScrollState
 import com.mewo.reader.ui.components.MewoAppBar
+import com.mewo.reader.ui.components.ProfileButton
 import com.mewo.reader.ui.components.ShowWhenIdle
 import java.io.File
 
@@ -62,7 +62,7 @@ import java.io.File
 fun LibraryScreen(
     viewModel: LibraryViewModel,
     onOpenBook: (String) -> Unit,
-    onDisplay: () -> Unit,
+    onOpenAccount: () -> Unit,
     hideOnScroll: HideOnScrollState,
 ) {
     val state by viewModel.state.collectAsStateWithLifecycle()
@@ -80,7 +80,7 @@ fun LibraryScreen(
             .background(MaterialTheme.colorScheme.background),
     ) {
         Column(Modifier.fillMaxSize()) {
-            HomeBar(onDisplay = onDisplay, visible = hideOnScroll.visible)
+            HomeBar(onOpenAccount = onOpenAccount, visible = hideOnScroll.visible)
             hideOnScroll.ShowWhenIdle(state.books.isEmpty())
             if (state.books.isEmpty() && !state.busy) {
                 EmptyTimeline(
@@ -202,20 +202,11 @@ private fun RemoveBookDialog(
 }
 
 @Composable
-private fun HomeBar(onDisplay: () -> Unit, visible: Boolean) {
+private fun HomeBar(onOpenAccount: () -> Unit, visible: Boolean) {
     MewoAppBar(
         visible = visible,
-        leading = {},
+        leading = { ProfileButton(onClick = onOpenAccount) },
         center = { BrandMark() },
-        trailing = {
-            IconButton(onClick = onDisplay) {
-                Icon(
-                    Icons.Outlined.Palette,
-                    contentDescription = "Display",
-                    tint = MaterialTheme.colorScheme.onBackground,
-                )
-            }
-        },
     )
 }
 

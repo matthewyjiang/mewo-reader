@@ -25,7 +25,7 @@ class MainActivity : ComponentActivity() {
              * Hairline rules, circular avatars, Atkinson body.
              * STORY: Import an EPUB, scroll the author as a feed, like a line.
              * FIRST VIEWPORT: Sticky "Mewo" bar, feed of books or empty timeline
-             * plus one FAB to add a file. Palette opens Display.
+             * plus one FAB to add a file. Avatar opens the account drawer.
              * FORM: X home timeline, brief-pinned, seed skipped.
              * FINISH: unreviewed and undocumented is unfinished; this build ends
              * with the finish review, the verdict, and DESIGN.md
