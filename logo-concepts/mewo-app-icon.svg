@@ -1,7 +1,0 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512" role="img" aria-labelledby="title desc">
-  <title id="title">Mewo app icon</title>
-  <desc id="desc">A geometric open book on black, with a solid white left page and an outlined right page.</desc>
-  <rect width="512" height="512" fill="#000000"/>
-  <path fill="#FFFFFF" d="M112 144 244 188V368L112 324Z"/>
-  <path fill="#FFFFFF" fill-rule="evenodd" d="M268 188 400 144V324L268 368ZM284 200V346L384 312V167Z"/>
-</svg>

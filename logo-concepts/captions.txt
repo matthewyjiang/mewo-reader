@@ -1,5 +1,0 @@
-1-closed-book-x.png	Closed book, X cut from the spine
-2-open-book-cutouts.png	Open book, even-odd voids
-3-x-as-book.png	X that is also an open book
-4-closed-book-outline.png	Front-on closed book, outline
-5-open-book-filled.png	Open book, filled pages

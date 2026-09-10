@@ -1,32 +1,42 @@
 # Mewo
 
-An Android EPUB reader that turns a book into an X-style timeline. One paragraph is one post. You scroll. You can like a line, quote it, or share it.
+An EPUB reader that turns a book into an X-style timeline. One paragraph is one post. You scroll. You can like a line, quote it, or share it.
+
+This repo holds both sides:
+
+```
+android/   phone app
+server/    hosted library API
+```
 
 Import a file from the picker, or tap **Open a sample** if you just want to see the feed.
 
-Kotlin, Jetpack Compose, and [Readium](https://github.com/readium/kotlin-toolkit) for parsing. The reader itself is Compose, not Readium's page navigator.
+The reader is Kotlin, Jetpack Compose, and [Readium](https://github.com/readium/kotlin-toolkit) for parsing. The reader itself is Compose, not Readium's page navigator. Open the `android` folder in Android Studio.
 
-## Requirements
+## Android
+
+### Requirements
 
 - Android 8 (API 26) or newer
 - JDK 17+ to build
 - Android SDK with `platforms;android-36`
 
-## Build
+### Build
 
 ```bash
 export JAVA_HOME=/path/to/jdk-21
 export ANDROID_HOME=/path/to/Android/Sdk
+cd android
 ./gradlew :app:assembleDebug --max-workers=12
 ```
 
-The APK lands at `app/build/outputs/apk/debug/app-debug.apk`.
+The APK lands at `android/app/build/outputs/apk/debug/app-debug.apk`.
 
-## Sideload
+### Sideload
 
 Mewo is not on the Play Store. You install the APK yourself.
 
-### On a phone
+#### On a phone
 
 1. Copy `app-debug.apk` onto the phone (USB, Drive, AirDrop-to-adjacent-Android, whatever).
 2. Open the file. Android will ask you to allow installs from that app (Files, Drive, Messages, etc.). Allow it.
@@ -34,24 +44,24 @@ Mewo is not on the Play Store. You install the APK yourself.
 
 If the phone refuses the package, check Settings > Apps > Special app access > Install unknown apps, and turn it on for the app you used to open the APK.
 
-### With adb
+#### With adb
 
 Plug the phone in, turn on USB debugging (Settings > Developer options), then:
 
 ```bash
-adb install -r app/build/outputs/apk/debug/app-debug.apk
+adb install -r android/app/build/outputs/apk/debug/app-debug.apk
 adb shell am start -n com.mewo.reader/.MainActivity
 ```
 
 Same commands work on an emulator.
 
-### Handing it to a friend
+#### Handing it to a friend
 
 Send them the APK. Tell them to open the file on the phone and allow the one-time "install unknown apps" prompt. They do not need Android Studio, adb, or a Google account for Mewo.
 
 Debug builds expire in the sense that you can overwrite them with `adb install -r`. They are not signed for Play. Don't put this APK on a public link if you care about people running unsigned debug code.
 
-## Emulator
+### Emulator
 
 ```bash
 export ANDROID_HOME=/path/to/Android/Sdk
@@ -60,3 +70,7 @@ $ANDROID_HOME/emulator/emulator -avd mewo -gpu host
 ```
 
 The `mewo` AVD in this repo's notes is a medium phone image, not a Pixel with a camera hole. The hole covers the system status bar and makes the top of the app look broken.
+
+## Server
+
+The hosted library API. See [server/README.md](server/README.md). The phone reaches it through `HostedLibraryStore`. Nothing is running there yet.
