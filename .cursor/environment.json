@@ -1,0 +1,11 @@
+{
+  "name": "Mewo (Android app + Rust server)",
+  "user": "ubuntu",
+  "install": "bash .cursor/install.sh",
+  "terminals": [
+    {
+      "name": "server",
+      "command": "cd server && RUST_LOG=info MEWO_DATA_DIR=$HOME/mewo-data cargo run"
+    }
+  ]
+}
