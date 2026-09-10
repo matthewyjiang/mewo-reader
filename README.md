@@ -73,4 +73,11 @@ The `mewo` AVD in this repo's notes is a medium phone image, not a Pixel with a 
 
 ## Server
 
-The hosted library API. See [server/README.md](server/README.md). The phone reaches it through `HostedLibraryStore`. Nothing is running there yet.
+Rust API for the hosted shelf. See [server/README.md](server/README.md).
+
+```bash
+cd server
+cargo run
+```
+
+That listens on port 8787. In the app, open the account drawer, pick **Hosted server**, and sign in with that URL. Local books stay on the phone. Hosted books live on the server. They do not merge.

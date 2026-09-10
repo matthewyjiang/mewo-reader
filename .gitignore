@@ -11,6 +11,7 @@
 /server/.kotlin/
 /server/target/
 /server/.env
+/server/data/
 /.idea/
 *.iml
 .DS_Store

@@ -8,7 +8,9 @@ import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.getValue
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.mewo.reader.ui.BackendController
+import com.mewo.reader.ui.HostedAuthController
 import com.mewo.reader.ui.LocalBackend
+import com.mewo.reader.ui.LocalHostedAuth
 import com.mewo.reader.ui.LocalLibraryStore
 import com.mewo.reader.ui.MewoNav
 import com.mewo.reader.ui.theme.LocalMewoMode
@@ -37,6 +39,7 @@ class MainActivity : ComponentActivity() {
             val theme by app.themeStore.theme.collectAsStateWithLifecycle()
             val mewoMode by app.mewoModeStore.enabled.collectAsStateWithLifecycle()
             val backend by app.backendStore.kind.collectAsStateWithLifecycle()
+            val hosted by app.hostedSession.session.collectAsStateWithLifecycle()
             MewoTheme(theme = theme) {
                 CompositionLocalProvider(
                     LocalThemeController provides ThemeController(
@@ -50,6 +53,13 @@ class MainActivity : ComponentActivity() {
                     LocalBackend provides BackendController(
                         kind = backend,
                         setKind = app.backendStore::setKind,
+                    ),
+                    LocalHostedAuth provides HostedAuthController(
+                        session = hosted,
+                        setBaseUrl = app.hostedSession::setBaseUrl,
+                        signIn = app.hostedAuth::signIn,
+                        createAccount = app.hostedAuth::createAccount,
+                        signOut = app.hostedAuth::signOut,
                     ),
                     LocalLibraryStore provides app.library,
                 ) {
