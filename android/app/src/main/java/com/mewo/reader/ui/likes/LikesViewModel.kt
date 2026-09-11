@@ -3,7 +3,9 @@ package com.mewo.reader.ui.likes
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
+import com.mewo.reader.data.CommentIndex
 import com.mewo.reader.data.LibraryStore
+import com.mewo.reader.data.PostComment
 import com.mewo.reader.data.PostHit
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -13,6 +15,7 @@ import kotlinx.coroutines.launch
 
 data class LikesUiState(
     val hits: List<PostHit> = emptyList(),
+    val comments: Map<String, CommentIndex> = emptyMap(),
     val loading: Boolean = true,
 )
 
@@ -25,13 +28,26 @@ class LikesViewModel(
     fun refresh() {
         viewModelScope.launch {
             _state.update { it.copy(loading = it.hits.isEmpty()) }
-            runCatching { store.likedPosts() }
-                .onSuccess { hits ->
-                    _state.update { it.copy(hits = hits, loading = false) }
+            runCatching {
+                val hits = store.likedPosts()
+                val comments = hits.map { it.book.id }.distinct().associateWith { id ->
+                    runCatching { store.commentIndex(id) }.getOrDefault(CommentIndex())
+                }
+                hits to comments
+            }
+                .onSuccess { (hits, comments) ->
+                    _state.update { it.copy(hits = hits, comments = comments, loading = false) }
                 }
                 .onFailure {
                     _state.update { it.copy(hits = emptyList(), loading = false) }
                 }
+        }
+    }
+
+    fun onCommentsChanged(bookId: String, postId: String, comments: List<PostComment>) {
+        _state.update { now ->
+            val current = now.comments[bookId] ?: CommentIndex()
+            now.copy(comments = now.comments + (bookId to current.afterThread(postId, comments)))
         }
     }
 

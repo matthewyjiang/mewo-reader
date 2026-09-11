@@ -1,6 +1,6 @@
 # Mewo
 
-An EPUB reader that turns a book into an X-style timeline. One paragraph is one post. You scroll. You can like a line, quote it, or share it.
+An EPUB reader that turns a book into an X-style timeline. One paragraph is one post. You scroll. You can comment on a line, like it, quote it, or share it.
 
 This repo holds both sides:
 
@@ -57,7 +57,7 @@ Same commands work on an emulator.
 
 #### Handing it to a friend
 
-Send them the APK. Tell them to open the file on the phone and allow the one-time "install unknown apps" prompt. They do not need Android Studio, adb, or a Google account for Mewo.
+Send them the APK. Tell them to open the file on the phone and allow the one-time "install unknown apps" prompt. First open asks for a handle. They do not need Android Studio, adb, or a Google account for Mewo.
 
 Debug builds expire in the sense that you can overwrite them with `adb install -r`. They are not signed for Play. Don't put this APK on a public link if you care about people running unsigned debug code.
 

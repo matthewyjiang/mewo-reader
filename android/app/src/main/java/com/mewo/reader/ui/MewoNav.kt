@@ -1,5 +1,6 @@
 package com.mewo.reader.ui
 
+import android.net.Uri
 import android.os.Build
 import android.view.inputmethod.InputMethodManager
 import androidx.activity.compose.LocalActivity
@@ -41,10 +42,13 @@ import com.mewo.reader.ui.library.LibraryScreen
 import com.mewo.reader.ui.library.LibraryViewModel
 import com.mewo.reader.ui.likes.LikesScreen
 import com.mewo.reader.ui.likes.LikesViewModel
+import com.mewo.reader.ui.profile.ProfileScreen
+import com.mewo.reader.ui.profile.ProfileViewModel
 import com.mewo.reader.ui.reader.ReaderScreen
 import com.mewo.reader.ui.reader.ReaderViewModel
 import com.mewo.reader.ui.search.SearchScreen
 import com.mewo.reader.ui.search.SearchViewModel
+import com.mewo.reader.ui.settings.SettingsAccountPage
 import com.mewo.reader.ui.settings.SettingsDisplayPage
 import com.mewo.reader.ui.settings.SettingsHome
 import com.mewo.reader.ui.settings.SettingsLibraryPage
@@ -65,7 +69,8 @@ fun MewoNav() {
     val route = entry?.destination?.route.orEmpty()
     val onReader = route.startsWith("reader")
     val onSettings = SettingsRoutes.matches(route)
-    val coverFeed = onReader || onSettings
+    val onProfile = route.startsWith("profile")
+    val coverFeed = onReader || onSettings || onProfile
     val activity = LocalActivity.current
     val focusManager = LocalFocusManager.current
     val keyboard = LocalSoftwareKeyboardController.current
@@ -78,8 +83,8 @@ fun MewoNav() {
         act.getSystemService(InputMethodManager::class.java)
             ?.hideSoftInputFromWindow(act.window.decorView.windowToken, 0)
     }
-    LaunchedEffect(tab, onReader, onSettings) {
-        if (tab != AppTab.Search || onReader || onSettings) {
+    LaunchedEffect(tab, onReader, onSettings, onProfile) {
+        if (tab != AppTab.Search || onReader || onSettings || onProfile) {
             delay(50)
             hideIme()
         }
@@ -139,6 +144,20 @@ fun MewoNav() {
         nav.navigate(dest)
     }
 
+    fun openProfile(handle: String, name: String = "") {
+        if (handle.isBlank()) return
+        hideIme()
+        chrome.show()
+        scope.launch { drawerState.close() }
+        val current = entry?.arguments?.getString("handle")
+        if (onProfile && current.equals(handle, ignoreCase = true)) return
+        val dest = buildString {
+            append("profile/${Uri.encode(handle)}")
+            if (name.isNotBlank()) append("?name=${Uri.encode(name)}")
+        }
+        nav.navigate(dest)
+    }
+
     fun openSettings() {
         hideIme()
         chrome.show()
@@ -154,6 +173,7 @@ fun MewoNav() {
         drawerState = drawerState,
         gesturesEnabled = !coverFeed,
         onOpenSettings = ::openSettings,
+        onOpenProfile = ::openProfile,
     ) {
         Column(
             modifier = Modifier
@@ -186,6 +206,7 @@ fun MewoNav() {
                         onOpenBook = { id -> openBook(id) },
                         onOpenPost = { bookId, postId -> openBook(bookId, postId) },
                         onOpenAccount = openAccount,
+                        onOpenProfile = ::openProfile,
                         hideOnScroll = chrome,
                     )
                 }
@@ -197,6 +218,7 @@ fun MewoNav() {
                         viewModel = vm,
                         onOpenPost = { bookId, postId -> openBook(bookId, postId) },
                         onOpenAccount = openAccount,
+                        onOpenProfile = ::openProfile,
                         hideOnScroll = chrome,
                     )
                 }
@@ -221,6 +243,37 @@ fun MewoNav() {
                             chrome.show()
                             nav.popBackStack()
                         },
+                        onOpenProfile = ::openProfile,
+                        hideOnScroll = chrome,
+                    )
+                }
+                composable(
+                    route = "profile/{handle}?name={name}",
+                    arguments = listOf(
+                        navArgument("handle") { type = NavType.StringType },
+                        navArgument("name") {
+                            type = NavType.StringType
+                            defaultValue = ""
+                        },
+                    ),
+                    enterTransition = { settingsEnter() },
+                    exitTransition = { settingsExit() },
+                    popEnterTransition = { settingsPopEnter() },
+                    popExitTransition = { settingsPopExit() },
+                ) { dest ->
+                    val handle = dest.arguments?.getString("handle") ?: return@composable
+                    val name = dest.arguments?.getString("name").orEmpty()
+                    val vm: ProfileViewModel = viewModel(
+                        factory = ProfileViewModel.factory(store, handle),
+                    )
+                    ProfileScreen(
+                        viewModel = vm,
+                        displayName = name,
+                        onBack = {
+                            chrome.show()
+                            nav.popBackStack()
+                        },
+                        onOpenProfile = ::openProfile,
                         hideOnScroll = chrome,
                     )
                 }
@@ -236,8 +289,20 @@ fun MewoNav() {
                             chrome.show()
                             nav.popBackStack()
                         },
+                        onOpenAccount = { nav.navigate(SettingsRoutes.Account) },
                         onOpenDisplay = { nav.navigate(SettingsRoutes.Display) },
                         onOpenLibrary = { nav.navigate(SettingsRoutes.Library) },
+                    )
+                }
+                composable(
+                    route = SettingsRoutes.Account,
+                    enterTransition = { settingsEnter() },
+                    exitTransition = { settingsExit() },
+                    popEnterTransition = { settingsPopEnter() },
+                    popExitTransition = { settingsPopExit() },
+                ) {
+                    SettingsAccountPage(
+                        onBack = { nav.popBackStack() },
                     )
                 }
                 composable(

@@ -6,8 +6,9 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
+import com.mewo.reader.ui.currentReaderIdentity
 
-/** Dummy account photo. Opens the X-style account drawer. */
+/** Letter avatar for the signed-in or local reader. Opens the account drawer. */
 @Composable
 fun ProfileButton(
     onClick: () -> Unit,
@@ -17,6 +18,6 @@ fun ProfileButton(
         onClick = onClick,
         modifier = modifier.semantics { contentDescription = "Account" },
     ) {
-        Avatar(name = "You", size = 32.dp)
+        Avatar(name = currentReaderIdentity().name, size = 32.dp)
     }
 }

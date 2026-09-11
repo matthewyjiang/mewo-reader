@@ -243,6 +243,7 @@ async fn upload_list_progress_like_download_delete() {
     let id = book["id"].as_str().unwrap().to_string();
     assert_eq!(book["title"], "Pride");
     assert_eq!(book["isSample"], false);
+    assert_eq!(book["mine"], true);
 
     let (status, library) = empty_req(&app, "GET", "/v1/library", Some(&token)).await;
     assert_eq!(status, StatusCode::OK);
@@ -319,7 +320,40 @@ async fn upload_list_progress_like_download_delete() {
 }
 
 #[tokio::test]
-async fn second_user_cannot_see_someone_elses_book() {
+async fn second_user_sees_shared_book_but_cannot_delete() {
+    let (app, _tmp) = app().await;
+    let matt = register(&app, "matt", "password1").await;
+    let ted = register(&app, "ted", "password1").await;
+    let (status, book) = upload(&app, &matt, "Pride", "Jane", b"epub", None, false).await;
+    assert_eq!(status, StatusCode::OK, "{book}");
+    let id = book["id"].as_str().unwrap();
+    assert_eq!(book["mine"], true);
+
+    let (status, seen) = empty_req(&app, "GET", &format!("/v1/books/{id}"), Some(&ted)).await;
+    assert_eq!(status, StatusCode::OK, "{seen}");
+    assert_eq!(seen["title"], "Pride");
+    assert_eq!(seen["mine"], false);
+    assert_eq!(seen["progressIndex"], 0);
+
+    let req = Request::builder()
+        .method("GET")
+        .uri(format!("/v1/books/{id}/epub"))
+        .header(header::AUTHORIZATION, format!("Bearer {ted}"))
+        .body(Body::empty())
+        .unwrap();
+    let (status, bytes) = send(&app, req).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(bytes.as_ref(), b"epub");
+
+    let (status, body) = empty_req(&app, "DELETE", &format!("/v1/books/{id}"), Some(&ted)).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+    let (status, library) = empty_req(&app, "GET", "/v1/library", Some(&ted)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(library["books"].as_array().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn progress_and_likes_stay_per_person() {
     let (app, _tmp) = app().await;
     let matt = register(&app, "matt", "password1").await;
     let ted = register(&app, "ted", "password1").await;
@@ -327,15 +361,178 @@ async fn second_user_cannot_see_someone_elses_book() {
     assert_eq!(status, StatusCode::OK, "{book}");
     let id = book["id"].as_str().unwrap();
 
-    let (status, _) = empty_req(&app, "GET", &format!("/v1/books/{id}"), Some(&ted)).await;
-    assert_eq!(status, StatusCode::NOT_FOUND);
-    let (status, _) = empty_req(&app, "GET", &format!("/v1/books/{id}/epub"), Some(&ted)).await;
-    assert_eq!(status, StatusCode::NOT_FOUND);
-    let (status, _) = empty_req(&app, "DELETE", &format!("/v1/books/{id}"), Some(&ted)).await;
-    assert_eq!(status, StatusCode::NOT_FOUND);
-    let (status, library) = empty_req(&app, "GET", "/v1/library", Some(&ted)).await;
+    let (status, patched) = json_req(
+        &app,
+        "PATCH",
+        &format!("/v1/books/{id}"),
+        Some(&matt),
+        json!({ "progressIndex": 4 }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{patched}");
+    assert_eq!(patched["progressIndex"], 4);
+
+    let (status, ted_book) = empty_req(&app, "GET", &format!("/v1/books/{id}"), Some(&ted)).await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(library["books"].as_array().unwrap().len(), 0);
+    assert_eq!(ted_book["progressIndex"], 0);
+
+    let (status, _) = empty_req(
+        &app,
+        "POST",
+        &format!("/v1/books/{id}/likes/p1"),
+        Some(&matt),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, ted_likes) =
+        empty_req(&app, "GET", &format!("/v1/books/{id}/likes"), Some(&ted)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(ted_likes["ids"], json!([]));
+}
+
+#[tokio::test]
+async fn comments_are_public_on_the_shared_book() {
+    let (app, _tmp) = app().await;
+    let matt = register(&app, "matt", "password1").await;
+    let ted = register(&app, "ted", "password1").await;
+    let (status, book) = upload(&app, &matt, "Pride", "Jane", b"epub", None, false).await;
+    assert_eq!(status, StatusCode::OK, "{book}");
+    let id = book["id"].as_str().unwrap();
+
+    let (status, thread) = json_req(
+        &app,
+        "POST",
+        &format!("/v1/books/{id}/comments/0"),
+        Some(&matt),
+        json!({ "text": "this line hits" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{thread}");
+    assert_eq!(thread["comments"].as_array().unwrap().len(), 1);
+    assert_eq!(thread["comments"][0]["username"], "matt");
+    assert_eq!(thread["comments"][0]["mine"], true);
+
+    let (status, ted_thread) = json_req(
+        &app,
+        "POST",
+        &format!("/v1/books/{id}/comments/0"),
+        Some(&ted),
+        json!({ "text": "same" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{ted_thread}");
+    assert_eq!(ted_thread["comments"].as_array().unwrap().len(), 2);
+    assert_eq!(ted_thread["comments"][0]["mine"], false);
+    assert_eq!(ted_thread["comments"][1]["mine"], true);
+
+    let (status, index) =
+        empty_req(&app, "GET", &format!("/v1/books/{id}/comments"), Some(&ted)).await;
+    assert_eq!(status, StatusCode::OK, "{index}");
+    assert_eq!(index["counts"]["0"], 2);
+    assert_eq!(index["mine"], json!(["0"]));
+
+    let comment_id = ted_thread["comments"][0]["id"].as_str().unwrap();
+    let (status, body) = empty_req(
+        &app,
+        "DELETE",
+        &format!("/v1/books/{id}/comments/0/{comment_id}"),
+        Some(&ted),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+
+    let ted_id = ted_thread["comments"][1]["id"].as_str().unwrap();
+    let (status, after) = empty_req(
+        &app,
+        "DELETE",
+        &format!("/v1/books/{id}/comments/0/{ted_id}"),
+        Some(&ted),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{after}");
+    assert_eq!(after["comments"].as_array().unwrap().len(), 1);
+
+    let (status, empty) = json_req(
+        &app,
+        "POST",
+        &format!("/v1/books/{id}/comments/0"),
+        Some(&ted),
+        json!({ "text": "   " }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{empty}");
+
+    let long = "x".repeat(2001);
+    let (status, body) = json_req(
+        &app,
+        "POST",
+        &format!("/v1/books/{id}/comments/0"),
+        Some(&ted),
+        json!({ "text": long }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    let error = body["error"].as_str().unwrap();
+    assert!(error.contains("2000"), "{error}");
+    assert!(error.contains("asked 2001"), "{error}");
+}
+
+#[tokio::test]
+async fn profile_lists_that_users_replies() {
+    let (app, _tmp) = app().await;
+    let matt = register(&app, "matt", "password1").await;
+    let ted = register(&app, "ted", "password1").await;
+    let (status, book) = upload(&app, &matt, "Pride", "Jane", b"epub", None, false).await;
+    assert_eq!(status, StatusCode::OK, "{book}");
+    let id = book["id"].as_str().unwrap();
+
+    let (status, _) = json_req(
+        &app,
+        "POST",
+        &format!("/v1/books/{id}/comments/0"),
+        Some(&matt),
+        json!({ "text": "first" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, _) = json_req(
+        &app,
+        "POST",
+        &format!("/v1/books/{id}/comments/1"),
+        Some(&matt),
+        json!({ "text": "later" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, _) = json_req(
+        &app,
+        "POST",
+        &format!("/v1/books/{id}/comments/0"),
+        Some(&ted),
+        json!({ "text": "ted here" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (status, matt_feed) =
+        empty_req(&app, "GET", "/v1/profiles/matt/replies", Some(&ted)).await;
+    assert_eq!(status, StatusCode::OK, "{matt_feed}");
+    assert_eq!(matt_feed["username"], "matt");
+    let replies = matt_feed["replies"].as_array().unwrap();
+    assert_eq!(replies.len(), 2);
+    let texts: Vec<&str> = replies
+        .iter()
+        .map(|row| row["comment"]["text"].as_str().unwrap())
+        .collect();
+    assert!(texts.contains(&"later"), "{matt_feed}");
+    assert!(texts.contains(&"first"), "{matt_feed}");
+    assert!(replies.iter().all(|row| row["comment"]["mine"] == false));
+    assert!(replies.iter().any(|row| row["postId"] == "1"));
+
+    let (status, missing) =
+        empty_req(&app, "GET", "/v1/profiles/nobody/replies", Some(&matt)).await;
+    assert_eq!(status, StatusCode::OK, "{missing}");
+    assert_eq!(missing["replies"].as_array().unwrap().len(), 0);
 }
 
 #[tokio::test]
@@ -350,6 +547,11 @@ async fn second_sample_returns_the_first() {
     let (status, library) = empty_req(&app, "GET", "/v1/library", Some(&token)).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(library["books"].as_array().unwrap().len(), 1);
+
+    let ted = register(&app, "ted", "password1").await;
+    let (status, ted_sample) = upload(&app, &ted, "Sample", "Mewo", b"three", None, true).await;
+    assert_eq!(status, StatusCode::OK, "{ted_sample}");
+    assert_eq!(ted_sample["id"], first["id"]);
 }
 
 #[tokio::test]

@@ -12,11 +12,16 @@ import com.mewo.reader.ui.HostedAuthController
 import com.mewo.reader.ui.LocalBackend
 import com.mewo.reader.ui.LocalHostedAuth
 import com.mewo.reader.ui.LocalLibraryStore
+import com.mewo.reader.ui.LocalProfile
+import com.mewo.reader.ui.LocalProfileController
 import com.mewo.reader.ui.MewoNav
+import com.mewo.reader.ui.onboarding.OnboardingScreen
 import com.mewo.reader.ui.theme.LocalMewoMode
+import com.mewo.reader.ui.theme.LocalReaderFont
 import com.mewo.reader.ui.theme.LocalThemeController
 import com.mewo.reader.ui.theme.MewoModeController
 import com.mewo.reader.ui.theme.MewoTheme
+import com.mewo.reader.ui.theme.ReaderFontController
 import com.mewo.reader.ui.theme.ThemeController
 
 class MainActivity : ComponentActivity() {
@@ -38,8 +43,10 @@ class MainActivity : ComponentActivity() {
             val app = application as MewoApp
             val theme by app.themeStore.theme.collectAsStateWithLifecycle()
             val mewoMode by app.mewoModeStore.enabled.collectAsStateWithLifecycle()
+            val readerFont by app.readerFontStore.scale.collectAsStateWithLifecycle()
             val backend by app.backendStore.kind.collectAsStateWithLifecycle()
             val hosted by app.hostedSession.session.collectAsStateWithLifecycle()
+            val profile by app.localProfileStore.profile.collectAsStateWithLifecycle()
             MewoTheme(theme = theme) {
                 CompositionLocalProvider(
                     LocalThemeController provides ThemeController(
@@ -49,6 +56,10 @@ class MainActivity : ComponentActivity() {
                     LocalMewoMode provides MewoModeController(
                         enabled = mewoMode,
                         setEnabled = app.mewoModeStore::setEnabled,
+                    ),
+                    LocalReaderFont provides ReaderFontController(
+                        scale = readerFont,
+                        setStep = app.readerFontStore::setStep,
                     ),
                     LocalBackend provides BackendController(
                         kind = backend,
@@ -62,8 +73,16 @@ class MainActivity : ComponentActivity() {
                         signOut = app.hostedAuth::signOut,
                     ),
                     LocalLibraryStore provides app.library,
+                    LocalProfile provides LocalProfileController(
+                        profile = profile,
+                        save = app.localProfileStore::save,
+                    ),
                 ) {
-                    MewoNav()
+                    if (profile.ready) {
+                        MewoNav()
+                    } else {
+                        OnboardingScreen()
+                    }
                 }
             }
         }

@@ -12,8 +12,8 @@ import java.io.File
 
 /**
  * Library verbs the UI uses. Local keeps books on the device. Hosted
- * will talk to a server. Same calls either way. EPUB parse stays on
- * the phone; a hosted adapter downloads the file, then extracts here.
+ * talks to a shared server shelf. Same calls either way. EPUB parse
+ * stays on the phone; a hosted adapter downloads the file, then extracts here.
  */
 interface LibraryStore {
     val library: StateFlow<LibrarySnapshot>
@@ -36,9 +36,20 @@ interface LibraryStore {
 
     suspend fun toggleLike(id: String, postId: String): Set<String>
 
+    suspend fun commentIndex(id: String): CommentIndex
+
+    suspend fun comments(id: String, postId: String): List<PostComment>
+
+    suspend fun addComment(id: String, postId: String, text: String): List<PostComment>
+
+    suspend fun deleteComment(id: String, postId: String, commentId: String): List<PostComment>
+
     suspend fun search(query: String): SearchResult
 
     suspend fun likedPosts(): List<PostHit>
+
+    /** Replies by this handle, newest first, each with the line they answered. */
+    suspend fun profileReplies(handle: String): List<ProfileReply>
 
     /** Local path the avatar can decode. Hosted writes a cache file first. */
     fun coverFile(id: String): File?
@@ -87,9 +98,21 @@ class SwitchingLibraryStore(
 
     override suspend fun toggleLike(id: String, postId: String) = active().toggleLike(id, postId)
 
+    override suspend fun commentIndex(id: String) = active().commentIndex(id)
+
+    override suspend fun comments(id: String, postId: String) = active().comments(id, postId)
+
+    override suspend fun addComment(id: String, postId: String, text: String) =
+        active().addComment(id, postId, text)
+
+    override suspend fun deleteComment(id: String, postId: String, commentId: String) =
+        active().deleteComment(id, postId, commentId)
+
     override suspend fun search(query: String) = active().search(query)
 
     override suspend fun likedPosts() = active().likedPosts()
+
+    override suspend fun profileReplies(handle: String) = active().profileReplies(handle)
 
     override fun coverFile(id: String) = active().coverFile(id)
 }

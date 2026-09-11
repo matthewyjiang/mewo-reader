@@ -47,7 +47,9 @@ import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.mewo.reader.data.BackendKind
 import com.mewo.reader.data.BookRecord
+import com.mewo.reader.ui.LocalBackend
 import com.mewo.reader.ui.LocalLibraryStore
 import com.mewo.reader.ui.components.Avatar
 import com.mewo.reader.ui.components.BindListTop
@@ -67,6 +69,7 @@ fun LibraryScreen(
 ) {
     val state by viewModel.state.collectAsStateWithLifecycle()
     val library = LocalLibraryStore.current
+    val hosted = LocalBackend.current.kind == BackendKind.Hosted
     var pendingDelete by remember { mutableStateOf<BookRecord?>(null) }
     val picker = rememberLauncherForActivityResult(
         ActivityResultContracts.OpenDocument(),
@@ -102,7 +105,11 @@ fun LibraryScreen(
                             book = book,
                             cover = library.coverFile(book.id),
                             onOpen = { onOpenBook(book.id) },
-                            onDelete = { pendingDelete = book },
+                            onDelete = if (book.mine) {
+                                { pendingDelete = book }
+                            } else {
+                                null
+                            },
                         )
                         HorizontalDivider(
                             color = MaterialTheme.colorScheme.outline,
@@ -155,6 +162,7 @@ fun LibraryScreen(
         pendingDelete?.let { book ->
             RemoveBookDialog(
                 book = book,
+                shared = hosted,
                 onConfirm = {
                     viewModel.delete(book.id)
                     pendingDelete = null
@@ -168,6 +176,7 @@ fun LibraryScreen(
 @Composable
 private fun RemoveBookDialog(
     book: BookRecord,
+    shared: Boolean,
     onConfirm: () -> Unit,
     onDismiss: () -> Unit,
 ) {
@@ -184,7 +193,11 @@ private fun RemoveBookDialog(
         },
         text = {
             Text(
-                text = "This removes ${book.title}, plus likes and where you left off. You can add the EPUB again.",
+                text = if (shared) {
+                    "This removes ${book.title} for everyone on this server, plus likes, notes, and reading place."
+                } else {
+                    "This removes ${book.title}, plus likes, notes, and where you left off. You can add the EPUB again."
+                },
                 style = MaterialTheme.typography.bodyLarge,
             )
         },
@@ -253,7 +266,7 @@ private fun BookPost(
     book: BookRecord,
     cover: File?,
     onOpen: () -> Unit,
-    onDelete: () -> Unit,
+    onDelete: (() -> Unit)?,
 ) {
     Row(
         modifier = Modifier
@@ -286,12 +299,14 @@ private fun BookPost(
                 color = MaterialTheme.colorScheme.onSurface,
             )
         }
-        IconButton(onClick = onDelete, modifier = Modifier.size(40.dp)) {
-            Icon(
-                Icons.Outlined.Delete,
-                contentDescription = "Remove ${book.title}",
-                tint = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
+        if (onDelete != null) {
+            IconButton(onClick = onDelete, modifier = Modifier.size(40.dp)) {
+                Icon(
+                    Icons.Outlined.Delete,
+                    contentDescription = "Remove ${book.title}",
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
         }
     }
 }

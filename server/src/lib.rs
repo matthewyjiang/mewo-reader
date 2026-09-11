@@ -43,6 +43,19 @@ pub fn router(state: AppState) -> Router {
             "/v1/books/{id}/likes/{post_id}",
             post(routes::toggle_like),
         )
+        .route("/v1/books/{id}/comments", get(routes::comment_index))
+        .route(
+            "/v1/books/{id}/comments/{post_id}",
+            get(routes::list_comments).post(routes::add_comment),
+        )
+        .route(
+            "/v1/books/{id}/comments/{post_id}/{comment_id}",
+            axum::routing::delete(routes::delete_comment),
+        )
+        .route(
+            "/v1/profiles/{username}/replies",
+            get(routes::profile_replies),
+        )
         .layer(DefaultBodyLimit::max(body_limit))
         .layer(TraceLayer::new_for_http())
         .with_state(state)

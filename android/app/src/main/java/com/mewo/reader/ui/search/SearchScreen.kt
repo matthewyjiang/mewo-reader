@@ -22,7 +22,9 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.FocusRequester
@@ -37,8 +39,10 @@ import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.mewo.reader.data.BackendKind
 import com.mewo.reader.data.BookRecord
 import com.mewo.reader.data.FeedPost
+import com.mewo.reader.ui.LocalBackend
 import com.mewo.reader.ui.LocalLibraryStore
 import com.mewo.reader.ui.components.Avatar
 import com.mewo.reader.ui.components.BindListTop
@@ -46,6 +50,8 @@ import com.mewo.reader.ui.components.HideOnScrollState
 import com.mewo.reader.ui.components.MewoAppBar
 import com.mewo.reader.ui.components.ProfileButton
 import com.mewo.reader.ui.components.ShowWhenIdle
+import com.mewo.reader.ui.reader.CommentSheet
+import com.mewo.reader.ui.reader.CommentTarget
 import com.mewo.reader.ui.reader.TimelinePost
 import java.io.File
 
@@ -55,11 +61,14 @@ fun SearchScreen(
     onOpenBook: (String) -> Unit,
     onOpenPost: (bookId: String, postId: String) -> Unit,
     onOpenAccount: () -> Unit,
+    onOpenProfile: (handle: String, name: String) -> Unit,
     hideOnScroll: HideOnScrollState,
 ) {
     val state by viewModel.state.collectAsStateWithLifecycle()
     val context = LocalContext.current
     val library = LocalLibraryStore.current
+    val hosted = LocalBackend.current.kind == BackendKind.Hosted
+    var commentTarget by remember { mutableStateOf<CommentTarget?>(null) }
     val focus = remember { FocusRequester() }
     val focusManager = LocalFocusManager.current
     val keyboard = LocalSoftwareKeyboardController.current
@@ -146,6 +155,9 @@ fun SearchScreen(
                                 handle = hit.book.handle,
                                 cover = library.coverFile(hit.book.id),
                                 liked = state.likes[hit.book.id]?.contains(hit.post.id) == true,
+                                commentCount = state.comments[hit.book.id]?.count(hit.post.id) ?: 0,
+                                commented = state.comments[hit.book.id]?.commented(hit.post.id) == true,
+                                onComment = { commentTarget = CommentTarget(hit.book, hit.post) },
                                 onLike = { viewModel.toggleLike(hit.book.id, hit.post.id) },
                                 onRepost = {
                                     shareText(context, quote(hit.book.author, hit.book.title, hit.post))
@@ -155,6 +167,20 @@ fun SearchScreen(
                             )
                         }
                     }
+                }
+                commentTarget?.let { target ->
+                    CommentSheet(
+                        target = target,
+                        publicNotes = hosted,
+                        onThreadChanged = { postId, comments ->
+                            viewModel.onCommentsChanged(target.book.id, postId, comments)
+                        },
+                        onDismiss = { commentTarget = null },
+                        onOpenProfile = { handle, name ->
+                            commentTarget = null
+                            onOpenProfile(handle, name)
+                        },
+                    )
                 }
             }
         }

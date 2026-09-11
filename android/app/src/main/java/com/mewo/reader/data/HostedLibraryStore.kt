@@ -182,6 +182,32 @@ class HostedLibraryStore(
             expireOn401 { client.toggleLike(requireSession(), safe, postId) }
         }
 
+    override suspend fun commentIndex(id: String): CommentIndex = withContext(Dispatchers.IO) {
+        val safe = requireBookId(id)
+        expireOn401 { client.commentIndex(requireSession(), safe) }
+    }
+
+    override suspend fun comments(id: String, postId: String): List<PostComment> =
+        withContext(Dispatchers.IO) {
+            val safe = requireBookId(id)
+            expireOn401 { client.comments(requireSession(), safe, postId) }
+        }
+
+    override suspend fun addComment(id: String, postId: String, text: String): List<PostComment> =
+        withContext(Dispatchers.IO) {
+            val safe = requireBookId(id)
+            expireOn401 { client.addComment(requireSession(), safe, postId, text) }
+        }
+
+    override suspend fun deleteComment(
+        id: String,
+        postId: String,
+        commentId: String,
+    ): List<PostComment> = withContext(Dispatchers.IO) {
+        val safe = requireBookId(id)
+        expireOn401 { client.deleteComment(requireSession(), safe, postId, commentId) }
+    }
+
     override suspend fun search(query: String): SearchResult = withContext(Dispatchers.IO) {
         val q = query.trim()
         if (q.isEmpty()) return@withContext SearchResult()
@@ -213,6 +239,23 @@ class HostedLibraryStore(
             }
         }
     }
+
+    override suspend fun profileReplies(handle: String): List<ProfileReply> =
+        withContext(Dispatchers.IO) {
+            val session = requireSession()
+            val remote = expireOn401 { client.profileReplies(session, handle) }
+            val books = _library.value.books.associateBy { it.id }
+            val feeds = mutableMapOf<String, Map<String, FeedPost>>()
+            remote.replies.mapNotNull { row ->
+                val book = books[row.bookId] ?: return@mapNotNull null
+                val posts = feeds.getOrPut(book.id) {
+                    val list = cachedFeed(book.id) ?: runCatching { feed(book.id) }.getOrNull().orEmpty()
+                    list.associateBy { it.id }
+                }
+                val post = posts[row.postId] ?: return@mapNotNull null
+                ProfileReply(book = book, post = post, comment = row.comment)
+            }
+        }
 
     private suspend fun ingest(
         session: HostedSession,

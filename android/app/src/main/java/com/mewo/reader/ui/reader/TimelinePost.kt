@@ -12,6 +12,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.outlined.ChatBubbleOutline
 import androidx.compose.material.icons.outlined.Favorite
 import androidx.compose.material.icons.outlined.FavoriteBorder
 import androidx.compose.material.icons.outlined.IosShare
@@ -32,13 +33,13 @@ import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.role
 import androidx.compose.ui.semantics.semantics
-import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.mewo.reader.data.FeedPost
 import com.mewo.reader.data.PostKind
 import com.mewo.reader.ui.components.Avatar
 import com.mewo.reader.ui.theme.LocalMewoColors
+import com.mewo.reader.ui.theme.LocalReaderFont
 import java.io.File
 
 @Composable
@@ -48,6 +49,9 @@ fun TimelinePost(
     handle: String,
     cover: File?,
     liked: Boolean,
+    commentCount: Int = 0,
+    commented: Boolean = false,
+    onComment: () -> Unit,
     onLike: () -> Unit,
     onRepost: () -> Unit,
     onShare: () -> Unit,
@@ -55,6 +59,7 @@ fun TimelinePost(
     onChapterClick: (() -> Unit)? = null,
 ) {
     val isHeading = post.kind == PostKind.Heading
+    val readerType = LocalReaderFont.current.scale
     Row(
         modifier = Modifier
             .fillMaxWidth()
@@ -102,15 +107,17 @@ fun TimelinePost(
             Text(
                 text = post.text,
                 style = if (isHeading) {
-                    MaterialTheme.typography.titleMedium
+                    readerType.headingStyle(MaterialTheme.typography.titleMedium)
                 } else {
-                    MaterialTheme.typography.bodyLarge
+                    readerType.bodyStyle(MaterialTheme.typography.bodyLarge)
                 },
-                fontWeight = if (isHeading) FontWeight.Bold else FontWeight.Normal,
             )
             Spacer(Modifier.height(4.dp))
-            ActionRow(
+            PostActions(
                 liked = liked,
+                commentCount = commentCount,
+                commented = commented,
+                onComment = onComment,
                 onLike = onLike,
                 onRepost = onRepost,
                 onShare = onShare,
@@ -122,20 +129,35 @@ fun TimelinePost(
 }
 
 @Composable
-private fun ActionRow(
+fun PostActions(
     liked: Boolean,
+    commentCount: Int,
+    commented: Boolean,
+    onComment: () -> Unit,
     onLike: () -> Unit,
     onRepost: () -> Unit,
     onShare: () -> Unit,
 ) {
     val mute = MaterialTheme.colorScheme.onSurfaceVariant
     val likeColor = LocalMewoColors.current.like
+    val accent = MaterialTheme.colorScheme.primary
     val likeScale by animateFloatAsState(if (liked) 1.18f else 1f, label = "like")
     Row(
         modifier = Modifier.fillMaxWidth(),
         horizontalArrangement = Arrangement.SpaceBetween,
         verticalAlignment = Alignment.CenterVertically,
     ) {
+        ActionIcon(
+            icon = Icons.Outlined.ChatBubbleOutline,
+            tint = if (commented) accent else mute,
+            label = if (commentCount == 0) {
+                "Comment on this line"
+            } else {
+                "Comments, $commentCount"
+            },
+            count = commentCount,
+            onClick = onComment,
+        )
         ActionIcon(
             icon = Icons.Outlined.Repeat,
             tint = mute,
@@ -165,16 +187,27 @@ private fun ActionIcon(
     label: String,
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
+    count: Int = 0,
 ) {
     IconButton(
         onClick = onClick,
         modifier = modifier
-            .size(40.dp)
+            .size(width = if (count > 0) 52.dp else 40.dp, height = 40.dp)
             .semantics {
                 contentDescription = label
                 role = Role.Button
             },
     ) {
-        Icon(icon, contentDescription = null, tint = tint, modifier = Modifier.size(18.dp))
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Icon(icon, contentDescription = null, tint = tint, modifier = Modifier.size(18.dp))
+            if (count > 0) {
+                Spacer(Modifier.width(4.dp))
+                Text(
+                    text = count.toString(),
+                    style = MaterialTheme.typography.labelSmall,
+                    color = tint,
+                )
+            }
+        }
     }
 }

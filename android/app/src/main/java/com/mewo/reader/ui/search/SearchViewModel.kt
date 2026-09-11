@@ -3,7 +3,9 @@ package com.mewo.reader.ui.search
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
+import com.mewo.reader.data.CommentIndex
 import com.mewo.reader.data.LibraryStore
+import com.mewo.reader.data.PostComment
 import com.mewo.reader.data.SearchResult
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -15,6 +17,7 @@ data class SearchUiState(
     val query: String = "",
     val result: SearchResult = SearchResult(),
     val likes: Map<String, Set<String>> = emptyMap(),
+    val comments: Map<String, CommentIndex> = emptyMap(),
 )
 
 class SearchViewModel(
@@ -28,14 +31,32 @@ class SearchViewModel(
         viewModelScope.launch {
             runCatching {
                 val hits = store.search(query)
-                val likes = hits.posts.map { it.book.id }.distinct()
-                    .associateWith { store.likes(it) }
-                hits to likes
-            }.onSuccess { (hits, likes) ->
+                val bookIds = hits.posts.map { it.book.id }.distinct()
+                val likes = bookIds.associateWith { store.likes(it) }
+                val comments = bookIds.associateWith {
+                    runCatching { store.commentIndex(it) }.getOrDefault(CommentIndex())
+                }
+                Triple(hits, likes, comments)
+            }.onSuccess { (hits, likes, comments) ->
                 _state.update { now ->
-                    if (now.query == query) now.copy(result = hits, likes = now.likes + likes) else now
+                    if (now.query == query) {
+                        now.copy(
+                            result = hits,
+                            likes = now.likes + likes,
+                            comments = now.comments + comments,
+                        )
+                    } else {
+                        now
+                    }
                 }
             }
+        }
+    }
+
+    fun onCommentsChanged(bookId: String, postId: String, comments: List<PostComment>) {
+        _state.update { now ->
+            val current = now.comments[bookId] ?: CommentIndex()
+            now.copy(comments = now.comments + (bookId to current.afterThread(postId, comments)))
         }
     }
 

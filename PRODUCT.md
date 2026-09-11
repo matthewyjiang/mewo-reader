@@ -24,10 +24,11 @@ The book is a timeline. Each paragraph is a post from the author. Neighboring re
 
 ## Operating Context
 
-Used on a phone, often in bed or on a couch, one-handed. Books come from files the user already has, or from a hosted shelf they signed into. Local has no account. Hosted does. No catalog. Share the APK, not a store listing.
+Used on a phone, often in bed or on a couch, one-handed. Books come from files the user already has, or from a hosted shelf they signed into. Local asks for a handle on first launch, and after an APK update if none is saved. Name is optional. This is not a password. Hosted still uses a server account. No catalog. Share the APK, not a store listing.
 
 ## Capabilities and Constraints
 
+- Set a local handle on first launch, and after an APK update if none is saved. Name is optional. Change both later in Settings.
 - Import EPUB from the system file picker
 - Persist the library on device, or on a hosted server you sign into
 - Read as a vertical feed: one post per paragraph, including long ones
@@ -36,10 +37,13 @@ Used on a phone, often in bed or on a couch, one-handed. Books come from files t
 - Jump to a heading from the chapter line or the reader title
 - Hide the title bar and tab bar when scrolling down a feed, show them when scrolling up
 - Like a passage and keep that like
+- Leave a note on a line. Local notes stay on the phone. Hosted notes are public to everyone on that server
 - Search books and opened posts
 - See liked lines in one feed
+- Open a profile from the account drawer or a reply. Posts are that person's replies, each shown with the original line. Own posts come later.
 - Pick Twitter or X display, light or dark
-- Local shelf has no account. Hosted shelf uses username and password. The two shelves do not merge or sync.
+- Pick how big posts read; bars and buttons stay on the system size
+- Local shelf uses the name and handle you set. Hosted shelf uses username and password. Hosted books are one shelf for every account. Likes and reading place stay per person. Notes on a line are public. The two shelves do not merge or sync.
 - No OPDS, DRM, or iOS in this version
 
 ## Brand Commitments
@@ -54,6 +58,6 @@ No real library, covers, or user books in the repo. Bundle a short public-domain
 ## Product Principles
 
 - The feed is the reader. If it looks like a book layout, it failed.
-- Local reading does not need a network. Hosted is a second shelf you opt into.
+- Local reading does not need a network. Hosted is a shared shelf you opt into.
 - One-handed phone use is the default scene.
 - Friends getting an APK should understand the app without a tour.

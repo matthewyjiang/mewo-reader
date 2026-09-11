@@ -3,7 +3,9 @@ use crate::config::MAX_COVER_BYTES;
 use crate::db::now_ms;
 use crate::error::ApiError;
 use crate::models::{
-    AuthRequest, AuthResponse, BookRecord, BookRow, LibrarySnapshot, LikeSet, MeResponse, PatchBook,
+    AuthRequest, AuthResponse, BookRecord, BookRow, CommentIndex, CommentRecord, CommentRow,
+    CommentThread, LibrarySnapshot, LikeSet, MeResponse, NewComment, PatchBook, ProfileReplies,
+    ProfileReplyRecord, ProfileReplyRow, MAX_COMMENT_CHARS, MAX_POST_ID_CHARS,
 };
 use crate::AppState;
 use axum::extract::{Multipart, Path, State};
@@ -93,17 +95,17 @@ pub async fn library(
     State(state): State<AppState>,
     authed: Authed,
 ) -> Result<Json<LibrarySnapshot>, ApiError> {
-    let rows = sqlx::query_as::<_, BookRow>(
-        "SELECT id, title, author, handle, imported_at, post_count, progress_index, is_sample
-         FROM books
-         WHERE user_id = ?
-         ORDER BY imported_at DESC",
-    )
+    let rows = sqlx::query_as::<_, BookRow>(&format!(
+        "{BOOK_SELECT} ORDER BY b.imported_at DESC"
+    ))
     .bind(&authed.user_id)
     .fetch_all(&state.pool)
     .await?;
     Ok(Json(LibrarySnapshot {
-        books: rows.into_iter().map(BookRow::into_record).collect(),
+        books: rows
+            .into_iter()
+            .map(|row| row.into_record(&authed.user_id))
+            .collect(),
     }))
 }
 
@@ -159,6 +161,14 @@ pub async fn upload_book(
         }
     }
 
+    sqlx::query(
+        "INSERT INTO book_progress (user_id, book_id, progress_index) VALUES (?, ?, 0)",
+    )
+    .bind(&authed.user_id)
+    .bind(&id)
+    .execute(&state.pool)
+    .await?;
+
     Ok(Json(BookRecord {
         id,
         title: parsed.title,
@@ -168,6 +178,7 @@ pub async fn upload_book(
         post_count: 0,
         progress_index: 0,
         is_sample: parsed.is_sample,
+        mine: true,
     }))
 }
 
@@ -176,7 +187,7 @@ pub async fn get_book(
     authed: Authed,
     Path(id): Path<String>,
 ) -> Result<Json<BookRecord>, ApiError> {
-    Ok(Json(owned_book(&state, &authed.user_id, &id).await?))
+    Ok(Json(shared_book(&state, &authed.user_id, &id).await?))
 }
 
 pub async fn delete_book(
@@ -184,13 +195,18 @@ pub async fn delete_book(
     authed: Authed,
     Path(id): Path<String>,
 ) -> Result<axum::http::StatusCode, ApiError> {
-    let _ = owned_book(&state, &authed.user_id, &id).await?;
+    let row = book_row(&state, &authed.user_id, &id).await?;
+    if row.owner_id != authed.user_id {
+        return Err(ApiError::Forbidden(
+            "Only the person who added this book can remove it.".into(),
+        ));
+    }
     sqlx::query("DELETE FROM books WHERE id = ? AND user_id = ?")
         .bind(&id)
         .bind(&authed.user_id)
         .execute(&state.pool)
         .await?;
-    let dest = book_dir(&state.data_dir, &authed.user_id, &id);
+    let dest = book_dir(&state.data_dir, &row.owner_id, &id);
     let _ = tokio::fs::remove_dir_all(dest).await;
     Ok(axum::http::StatusCode::NO_CONTENT)
 }
@@ -201,19 +217,27 @@ pub async fn patch_book(
     Path(id): Path<String>,
     Json(body): Json<PatchBook>,
 ) -> Result<Json<BookRecord>, ApiError> {
-    let current = owned_book(&state, &authed.user_id, &id).await?;
+    let current = shared_book(&state, &authed.user_id, &id).await?;
     let post_count = body.post_count.unwrap_or(current.post_count);
-    let progress_index = body.progress_index.unwrap_or(current.progress_index).max(0);
-    sqlx::query(
-        "UPDATE books SET post_count = ?, progress_index = ? WHERE id = ? AND user_id = ?",
-    )
-    .bind(post_count)
-    .bind(progress_index)
-    .bind(&id)
-    .bind(&authed.user_id)
-    .execute(&state.pool)
-    .await?;
-    Ok(Json(owned_book(&state, &authed.user_id, &id).await?))
+    sqlx::query("UPDATE books SET post_count = ? WHERE id = ?")
+        .bind(post_count)
+        .bind(&id)
+        .execute(&state.pool)
+        .await?;
+    if let Some(progress_index) = body.progress_index {
+        let progress_index = progress_index.max(0);
+        sqlx::query(
+            "INSERT INTO book_progress (user_id, book_id, progress_index)
+             VALUES (?, ?, ?)
+             ON CONFLICT(user_id, book_id) DO UPDATE SET progress_index = excluded.progress_index",
+        )
+        .bind(&authed.user_id)
+        .bind(&id)
+        .bind(progress_index)
+        .execute(&state.pool)
+        .await?;
+    }
+    Ok(Json(shared_book(&state, &authed.user_id, &id).await?))
 }
 
 pub async fn download_epub(
@@ -221,8 +245,8 @@ pub async fn download_epub(
     authed: Authed,
     Path(id): Path<String>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let _ = owned_book(&state, &authed.user_id, &id).await?;
-    let path = book_dir(&state.data_dir, &authed.user_id, &id).join("book.epub");
+    let row = book_row(&state, &authed.user_id, &id).await?;
+    let path = book_dir(&state.data_dir, &row.owner_id, &id).join("book.epub");
     file_response(path, "application/epub+zip", "book.epub").await
 }
 
@@ -231,8 +255,8 @@ pub async fn download_cover(
     authed: Authed,
     Path(id): Path<String>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let _ = owned_book(&state, &authed.user_id, &id).await?;
-    let path = book_dir(&state.data_dir, &authed.user_id, &id).join("cover.jpg");
+    let row = book_row(&state, &authed.user_id, &id).await?;
+    let path = book_dir(&state.data_dir, &row.owner_id, &id).join("cover.jpg");
     if !path.exists() {
         return Err(ApiError::NotFound);
     }
@@ -244,7 +268,7 @@ pub async fn list_likes(
     authed: Authed,
     Path(id): Path<String>,
 ) -> Result<Json<LikeSet>, ApiError> {
-    let _ = owned_book(&state, &authed.user_id, &id).await?;
+    let _ = shared_book(&state, &authed.user_id, &id).await?;
     Ok(Json(likes_for(&state, &authed.user_id, &id).await?))
 }
 
@@ -253,7 +277,7 @@ pub async fn toggle_like(
     authed: Authed,
     Path((id, post_id)): Path<(String, String)>,
 ) -> Result<Json<LikeSet>, ApiError> {
-    let _ = owned_book(&state, &authed.user_id, &id).await?;
+    let _ = shared_book(&state, &authed.user_id, &id).await?;
     let inserted = sqlx::query(
         "INSERT INTO likes (user_id, book_id, post_id) VALUES (?, ?, ?)
          ON CONFLICT DO NOTHING",
@@ -274,6 +298,141 @@ pub async fn toggle_like(
     Ok(Json(likes_for(&state, &authed.user_id, &id).await?))
 }
 
+pub async fn comment_index(
+    State(state): State<AppState>,
+    authed: Authed,
+    Path(id): Path<String>,
+) -> Result<Json<CommentIndex>, ApiError> {
+    let _ = shared_book(&state, &authed.user_id, &id).await?;
+    let counts = sqlx::query_as::<_, (String, i64)>(
+        "SELECT post_id, COUNT(*) FROM comments WHERE book_id = ? GROUP BY post_id",
+    )
+    .bind(&id)
+    .fetch_all(&state.pool)
+    .await?;
+    let mine = sqlx::query_scalar::<_, String>(
+        "SELECT DISTINCT post_id FROM comments WHERE book_id = ? AND user_id = ?",
+    )
+    .bind(&id)
+    .bind(&authed.user_id)
+    .fetch_all(&state.pool)
+    .await?;
+    Ok(Json(CommentIndex {
+        counts: counts.into_iter().collect(),
+        mine,
+    }))
+}
+
+pub async fn list_comments(
+    State(state): State<AppState>,
+    authed: Authed,
+    Path((id, post_id)): Path<(String, String)>,
+) -> Result<Json<CommentThread>, ApiError> {
+    let post_id = parse_post_id(&post_id)?;
+    let _ = shared_book(&state, &authed.user_id, &id).await?;
+    Ok(Json(thread_for(&state, &authed.user_id, &id, &post_id).await?))
+}
+
+pub async fn add_comment(
+    State(state): State<AppState>,
+    authed: Authed,
+    Path((id, post_id)): Path<(String, String)>,
+    Json(body): Json<NewComment>,
+) -> Result<Json<CommentThread>, ApiError> {
+    let post_id = parse_post_id(&post_id)?;
+    let _ = shared_book(&state, &authed.user_id, &id).await?;
+    let text = parse_comment_text(&body.text)?;
+    let comment_id = Uuid::new_v4().to_string();
+    sqlx::query(
+        "INSERT INTO comments (id, user_id, book_id, post_id, text, created_at)
+         VALUES (?, ?, ?, ?, ?, ?)",
+    )
+    .bind(&comment_id)
+    .bind(&authed.user_id)
+    .bind(&id)
+    .bind(&post_id)
+    .bind(&text)
+    .bind(now_ms())
+    .execute(&state.pool)
+    .await?;
+    Ok(Json(thread_for(&state, &authed.user_id, &id, &post_id).await?))
+}
+
+pub async fn profile_replies(
+    State(state): State<AppState>,
+    authed: Authed,
+    Path(username): Path<String>,
+) -> Result<Json<ProfileReplies>, ApiError> {
+    let (display, norm) = normalize_username(&username)?;
+    let user = sqlx::query_as::<_, (String, String)>(
+        "SELECT id, username FROM users WHERE username_norm = ?",
+    )
+    .bind(&norm)
+    .fetch_optional(&state.pool)
+    .await?;
+    let Some((user_id, stored_name)) = user else {
+        return Ok(Json(ProfileReplies {
+            username: display,
+            replies: vec![],
+        }));
+    };
+    let rows = sqlx::query_as::<_, ProfileReplyRow>(
+        "SELECT c.id, c.book_id, c.post_id, u.username, c.text, c.created_at, c.user_id
+         FROM comments c
+         JOIN users u ON u.id = c.user_id
+         WHERE c.user_id = ?
+         ORDER BY c.created_at DESC, c.id DESC",
+    )
+    .bind(&user_id)
+    .fetch_all(&state.pool)
+    .await?;
+    Ok(Json(ProfileReplies {
+        username: stored_name,
+        replies: rows
+            .into_iter()
+            .map(|row| ProfileReplyRecord {
+                book_id: row.book_id,
+                post_id: row.post_id,
+                comment: CommentRecord {
+                    id: row.id,
+                    username: row.username,
+                    text: row.text,
+                    created_at: row.created_at,
+                    mine: row.user_id == authed.user_id,
+                },
+            })
+            .collect(),
+    }))
+}
+
+pub async fn delete_comment(
+    State(state): State<AppState>,
+    authed: Authed,
+    Path((id, post_id, comment_id)): Path<(String, String, String)>,
+) -> Result<Json<CommentThread>, ApiError> {
+    let post_id = parse_post_id(&post_id)?;
+    let _ = shared_book(&state, &authed.user_id, &id).await?;
+    let owner = sqlx::query_scalar::<_, String>("SELECT user_id FROM comments WHERE id = ? AND book_id = ? AND post_id = ?")
+        .bind(&comment_id)
+        .bind(&id)
+        .bind(&post_id)
+        .fetch_optional(&state.pool)
+        .await?;
+    let Some(owner) = owner else {
+        return Err(ApiError::NotFound);
+    };
+    if owner != authed.user_id {
+        return Err(ApiError::Forbidden(
+            "You can only delete your own comment.".into(),
+        ));
+    }
+    sqlx::query("DELETE FROM comments WHERE id = ?")
+        .bind(&comment_id)
+        .execute(&state.pool)
+        .await?;
+    Ok(Json(thread_for(&state, &authed.user_id, &id, &post_id).await?))
+}
+
 async fn issue_session(state: &AppState, user_id: &str) -> Result<String, ApiError> {
     let token = new_token();
     sqlx::query("INSERT INTO sessions (token, user_id, created_at) VALUES (?, ?, ?)")
@@ -289,30 +448,88 @@ fn parse_book_id(id: &str) -> Result<Uuid, ApiError> {
     Uuid::parse_str(id).map_err(|_| ApiError::NotFound)
 }
 
-async fn owned_book(state: &AppState, user_id: &str, id: &str) -> Result<BookRecord, ApiError> {
+const BOOK_SELECT: &str = "
+SELECT b.id, b.title, b.author, b.handle, b.imported_at, b.post_count,
+       COALESCE(p.progress_index, 0) as progress_index,
+       b.is_sample, b.user_id as owner_id
+FROM books b
+LEFT JOIN book_progress p ON p.book_id = b.id AND p.user_id = ?
+";
+
+async fn shared_book(state: &AppState, user_id: &str, id: &str) -> Result<BookRecord, ApiError> {
+    Ok(book_row(state, user_id, id).await?.into_record(user_id))
+}
+
+async fn book_row(state: &AppState, user_id: &str, id: &str) -> Result<BookRow, ApiError> {
     let id = parse_book_id(id)?.to_string();
-    let row = sqlx::query_as::<_, BookRow>(
-        "SELECT id, title, author, handle, imported_at, post_count, progress_index, is_sample
-         FROM books
-         WHERE id = ? AND user_id = ?",
-    )
-    .bind(&id)
-    .bind(user_id)
-    .fetch_optional(&state.pool)
-    .await?;
-    row.map(BookRow::into_record).ok_or(ApiError::NotFound)
+    let row = sqlx::query_as::<_, BookRow>(&format!("{BOOK_SELECT} WHERE b.id = ?"))
+        .bind(user_id)
+        .bind(&id)
+        .fetch_optional(&state.pool)
+        .await?;
+    row.ok_or(ApiError::NotFound)
 }
 
 async fn existing_sample(state: &AppState, user_id: &str) -> Result<Option<BookRecord>, ApiError> {
-    let row = sqlx::query_as::<_, BookRow>(
-        "SELECT id, title, author, handle, imported_at, post_count, progress_index, is_sample
-         FROM books
-         WHERE user_id = ? AND is_sample = 1",
-    )
+    let row = sqlx::query_as::<_, BookRow>(&format!(
+        "{BOOK_SELECT} WHERE b.is_sample = 1 ORDER BY b.imported_at ASC LIMIT 1"
+    ))
     .bind(user_id)
     .fetch_optional(&state.pool)
     .await?;
-    Ok(row.map(BookRow::into_record))
+    Ok(row.map(|row| row.into_record(user_id)))
+}
+
+fn parse_post_id(post_id: &str) -> Result<String, ApiError> {
+    if post_id.is_empty() {
+        return Err(ApiError::BadRequest("Post id is required.".into()));
+    }
+    if post_id.chars().count() > MAX_POST_ID_CHARS {
+        return Err(ApiError::BadRequest(format!(
+            "Post id is longer than {MAX_POST_ID_CHARS} characters (asked {}).",
+            post_id.chars().count()
+        )));
+    }
+    Ok(post_id.to_string())
+}
+
+fn parse_comment_text(raw: &str) -> Result<String, ApiError> {
+    let text = raw.trim().to_string();
+    if text.is_empty() {
+        return Err(ApiError::BadRequest("Write something first.".into()));
+    }
+    let asked = text.chars().count();
+    if asked > MAX_COMMENT_CHARS {
+        return Err(ApiError::BadRequest(format!(
+            "Comment is longer than {MAX_COMMENT_CHARS} characters (asked {asked})."
+        )));
+    }
+    Ok(text)
+}
+
+async fn thread_for(
+    state: &AppState,
+    user_id: &str,
+    book_id: &str,
+    post_id: &str,
+) -> Result<CommentThread, ApiError> {
+    let rows = sqlx::query_as::<_, CommentRow>(
+        "SELECT c.id, u.username, c.text, c.created_at, c.user_id
+         FROM comments c
+         JOIN users u ON u.id = c.user_id
+         WHERE c.book_id = ? AND c.post_id = ?
+         ORDER BY c.created_at ASC",
+    )
+    .bind(book_id)
+    .bind(post_id)
+    .fetch_all(&state.pool)
+    .await?;
+    Ok(CommentThread {
+        comments: rows
+            .into_iter()
+            .map(|row| row.into_record(user_id))
+            .collect(),
+    })
 }
 
 async fn likes_for(state: &AppState, user_id: &str, book_id: &str) -> Result<LikeSet, ApiError> {

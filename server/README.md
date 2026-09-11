@@ -2,7 +2,7 @@
 
 Hosted library for Mewo. The phone talks to this through `HostedLibraryStore`.
 
-Local and hosted are different shelves. This process is the hosted one. Each account has its own books. The phone still parses EPUB files with Readium.
+Local and hosted are different shelves. This process is the hosted one. Books are a shared shelf. Likes and reading place stay per account. Notes on a line are public. The phone still parses EPUB files with Readium.
 
 ## Run
 
@@ -75,12 +75,19 @@ Prefix `/v1`.
 - `PATCH /books/{id}` `{ "postCount"?, "progressIndex"? }`
 - `GET /books/{id}/likes` `{ "ids": [...] }`
 - `POST /books/{id}/likes/{postId}` toggle
+- `GET /books/{id}/comments` `{ "counts": { "0": 2 }, "mine": ["0"] }`
+- `GET /books/{id}/comments/{postId}` `{ "comments": [ Comment ] }`
+- `POST /books/{id}/comments/{postId}` `{ "text": "..." }`
+- `DELETE /books/{id}/comments/{postId}/{commentId}`
+- `GET /profiles/{username}/replies` `{ "username", "replies": [ { "bookId", "postId", "comment" } ] }` newest first. Unknown username is an empty list.
 
-Book JSON matches the phone's `BookRecord`: `id`, `title`, `author`, `handle`, `importedAt`, `postCount`, `progressIndex`, `isSample`.
+Book JSON matches the phone's `BookRecord`: `id`, `title`, `author`, `handle`, `importedAt`, `postCount`, `progressIndex`, `isSample`, `mine`.
 
-A book that is not yours is 404, same as missing.
+Every signed-in account can read every book. `mine` is true when you added it. Only that account can delete it. Reading place is per account.
 
-`isSample=true` keeps one sample per user. A second upload returns the first row.
+`isSample=true` keeps one sample for the server. A second upload returns the first row.
+
+A comment is at most 2000 characters. The compose field shows about 8 lines of 40 characters. A long paragraph in the sample books stays under 1000. 2000 is six times the visible field. A 400 names the budget and the asked length. Empty text is 400 "Write something first."
 
 ## Tests
 
@@ -88,4 +95,4 @@ A book that is not yours is 404, same as missing.
 cargo test
 ```
 
-Register, login, upload, progress, likes, download, delete, isolation between users, signup off, oversized EPUB.
+Register, login, upload, progress, likes, comments, profile replies, download, delete, shared books, per-person progress, signup off, oversized EPUB.

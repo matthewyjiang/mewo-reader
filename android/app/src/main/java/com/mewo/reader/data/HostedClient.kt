@@ -144,6 +144,46 @@ class HostedClient(
         return set.ids
     }
 
+    fun commentIndex(session: HostedSession, id: String): CommentIndex {
+        return get(session, "/v1/books/$id/comments")
+    }
+
+    fun comments(session: HostedSession, id: String, postId: String): List<PostComment> {
+        val thread: CommentThread = get(session, "/v1/books/$id/comments/$postId")
+        return thread.comments
+    }
+
+    fun addComment(
+        session: HostedSession,
+        id: String,
+        postId: String,
+        text: String,
+    ): List<PostComment> {
+        val req = request(session.api("/v1/books/$id/comments/$postId"), session.token)
+            .post(json.encodeToString(NewComment(text)).toRequestBody(JSON))
+            .build()
+        val thread: CommentThread = http.newCall(req).execute().use { it.decode() }
+        return thread.comments
+    }
+
+    fun profileReplies(session: HostedSession, handle: String): ProfileReplies {
+        return get(session, "/v1/profiles/${android.net.Uri.encode(handle)}/replies")
+    }
+
+    fun deleteComment(
+        session: HostedSession,
+        id: String,
+        postId: String,
+        commentId: String,
+    ): List<PostComment> {
+        val req = request(
+            session.api("/v1/books/$id/comments/$postId/$commentId"),
+            session.token,
+        ).delete().build()
+        val thread: CommentThread = http.newCall(req).execute().use { it.decode() }
+        return thread.comments
+    }
+
     private fun postAuth(url: String, username: String, password: String): AuthResponse {
         val req = Request.Builder()
             .url(url)

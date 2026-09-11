@@ -37,7 +37,7 @@ fun LibrarySettings(modifier: Modifier = Modifier) {
     val hosted = LocalHostedAuth.current
     Column(modifier = modifier.fillMaxWidth()) {
         Text(
-            text = "Books, likes, and where you left off. Local and hosted are different shelves.",
+            text = "Books, likes, notes, and where you left off. Local is yours. Hosted is a shared shelf.",
             style = MaterialTheme.typography.bodyMedium,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
@@ -57,7 +57,7 @@ fun LibrarySettings(modifier: Modifier = Modifier) {
                 body = if (hosted.session.signedIn) {
                     "Signed in as @${hosted.session.username}."
                 } else {
-                    "A second shelf. Sign in with a server URL."
+                    "A shared shelf. Sign in with a server URL."
                 },
                 selected = backend.kind == BackendKind.Hosted,
                 onSelect = { backend.setKind(BackendKind.Hosted) },

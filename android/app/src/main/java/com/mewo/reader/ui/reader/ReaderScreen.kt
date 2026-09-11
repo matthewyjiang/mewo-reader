@@ -41,7 +41,9 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.mewo.reader.data.BackendKind
 import com.mewo.reader.data.FeedPost
+import com.mewo.reader.ui.LocalBackend
 import com.mewo.reader.ui.LocalLibraryStore
 import com.mewo.reader.data.currentHeadingIndex
 import com.mewo.reader.data.headingPosts
@@ -56,13 +58,16 @@ import kotlinx.coroutines.flow.drop
 fun ReaderScreen(
     viewModel: ReaderViewModel,
     onBack: () -> Unit,
+    onOpenProfile: (handle: String, name: String) -> Unit,
     hideOnScroll: HideOnScrollState,
 ) {
     val state by viewModel.state.collectAsStateWithLifecycle()
     val context = LocalContext.current
     val library = LocalLibraryStore.current
+    val hosted = LocalBackend.current.kind == BackendKind.Hosted
     val book = state.book
     var showChapters by rememberSaveable { mutableStateOf(false) }
+    var commentTarget by remember { mutableStateOf<CommentTarget?>(null) }
 
     Column(
         modifier = Modifier
@@ -130,6 +135,11 @@ fun ReaderScreen(
                             handle = book?.handle ?: "author",
                             cover = book?.let { library.coverFile(it.id) },
                             liked = post.id in state.likes,
+                            commentCount = state.comments.count(post.id),
+                            commented = state.comments.commented(post.id),
+                            onComment = {
+                                book?.let { commentTarget = CommentTarget(it, post) }
+                            },
                             onLike = { viewModel.toggleLike(post.id) },
                             onRepost = {
                                 shareText(context, quote(book?.author, book?.title, post))
@@ -143,6 +153,18 @@ fun ReaderScreen(
                     item {
                         EndOfFeed(title = book?.title)
                     }
+                }
+                commentTarget?.let { target ->
+                    CommentSheet(
+                        target = target,
+                        publicNotes = hosted,
+                        onThreadChanged = viewModel::onCommentsChanged,
+                        onDismiss = { commentTarget = null },
+                        onOpenProfile = { handle, name ->
+                            commentTarget = null
+                            onOpenProfile(handle, name)
+                        },
+                    )
                 }
                 if (showChapters) {
                     val current = currentHeadingIndex(

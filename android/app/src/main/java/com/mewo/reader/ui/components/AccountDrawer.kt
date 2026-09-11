@@ -31,10 +31,10 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.RectangleShape
 import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
-import com.mewo.reader.data.BackendKind
-import com.mewo.reader.ui.LocalBackend
-import com.mewo.reader.ui.LocalHostedAuth
+import com.mewo.reader.ui.currentReaderIdentity
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -42,6 +42,7 @@ fun AccountDrawer(
     drawerState: DrawerState,
     gesturesEnabled: Boolean,
     onOpenSettings: () -> Unit,
+    onOpenProfile: (handle: String, name: String) -> Unit,
     content: @Composable () -> Unit,
 ) {
     ModalNavigationDrawer(
@@ -58,7 +59,10 @@ fun AccountDrawer(
                 drawerContainerColor = MaterialTheme.colorScheme.surface,
                 drawerContentColor = MaterialTheme.colorScheme.onSurface,
             ) {
-                AccountDrawerContent(onOpenSettings = onOpenSettings)
+                AccountDrawerContent(
+                    onOpenSettings = onOpenSettings,
+                    onOpenProfile = onOpenProfile,
+                )
             }
         },
     ) {
@@ -79,13 +83,11 @@ fun AccountDrawer(
 }
 
 @Composable
-private fun AccountDrawerContent(onOpenSettings: () -> Unit) {
-    val backend = LocalBackend.current
-    val hosted = LocalHostedAuth.current
-    val handle = when (backend.kind) {
-        BackendKind.Local -> "@local"
-        BackendKind.Hosted -> hosted.session.username?.let { "@$it" } ?: "@hosted"
-    }
+private fun AccountDrawerContent(
+    onOpenSettings: () -> Unit,
+    onOpenProfile: (handle: String, name: String) -> Unit,
+) {
+    val me = currentReaderIdentity()
     Column(
         modifier = Modifier
             .fillMaxWidth()
@@ -93,14 +95,18 @@ private fun AccountDrawerContent(onOpenSettings: () -> Unit) {
             .padding(bottom = 28.dp),
     ) {
         Column(
-            modifier = Modifier.padding(start = 16.dp, end = 16.dp, top = 8.dp, bottom = 16.dp),
+            modifier = Modifier
+                .fillMaxWidth()
+                .clickable(role = Role.Button) { onOpenProfile(me.handle, me.name) }
+                .padding(start = 16.dp, end = 16.dp, top = 8.dp, bottom = 16.dp)
+                .semantics { contentDescription = "Profile" },
         ) {
-            Avatar(name = "You", size = 56.dp)
+            Avatar(name = me.name, size = 56.dp)
             Spacer(Modifier.height(12.dp))
-            Text("You", style = MaterialTheme.typography.titleMedium)
+            Text(me.name, style = MaterialTheme.typography.titleMedium)
             Spacer(Modifier.height(2.dp))
             Text(
-                text = handle,
+                text = "@${me.handle}",
                 style = MaterialTheme.typography.labelSmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )

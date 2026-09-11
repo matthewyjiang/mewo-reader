@@ -9,7 +9,9 @@ import com.mewo.reader.data.HostedLibraryStore
 import com.mewo.reader.data.HostedSessionStore
 import com.mewo.reader.data.LibraryStore
 import com.mewo.reader.data.LocalLibraryStore
+import com.mewo.reader.data.LocalProfileStore
 import com.mewo.reader.data.MewoModeStore
+import com.mewo.reader.data.ReaderFontStore
 import com.mewo.reader.data.SwitchingLibraryStore
 import com.mewo.reader.data.ThemeStore
 import kotlinx.coroutines.CoroutineScope
@@ -31,6 +33,10 @@ class MewoApp : Application() {
         private set
     lateinit var mewoModeStore: MewoModeStore
         private set
+    lateinit var readerFontStore: ReaderFontStore
+        private set
+    lateinit var localProfileStore: LocalProfileStore
+        private set
 
     override fun onCreate() {
         super.onCreate()
@@ -39,10 +45,12 @@ class MewoApp : Application() {
         val client = HostedClient()
         hostedAuth = HostedAuth(hostedSession, client)
         val opener = EpubOpener(this)
+        localProfileStore = LocalProfileStore(this)
         library = SwitchingLibraryStore(
             local = LocalLibraryStore(
                 context = this,
                 opener = opener,
+                profile = localProfileStore,
             ),
             hosted = HostedLibraryStore(
                 context = this,
@@ -56,5 +64,6 @@ class MewoApp : Application() {
         )
         themeStore = ThemeStore(this)
         mewoModeStore = MewoModeStore(this)
+        readerFontStore = ReaderFontStore(this)
     }
 }

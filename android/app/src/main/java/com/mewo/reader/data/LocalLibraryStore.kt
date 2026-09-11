@@ -19,6 +19,7 @@ import java.util.UUID
 class LocalLibraryStore(
     private val context: Context,
     private val opener: EpubOpener,
+    private val profile: LocalProfileStore,
     private val extractor: FeedExtractor = FeedExtractor(),
 ) : LibraryStore {
     private val json = Json {
@@ -121,6 +122,74 @@ class LocalLibraryStore(
         current
     }
 
+    override suspend fun commentIndex(id: String): CommentIndex = withContext(Dispatchers.IO) {
+        val file = readComments(id)
+        CommentIndex(
+            counts = file.posts.mapValues { it.value.size },
+            mine = file.posts.filterValues { it.isNotEmpty() }.keys,
+        )
+    }
+
+    override suspend fun comments(id: String, postId: String): List<PostComment> =
+        withContext(Dispatchers.IO) {
+            localThread(readComments(id).posts[postId].orEmpty())
+        }
+
+    override suspend fun addComment(id: String, postId: String, text: String): List<PostComment> =
+        withContext(Dispatchers.IO) {
+            val trimmed = text.trim()
+            if (trimmed.isEmpty()) error("Write something first.")
+            val asked = trimmed.length
+            if (asked > MAX_COMMENT_CHARS) {
+                error("Comment is longer than $MAX_COMMENT_CHARS characters (asked $asked).")
+            }
+            val file = File(root, "$id/comments.json")
+            val current = readComments(id)
+            val next = current.posts.toMutableMap()
+            val row = LocalComment(
+                id = UUID.randomUUID().toString(),
+                text = trimmed,
+                createdAt = System.currentTimeMillis(),
+            )
+            next[postId] = next[postId].orEmpty() + row
+            file.writeText(json.encodeToString(LocalCommentFile(next)))
+            localThread(next[postId].orEmpty())
+        }
+
+    override suspend fun deleteComment(
+        id: String,
+        postId: String,
+        commentId: String,
+    ): List<PostComment> = withContext(Dispatchers.IO) {
+        val file = File(root, "$id/comments.json")
+        val current = readComments(id)
+        val next = current.posts.toMutableMap()
+        next[postId] = next[postId].orEmpty().filterNot { it.id == commentId }
+        if (next[postId].isNullOrEmpty()) next.remove(postId)
+        file.writeText(json.encodeToString(LocalCommentFile(next)))
+        localThread(next[postId].orEmpty())
+    }
+
+    private fun readComments(id: String): LocalCommentFile {
+        val file = File(root, "$id/comments.json")
+        if (!file.exists()) return LocalCommentFile()
+        return runCatching {
+            json.decodeFromString<LocalCommentFile>(file.readText())
+        }.getOrDefault(LocalCommentFile())
+    }
+
+    private fun localThread(rows: List<LocalComment>): List<PostComment> {
+        return rows.map { row ->
+            PostComment(
+                id = row.id,
+                username = LOCAL_COMMENT_NAME,
+                text = row.text,
+                createdAt = row.createdAt,
+                mine = true,
+            )
+        }
+    }
+
     /**
      * Title, author, handle, plus post text from books already opened.
      * Unopened books have no feed cache, so they only match on metadata.
@@ -159,6 +228,33 @@ class LocalLibraryStore(
                 posts.filter { it.id in ids }.map { PostHit(book, it) }
             }
         }
+    }
+
+    override suspend fun profileReplies(handle: String): List<ProfileReply> =
+        withContext(Dispatchers.IO) {
+            val self = profile.profile.value.handle
+            if (self.isBlank() || !handle.equals(self, ignoreCase = true)) {
+                return@withContext emptyList()
+            }
+            if (_library.value.books.isEmpty()) {
+                mutex.withLock { _library.value = readLibrary() }
+            }
+            _library.value.books.flatMap { book ->
+                val file = readComments(book.id)
+                if (file.posts.isEmpty()) return@flatMap emptyList()
+                val posts = postMap(book.id)
+                file.posts.flatMap { (postId, rows) ->
+                    val post = posts[postId] ?: return@flatMap emptyList()
+                    localThread(rows).map { comment ->
+                        ProfileReply(book = book, post = post, comment = comment)
+                    }
+                }
+            }.sortedByDescending { it.comment.createdAt }
+        }
+
+    private suspend fun postMap(id: String): Map<String, FeedPost> {
+        val posts = cachedFeed(id) ?: runCatching { feed(id) }.getOrNull().orEmpty()
+        return posts.associateBy { it.id }
     }
 
     private fun cachedFeed(id: String): List<FeedPost>? {
@@ -210,6 +306,11 @@ class LocalLibraryStore(
 
 /** Bump when extract output changes so an already-opened book rebuilds its feed. */
 const val FEED_CACHE_VERSION = 4
+
+/** Same budget as the hosted API. See server/src/models.rs. */
+const val MAX_COMMENT_CHARS = 2000
+
+const val LOCAL_COMMENT_NAME = "You"
 
 fun slug(value: String): String {
     val cleaned = value.lowercase()
