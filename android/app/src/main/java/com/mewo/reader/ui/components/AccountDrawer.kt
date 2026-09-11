@@ -1,20 +1,27 @@
 package com.mewo.reader.ui.components
 
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.systemGestureExclusion
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.outlined.KeyboardArrowRight
 import androidx.compose.material3.DrawerState
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalDrawerSheet
 import androidx.compose.material3.ModalNavigationDrawer
@@ -23,17 +30,18 @@ import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.RectangleShape
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.unit.dp
 import com.mewo.reader.data.BackendKind
 import com.mewo.reader.ui.LocalBackend
 import com.mewo.reader.ui.LocalHostedAuth
-import com.mewo.reader.ui.theme.DisplaySettings
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun AccountDrawer(
     drawerState: DrawerState,
     gesturesEnabled: Boolean,
+    onOpenSettings: () -> Unit,
     content: @Composable () -> Unit,
 ) {
     ModalNavigationDrawer(
@@ -50,7 +58,7 @@ fun AccountDrawer(
                 drawerContainerColor = MaterialTheme.colorScheme.surface,
                 drawerContentColor = MaterialTheme.colorScheme.onSurface,
             ) {
-                AccountDrawerContent()
+                AccountDrawerContent(onOpenSettings = onOpenSettings)
             }
         },
     ) {
@@ -71,7 +79,7 @@ fun AccountDrawer(
 }
 
 @Composable
-private fun AccountDrawerContent() {
+private fun AccountDrawerContent(onOpenSettings: () -> Unit) {
     val backend = LocalBackend.current
     val hosted = LocalHostedAuth.current
     val handle = when (backend.kind) {
@@ -101,17 +109,25 @@ private fun AccountDrawerContent() {
             color = MaterialTheme.colorScheme.outline,
             thickness = 0.6.dp,
         )
-        Text(
-            text = "Settings",
-            style = MaterialTheme.typography.headlineLarge,
-            modifier = Modifier.padding(start = 16.dp, end = 16.dp, top = 20.dp, bottom = 16.dp),
-        )
-        DisplaySettings(
-            modifier = Modifier.padding(horizontal = 16.dp),
-        )
-        Spacer(Modifier.height(24.dp))
-        LibrarySettings(
-            modifier = Modifier.padding(horizontal = 16.dp),
-        )
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .heightIn(min = 52.dp)
+                .clickable(role = Role.Button, onClick = onOpenSettings)
+                .padding(horizontal = 16.dp, vertical = 14.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text(
+                text = "Settings",
+                style = MaterialTheme.typography.titleMedium,
+                modifier = Modifier.weight(1f),
+            )
+            Icon(
+                imageVector = Icons.AutoMirrored.Outlined.KeyboardArrowRight,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.size(22.dp),
+            )
+        }
     }
 }

@@ -30,14 +30,12 @@ import com.mewo.reader.ui.LocalBackend
 import com.mewo.reader.ui.LocalHostedAuth
 import kotlinx.coroutines.launch
 
-/** Local vs hosted library. Lives in the account drawer. */
+/** Local vs hosted library. Lives on the Library settings page. */
 @Composable
 fun LibrarySettings(modifier: Modifier = Modifier) {
     val backend = LocalBackend.current
     val hosted = LocalHostedAuth.current
     Column(modifier = modifier.fillMaxWidth()) {
-        Text("Library", style = MaterialTheme.typography.titleMedium)
-        Spacer(Modifier.height(6.dp))
         Text(
             text = "Books, likes, and where you left off. Local and hosted are different shelves.",
             style = MaterialTheme.typography.bodyMedium,

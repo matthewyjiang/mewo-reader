@@ -33,15 +33,13 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.unit.dp
 
-/** Theme swatches and Mewo mode. Lives in the account drawer. */
+/** Theme swatches and Mewo mode. Lives on the Display settings page. */
 @Composable
 fun DisplaySettings(modifier: Modifier = Modifier) {
     val controller = LocalThemeController.current
     val mewoMode = LocalMewoMode.current
     var iconError by remember { mutableStateOf<String?>(null) }
     Column(modifier = modifier.fillMaxWidth()) {
-        Text("Display", style = MaterialTheme.typography.titleMedium)
-        Spacer(Modifier.height(6.dp))
         Text(
             text = "Twitter kept a navy night. X went black.",
             style = MaterialTheme.typography.bodyMedium,

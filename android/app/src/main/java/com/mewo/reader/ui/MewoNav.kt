@@ -4,6 +4,11 @@ import android.os.Build
 import android.view.inputmethod.InputMethodManager
 import androidx.activity.compose.LocalActivity
 import androidx.activity.compose.PredictiveBackHandler
+import androidx.compose.animation.AnimatedContentTransitionScope
+import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
@@ -40,6 +45,10 @@ import com.mewo.reader.ui.reader.ReaderScreen
 import com.mewo.reader.ui.reader.ReaderViewModel
 import com.mewo.reader.ui.search.SearchScreen
 import com.mewo.reader.ui.search.SearchViewModel
+import com.mewo.reader.ui.settings.SettingsDisplayPage
+import com.mewo.reader.ui.settings.SettingsHome
+import com.mewo.reader.ui.settings.SettingsLibraryPage
+import com.mewo.reader.ui.settings.SettingsRoutes
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -55,6 +64,8 @@ fun MewoNav() {
     val entry by nav.currentBackStackEntryAsState()
     val route = entry?.destination?.route.orEmpty()
     val onReader = route.startsWith("reader")
+    val onSettings = SettingsRoutes.matches(route)
+    val coverFeed = onReader || onSettings
     val activity = LocalActivity.current
     val focusManager = LocalFocusManager.current
     val keyboard = LocalSoftwareKeyboardController.current
@@ -67,8 +78,8 @@ fun MewoNav() {
         act.getSystemService(InputMethodManager::class.java)
             ?.hideSoftInputFromWindow(act.window.decorView.windowToken, 0)
     }
-    LaunchedEffect(tab, onReader) {
-        if (tab != AppTab.Search || onReader) {
+    LaunchedEffect(tab, onReader, onSettings) {
+        if (tab != AppTab.Search || onReader || onSettings) {
             delay(50)
             hideIme()
         }
@@ -86,7 +97,7 @@ fun MewoNav() {
     // has no progress events, backgrounds the task so the themed
     // launcher trampoline does not finish the reader activity.
     PredictiveBackHandler(
-        enabled = !onReader && !drawerState.isOpen && activity != null,
+        enabled = !coverFeed && !drawerState.isOpen && activity != null,
     ) { progress ->
         var swipe = false
         try {
@@ -128,9 +139,21 @@ fun MewoNav() {
         nav.navigate(dest)
     }
 
+    fun openSettings() {
+        hideIme()
+        chrome.show()
+        scope.launch { drawerState.close() }
+        if (!onSettings) {
+            nav.navigate(SettingsRoutes.Home) {
+                launchSingleTop = true
+            }
+        }
+    }
+
     AccountDrawer(
         drawerState = drawerState,
-        gesturesEnabled = !onReader,
+        gesturesEnabled = !coverFeed,
+        onOpenSettings = ::openSettings,
     ) {
         Column(
             modifier = Modifier
@@ -201,12 +224,80 @@ fun MewoNav() {
                         hideOnScroll = chrome,
                     )
                 }
+                composable(
+                    route = SettingsRoutes.Home,
+                    enterTransition = { settingsEnter() },
+                    exitTransition = { settingsExit() },
+                    popEnterTransition = { settingsPopEnter() },
+                    popExitTransition = { settingsPopExit() },
+                ) {
+                    SettingsHome(
+                        onBack = {
+                            chrome.show()
+                            nav.popBackStack()
+                        },
+                        onOpenDisplay = { nav.navigate(SettingsRoutes.Display) },
+                        onOpenLibrary = { nav.navigate(SettingsRoutes.Library) },
+                    )
+                }
+                composable(
+                    route = SettingsRoutes.Display,
+                    enterTransition = { settingsEnter() },
+                    exitTransition = { settingsExit() },
+                    popEnterTransition = { settingsPopEnter() },
+                    popExitTransition = { settingsPopExit() },
+                ) {
+                    SettingsDisplayPage(
+                        onBack = { nav.popBackStack() },
+                    )
+                }
+                composable(
+                    route = SettingsRoutes.Library,
+                    enterTransition = { settingsEnter() },
+                    exitTransition = { settingsExit() },
+                    popEnterTransition = { settingsPopEnter() },
+                    popExitTransition = { settingsPopExit() },
+                ) {
+                    SettingsLibraryPage(
+                        onBack = { nav.popBackStack() },
+                    )
+                }
             }
             HomeTabBar(
                 selected = tab,
                 onSelect = ::goTab,
-                visible = chrome.visible,
+                visible = chrome.visible && !onSettings,
             )
         }
     }
 }
+
+private const val SettingsMotionMs = 220
+
+private fun AnimatedContentTransitionScope<*>.settingsEnter() =
+    fadeIn(tween(SettingsMotionMs, easing = FastOutSlowInEasing)) +
+        slideIntoContainer(
+            towards = AnimatedContentTransitionScope.SlideDirection.Left,
+            animationSpec = tween(SettingsMotionMs, easing = FastOutSlowInEasing),
+        )
+
+private fun AnimatedContentTransitionScope<*>.settingsExit() =
+    fadeOut(tween(SettingsMotionMs, easing = FastOutSlowInEasing)) +
+        slideOutOfContainer(
+            towards = AnimatedContentTransitionScope.SlideDirection.Left,
+            animationSpec = tween(SettingsMotionMs, easing = FastOutSlowInEasing),
+        )
+
+private fun AnimatedContentTransitionScope<*>.settingsPopEnter() =
+    fadeIn(tween(SettingsMotionMs, easing = FastOutSlowInEasing)) +
+        slideIntoContainer(
+            towards = AnimatedContentTransitionScope.SlideDirection.Right,
+            animationSpec = tween(SettingsMotionMs, easing = FastOutSlowInEasing),
+        )
+
+private fun AnimatedContentTransitionScope<*>.settingsPopExit() =
+    fadeOut(tween(SettingsMotionMs, easing = FastOutSlowInEasing)) +
+        slideOutOfContainer(
+            towards = AnimatedContentTransitionScope.SlideDirection.Right,
+            animationSpec = tween(SettingsMotionMs, easing = FastOutSlowInEasing),
+        )
