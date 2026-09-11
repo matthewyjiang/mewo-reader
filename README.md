@@ -80,4 +80,10 @@ cd server
 cargo run
 ```
 
-That listens on port 8787. In the app, open the account drawer, pick **Hosted server**, and sign in with that URL. Local books stay on the phone. Hosted books live on the server. They do not merge.
+Or pull the image CI publishes to GHCR:
+
+```bash
+docker run --rm -p 8787:8787 -v mewo-data:/data ghcr.io/matthewyjiang/mewo-reader/server:latest
+```
+
+That listens on port 8787. In the app, open the account drawer, pick **Hosted server**, and sign in with that URL. Local books stay on the phone. Hosted books live on the server. They do not merge. See [server/README.md](server/README.md) for env vars and the Dockerfile.

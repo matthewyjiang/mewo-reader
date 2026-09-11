@@ -16,6 +16,28 @@ Listens on `0.0.0.0:8787`. Data lands in `./data` (`mewo.db` plus uploaded files
 
 On a phone on the same LAN, the server URL is `http://<that-machine>:8787`.
 
+## Docker
+
+From this directory:
+
+```bash
+docker build -t mewo-server .
+docker run --rm -p 8787:8787 -v mewo-data:/data mewo-server
+```
+
+Same env vars as below. Keep `/data` on a volume or the next `docker run` starts with an empty shelf.
+
+Pushes to `main` that touch `server/` publish `ghcr.io/matthewyjiang/mewo-reader/server`. Tags: `latest`, `sha-<commit>`, and a semver tag if you push `v*`.
+
+```bash
+docker pull ghcr.io/matthewyjiang/mewo-reader/server:latest
+docker run --rm -p 8787:8787 -v mewo-data:/data ghcr.io/matthewyjiang/mewo-reader/server:latest
+```
+
+The package is private until you flip it public under the repo's Packages tab. A 403 on pull means log in with a token that can read packages, or make the package public.
+
+The process runs as uid 10001. If you bind-mount a host directory, that directory needs to be writable by that uid.
+
 ## Env
 
 - `MEWO_LISTEN` default `0.0.0.0:8787`
