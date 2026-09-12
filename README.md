@@ -5,13 +5,14 @@ An EPUB reader that turns a book into an X-style timeline. One paragraph is one 
 This repo holds both sides:
 
 ```
-android/   phone app
+android/   Android phone app
+ios/       iPhone app
 server/    hosted library API
 ```
 
 Import a file from the picker, or tap **Open a sample** if you just want to see the feed.
 
-The reader is Kotlin, Jetpack Compose, and [Readium](https://github.com/readium/kotlin-toolkit) for parsing. The reader itself is Compose, not Readium's page navigator. Open the `android` folder in Android Studio.
+Android is Kotlin, Jetpack Compose, and [Readium](https://github.com/readium/kotlin-toolkit) for parsing. iPhone is SwiftUI and the [Readium Swift toolkit](https://github.com/readium/swift-toolkit). The reader itself is the app's timeline, not Readium's page navigator. Open `android/` in Android Studio, or `ios/Mewo.xcodeproj` in Xcode.
 
 ## Android
 
@@ -70,6 +71,24 @@ $ANDROID_HOME/emulator/emulator -avd mewo -gpu host
 ```
 
 The `mewo` AVD in this repo's notes is a medium phone image, not a Pixel with a camera hole. The hole covers the system status bar and makes the top of the app look broken.
+
+## iPhone
+
+### Requirements
+
+- A Mac with full Xcode 26 or newer (the Command Line Tools package is not enough)
+- The iOS 26 SDK
+- [XcodeGen](https://github.com/yonaskolb/XcodeGen) if you need to regenerate `Mewo.xcodeproj` (`brew install xcodegen`)
+
+### Build
+
+```bash
+cd ios
+xcodegen generate
+xcodebuild -scheme Mewo -destination 'platform=iOS Simulator,name=iPhone 17' -jobs 12 build
+```
+
+Install from Xcode onto a phone or Simulator. This is not an App Store listing. Friends get a TestFlight build or an Xcode install, same idea as the Android APK.
 
 ## Server
 

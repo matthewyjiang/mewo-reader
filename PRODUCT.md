@@ -4,19 +4,19 @@
 
 ## Platform
 
-android
+adaptive
 
 ## Stack
 
-delegated: Kotlin, Jetpack Compose, Readium Kotlin toolkit 3.x on the phone. Rust (axum, sqlx, SQLite) for the optional hosted library. EPUB rendering is a native Android problem and Readium already parses publications into text elements we can feed. The server stores files and library state. It does not parse books.
+delegated: Kotlin and Jetpack Compose on Android, SwiftUI on iPhone. Both phones use the matching Readium toolkit to parse EPUB into text elements. Rust (axum, sqlx, SQLite) for the optional hosted library. The server stores files and library state. It does not parse books.
 
 ## Users
 
-Matt and a few people he might hand an APK to. They sideload EPUB files from the device and read them. Hosted mode is for the same people on a server they run, each with their own account.
+Matt and a few people he might hand an APK or an Xcode/TestFlight install to. They sideload EPUB files from the device and read them. Hosted mode is for the same people on a server they run, each with their own account.
 
 ## Product Purpose
 
-Mewo is an Android EPUB reader. You import a book from the file picker and read it as a vertical feed, one paragraph per post. Success is opening a real EPUB and scrolling it like a timeline without fighting pagination.
+Mewo is a phone EPUB reader. You import a book from the file picker and read it as a vertical feed, one paragraph per post. Success is opening a real EPUB and scrolling it like a timeline without fighting pagination.
 
 ## Positioning
 
@@ -44,7 +44,7 @@ Used on a phone, often in bed or on a couch, one-handed. Books come from files t
 - Pick Twitter or X display, light or dark
 - Pick how big posts read; bars and buttons stay on the system size
 - Local shelf uses the name and handle you set. Hosted shelf uses username and password. Hosted books are one shelf for every account. Likes and reading place stay per person. Notes on a line are public. The two shelves do not merge or sync.
-- No OPDS, DRM, or iOS in this version
+- No OPDS or DRM in this version
 
 ## Brand Commitments
 
@@ -60,4 +60,4 @@ No real library, covers, or user books in the repo. Bundle a short public-domain
 - The feed is the reader. If it looks like a book layout, it failed.
 - Local reading does not need a network. Hosted is a shared shelf you opt into.
 - One-handed phone use is the default scene.
-- Friends getting an APK should understand the app without a tour.
+- Friends getting an APK or an Xcode/TestFlight install should understand the app without a tour.

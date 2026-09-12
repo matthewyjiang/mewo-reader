@@ -1,0 +1,94 @@
+name: Mewo
+options:
+  bundleIdPrefix: com.mewo
+  deploymentTarget:
+    iOS: "26.0"
+  xcodeVersion: "26.0"
+  createIntermediateGroups: true
+settings:
+  base:
+    MARKETING_VERSION: 0.1.0
+    CURRENT_PROJECT_VERSION: 1
+    SWIFT_VERSION: 5.10
+    TARGETED_DEVICE_FAMILY: 1
+    IPHONEOS_DEPLOYMENT_TARGET: "26.0"
+    GENERATE_INFOPLIST_FILE: false
+    INFOPLIST_FILE: Mewo/Resources/Info.plist
+    PRODUCT_BUNDLE_IDENTIFIER: com.mewo.reader
+    DEVELOPMENT_TEAM: ""
+    CODE_SIGN_STYLE: Automatic
+    SWIFT_EMIT_LOC_STRINGS: YES
+packages:
+  Readium:
+    url: https://github.com/readium/swift-toolkit.git
+    from: 3.3.0
+targets:
+  Mewo:
+    type: application
+    platform: iOS
+    sources:
+      - path: Mewo
+        excludes:
+          - Resources/Info.plist
+    resources:
+      - path: Mewo/Resources/Assets.xcassets
+      - path: Mewo/Resources/sample.epub
+      - path: Mewo/Resources/Fonts/atkinson_hyperlegible_regular.ttf
+      - path: Mewo/Resources/Fonts/atkinson_hyperlegible_bold.ttf
+    settings:
+      base:
+        PRODUCT_NAME: Mewo
+        INFOPLIST_FILE: Mewo/Resources/Info.plist
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        ASSETCATALOG_COMPILER_ALTERNATE_APPICON_NAMES: AppIconTeddy
+        INFOPLIST_KEY_CFBundleDisplayName: Mewo
+        INFOPLIST_KEY_LSApplicationCategoryType: public.app-category.books
+        SUPPORTS_XR_DESIGNED_FOR_IPHONE_IPAD: false
+        SUPPORTS_MAC_DESIGNED_FOR_IPHONE_IPAD: false
+    dependencies:
+      - package: Readium
+        product: ReadiumShared
+      - package: Readium
+        product: ReadiumStreamer
+  MewoTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources:
+      - MewoTests
+    dependencies:
+      - target: Mewo
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.mewo.reader.tests
+        GENERATE_INFOPLIST_FILE: true
+        INFOPLIST_FILE: ""
+        TEST_HOST: "$(BUILT_PRODUCTS_DIR)/Mewo.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/Mewo"
+        BUNDLE_LOADER: "$(TEST_HOST)"
+  MewoUITests:
+    type: bundle.ui-testing
+    platform: iOS
+    sources:
+      - MewoUITests
+    dependencies:
+      - target: Mewo
+        embed: false
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.mewo.reader.uitests
+        GENERATE_INFOPLIST_FILE: true
+        INFOPLIST_FILE: ""
+        TEST_TARGET_NAME: Mewo
+        IPHONEOS_DEPLOYMENT_TARGET: "26.0"
+schemes:
+  Mewo:
+    build:
+      targets:
+        Mewo: all
+        MewoTests: [test]
+        MewoUITests: [test]
+    test:
+      targets:
+        - MewoTests
+        - MewoUITests
+    run:
+      config: Debug

@@ -1,0 +1,726 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 77;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		116D7C4D5A8CC7F9236A5498 /* HostedLibraryStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 708CE92D42A175108892E3FD /* HostedLibraryStore.swift */; };
+		17728937C6BA3C75D9E687D1 /* SettingsScreen.swift in Sources */ = {isa = PBXBuildFile; fileRef = 295484C89343CC67CBEA1171 /* SettingsScreen.swift */; };
+		19D539D31156FA009CEE510E /* LibraryStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = DD3458C195D8CB450E09C030 /* LibraryStore.swift */; };
+		1C318AC51189C338327EDC1C /* TimelinePost.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6B87C077BC50CA491D4F54A5 /* TimelinePost.swift */; };
+		211196AB773E70E817E87F65 /* PrefsStores.swift in Sources */ = {isa = PBXBuildFile; fileRef = 66097A819BA2638A705AB13F /* PrefsStores.swift */; };
+		21AC49C554877DA111643827 /* JSONFiles.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7E4122143733BF3C0E670FC4 /* JSONFiles.swift */; };
+		26F7E79B0E9657631014E083 /* FeedStart.swift in Sources */ = {isa = PBXBuildFile; fileRef = 950EE3C1B2A5757CC3BB8B09 /* FeedStart.swift */; };
+		2EC27BE1DA4203676DD7F120 /* Palette.swift in Sources */ = {isa = PBXBuildFile; fileRef = B66F3FB253EE6724518758AD /* Palette.swift */; };
+		4859584999155A51ABAEAB3C /* FeedExtractor.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2BA5FDBC274BF117C398912D /* FeedExtractor.swift */; };
+		4F744DD8DCE299549B68601D /* Models.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4413717A616851102DC7326F /* Models.swift */; };
+		581583C61BFE96E765BE7B7B /* SearchScreen.swift in Sources */ = {isa = PBXBuildFile; fileRef = 970FA89A3AAD94F94309DAFE /* SearchScreen.swift */; };
+		5C4397838BF236B2F0050192 /* HostedSessionStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 04D41FEA962E2855408B8222 /* HostedSessionStore.swift */; };
+		60E574DB0C2B9EED9BAAAD63 /* LocalIdentity.swift in Sources */ = {isa = PBXBuildFile; fileRef = CF102DFB037B91B3520D5624 /* LocalIdentity.swift */; };
+		649DD2B6EB6D6E3026C1B4C9 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 705EBB27D5531492D677A876 /* Assets.xcassets */; };
+		64BD778022E084487F1143F8 /* sample.epub in Resources */ = {isa = PBXBuildFile; fileRef = 97D88772A6730ACB57F2E4F3 /* sample.epub */; };
+		665DA70D7778CFAA26318FB1 /* Keychain.swift in Sources */ = {isa = PBXBuildFile; fileRef = C72FEE25BCAF45B0E834EF44 /* Keychain.swift */; };
+		66CAE5E7098F182C18FA5927 /* Forms.swift in Sources */ = {isa = PBXBuildFile; fileRef = 29DFEF201A6B13D3111189E1 /* Forms.swift */; };
+		6F3277E21AEF9848E3E12467 /* OnboardingScreen.swift in Sources */ = {isa = PBXBuildFile; fileRef = 31A3D4FF88DE8A3E4113E80E /* OnboardingScreen.swift */; };
+		789C0D5E0E7EA4118B3A74E2 /* ReadiumStreamer in Frameworks */ = {isa = PBXBuildFile; productRef = 3663EDCE82E6FCA3DDF30496 /* ReadiumStreamer */; };
+		816A10E932C203E1578BB5EF /* atkinson_hyperlegible_regular.ttf in Resources */ = {isa = PBXBuildFile; fileRef = 55E2F9F86972A19713059962 /* atkinson_hyperlegible_regular.ttf */; };
+		9DD13E2F4C93527A050EEC35 /* ReaderScreen.swift in Sources */ = {isa = PBXBuildFile; fileRef = BC966410684CE1362C015057 /* ReaderScreen.swift */; };
+		A04DFC4E8B7F7E228028F44C /* EpubOpener.swift in Sources */ = {isa = PBXBuildFile; fileRef = 54867A6C884E240F996C501B /* EpubOpener.swift */; };
+		A1FDCEF022CA0872C2772BDB /* CommentSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0BF2F5C41A43E7C33DD35BF8 /* CommentSheet.swift */; };
+		A85B633723EAE2257B459A85 /* Typography.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6E2D86846CDBD40FD4A268B1 /* Typography.swift */; };
+		AC92F8ED719F79BBA040B43E /* LikesScreen.swift in Sources */ = {isa = PBXBuildFile; fileRef = DF0D3BC3A891755D9AC55253 /* LikesScreen.swift */; };
+		B25B1852F3E23482F103FA49 /* MewoNav.swift in Sources */ = {isa = PBXBuildFile; fileRef = 55F78BF6CC0B65A066768C02 /* MewoNav.swift */; };
+		B5CA2DDD074618ED494DA07B /* LibraryScreen.swift in Sources */ = {isa = PBXBuildFile; fileRef = AFEC328398E1A0775329DF3B /* LibraryScreen.swift */; };
+		B9470F3D756CCE831B5EFC90 /* ProfileScreen.swift in Sources */ = {isa = PBXBuildFile; fileRef = D6800081EED54B5FD6932F36 /* ProfileScreen.swift */; };
+		C34B86E48FE9C9ABFE3E66CE /* MewoApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB3B10368441863852AAF842 /* MewoApp.swift */; };
+		C780526290172A5F85ACF442 /* atkinson_hyperlegible_bold.ttf in Resources */ = {isa = PBXBuildFile; fileRef = ED562555052DC0650FBC08AF /* atkinson_hyperlegible_bold.ttf */; };
+		CAABF2658C368BE3B19F37E6 /* AccountDrawer.swift in Sources */ = {isa = PBXBuildFile; fileRef = D8FE96DF3C1E12D54449DFE0 /* AccountDrawer.swift */; };
+		DD931482001A225BEDC8D12E /* Chapters.swift in Sources */ = {isa = PBXBuildFile; fileRef = 078011F30AFF7C862CC84EA2 /* Chapters.swift */; };
+		DEEBA4AEB0A2810678AE75A8 /* BrandShapes.swift in Sources */ = {isa = PBXBuildFile; fileRef = AD30442210FA84820F34AFFA /* BrandShapes.swift */; };
+		E7216998677F2FC0AA95904D /* ReadiumShared in Frameworks */ = {isa = PBXBuildFile; productRef = 986EE18389766F7F9A0A073C /* ReadiumShared */; };
+		E947D6F44A53440535E00535 /* LocalLibraryStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = A87BC9915B9BC9822A230626 /* LocalLibraryStore.swift */; };
+		F0AC78A999A10B4743D26556 /* HostedClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = 404AC86C65664DDDBD207B14 /* HostedClient.swift */; };
+		F4D72E012E66016633505213 /* Chrome.swift in Sources */ = {isa = PBXBuildFile; fileRef = CEE8A942A4FC81D91F91B828 /* Chrome.swift */; };
+		F5951F6394A0F8940EE096EA /* FeedStartTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = EF7D5E18C99DDD9FB7E68FA4 /* FeedStartTests.swift */; };
+		FFD8D061C84A9E53308029BD /* AppEnvironment.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0CCB64C15AD4564BF9E84C6D /* AppEnvironment.swift */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXContainerItemProxy section */
+		F3F50ADC48E5C4A58E1676D3 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 57FB143E73F3AF9D8FA61F17 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 3C87BB933676C817173A4C92;
+			remoteInfo = Mewo;
+		};
+/* End PBXContainerItemProxy section */
+
+/* Begin PBXFileReference section */
+		04D41FEA962E2855408B8222 /* HostedSessionStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HostedSessionStore.swift; sourceTree = "<group>"; };
+		078011F30AFF7C862CC84EA2 /* Chapters.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Chapters.swift; sourceTree = "<group>"; };
+		0BF2F5C41A43E7C33DD35BF8 /* CommentSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CommentSheet.swift; sourceTree = "<group>"; };
+		0CCB64C15AD4564BF9E84C6D /* AppEnvironment.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppEnvironment.swift; sourceTree = "<group>"; };
+		23C4D1E9C6CD4D23A9541957 /* Mewo.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = Mewo.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		295484C89343CC67CBEA1171 /* SettingsScreen.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsScreen.swift; sourceTree = "<group>"; };
+		29DFEF201A6B13D3111189E1 /* Forms.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Forms.swift; sourceTree = "<group>"; };
+		2BA5FDBC274BF117C398912D /* FeedExtractor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FeedExtractor.swift; sourceTree = "<group>"; };
+		31A3D4FF88DE8A3E4113E80E /* OnboardingScreen.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OnboardingScreen.swift; sourceTree = "<group>"; };
+		404AC86C65664DDDBD207B14 /* HostedClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HostedClient.swift; sourceTree = "<group>"; };
+		4413717A616851102DC7326F /* Models.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Models.swift; sourceTree = "<group>"; };
+		54867A6C884E240F996C501B /* EpubOpener.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EpubOpener.swift; sourceTree = "<group>"; };
+		55E2F9F86972A19713059962 /* atkinson_hyperlegible_regular.ttf */ = {isa = PBXFileReference; lastKnownFileType = file; path = atkinson_hyperlegible_regular.ttf; sourceTree = "<group>"; };
+		55F78BF6CC0B65A066768C02 /* MewoNav.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MewoNav.swift; sourceTree = "<group>"; };
+		66097A819BA2638A705AB13F /* PrefsStores.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PrefsStores.swift; sourceTree = "<group>"; };
+		6B87C077BC50CA491D4F54A5 /* TimelinePost.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TimelinePost.swift; sourceTree = "<group>"; };
+		6E2D86846CDBD40FD4A268B1 /* Typography.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Typography.swift; sourceTree = "<group>"; };
+		705EBB27D5531492D677A876 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
+		708CE92D42A175108892E3FD /* HostedLibraryStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HostedLibraryStore.swift; sourceTree = "<group>"; };
+		7E4122143733BF3C0E670FC4 /* JSONFiles.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = JSONFiles.swift; sourceTree = "<group>"; };
+		8F641640AA8A07BF9DB00616 /* MewoTests.xctest */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.cfbundle; path = MewoTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		950EE3C1B2A5757CC3BB8B09 /* FeedStart.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FeedStart.swift; sourceTree = "<group>"; };
+		970FA89A3AAD94F94309DAFE /* SearchScreen.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SearchScreen.swift; sourceTree = "<group>"; };
+		97D88772A6730ACB57F2E4F3 /* sample.epub */ = {isa = PBXFileReference; path = sample.epub; sourceTree = "<group>"; };
+		A87BC9915B9BC9822A230626 /* LocalLibraryStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LocalLibraryStore.swift; sourceTree = "<group>"; };
+		AD30442210FA84820F34AFFA /* BrandShapes.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BrandShapes.swift; sourceTree = "<group>"; };
+		AFEC328398E1A0775329DF3B /* LibraryScreen.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LibraryScreen.swift; sourceTree = "<group>"; };
+		B66F3FB253EE6724518758AD /* Palette.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Palette.swift; sourceTree = "<group>"; };
+		BB3B10368441863852AAF842 /* MewoApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MewoApp.swift; sourceTree = "<group>"; };
+		BC966410684CE1362C015057 /* ReaderScreen.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReaderScreen.swift; sourceTree = "<group>"; };
+		C72FEE25BCAF45B0E834EF44 /* Keychain.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Keychain.swift; sourceTree = "<group>"; };
+		CEE8A942A4FC81D91F91B828 /* Chrome.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Chrome.swift; sourceTree = "<group>"; };
+		CF102DFB037B91B3520D5624 /* LocalIdentity.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LocalIdentity.swift; sourceTree = "<group>"; };
+		D6800081EED54B5FD6932F36 /* ProfileScreen.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProfileScreen.swift; sourceTree = "<group>"; };
+		D8FE96DF3C1E12D54449DFE0 /* AccountDrawer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AccountDrawer.swift; sourceTree = "<group>"; };
+		DD3458C195D8CB450E09C030 /* LibraryStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LibraryStore.swift; sourceTree = "<group>"; };
+		DF0D3BC3A891755D9AC55253 /* LikesScreen.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LikesScreen.swift; sourceTree = "<group>"; };
+		ED562555052DC0650FBC08AF /* atkinson_hyperlegible_bold.ttf */ = {isa = PBXFileReference; lastKnownFileType = file; path = atkinson_hyperlegible_bold.ttf; sourceTree = "<group>"; };
+		EF7D5E18C99DDD9FB7E68FA4 /* FeedStartTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FeedStartTests.swift; sourceTree = "<group>"; };
+/* End PBXFileReference section */
+
+/* Begin PBXFrameworksBuildPhase section */
+		D52988C34E0ED94AC9B7CE79 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				E7216998677F2FC0AA95904D /* ReadiumShared in Frameworks */,
+				789C0D5E0E7EA4118B3A74E2 /* ReadiumStreamer in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXFrameworksBuildPhase section */
+
+/* Begin PBXGroup section */
+		02900E1E83AF6E9F1F71F5BF /* UI */ = {
+			isa = PBXGroup;
+			children = (
+				55F78BF6CC0B65A066768C02 /* MewoNav.swift */,
+				D3B35E1617E43C881A593A52 /* Components */,
+				E857EC583EF5616AFE0B3395 /* Library */,
+				5187016151124487A3E105BA /* Likes */,
+				D752BDCB6E93FA0C9AD9BB92 /* Onboarding */,
+				42AA919F3188099F7F33FE6E /* Profile */,
+				B2126A7CA0D8DC7C891FFA87 /* Reader */,
+				EDA6A98AD9A20AAB6DE3342A /* Search */,
+				49C159DA4FC7AC7CECAF5DB0 /* Settings */,
+				5BEED050EE20B6211A6A6423 /* Theme */,
+			);
+			path = UI;
+			sourceTree = "<group>";
+		};
+		0C61FCC22067C4ED04D7E1AF /* App */ = {
+			isa = PBXGroup;
+			children = (
+				0CCB64C15AD4564BF9E84C6D /* AppEnvironment.swift */,
+				BB3B10368441863852AAF842 /* MewoApp.swift */,
+			);
+			path = App;
+			sourceTree = "<group>";
+		};
+		42AA919F3188099F7F33FE6E /* Profile */ = {
+			isa = PBXGroup;
+			children = (
+				D6800081EED54B5FD6932F36 /* ProfileScreen.swift */,
+			);
+			path = Profile;
+			sourceTree = "<group>";
+		};
+		49C159DA4FC7AC7CECAF5DB0 /* Settings */ = {
+			isa = PBXGroup;
+			children = (
+				295484C89343CC67CBEA1171 /* SettingsScreen.swift */,
+			);
+			path = Settings;
+			sourceTree = "<group>";
+		};
+		5187016151124487A3E105BA /* Likes */ = {
+			isa = PBXGroup;
+			children = (
+				DF0D3BC3A891755D9AC55253 /* LikesScreen.swift */,
+			);
+			path = Likes;
+			sourceTree = "<group>";
+		};
+		5BEED050EE20B6211A6A6423 /* Theme */ = {
+			isa = PBXGroup;
+			children = (
+				B66F3FB253EE6724518758AD /* Palette.swift */,
+				6E2D86846CDBD40FD4A268B1 /* Typography.swift */,
+			);
+			path = Theme;
+			sourceTree = "<group>";
+		};
+		62ECD183774CEDE402A2566D /* Fonts */ = {
+			isa = PBXGroup;
+			children = (
+				ED562555052DC0650FBC08AF /* atkinson_hyperlegible_bold.ttf */,
+				55E2F9F86972A19713059962 /* atkinson_hyperlegible_regular.ttf */,
+			);
+			path = Fonts;
+			sourceTree = "<group>";
+		};
+		6AA59CA6805E48CE1A9F7FB9 /* Mewo */ = {
+			isa = PBXGroup;
+			children = (
+				0C61FCC22067C4ED04D7E1AF /* App */,
+				F1AA73F53C09F830773137D7 /* Data */,
+				798E1B989CB0FFBF35911A85 /* Resources */,
+				02900E1E83AF6E9F1F71F5BF /* UI */,
+			);
+			path = Mewo;
+			sourceTree = "<group>";
+		};
+		798E1B989CB0FFBF35911A85 /* Resources */ = {
+			isa = PBXGroup;
+			children = (
+				705EBB27D5531492D677A876 /* Assets.xcassets */,
+				97D88772A6730ACB57F2E4F3 /* sample.epub */,
+				62ECD183774CEDE402A2566D /* Fonts */,
+			);
+			path = Resources;
+			sourceTree = "<group>";
+		};
+		8955DCA37D7AED56A2A2E265 = {
+			isa = PBXGroup;
+			children = (
+				6AA59CA6805E48CE1A9F7FB9 /* Mewo */,
+				F8DE7624F01C899F24131767 /* MewoTests */,
+				D1B3070CDC219A617DA00B22 /* Products */,
+			);
+			sourceTree = "<group>";
+		};
+		B2126A7CA0D8DC7C891FFA87 /* Reader */ = {
+			isa = PBXGroup;
+			children = (
+				0BF2F5C41A43E7C33DD35BF8 /* CommentSheet.swift */,
+				BC966410684CE1362C015057 /* ReaderScreen.swift */,
+				6B87C077BC50CA491D4F54A5 /* TimelinePost.swift */,
+			);
+			path = Reader;
+			sourceTree = "<group>";
+		};
+		D1B3070CDC219A617DA00B22 /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				23C4D1E9C6CD4D23A9541957 /* Mewo.app */,
+				8F641640AA8A07BF9DB00616 /* MewoTests.xctest */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+		D3B35E1617E43C881A593A52 /* Components */ = {
+			isa = PBXGroup;
+			children = (
+				D8FE96DF3C1E12D54449DFE0 /* AccountDrawer.swift */,
+				AD30442210FA84820F34AFFA /* BrandShapes.swift */,
+				CEE8A942A4FC81D91F91B828 /* Chrome.swift */,
+				29DFEF201A6B13D3111189E1 /* Forms.swift */,
+			);
+			path = Components;
+			sourceTree = "<group>";
+		};
+		D752BDCB6E93FA0C9AD9BB92 /* Onboarding */ = {
+			isa = PBXGroup;
+			children = (
+				31A3D4FF88DE8A3E4113E80E /* OnboardingScreen.swift */,
+			);
+			path = Onboarding;
+			sourceTree = "<group>";
+		};
+		E857EC583EF5616AFE0B3395 /* Library */ = {
+			isa = PBXGroup;
+			children = (
+				AFEC328398E1A0775329DF3B /* LibraryScreen.swift */,
+			);
+			path = Library;
+			sourceTree = "<group>";
+		};
+		EDA6A98AD9A20AAB6DE3342A /* Search */ = {
+			isa = PBXGroup;
+			children = (
+				970FA89A3AAD94F94309DAFE /* SearchScreen.swift */,
+			);
+			path = Search;
+			sourceTree = "<group>";
+		};
+		F1AA73F53C09F830773137D7 /* Data */ = {
+			isa = PBXGroup;
+			children = (
+				078011F30AFF7C862CC84EA2 /* Chapters.swift */,
+				54867A6C884E240F996C501B /* EpubOpener.swift */,
+				2BA5FDBC274BF117C398912D /* FeedExtractor.swift */,
+				950EE3C1B2A5757CC3BB8B09 /* FeedStart.swift */,
+				404AC86C65664DDDBD207B14 /* HostedClient.swift */,
+				708CE92D42A175108892E3FD /* HostedLibraryStore.swift */,
+				04D41FEA962E2855408B8222 /* HostedSessionStore.swift */,
+				7E4122143733BF3C0E670FC4 /* JSONFiles.swift */,
+				C72FEE25BCAF45B0E834EF44 /* Keychain.swift */,
+				DD3458C195D8CB450E09C030 /* LibraryStore.swift */,
+				CF102DFB037B91B3520D5624 /* LocalIdentity.swift */,
+				A87BC9915B9BC9822A230626 /* LocalLibraryStore.swift */,
+				4413717A616851102DC7326F /* Models.swift */,
+				66097A819BA2638A705AB13F /* PrefsStores.swift */,
+			);
+			path = Data;
+			sourceTree = "<group>";
+		};
+		F8DE7624F01C899F24131767 /* MewoTests */ = {
+			isa = PBXGroup;
+			children = (
+				EF7D5E18C99DDD9FB7E68FA4 /* FeedStartTests.swift */,
+			);
+			path = MewoTests;
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		3C87BB933676C817173A4C92 /* Mewo */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 26F18F30BDC78EFB5D812CF2 /* Build configuration list for PBXNativeTarget "Mewo" */;
+			buildPhases = (
+				23ED91217D0060143D8F90C6 /* Sources */,
+				22E5410D7F4A41F6FBE447AA /* Resources */,
+				D52988C34E0ED94AC9B7CE79 /* Frameworks */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = Mewo;
+			packageProductDependencies = (
+				986EE18389766F7F9A0A073C /* ReadiumShared */,
+				3663EDCE82E6FCA3DDF30496 /* ReadiumStreamer */,
+			);
+			productName = Mewo;
+			productReference = 23C4D1E9C6CD4D23A9541957 /* Mewo.app */;
+			productType = "com.apple.product-type.application";
+		};
+		D52436ED1190D06C8BDD0D1D /* MewoTests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 9C8717D78EDD9AFDD9D60156 /* Build configuration list for PBXNativeTarget "MewoTests" */;
+			buildPhases = (
+				055BD3CDCD47CE0DB4DD78F9 /* Sources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				EB899CC33FB9E153FCA3CA6B /* PBXTargetDependency */,
+			);
+			name = MewoTests;
+			packageProductDependencies = (
+			);
+			productName = MewoTests;
+			productReference = 8F641640AA8A07BF9DB00616 /* MewoTests.xctest */;
+			productType = "com.apple.product-type.bundle.unit-test";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		57FB143E73F3AF9D8FA61F17 /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = YES;
+				LastUpgradeCheck = 2600;
+				TargetAttributes = {
+					3C87BB933676C817173A4C92 = {
+						DevelopmentTeam = "";
+						ProvisioningStyle = Automatic;
+					};
+					D52436ED1190D06C8BDD0D1D = {
+						DevelopmentTeam = "";
+						ProvisioningStyle = Automatic;
+					};
+				};
+			};
+			buildConfigurationList = 8A5C5734B95EA64750CA31B2 /* Build configuration list for PBXProject "Mewo" */;
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				Base,
+				en,
+			);
+			mainGroup = 8955DCA37D7AED56A2A2E265;
+			minimizedProjectReferenceProxies = 1;
+			packageReferences = (
+				5E44EC96CB17D0D79F29B78F /* XCRemoteSwiftPackageReference "swift-toolkit" */,
+			);
+			preferredProjectObjectVersion = 77;
+			productRefGroup = D1B3070CDC219A617DA00B22 /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				3C87BB933676C817173A4C92 /* Mewo */,
+				D52436ED1190D06C8BDD0D1D /* MewoTests */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXResourcesBuildPhase section */
+		22E5410D7F4A41F6FBE447AA /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				649DD2B6EB6D6E3026C1B4C9 /* Assets.xcassets in Resources */,
+				C780526290172A5F85ACF442 /* atkinson_hyperlegible_bold.ttf in Resources */,
+				816A10E932C203E1578BB5EF /* atkinson_hyperlegible_regular.ttf in Resources */,
+				64BD778022E084487F1143F8 /* sample.epub in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXResourcesBuildPhase section */
+
+/* Begin PBXSourcesBuildPhase section */
+		055BD3CDCD47CE0DB4DD78F9 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				F5951F6394A0F8940EE096EA /* FeedStartTests.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		23ED91217D0060143D8F90C6 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				CAABF2658C368BE3B19F37E6 /* AccountDrawer.swift in Sources */,
+				FFD8D061C84A9E53308029BD /* AppEnvironment.swift in Sources */,
+				DEEBA4AEB0A2810678AE75A8 /* BrandShapes.swift in Sources */,
+				DD931482001A225BEDC8D12E /* Chapters.swift in Sources */,
+				F4D72E012E66016633505213 /* Chrome.swift in Sources */,
+				A1FDCEF022CA0872C2772BDB /* CommentSheet.swift in Sources */,
+				A04DFC4E8B7F7E228028F44C /* EpubOpener.swift in Sources */,
+				4859584999155A51ABAEAB3C /* FeedExtractor.swift in Sources */,
+				26F7E79B0E9657631014E083 /* FeedStart.swift in Sources */,
+				66CAE5E7098F182C18FA5927 /* Forms.swift in Sources */,
+				F0AC78A999A10B4743D26556 /* HostedClient.swift in Sources */,
+				116D7C4D5A8CC7F9236A5498 /* HostedLibraryStore.swift in Sources */,
+				5C4397838BF236B2F0050192 /* HostedSessionStore.swift in Sources */,
+				21AC49C554877DA111643827 /* JSONFiles.swift in Sources */,
+				665DA70D7778CFAA26318FB1 /* Keychain.swift in Sources */,
+				B5CA2DDD074618ED494DA07B /* LibraryScreen.swift in Sources */,
+				19D539D31156FA009CEE510E /* LibraryStore.swift in Sources */,
+				AC92F8ED719F79BBA040B43E /* LikesScreen.swift in Sources */,
+				60E574DB0C2B9EED9BAAAD63 /* LocalIdentity.swift in Sources */,
+				E947D6F44A53440535E00535 /* LocalLibraryStore.swift in Sources */,
+				C34B86E48FE9C9ABFE3E66CE /* MewoApp.swift in Sources */,
+				B25B1852F3E23482F103FA49 /* MewoNav.swift in Sources */,
+				4F744DD8DCE299549B68601D /* Models.swift in Sources */,
+				6F3277E21AEF9848E3E12467 /* OnboardingScreen.swift in Sources */,
+				2EC27BE1DA4203676DD7F120 /* Palette.swift in Sources */,
+				211196AB773E70E817E87F65 /* PrefsStores.swift in Sources */,
+				B9470F3D756CCE831B5EFC90 /* ProfileScreen.swift in Sources */,
+				9DD13E2F4C93527A050EEC35 /* ReaderScreen.swift in Sources */,
+				581583C61BFE96E765BE7B7B /* SearchScreen.swift in Sources */,
+				17728937C6BA3C75D9E687D1 /* SettingsScreen.swift in Sources */,
+				1C318AC51189C338327EDC1C /* TimelinePost.swift in Sources */,
+				A85B633723EAE2257B459A85 /* Typography.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin PBXTargetDependency section */
+		EB899CC33FB9E153FCA3CA6B /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 3C87BB933676C817173A4C92 /* Mewo */;
+			targetProxy = F3F50ADC48E5C4A58E1676D3 /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
+
+/* Begin XCBuildConfiguration section */
+		247944D3754D3DB41D98E90A /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = "";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@loader_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.mewo.reader.tests;
+				SDKROOT = iphoneos;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Mewo.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/Mewo";
+			};
+			name = Debug;
+		};
+		2A95ECB4976C0FE790AF0008 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_ALTERNATE_APPICON_NAMES = AppIconTeddy;
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_IDENTITY = "iPhone Developer";
+				INFOPLIST_FILE = Mewo/Resources/Info.plist;
+				INFOPLIST_KEY_CFBundleDisplayName = Mewo;
+				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.books";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				PRODUCT_NAME = Mewo;
+				SDKROOT = iphoneos;
+				SUPPORTS_MAC_DESIGNED_FOR_IPHONE_IPAD = NO;
+				SUPPORTS_XR_DESIGNED_FOR_IPHONE_IPAD = NO;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Debug;
+		};
+		A791DF493B0FCA2ED892F608 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_ALTERNATE_APPICON_NAMES = AppIconTeddy;
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_IDENTITY = "iPhone Developer";
+				INFOPLIST_FILE = Mewo/Resources/Info.plist;
+				INFOPLIST_KEY_CFBundleDisplayName = Mewo;
+				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.books";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				PRODUCT_NAME = Mewo;
+				SDKROOT = iphoneos;
+				SUPPORTS_MAC_DESIGNED_FOR_IPHONE_IPAD = NO;
+				SUPPORTS_XR_DESIGNED_FOR_IPHONE_IPAD = NO;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Release;
+		};
+		C7A6C2B75F6DE3D567AC3308 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++14";
+				CLANG_CXX_LIBRARY = "libc++";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				CODE_SIGN_STYLE = Automatic;
+				COPY_PHASE_STRIP = NO;
+				CURRENT_PROJECT_VERSION = 1;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				DEVELOPMENT_TEAM = "";
+				ENABLE_NS_ASSERTIONS = NO;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu11;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = Mewo/Resources/Info.plist;
+				IPHONEOS_DEPLOYMENT_TARGET = 26.0;
+				MARKETING_VERSION = 0.1.0;
+				MTL_ENABLE_DEBUG_INFO = NO;
+				MTL_FAST_MATH = YES;
+				PRODUCT_BUNDLE_IDENTIFIER = com.mewo.reader;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				SWIFT_COMPILATION_MODE = wholemodule;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_OPTIMIZATION_LEVEL = "-O";
+				SWIFT_VERSION = 5.1;
+				TARGETED_DEVICE_FAMILY = 1;
+			};
+			name = Release;
+		};
+		CED18A9CF6403E4A7DE76735 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++14";
+				CLANG_CXX_LIBRARY = "libc++";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				CODE_SIGN_STYLE = Automatic;
+				COPY_PHASE_STRIP = NO;
+				CURRENT_PROJECT_VERSION = 1;
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				DEVELOPMENT_TEAM = "";
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_TESTABILITY = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu11;
+				GCC_DYNAMIC_NO_PIC = NO;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_OPTIMIZATION_LEVEL = 0;
+				GCC_PREPROCESSOR_DEFINITIONS = (
+					"$(inherited)",
+					"DEBUG=1",
+				);
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = Mewo/Resources/Info.plist;
+				IPHONEOS_DEPLOYMENT_TARGET = 26.0;
+				MARKETING_VERSION = 0.1.0;
+				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
+				MTL_FAST_MATH = YES;
+				ONLY_ACTIVE_ARCH = YES;
+				PRODUCT_BUNDLE_IDENTIFIER = com.mewo.reader;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = DEBUG;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+				SWIFT_VERSION = 5.1;
+				TARGETED_DEVICE_FAMILY = 1;
+			};
+			name = Debug;
+		};
+		D49E34FAF06A06D4D82D6158 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = "";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@loader_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.mewo.reader.tests;
+				SDKROOT = iphoneos;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Mewo.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/Mewo";
+			};
+			name = Release;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		26F18F30BDC78EFB5D812CF2 /* Build configuration list for PBXNativeTarget "Mewo" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				2A95ECB4976C0FE790AF0008 /* Debug */,
+				A791DF493B0FCA2ED892F608 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		8A5C5734B95EA64750CA31B2 /* Build configuration list for PBXProject "Mewo" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				CED18A9CF6403E4A7DE76735 /* Debug */,
+				C7A6C2B75F6DE3D567AC3308 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		9C8717D78EDD9AFDD9D60156 /* Build configuration list for PBXNativeTarget "MewoTests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				247944D3754D3DB41D98E90A /* Debug */,
+				D49E34FAF06A06D4D82D6158 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+/* End XCConfigurationList section */
+
+/* Begin XCRemoteSwiftPackageReference section */
+		5E44EC96CB17D0D79F29B78F /* XCRemoteSwiftPackageReference "swift-toolkit" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/readium/swift-toolkit.git";
+			requirement = {
+				kind = upToNextMajorVersion;
+				minimumVersion = 3.3.0;
+			};
+		};
+/* End XCRemoteSwiftPackageReference section */
+
+/* Begin XCSwiftPackageProductDependency section */
+		3663EDCE82E6FCA3DDF30496 /* ReadiumStreamer */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 5E44EC96CB17D0D79F29B78F /* XCRemoteSwiftPackageReference "swift-toolkit" */;
+			productName = ReadiumStreamer;
+		};
+		986EE18389766F7F9A0A073C /* ReadiumShared */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 5E44EC96CB17D0D79F29B78F /* XCRemoteSwiftPackageReference "swift-toolkit" */;
+			productName = ReadiumShared;
+		};
+/* End XCSwiftPackageProductDependency section */
+	};
+	rootObject = 57FB143E73F3AF9D8FA61F17 /* Project object */;
+}
