@@ -5,6 +5,27 @@ plugins {
     id("org.jetbrains.kotlin.plugin.serialization")
 }
 
+fun envOrProp(name: String): String? {
+    val fromEnv = System.getenv(name)?.trim().orEmpty()
+    if (fromEnv.isNotEmpty()) return fromEnv
+    return (findProperty(name) as String?)?.trim()?.takeIf { it.isNotEmpty() }
+}
+
+val releaseStoreFile = envOrProp("MEWO_STORE_FILE")
+val releaseStorePassword = envOrProp("MEWO_STORE_PASSWORD")
+val releaseKeyAlias = envOrProp("MEWO_KEY_ALIAS")
+val releaseKeyPassword = envOrProp("MEWO_KEY_PASSWORD")
+val releaseSigningConfigured = releaseStoreFile != null
+if (releaseSigningConfigured) {
+    require(
+        releaseStorePassword != null &&
+            releaseKeyAlias != null &&
+            releaseKeyPassword != null,
+    ) {
+        "MEWO_STORE_FILE is set. Also set MEWO_STORE_PASSWORD, MEWO_KEY_ALIAS, and MEWO_KEY_PASSWORD."
+    }
+}
+
 android {
     namespace = "com.mewo.reader"
     compileSdk = 36
@@ -13,8 +34,19 @@ android {
         applicationId = "com.mewo.reader"
         minSdk = 26
         targetSdk = 36
-        versionCode = 1
-        versionName = "0.1.0"
+        versionCode = envOrProp("MEWO_VERSION_CODE")?.toInt() ?: 1
+        versionName = envOrProp("MEWO_VERSION_NAME") ?: "0.1.0"
+    }
+
+    signingConfigs {
+        if (releaseSigningConfigured) {
+            create("release") {
+                storeFile = file(releaseStoreFile!!)
+                storePassword = releaseStorePassword
+                keyAlias = releaseKeyAlias
+                keyPassword = releaseKeyPassword
+            }
+        }
     }
 
     buildTypes {
@@ -24,6 +56,9 @@ android {
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro",
             )
+            if (releaseSigningConfigured) {
+                signingConfig = signingConfigs.getByName("release")
+            }
         }
     }
 

@@ -33,6 +33,48 @@ cd android
 
 The APK lands at `android/app/build/outputs/apk/debug/app-debug.apk`.
 
+### Release
+
+A tag `vMAJOR.MINOR.PATCH` (example: `v0.1.0`) runs `:app:assembleRelease` in CI. The workflow sets `versionName` from the tag and `versionCode` to `major * 1000000 + minor * 1000 + patch`, then attaches `mewo-<version>.apk` to the GitHub Release.
+
+PRs that touch `android/` run the same Gradle task without signing, so a broken release compile fails the PR. `workflow_dispatch` builds a signed APK when you want one without tagging.
+
+Friends who already installed a debug APK have to uninstall it before a release APK will install. The signatures differ. Later `v*` releases then upgrade in place.
+
+#### Signing secrets
+
+CI signs with a release keystore. Create one and keep a backup outside this repo:
+
+```bash
+keytool -genkeypair -v \
+  -keystore mewo-release.jks \
+  -keyalg RSA -keysize 2048 -validity 10000 \
+  -alias mewo \
+  -storetype JKS
+```
+
+Set these repo Actions secrets (`gh secret set NAME`):
+
+- `MEWO_STORE_BASE64` - `base64 -w0 mewo-release.jks` (on macOS: `base64 < mewo-release.jks | tr -d '\n'`)
+- `MEWO_STORE_PASSWORD`
+- `MEWO_KEY_ALIAS` - `mewo` if you used the command above
+- `MEWO_KEY_PASSWORD`
+
+A tagged release fails out loud if any of those are missing.
+
+#### Local release build
+
+```bash
+export MEWO_STORE_FILE=/path/to/mewo-release.jks
+export MEWO_STORE_PASSWORD=...
+export MEWO_KEY_ALIAS=mewo
+export MEWO_KEY_PASSWORD=...
+cd android
+./gradlew :app:assembleRelease --max-workers=12
+```
+
+The APK lands at `android/app/build/outputs/apk/release/app-release.apk`. You can put the same four names in `~/.gradle/gradle.properties` instead of exporting them.
+
 ### Sideload
 
 Mewo is not on the Play Store. You install the APK yourself.
@@ -60,7 +102,7 @@ Same commands work on an emulator.
 
 Send them the APK. Tell them to open the file on the phone and allow the one-time "install unknown apps" prompt. First open asks for a handle. They do not need Android Studio, adb, or a Google account for Mewo.
 
-Debug builds expire in the sense that you can overwrite them with `adb install -r`. They are not signed for Play. Don't put this APK on a public link if you care about people running unsigned debug code.
+Debug builds expire in the sense that you can overwrite them with `adb install -r`. They use the local debug keystore, not the release key. Send friends a GitHub Release APK, not `app-debug.apk`.
 
 ### Emulator
 

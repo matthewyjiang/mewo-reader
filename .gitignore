@@ -19,4 +19,7 @@
 *.apk
 *.ap_
 *.aab
+*.jks
+*.keystore
+keystore.properties
 .cxx/
