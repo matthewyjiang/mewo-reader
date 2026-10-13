@@ -33,7 +33,7 @@ Used on a phone, often in bed or on a couch, one-handed. Books come from files t
 - Persist the library on device, or on a hosted server you sign into
 - Read as a vertical feed: one post per paragraph, including long ones
 - Start the feed at the first non-publisher TOC entry, not copyright or contents
-- Remember reading place per book
+- Remember reading place per book. A book read to the last post sits under Finished on Home, and returns to the timeline if you leave off earlier
 - Jump to a heading from the chapter line or the reader title
 - Hide the title bar and tab bar when scrolling down a feed, show them when scrolling up
 - Like a passage and keep that like

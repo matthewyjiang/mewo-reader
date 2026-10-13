@@ -4,7 +4,6 @@ import UniformTypeIdentifiers
 @Observable
 @MainActor
 final class LibraryViewModel {
-    var books: [BookRecord] = []
     var busy = false
     var error: String?
     private let env: AppEnvironment
@@ -20,7 +19,6 @@ final class LibraryViewModel {
     func load() async {
         do {
             try await env.library.load()
-            books = env.library.books
         } catch {
             self.error = error.localizedDescription
         }
@@ -38,7 +36,6 @@ final class LibraryViewModel {
         Task {
             do {
                 try await env.library.delete(id: id)
-                books = env.library.books
             } catch {
                 self.error = error.localizedDescription
             }
@@ -51,7 +48,6 @@ final class LibraryViewModel {
             error = nil
             do {
                 try await block()
-                books = env.library.books
             } catch {
                 self.error = error.localizedDescription
             }
@@ -82,7 +78,7 @@ struct LibraryScreen: View {
         ZStack(alignment: .bottomTrailing) {
             VStack(spacing: 0) {
                 MewoAppBar(visible: chrome.visible, leading: { ProfileButton(onClick: onOpenAccount) }, center: { BrandMark() })
-                if model.books.isEmpty && !model.busy {
+                if shelf.isEmpty && !model.busy {
                     empty
                 } else {
                     list
@@ -130,11 +126,17 @@ struct LibraryScreen: View {
         }
         .onAppear {
             model.start()
-            chrome.showWhenIdle(model.books.isEmpty)
+            chrome.showWhenIdle(shelf.isEmpty)
         }
-        .onChange(of: model.books.count) { _, count in
+        .onChange(of: shelf.count) { _, count in
             chrome.showWhenIdle(count == 0)
         }
+    }
+
+    /// Live shelf, not the view-model snapshot. Progress saved in the reader
+    /// has to move a book under Finished when you come back.
+    private var shelf: [BookRecord] {
+        app.backend.kind == .hosted ? app.hostedLibrary.books : app.localLibrary.books
     }
 
     private var empty: some View {
@@ -172,18 +174,37 @@ struct LibraryScreen: View {
         .padding(.horizontal, 28)
     }
 
+    private var reading: [BookRecord] { shelf.filter { !$0.isFinished } }
+    private var finished: [BookRecord] { shelf.filter(\.isFinished) }
+
     private var list: some View {
         ScrollView {
             LazyVStack(spacing: 0) {
                 offsetTracker
-                ForEach(model.books) { book in
+                ForEach(reading) { book in
                     bookRow(book)
                     Hairline()
+                }
+                if !finished.isEmpty {
+                    sectionLabel("Finished")
+                    ForEach(finished) { book in
+                        bookRow(book)
+                        Hairline()
+                    }
                 }
             }
             .padding(.bottom, 96)
         }
         .scrollIndicators(.hidden)
+    }
+
+    private func sectionLabel(_ text: String) -> some View {
+        Text(text)
+            .font(MewoFont.regular(13))
+            .foregroundStyle(mewo.mute)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, 16)
+            .padding(.vertical, 10)
     }
 
     private var offsetTracker: some View {

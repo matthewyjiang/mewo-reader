@@ -127,7 +127,7 @@ Avatars and the FAB are circles. The empty-state add control is a pill. Posts ha
 
 **Profile.** Full-screen destination. Back, the name, and "N posts" in the 56dp bar. A 125dp hover banner, then a 68dp letter avatar overlapping it with a 4dp ground ring. Name, @handle, and one Posts tab with an accent underline. The tab is replies for now: original line above, reply below, 2dp rule down the avatar column, action row on the line. Newest first. Empty copy: "Reply to a line. It shows up here." on your profile, "No posts yet." on someone else's. Tap a row to open that line's comment sheet. The tab bar stays. Back leaves.
 
-**Book row.** Same skeleton as a post. Title is the name. Progress is the body line.
+**Book row.** Same skeleton as a post. Title is the name. Progress is the body line. Home stays one timeline. A book whose saved place is the last post drops under a mute Finished label, and the line reads "N posts · Finished". Scroll back up in that book and it returns above the label. Unopened and in-progress books stay on top, newest import first. No Finished label when nothing is finished.
 
 **Empty timeline.** Headline, one sentence, pill to add a file, text button for the sample.
 

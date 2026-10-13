@@ -34,6 +34,28 @@ final class FeedStartTests: XCTestCase {
         XCTAssertFalse(sameHeading("Something else", tocTitle: "Chapter One"))
     }
 
+    func testFinishedBooksLeaveTheTimeline() {
+        func book(_ id: String, posts: Int, index: Int) -> BookRecord {
+            BookRecord(
+                id: id, title: id, author: "Author", handle: "author",
+                importedAt: 1, postCount: posts, progressIndex: index
+            )
+        }
+        let unread = book("unread", posts: 0, index: 0)
+        let reading = book("reading", posts: 10, index: 3)
+        let atEnd = book("end", posts: 10, index: 9)
+        let onePost = book("one", posts: 1, index: 0)
+        let onePostDone = book("done", posts: 1, index: 1)
+        XCTAssertFalse(unread.isFinished)
+        XCTAssertFalse(reading.isFinished)
+        XCTAssertTrue(atEnd.isFinished)
+        XCTAssertFalse(onePost.isFinished)
+        XCTAssertTrue(onePostDone.isFinished)
+        XCTAssertEqual(statusLine(for: unread), "Not opened yet")
+        XCTAssertEqual(statusLine(for: reading), "10 posts · 40%")
+        XCTAssertEqual(statusLine(for: atEnd), "10 posts · Finished")
+    }
+
     func testHandleRules() {
         XCTAssertFalse(LocalIdentity.parse(name: "", handle: "ab").isSuccess)
         XCTAssertTrue(LocalIdentity.parse(name: "Matt", handle: "matt").isSuccess)

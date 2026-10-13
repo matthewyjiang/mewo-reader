@@ -18,6 +18,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyListScope
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
@@ -49,6 +50,7 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.mewo.reader.data.BackendKind
 import com.mewo.reader.data.BookRecord
+import com.mewo.reader.data.LibraryStore
 import com.mewo.reader.ui.LocalBackend
 import com.mewo.reader.ui.LocalLibraryStore
 import com.mewo.reader.ui.components.Avatar
@@ -93,6 +95,8 @@ fun LibraryScreen(
             } else {
                 val listState = rememberLazyListState()
                 hideOnScroll.BindListTop(listState)
+                val reading = state.books.filterNot { it.isFinished }
+                val finished = state.books.filter { it.isFinished }
                 LazyColumn(
                     state = listState,
                     modifier = Modifier
@@ -100,21 +104,10 @@ fun LibraryScreen(
                         .nestedScroll(hideOnScroll.connection),
                     contentPadding = PaddingValues(bottom = 96.dp),
                 ) {
-                    items(state.books, key = { it.id }) { book ->
-                        BookPost(
-                            book = book,
-                            cover = library.coverFile(book.id),
-                            onOpen = { onOpenBook(book.id) },
-                            onDelete = if (book.mine) {
-                                { pendingDelete = book }
-                            } else {
-                                null
-                            },
-                        )
-                        HorizontalDivider(
-                            color = MaterialTheme.colorScheme.outline,
-                            thickness = 0.6.dp,
-                        )
+                    bookRows(reading, library, onOpenBook) { pendingDelete = it }
+                    if (finished.isNotEmpty()) {
+                        item(key = "section-finished") { SectionLabel("Finished") }
+                        bookRows(finished, library, onOpenBook) { pendingDelete = it }
                     }
                 }
             }
@@ -261,6 +254,50 @@ private fun EmptyTimeline(
     }
 }
 
+private fun LazyListScope.bookRows(
+    books: List<BookRecord>,
+    library: LibraryStore,
+    onOpenBook: (String) -> Unit,
+    onDelete: (BookRecord) -> Unit,
+) {
+    items(books, key = { it.id }) { book ->
+        ShelfBook(
+            book = book,
+            cover = library.coverFile(book.id),
+            onOpen = { onOpenBook(book.id) },
+            onDelete = if (book.mine) {
+                { onDelete(book) }
+            } else {
+                null
+            },
+        )
+    }
+}
+
+@Composable
+private fun SectionLabel(text: String) {
+    Text(
+        text = text,
+        style = MaterialTheme.typography.labelSmall,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+        modifier = Modifier.padding(horizontal = 16.dp, vertical = 10.dp),
+    )
+}
+
+@Composable
+private fun ShelfBook(
+    book: BookRecord,
+    cover: File?,
+    onOpen: () -> Unit,
+    onDelete: (() -> Unit)?,
+) {
+    BookPost(book = book, cover = cover, onOpen = onOpen, onDelete = onDelete)
+    HorizontalDivider(
+        color = MaterialTheme.colorScheme.outline,
+        thickness = 0.6.dp,
+    )
+}
+
 @Composable
 private fun BookPost(
     book: BookRecord,
@@ -313,6 +350,7 @@ private fun BookPost(
 
 private fun statusLine(book: BookRecord): String {
     val count = if (book.postCount > 0) "${book.postCount} posts" else "Not opened yet"
+    if (book.isFinished) return "$count · Finished"
     val progress = if (book.postCount > 0 && book.progressIndex > 0) {
         val pct = ((book.progressIndex + 1) * 100 / book.postCount).coerceIn(1, 100)
         " · $pct%"

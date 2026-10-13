@@ -14,6 +14,13 @@ struct BookRecord: Codable, Equatable, Identifiable, Hashable, Sendable {
     var progressIndex: Int = 0
     var isSample: Bool = false
     var mine: Bool = true
+
+    /// Saved place is the last post. Index 0 is the start, so an unopened
+    /// book stays on the timeline. A one-post book finishes when the reader
+    /// scrolls onto the end card and the index moves past 0.
+    var isFinished: Bool {
+        postCount > 0 && progressIndex >= max(1, postCount - 1)
+    }
 }
 
 struct FeedCache: Codable, Equatable, Sendable {
@@ -178,6 +185,7 @@ func quoteLine(author: String?, title: String?, text: String) -> String {
 
 func statusLine(for book: BookRecord) -> String {
     let count = book.postCount > 0 ? "\(book.postCount) posts" : "Not opened yet"
+    if book.isFinished { return "\(count) · Finished" }
     if book.postCount > 0 && book.progressIndex > 0 {
         let pct = min(100, max(1, (book.progressIndex + 1) * 100 / book.postCount))
         return "\(count) · \(pct)%"

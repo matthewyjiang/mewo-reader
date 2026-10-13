@@ -18,7 +18,15 @@ data class BookRecord(
     val progressIndex: Int = 0,
     val isSample: Boolean = false,
     val mine: Boolean = true,
-)
+) {
+    /**
+     * Saved place is the last post. Index 0 is the start, so an unopened
+     * book stays on the timeline. A one-post book finishes when the reader
+     * scrolls onto the end card and the index moves past 0.
+     */
+    val isFinished: Boolean
+        get() = postCount > 0 && progressIndex >= maxOf(1, postCount - 1)
+}
 
 @Serializable
 data class FeedCache(
