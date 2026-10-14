@@ -21,12 +21,13 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListScope
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
-import androidx.compose.foundation.selection.toggleable
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.People
 import androidx.compose.material.icons.outlined.Add
 import androidx.compose.material.icons.outlined.Delete
+import androidx.compose.material.icons.outlined.Lock
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.FloatingActionButton
@@ -35,7 +36,6 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Snackbar
-import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -46,11 +46,9 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.semantics.Role
-import androidx.compose.ui.semantics.clearAndSetSemantics
-import androidx.compose.ui.semantics.contentDescription
-import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.mewo.reader.data.BackendKind
@@ -368,16 +366,17 @@ private fun ShelfBook(
 }
 
 @Composable
-private fun BookPost(
+internal fun BookPost(
     book: BookRecord,
     cover: File?,
     showOwner: Boolean,
     onOpen: () -> Unit,
     onDelete: (() -> Unit)?,
     onShare: ((Boolean) -> Unit)?,
+    modifier: Modifier = Modifier,
 ) {
     Row(
-        modifier = Modifier.fillMaxWidth(),
+        modifier = modifier.fillMaxWidth(),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Row(
@@ -426,21 +425,26 @@ private fun BookPost(
                 }
             }
         }
-        if (onShare != null) {
-            ShareSwitch(book = book, onShare = onShare)
-        }
-        if (onDelete != null) {
-            IconButton(
-                onClick = onDelete,
-                modifier = Modifier
-                    .padding(end = 8.dp)
-                    .size(40.dp),
+        if (onShare != null || onDelete != null) {
+            Row(
+                modifier = Modifier.padding(end = 8.dp),
+                verticalAlignment = Alignment.CenterVertically,
             ) {
-                Icon(
-                    Icons.Outlined.Delete,
-                    contentDescription = "Remove ${book.title}",
-                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
+                if (onShare != null) {
+                    val shared = book.shared
+                    RowActionButton(
+                        onClick = { onShare(!shared) },
+                        icon = if (shared) Icons.Filled.People else Icons.Outlined.Lock,
+                        contentDescription = if (shared) "Make private" else "Share",
+                    )
+                }
+                if (onDelete != null) {
+                    RowActionButton(
+                        onClick = onDelete,
+                        icon = Icons.Outlined.Delete,
+                        contentDescription = "Remove ${book.title}",
+                    )
+                }
             }
         } else {
             Spacer(Modifier.width(16.dp))
@@ -449,35 +453,26 @@ private fun BookPost(
 }
 
 @Composable
-private fun ShareSwitch(
-    book: BookRecord,
-    onShare: (Boolean) -> Unit,
+private fun RowActionButton(
+    onClick: () -> Unit,
+    icon: ImageVector,
+    contentDescription: String,
 ) {
-    val label = if (book.shared) "Stop sharing ${book.title}" else "Share ${book.title}"
-    Row(
-        modifier = Modifier
-            .toggleable(
-                value = book.shared,
-                onValueChange = onShare,
-                role = Role.Switch,
-            )
-            .semantics { contentDescription = label }
-            .padding(horizontal = 4.dp),
-        verticalAlignment = Alignment.CenterVertically,
+    IconButton(
+        onClick = onClick,
+        modifier = Modifier.size(RowActionSize),
     ) {
-        Text(
-            text = if (book.shared) "Shared" else "Share",
-            style = MaterialTheme.typography.labelSmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
-        Spacer(Modifier.width(6.dp))
-        Switch(
-            checked = book.shared,
-            onCheckedChange = null,
-            modifier = Modifier.clearAndSetSemantics {},
+        Icon(
+            imageVector = icon,
+            contentDescription = contentDescription,
+            modifier = Modifier.size(RowActionIconSize),
+            tint = MaterialTheme.colorScheme.onSurfaceVariant,
         )
     }
 }
+
+private val RowActionSize = 40.dp
+private val RowActionIconSize = 24.dp
 
 private fun statusLine(book: BookRecord): String {
     val count = if (book.postCount > 0) "${book.postCount} posts" else "Not opened yet"

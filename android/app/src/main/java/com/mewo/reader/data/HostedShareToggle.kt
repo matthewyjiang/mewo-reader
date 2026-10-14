@@ -7,9 +7,9 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 
 /**
- * Owner share switch. The shelf flips immediately. Toggles for one book run
- * in order. A failed PATCH puts the switch back to the last value the server
- * confirmed, unless a newer toggle already moved it.
+ * Owner share control. The shelf flips immediately. Toggles for one book run
+ * in order. A failed PATCH restores the last value the server confirmed,
+ * unless a newer toggle already moved it.
  */
 internal class HostedShareToggle(
     private val books: () -> List<BookRecord>,
