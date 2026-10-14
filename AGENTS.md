@@ -18,7 +18,7 @@ Types:
 - `ci`: workflows and release plumbing
 - `chore`: deps, tooling, leftovers
 
-Scopes are `android`, `ios`, or `server`. Drop the scope if the change spans more than one.
+Scopes are `android`, `ios`, `web`, or `server`. Drop the scope if the change spans more than one.
 
 The description is imperative, lowercase, and has no trailing period.
 
@@ -29,3 +29,7 @@ ci(android): attach a signed apk on v* tags
 ```
 
 A breaking change uses `feat(android)!:` or a `BREAKING CHANGE:` footer.
+
+## Feature Parity
+
+Any new features or changes added should try to be implemented in all clients, in order to keep feature parity.
