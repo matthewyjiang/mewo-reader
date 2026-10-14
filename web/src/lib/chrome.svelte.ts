@@ -20,6 +20,8 @@ class Chrome {
     this.visible = true;
   }
 
+  rebase(y: number): void { this.lastY = y; }
+
   scroll(y: number): void {
     if (!this.suspended) {
       if (y <= 0 || y < this.lastY) this.visible = true;

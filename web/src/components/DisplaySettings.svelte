@@ -83,3 +83,132 @@
     />
   </label>
 </section>
+
+<style>
+.display-settings {
+  padding: 24px 16px;
+}
+
+.palette-fieldset {
+  border: 0;
+  padding: 0;
+  margin: 0 0 24px;
+}
+
+.palette-fieldset legend {
+  padding: 0;
+  font-weight: 700;
+  margin-bottom: 16px;
+  font-size: 1.0625rem;
+}
+
+.palettes {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.palette {
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 12px;
+  text-align: left;
+  background: var(--ground);
+  color: var(--ink);
+  font-size: .9375rem;
+}
+
+.palette.selected {
+  outline: 2px solid var(--accent);
+  outline-offset: 0;
+}
+
+.palette-sample {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  width: 100%;
+}
+
+.palette-sample strong {
+  font-size: 1.5rem;
+  line-height: 1.18;
+}
+
+.palette-sample > span {
+  display: block;
+  height: 2px;
+  width: 70%;
+  background: var(--mute);
+}
+
+.palette-sample > span:last-child {
+  width: 45%;
+}
+
+.setting-label {
+  display: flex;
+  justify-content: space-between;
+  font-weight: 700;
+  align-items: center;
+  gap: 12px;
+}
+
+.size-control {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  padding-block: 16px;
+}
+
+.size-control input {
+  flex: 1;
+  min-width: 0;
+  height: 40px;
+  cursor: pointer;
+}
+
+.large-aa {
+  font-size: 1.75rem;
+}
+
+.preview.post {
+  border-block: .6px solid var(--line);
+  padding-inline: 0;
+  padding-bottom: 16px;
+  margin-bottom: 8px;
+}
+
+.switch-row {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  justify-content: space-between;
+  padding: 20px 0;
+  border-bottom: .6px solid var(--line);
+}
+
+.switch-row > span {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  flex: 1;
+}
+
+.switch-row input {
+  width: 36px;
+  height: 24px;
+  flex: 0 0 36px;
+  cursor: pointer;
+}
+
+@media (forced-colors: active) {
+  .palette.selected {
+    outline-color: Highlight;
+  }
+}
+</style>

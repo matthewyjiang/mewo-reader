@@ -11,3 +11,29 @@
     <span class="sr-only">Mewo</span>
   {/if}
 </span>
+
+<style>
+.brand {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: 40px;
+}
+
+.brand img {
+  object-fit: contain;
+  height: 36px;
+  width: 36px;
+}
+
+.brand.twitter {
+  color: var(--accent);
+}
+
+:global(:root[data-theme='twitter_dim']) .brand.twitter {
+  color: var(--ink);
+}
+
+
+
+</style>

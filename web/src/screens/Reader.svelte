@@ -1,9 +1,10 @@
 <script lang="ts">
   import { onMount, tick } from 'svelte';
   import FeedStatus from '../components/FeedStatus.svelte';
-  import Icon from '../components/Icon.svelte';
+  import ChapterSheet from '../components/ChapterSheet.svelte';
   import Post from '../components/Post.svelte';
-  import Sheet from '../components/Sheet.svelte';
+  import Timeline from '../components/Timeline.svelte';
+  import type { TimelineAnchor } from '../components/Timeline.svelte';
   import { chrome } from '../lib/chrome.svelte';
   import { currentHeadingIndex } from '../lib/models';
   import type { BookRecord, FeedPost } from '../lib/models';
@@ -30,7 +31,7 @@
   let currentChapter = $derived(currentHeadingIndex(headings, visibleIndex));
   let active = true;
   let ready = false;
-  let frame = 0;
+  let timeline = $state<ReturnType<typeof Timeline>>();
   const entryKey = router.current.key;
 
   export function openChapters(): void {
@@ -43,22 +44,24 @@
     ready = false;
     onbusy(true);
     chrome.show();
+    const token = store.session?.token;
     try {
       const nextBook = await store.book(id);
+      if (!active || token !== store.session?.token) return;
       const [feed] = await Promise.all([store.feed(id), store.social(id)]);
-      if (!active) return;
+      if (!active || token !== store.session?.token) return;
       book = nextBook;
       posts = feed;
       onloaded(nextBook);
       const focus = focusPostId === null ? -1 : feed.findIndex((post) => post.id === focusPostId);
       visibleIndex = focus >= 0
         ? focus
-        : Math.min(Math.max(0, nextBook.progressIndex), Math.max(0, feed.length - 1));
+        : Math.min(Math.max(0, nextBook.progressIndex), feed.length);
       loading = false;
       await tick();
       if (!active) return;
       const saved = router.scroll.get(entryKey);
-      if (saved !== undefined) scroller.scrollTop = saved;
+      if (saved && typeof saved !== 'number') await jump(saved.index, false, saved.offset);
       else if (posts.length) await jump(visibleIndex, false);
       else scroller.scrollTop = 0;
       chrome.reset(scroller.scrollTop);
@@ -71,41 +74,27 @@
     }
   }
 
-  /** Probe the visible DOM rather than measuring every paragraph in a long book. */
-  function track(): void {
-    if (frame || !ready) return;
-    frame = requestAnimationFrame(() => {
-      frame = 0;
-      if (!ready || !active || !posts.length) return;
-      const box = scroller.getBoundingClientRect();
-      // Look beneath the header while its hide/show transition is still in flight.
-      const node = document.elementsFromPoint(
-        box.left + box.width / 2,
-        box.top + (chrome.shown ? 56 : 0) + 1,
-      ).map((element) => element.closest<HTMLElement>('[data-post-index]'))
-        .find((element) => element && scroller.contains(element));
-      if (!node) return;
-      const index = Number(node.dataset.postIndex);
-      if (Number.isInteger(index) && index >= 0 && index <= posts.length) {
-        visibleIndex = index;
-        store.saveProgress(id, index);
-      }
-    });
+  function track(anchor: TimelineAnchor): void {
+    if (!ready || !active) return;
+    visibleIndex = anchor.index;
+    store.saveProgress(id, anchor.index);
   }
 
-  async function jump(index: number, save = true): Promise<void> {
-    const node = scroller.querySelector<HTMLElement>(`[data-post-index="${index}"]`);
-    if (!node) return;
+  export function capture(): void {
+    if (!ready || !timeline) return;
+    const anchor = timeline.anchor();
+    track(anchor);
+    router.scroll.set(entryKey, anchor);
+  }
+
+  async function jump(index: number, save = true, offset = 0): Promise<void> {
+    if (!timeline) return;
     ready = false;
     chrome.suspended = true;
     chrome.show();
-    // Reveal estimated offscreen content before aligning a far-away destination.
-    node.style.contentVisibility = 'visible';
-    node.scrollIntoView({ block: 'start', behavior: 'instant' });
-    await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+    await tick();
+    await timeline.jump(index, offset);
     if (!active) { chrome.suspended = false; return; }
-    node.scrollIntoView({ block: 'start', behavior: 'instant' });
-    node.style.contentVisibility = '';
     visibleIndex = index;
     if (save) store.saveProgress(id, index);
     chapters = false;
@@ -116,13 +105,11 @@
 
   onMount(() => {
     void load();
-    scroller.addEventListener('scroll', track, { passive: true });
     return () => {
+      capture();
       active = false;
       ready = false;
       chrome.suspended = false;
-      cancelAnimationFrame(frame);
-      scroller.removeEventListener('scroll', track);
       store.flushProgress(id);
     };
   });
@@ -131,49 +118,55 @@
 {#if loading || error}
   <FeedStatus {loading} {error} label="your timeline" onretry={load} />
 {:else if book}
-  {#each posts as post, index (post.id)}
-    <div class="timeline-item" data-post-index={index}>
-      <Post
-        {book}
-        {post}
-        oncomment={() => oncomment(book!, post)}
-        onchapter={openChapters}
-      />
-    </div>
-  {/each}
-  <div class="end-card" data-post-index={posts.length}>
-    <p>{posts.length ? `End of ${book.title}` : 'This book has no readable posts.'}</p>
-    <button class="text-button" onclick={() => router.go('/')}>Back to your shelf</button>
-  </div>
+  <Timeline
+    bind:this={timeline}
+    count={posts.length + 1}
+    {scroller}
+    inset={chrome.shown ? 56 : 0}
+    onvisible={track}
+    onadjust={(y) => chrome.rebase(y)}
+  >
+    {#snippet row(index: number)}
+      {#if index < posts.length}
+        <Post
+          book={book!}
+          post={posts[index]}
+          oncomment={() => oncomment(book!, posts[index])}
+          onchapter={openChapters}
+        />
+      {:else}
+        <div class="end-card">
+          <p>{posts.length ? `End of ${book!.title}` : 'This book has no readable posts.'}</p>
+          <button class="text-button" onclick={() => router.go('/')}>Back to your shelf</button>
+        </div>
+      {/if}
+    {/snippet}
+  </Timeline>
 {/if}
 
 {#if chapters && book}
-  <Sheet label={`Chapters, ${book.title}`} onclose={() => chapters = false}>
-    <header class="sheet-bar">
-      <h2>{book.title}</h2>
-      <button
-        class="icon-button"
-        aria-label="Close chapters"
-        onclick={() => chapters = false}
-      >
-        <Icon name="close" />
-      </button>
-    </header>
-    <div class="chapter-list">
-      {#if !headings.length}
-        <p class="inline-status">This book has no chapter headings.</p>
-      {:else}
-        {#each headings as heading, index (heading.post.id)}
-          <button
-            class="chapter-row"
-            class:current={index === currentChapter}
-            aria-current={index === currentChapter ? 'location' : undefined}
-            onclick={() => jump(heading.index)}
-          >
-            {heading.post.text}
-          </button>
-        {/each}
-      {/if}
-    </div>
-  </Sheet>
+  <ChapterSheet
+    title={book.title}
+    {headings}
+    current={currentChapter}
+    onjump={(index) => { void jump(index); }}
+    onclose={() => chapters = false}
+  />
 {/if}
+
+<style>
+.end-card {
+  /* Allow the end card itself to reach the top even with hidden navigation. */
+  min-height: calc(100dvh - env(safe-area-inset-top) - env(safe-area-inset-bottom));
+  text-align: center;
+  padding: 48px 24px;
+  color: var(--mute);
+  scroll-margin-top: 0;
+}
+
+.end-card .text-button {
+  text-align: center;
+  margin-top: 16px;
+}
+
+</style>

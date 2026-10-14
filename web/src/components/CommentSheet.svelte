@@ -34,12 +34,11 @@
   function publish(next: PostComment[]): void {
     if (!active || store.session?.token !== token) return;
     comments = next;
-    store.afterThread(target.book.id, target.post.id, next);
     onchanged?.();
   }
 
   onMount(() => {
-    store.api.comments(target.book.id, target.post.id).then((next) => {
+    store.comments(target.book.id, target.post.id).then((next) => {
       if (active) publish(next);
     }).catch((err: unknown) => {
       if (active) error = message(err);
@@ -56,14 +55,15 @@
     sending = true;
     error = '';
     try {
-      const next = await store.api.addComment(target.book.id, target.post.id, draft.trim());
+      const next = await store.addComment(target.book.id, target.post.id, draft.trim());
       publish(next);
+      if (!active) return;
       draft = '';
       focused = false;
     } catch (err) {
-      error = message(err);
+      if (active) error = message(err);
     } finally {
-      sending = false;
+      if (active) sending = false;
     }
   }
 
@@ -71,11 +71,11 @@
     if (deleting) return;
     deleting = true;
     try {
-      publish(await store.api.deleteComment(target.book.id, target.post.id, comment.id));
+      publish(await store.deleteComment(target.book.id, target.post.id, comment.id));
     } catch (err) {
-      error = message(err);
+      if (active) error = message(err);
     } finally {
-      deleting = false;
+      if (active) deleting = false;
     }
   }
 </script>
@@ -152,3 +152,48 @@
     </div>
   </form>
 </Sheet>
+
+<style>
+.comment-form {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+}
+
+.comment-scroll {
+  overflow-y: auto;
+  min-height: 0;
+  flex: 1;
+  overscroll-behavior: contain;
+}
+
+.compose-row {
+  display: flex;
+  gap: 12px;
+  padding: 8px 16px 24px;
+}
+
+.compose-row textarea {
+  width: 100%;
+  resize: vertical;
+  border: 0;
+  background: transparent;
+  color: var(--ink);
+  padding: 8px 0;
+  font-size: 1.0625rem;
+  line-height: 1.41;
+}
+
+.compose-row .meta.accent {
+  margin-top: 4px;
+}
+
+.composer-meta {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+
+</style>

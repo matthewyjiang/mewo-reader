@@ -31,7 +31,9 @@
       cancelAnimationFrame(frame);
       node.close();
       document.body.style.overflow = overflow;
-      if (previous instanceof HTMLElement && previous.isConnected) previous.focus();
+      if (previous instanceof HTMLElement && previous.isConnected) {
+        previous.focus({ preventScroll: true });
+      }
     };
   });
 </script>

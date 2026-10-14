@@ -33,3 +33,29 @@
     {name.trim().charAt(0).toUpperCase() || 'M'}
   {/if}
 </span>
+
+<style>
+.avatar {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  color: #fff;
+  font-weight: 700;
+  overflow: hidden;
+  line-height: 1;
+}
+
+.avatar img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+@media (forced-colors: active) {
+  .avatar {
+    border: 1px solid CanvasText;
+  }
+}
+</style>

@@ -9,7 +9,10 @@ export interface FeedScreenProps {
 
 /** Restore only after the destination has rendered its rows. */
 export function restoreScroll(scroller: HTMLElement, key = router.current.key): void {
-  scroller.scrollTop = router.scroll.get(key) ?? 0;
+  const saved = router.scroll.get(key);
+  scroller.scrollTop = typeof saved === 'number' ? saved : 0;
   chrome.reset(scroller.scrollTop);
-  scroller.focus({ preventScroll: true });
+  if (!(router.fromTab && router.url.pathname === '/search')) {
+    scroller.focus({ preventScroll: true });
+  }
 }

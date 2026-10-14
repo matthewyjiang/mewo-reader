@@ -44,13 +44,11 @@
   </div>
 {:else}
   {#each hits as hit (`${hit.book.id}:${hit.post.id}`)}
-    <div class="timeline-item">
-      <Post
-        book={hit.book}
-        post={hit.post}
-        onopen={() => router.go(readerUrl(hit.book.id, hit.post.id))}
-        oncomment={() => oncomment(hit.book, hit.post)}
-      />
-    </div>
+    <Post
+      book={hit.book}
+      post={hit.post}
+      onopen={() => router.go(readerUrl(hit.book.id, hit.post.id))}
+      oncomment={() => oncomment(hit.book, hit.post)}
+    />
   {/each}
 {/if}

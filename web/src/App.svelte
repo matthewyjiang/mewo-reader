@@ -24,7 +24,7 @@
 
   let main = $state<HTMLElement>();
   let fileInput = $state<HTMLInputElement>();
-  let reader = $state<{ openChapters: () => void }>();
+  let reader = $state<{ openChapters: () => void; capture: () => void }>();
   let profile = $state<{ refresh: () => Promise<void> }>();
   let drawer = $state(false);
   let commentTarget = $state<PostHit | null>(null);
@@ -130,10 +130,17 @@
 
   onMount(() => {
     router.beforeChange = () => {
-      if (main) router.scroll.set(router.current.key, main.scrollTop);
+      if (readerId) reader?.capture();
+      else if (main) {
+        router.scroll.set(router.current.key, main.scrollTop);
+        if (root) router.tabScroll.set(router.current.tab, main.scrollTop);
+      }
       store.flushProgress();
     };
-    const save = (): void => { store.flushProgress(); };
+    const save = (): void => {
+      if (readerId) reader?.capture();
+      store.flushProgress(undefined, true);
+    };
     const visibility = (): void => {
       if (document.visibilityState === 'hidden') save();
     };
@@ -197,6 +204,7 @@
 
   async function signOut(): Promise<void> {
     drawer = false;
+    if (readerId) reader?.capture();
     try { await store.signOut(); } catch (error) { store.notice = message(error); }
     router.go('/', true);
   }
@@ -373,3 +381,135 @@
 {#if removeTarget && store.session}
   <RemoveBookSheet book={removeTarget} onclose={() => removeTarget = null} />
 {/if}
+
+<style>
+/* The timeline stays centered even when there is room for the navigation rail. */
+.app-shell {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 600px) minmax(0, 1fr);
+  width: 100%;
+  height: 100dvh;
+  padding-top: env(safe-area-inset-top);
+  padding-bottom: env(safe-area-inset-bottom);
+}
+
+.timeline-shell {
+  grid-column: 2;
+  position: relative;
+  min-width: 0;
+  min-height: 0;
+  border-inline: 1px solid var(--line);
+  overflow: hidden;
+}
+
+.timeline {
+  height: 100%;
+  overflow-y: auto;
+  overscroll-behavior-y: contain;
+  overflow-anchor: none;
+  padding: 56px 0 52px;
+  scroll-padding-top: 56px;
+}
+
+.timeline.settings-timeline {
+  padding-bottom: 0;
+}
+
+
+.fab {
+  position: absolute;
+  right: 16px;
+  bottom: 68px;
+  z-index: 4;
+  border-radius: 50%;
+  width: 56px;
+  height: 56px;
+  background: var(--accent);
+  color: #fff;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.fab:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--accent) 85%, var(--ink));
+}
+
+.notice {
+  position: absolute;
+  z-index: 10;
+  bottom: 64px;
+  left: 16px;
+  right: 16px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 8px 8px 16px;
+  border: 1px solid var(--line);
+  background: var(--hover);
+  font-size: .9375rem;
+  line-height: 1.33;
+  overflow-wrap: anywhere;
+}
+
+.notice > span {
+  flex: 1;
+}
+
+.upload-status {
+  position: absolute;
+  z-index: 9;
+  bottom: 64px;
+  inset-inline: 16px;
+  padding: 16px;
+  background: var(--ground);
+  border: 1px solid var(--line);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+progress {
+  width: 100%;
+  height: 4px;
+  border: 0;
+  border-radius: 0;
+  background: var(--line);
+  accent-color: var(--accent);
+}
+
+progress::-webkit-progress-bar {
+  background: var(--line);
+}
+
+progress::-webkit-progress-value {
+  background: var(--accent);
+}
+
+progress::-moz-progress-bar {
+  background: var(--accent);
+}
+
+@media (min-width: 1000px) {
+  .timeline {
+    padding-bottom: 0;
+  }
+  .fab {
+    bottom: 24px;
+  }
+  .notice, .upload-status {
+    bottom: 16px;
+  }
+}
+
+@media (max-width: 760px) {
+  .app-shell {
+    display: block;
+    padding-inline: env(safe-area-inset-left) env(safe-area-inset-right);
+  }
+  .timeline-shell {
+    height: 100%;
+    border-inline: 0;
+  }
+}
+</style>

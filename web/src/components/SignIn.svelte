@@ -89,3 +89,84 @@
     </button>
   </form>
 </div>
+
+<style>
+.auth-page {
+  max-width: 600px;
+  margin-inline: auto;
+  min-height: 100dvh;
+  padding-top: env(safe-area-inset-top);
+  padding-bottom: env(safe-area-inset-bottom);
+  border-inline: 1px solid var(--line);
+}
+
+.auth-bar {
+  height: 56px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-bottom: .6px solid var(--line);
+}
+
+.auth-form {
+  padding: 48px 28px 24px;
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  max-width: 460px;
+  margin-inline: auto;
+}
+
+.auth-form h1 {
+  font-size: 1.75rem;
+  margin-bottom: 12px;
+}
+
+.auth-form > .identity-preview {
+  margin-top: 32px;
+  margin-bottom: 12px;
+}
+
+.auth-form > label {
+  margin: 20px 0 8px;
+  font-weight: 700;
+}
+
+.auth-form > input {
+  color: var(--ink);
+  background: var(--ground);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  padding: 12px;
+  min-height: 48px;
+  width: 100%;
+}
+
+.auth-form > input:focus {
+  border-color: var(--accent);
+}
+
+.auth-form > .meta {
+  margin-top: 6px;
+}
+
+.auth-form > .error {
+  margin-top: 16px;
+}
+
+.auth-submit {
+  margin-top: 28px;
+  align-self: flex-end;
+}
+
+.auth-form > .text-button {
+  margin-top: 12px;
+  text-align: center;
+}
+
+@media (max-width: 760px) {
+  .auth-page {
+    border: 0;
+  }
+}
+</style>

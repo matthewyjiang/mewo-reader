@@ -79,3 +79,45 @@
     <button class="pill" onclick={() => router.go('/settings')}>Back to Settings</button>
   </div>
 {/if}
+
+<style>
+.settings-row {
+  width: 100%;
+  padding: 20px 16px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  text-align: left;
+  border-bottom: .6px solid var(--line);
+}
+
+.settings-row > span {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.settings-row strong {
+  font-size: 1.0625rem;
+}
+
+.settings-row :global(svg) {
+  color: var(--mute);
+  flex-shrink: 0;
+}
+
+.settings-row:hover {
+  background: var(--hover);
+}
+
+.settings-content {
+  padding: 24px 16px;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 16px;
+}
+
+
+</style>

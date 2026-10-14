@@ -37,3 +37,43 @@
     </button>
   {/if}
 </div>
+
+<style>
+.book-row {
+  display: flex;
+  align-items: flex-start;
+  border-bottom: .6px solid var(--line);
+  padding-right: 12px;
+}
+
+.book-row:hover {
+  background: var(--hover);
+}
+
+.book-link {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  gap: 12px;
+  padding: 12px 4px 16px 16px;
+}
+
+.book-link p {
+  margin-top: 3px;
+  font-size: .9375rem;
+  line-height: 1.33;
+}
+
+.book-row > .icon-button {
+  margin-top: 6px;
+  color: var(--mute);
+}
+
+.book-row .post-meta > strong {
+  max-width: 70%;
+  font-size: 1.0625rem;
+}
+
+
+
+</style>

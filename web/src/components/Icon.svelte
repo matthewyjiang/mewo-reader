@@ -3,15 +3,6 @@
     | 'home' | 'search' | 'heart' | 'comment' | 'quote' | 'share'
     | 'back' | 'close' | 'plus' | 'trash' | 'settings' | 'chevron'
     | 'more' | 'x' | 'bird' | 'book';
-</script>
-
-<script lang="ts">
-  let { name, filled = false, size = 22 }: {
-    name: IconName;
-    filled?: boolean;
-    size?: number;
-  } = $props();
-
   const paths: Record<IconName, string> = {
     home: 'M3 10 12 3l9 7v10a1 1 0 0 1-1 1h-5v-7H9v7H4a1 1 0 0 1-1-1Z',
     search: 'M21 21l-5-5M18 10a8 8 0 1 1-16 0 8 8 0 0 1 16 0',
@@ -39,6 +30,14 @@
     book: 'M12 5C8 2 4 3 2 4v16c4-2 7-1 10 1m0-16c4-3 8-2 10-1v16'
       + 'c-4-2-7-1-10 1V5',
   };
+</script>
+
+<script lang="ts">
+  let { name, filled = false, size = 22 }: {
+    name: IconName;
+    filled?: boolean;
+    size?: number;
+  } = $props();
   let solid = $derived(filled || name === 'x' || name === 'bird');
 </script>
 

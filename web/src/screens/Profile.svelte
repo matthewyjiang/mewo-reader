@@ -21,16 +21,22 @@
   let loading = $state(true);
   let error = $state('');
   let active = true;
+  let request = 0;
   let ownProfile = $derived(
     username.toLowerCase() === store.session?.username.toLowerCase(),
   );
 
   export async function refresh(): Promise<void> {
+    const latest = ++request;
     const token = store.session?.token;
-    const next = await store.profile(username);
-    if (!active || token !== store.session?.token) return;
-    replies = next;
-    oncount(next.length);
+    try {
+      const next = await store.profile(username);
+      if (!active || latest !== request || token !== store.session?.token) return;
+      replies = next;
+      oncount(next.length);
+    } catch (error) {
+      if (active && latest === request && token === store.session?.token) throw error;
+    }
   }
 
   async function load(): Promise<void> {
@@ -72,7 +78,7 @@
     </p>
   {:else}
     {#each replies as reply (reply.comment.id)}
-      <div class="profile-reply timeline-item">
+      <div class="profile-reply">
         <Post
           book={reply.book}
           post={reply.post}
@@ -92,3 +98,71 @@
     {/each}
   {/if}
 {/if}
+
+<style>
+.profile-banner {
+  height: 125px;
+  background: var(--hover);
+}
+
+.profile-header {
+  position: relative;
+}
+
+.profile-avatar {
+  position: absolute;
+  left: 12px;
+  top: 87px;
+  width: 76px;
+  height: 76px;
+  background: var(--ground);
+  border-radius: 50%;
+  padding: 4px;
+}
+
+.profile-info {
+  padding: 42px 16px 16px;
+}
+
+.profile-info p {
+  margin-top: 2px;
+}
+
+.posts-tab {
+  height: 48px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-weight: 700;
+  position: relative;
+  border-bottom: .6px solid var(--line);
+}
+
+.posts-tab::after {
+  content: '';
+  position: absolute;
+  bottom: 0;
+  height: 3px;
+  width: 56px;
+  border-radius: 999px;
+  background: var(--accent);
+}
+
+.profile-reply {
+  border-bottom: .6px solid var(--line);
+}
+
+.profile-reply :global(.post) {
+  border-bottom: 0;
+}
+
+.profile-reply :global(.thread-row) {
+  padding-bottom: 16px;
+}
+
+@media (forced-colors: active) {
+  .posts-tab::after {
+    background: CanvasText;
+  }
+}
+</style>

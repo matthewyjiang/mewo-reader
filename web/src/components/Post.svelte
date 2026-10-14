@@ -115,3 +115,59 @@
     {/if}
   </div>
 </article>
+
+<style>
+.chapter {
+  text-align: left;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  padding-block: 4px;
+}
+
+.chapter:hover {
+  text-decoration: underline;
+}
+
+.post-link {
+  display: block;
+}
+
+.post-link:hover {
+  text-decoration: none;
+}
+
+.post-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 4px;
+  margin-top: 4px;
+  color: var(--mute);
+}
+
+.post-actions .liked {
+  color: var(--like);
+}
+
+.like-action:hover:not(:disabled) {
+  color: var(--like);
+  background: color-mix(in srgb, var(--like) 10%, transparent);
+}
+
+.quote-action:hover:not(:disabled) {
+  color: var(--green);
+  background: color-mix(in srgb, var(--green) 10%, transparent);
+}
+
+.like-action[aria-pressed='true'] :global(svg) {
+  transform: scale(1.12);
+}
+
+.like-action :global(svg) {
+  transition: transform 200ms ease-out;
+}
+
+
+
+</style>

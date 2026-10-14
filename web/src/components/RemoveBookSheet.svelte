@@ -38,3 +38,26 @@
     </div>
   </section>
 </Sheet>
+
+<style>
+.confirm-remove {
+  padding: 24px;
+}
+
+.confirm-remove p {
+  margin-top: 16px;
+}
+
+.confirm-actions {
+  display: flex;
+  gap: 16px;
+  justify-content: flex-end;
+  margin-top: 24px;
+}
+
+.danger-pill {
+  background: var(--like);
+}
+
+
+</style>
