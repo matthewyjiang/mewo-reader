@@ -35,7 +35,7 @@ android {
         minSdk = 26
         targetSdk = 36
         versionCode = envOrProp("MEWO_VERSION_CODE")?.toInt() ?: 1
-        versionName = envOrProp("MEWO_VERSION_NAME") ?: "0.1.0"
+        versionName = envOrProp("MEWO_VERSION_NAME") ?: "0.1.1"
     }
 
     signingConfigs {
