@@ -13,6 +13,12 @@ struct AccountDrawer<Content: View>: View {
         ZStack(alignment: .leading) {
             content
                 .allowsHitTesting(!open)
+            // Full-bleed dimmer, faded in place. It used to share the sliding
+            // stack with the 300pt panel, so its frame was only the leftover
+            // width and the move transition carried that strip across the
+            // library. The panel stays above it, so Profile and Settings
+            // still win their taps.
+            scrim
             if !open && gesturesEnabled {
                 Color.clear
                     .frame(width: 24)
@@ -22,24 +28,25 @@ struct AccountDrawer<Content: View>: View {
                     .accessibilityHidden(true)
             }
             if open {
-                // Dimmer sits only to the right of the panel so a Settings/Profile
-                // tap cannot land on the dismiss gesture instead.
-                HStack(spacing: 0) {
-                    panel
-                    // The scrim's fill runs under the status bar. Its layout
-                    // frame stays in the safe area so it cannot stretch the
-                    // panel up over the clock.
-                    Color.clear
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
-                        .contentShape(Rectangle())
-                        .onTapGesture { withAnimation(.easeInOut(duration: 0.22)) { open = false } }
-                        .gesture(closeGesture)
-                        .background(mewo.ink.opacity(0.2), ignoresSafeAreaEdges: .all)
-                        .accessibilityHidden(true)
-                }
-                .transition(.move(edge: .leading))
+                panel
+                    .transition(.move(edge: .leading))
+                    .zIndex(1)
             }
         }
+    }
+
+    private var scrim: some View {
+        // Layout stays in the safe area so this layer cannot stretch the
+        // panel up over the clock. The fill still runs under the status bar.
+        Color.clear
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .contentShape(Rectangle())
+            .onTapGesture { withAnimation(.easeInOut(duration: 0.22)) { open = false } }
+            .gesture(closeGesture)
+            .background(mewo.ink.opacity(0.2), ignoresSafeAreaEdges: .all)
+            .opacity(open ? 1 : 0)
+            .allowsHitTesting(open)
+            .accessibilityHidden(true)
     }
 
     private var panel: some View {
