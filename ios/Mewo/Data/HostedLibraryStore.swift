@@ -2,14 +2,15 @@ import Foundation
 import Observation
 import UIKit
 
-/// Hosted shelf. Talks HTTP, then parses the EPUB on the phone.
+/// Hosted shelf. Talks HTTP. The server parses each book, so every client
+/// reads the same posts and post ids. Readium here only reads title, author,
+/// and cover for upload.
 @Observable
 @MainActor
 final class HostedLibraryStore: LibraryStore {
     private let opener: EpubOpener
     private let sessions: HostedSessionStore
     private let client: HostedClient
-    private let extractor = FeedExtractor()
     private let root: URL
     private var epoch = 0
     private(set) var books: [BookRecord] = []
@@ -102,18 +103,19 @@ final class HostedLibraryStore: LibraryStore {
     func feed(id: String) async throws -> [FeedPost] {
         let session = try requireSession()
         let safe = try requireBookId(id)
-        let epub = try await ensureEpub(session, id: safe)
-        let cacheFile = bookDir(safe).appendingPathComponent("feed.json")
-        if let cache = JSONFiles.read(FeedCache.self, from: cacheFile), cache.version == feedCacheVersion {
-            return cache.posts
+        if let cached = cachedFeed(safe) { return cached }
+        let posts = try await expireOn401 { try await client.posts(session, id: safe) }
+        let dir = bookDir(safe)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        // Builds before server parsing kept the EPUB and a Readium feed here.
+        try? FileManager.default.removeItem(at: dir.appendingPathComponent("book.epub"))
+        try? FileManager.default.removeItem(at: dir.appendingPathComponent("feed.json"))
+        try JSONFiles.write(FeedCache(version: hostedPostsCacheVersion, posts: posts), to: dir.appendingPathComponent(hostedPostsCache))
+        // The server set postCount when it parsed; mirror it so Finished works before the next load.
+        if var record = books.first(where: { $0.id == safe }), record.postCount != posts.count {
+            record.postCount = posts.count
+            replaceBook(record)
         }
-        let posts = try await opener.open(file: epub) { publication in
-            try await FeedExtractor().extract(publication)
-        }
-        try FileManager.default.createDirectory(at: bookDir(safe), withIntermediateDirectories: true)
-        try JSONFiles.write(FeedCache(version: feedCacheVersion, posts: posts), to: cacheFile)
-        let updated = try await expireOn401 { try await client.patch(session, id: safe, body: PatchBook(postCount: posts.count)) }
-        replaceBook(updated)
         return posts
     }
 
@@ -229,7 +231,6 @@ final class HostedLibraryStore: LibraryStore {
         let safe = try requireBookId(record.id)
         let dest = bookDir(safe)
         try FileManager.default.createDirectory(at: dest, withIntermediateDirectories: true)
-        try FileManager.default.copyItem(at: epub, to: dest.appendingPathComponent("book.epub"))
         if FileManager.default.fileExists(atPath: cover.path) {
             try? FileManager.default.copyItem(at: cover, to: dest.appendingPathComponent("cover.jpg"))
         }
@@ -238,19 +239,10 @@ final class HostedLibraryStore: LibraryStore {
         return record
     }
 
-    private func ensureEpub(_ session: HostedSession, id: String) async throws -> URL {
-        let dest = bookDir(id).appendingPathComponent("book.epub")
-        if !FileManager.default.fileExists(atPath: dest.path)
-            || ((try? dest.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0) == 0 {
-            try await expireOn401 { try await client.downloadEpub(session, id: id, dest: dest) }
-        }
-        return dest
-    }
-
     private func cachedFeed(_ id: String) -> [FeedPost]? {
         guard let safe = safeBookId(id) else { return nil }
-        let cacheFile = bookDir(safe).appendingPathComponent("feed.json")
-        guard let cache = JSONFiles.read(FeedCache.self, from: cacheFile), cache.version == feedCacheVersion else {
+        let cacheFile = bookDir(safe).appendingPathComponent(hostedPostsCache)
+        guard let cache = JSONFiles.read(FeedCache.self, from: cacheFile), cache.version == hostedPostsCacheVersion else {
             return nil
         }
         return cache.posts
@@ -332,3 +324,7 @@ final class HostedAuth {
         return url
     }
 }
+
+/// Server posts cached per hosted book. Bump the version if the server's post shape changes.
+private let hostedPostsCache = "posts.json"
+private let hostedPostsCacheVersion = 1
