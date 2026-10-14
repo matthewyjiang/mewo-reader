@@ -329,7 +329,7 @@ struct LibraryScreen: View {
             HStack(alignment: .center, spacing: 0) {
                 if hosted && book.mine {
                     shelfAction(
-                        symbol: book.shared ? "person.2.fill" : "person.2",
+                        symbol: book.shared ? "person.2.fill" : "lock",
                         label: book.shared ? "Make private" : "Share",
                         identifier: "share-\(book.id)"
                     ) {
