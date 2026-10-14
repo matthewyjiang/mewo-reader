@@ -174,8 +174,12 @@ private extension View {
     /// `navigationBarHidden` hides the bar chrome and leaves its inset, so the
     /// custom header sits under a tall empty band. Hiding the toolbar drops
     /// that inset and keeps the status-bar inset.
+    ///
+    /// A short root, such as empty Search or Likes, is then centered in the
+    /// stack. Pin it to the top so the header stays under the status bar.
     func mewoHidesSystemNavigationBar() -> some View {
         toolbar(.hidden, for: .navigationBar)
             .toolbarBackground(.hidden, for: .navigationBar)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
     }
 }
