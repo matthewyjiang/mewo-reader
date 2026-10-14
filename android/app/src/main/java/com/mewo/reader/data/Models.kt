@@ -18,6 +18,10 @@ data class BookRecord(
     val progressIndex: Int = 0,
     val isSample: Boolean = false,
     val mine: Boolean = true,
+    /** Owner chose to show this book on other accounts' shelves. */
+    val shared: Boolean = false,
+    /** Username of the account that added the book. Older servers omit it. */
+    val ownerUsername: String? = null,
 ) {
     /**
      * Saved place is the last post. Index 0 is the start, so an unopened

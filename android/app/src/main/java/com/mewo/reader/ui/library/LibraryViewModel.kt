@@ -38,8 +38,15 @@ class LibraryViewModel(
         }
     }
 
-    fun import(uri: Uri) = runWork {
-        store.importFromUri(uri)
+    fun import(uri: Uri, hosted: Boolean) = runWork {
+        val book = store.importFromUri(uri)
+        if (hosted && !book.isSample && !book.shared) {
+            _state.update {
+                it.copy(
+                    error = "${book.title} is private. Use Share on Home when you want others to read it.",
+                )
+            }
+        }
     }
 
     fun importSample() = runWork {
@@ -52,6 +59,18 @@ class LibraryViewModel(
                 .onFailure { err ->
                     _state.update {
                         it.copy(error = err.message ?: "Could not remove that book.")
+                    }
+                }
+        }
+    }
+
+    fun setShared(id: String, shared: Boolean) {
+        viewModelScope.launch {
+            _state.update { it.copy(error = null) }
+            runCatching { store.setShared(id, shared) }
+                .onFailure { err ->
+                    _state.update {
+                        it.copy(error = err.message ?: "Could not change sharing.")
                     }
                 }
         }

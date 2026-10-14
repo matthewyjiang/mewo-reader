@@ -464,7 +464,7 @@ private fun ComposePost(
                     .onFocusChanged { onFocus(it.isFocused) }
                     .semantics {
                         contentDescription = if (publicNotes) {
-                            "Reply, public on this server"
+                            "Reply, visible to anyone who can read this book"
                         } else {
                             "Reply"
                         }

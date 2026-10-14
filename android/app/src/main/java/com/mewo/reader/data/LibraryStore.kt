@@ -12,8 +12,9 @@ import java.io.File
 
 /**
  * Library verbs the UI uses. Local keeps books on the device. Hosted
- * talks to a shared server shelf. Same calls either way. Local books
- * are parsed on the phone; hosted books are parsed by the server.
+ * talks to a server. Same calls either way. Local books are parsed on
+ * the phone; hosted books are parsed by the server. A hosted book stays
+ * private until the owner shares it.
  */
 interface LibraryStore {
     val library: StateFlow<LibrarySnapshot>
@@ -25,6 +26,9 @@ interface LibraryStore {
     suspend fun importSample(): BookRecord
 
     suspend fun delete(id: String)
+
+    /** Owner-only on the hosted library. Local has no shared shelf. */
+    suspend fun setShared(id: String, shared: Boolean)
 
     suspend fun book(id: String): BookRecord?
 
@@ -87,6 +91,8 @@ class SwitchingLibraryStore(
     override suspend fun importSample() = active().importSample()
 
     override suspend fun delete(id: String) = active().delete(id)
+
+    override suspend fun setShared(id: String, shared: Boolean) = active().setShared(id, shared)
 
     override suspend fun book(id: String) = active().book(id)
 
