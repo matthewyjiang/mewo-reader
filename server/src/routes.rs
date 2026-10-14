@@ -98,10 +98,13 @@ pub async fn library(
     State(state): State<AppState>,
     authed: Authed,
 ) -> Result<Json<LibrarySnapshot>, ApiError> {
-    let rows = sqlx::query_as::<_, BookRow>(&format!("{BOOK_SELECT} ORDER BY b.imported_at DESC"))
-        .bind(&authed.user_id)
-        .fetch_all(&state.pool)
-        .await?;
+    let rows = sqlx::query_as::<_, BookRow>(&format!(
+        "{BOOK_SELECT} WHERE {BOOK_VISIBLE_TO} ORDER BY b.imported_at DESC"
+    ))
+    .bind(&authed.user_id)
+    .bind(&authed.user_id)
+    .fetch_all(&state.pool)
+    .await?;
     Ok(Json(LibrarySnapshot {
         books: rows
             .into_iter()
@@ -176,6 +179,8 @@ pub async fn upload_book(
         progress_index: 0,
         is_sample: parsed.is_sample,
         mine: true,
+        shared: false,
+        owner_username: authed.username,
     }))
 }
 
@@ -184,7 +189,7 @@ pub async fn get_book(
     authed: Authed,
     Path(id): Path<String>,
 ) -> Result<Json<BookRecord>, ApiError> {
-    Ok(Json(shared_book(&state, &authed.user_id, &id).await?))
+    Ok(Json(book_record(&state, &authed.user_id, &id).await?))
 }
 
 pub async fn delete_book(
@@ -192,18 +197,18 @@ pub async fn delete_book(
     authed: Authed,
     Path(id): Path<String>,
 ) -> Result<axum::http::StatusCode, ApiError> {
-    let row = book_row(&state, &authed.user_id, &id).await?;
+    let row = visible_book(&state, &authed.user_id, &id).await?;
     if row.owner_id != authed.user_id {
         return Err(ApiError::Forbidden(
             "Only the person who added this book can remove it.".into(),
         ));
     }
     sqlx::query("DELETE FROM books WHERE id = ? AND user_id = ?")
-        .bind(&id)
+        .bind(&row.id)
         .bind(&authed.user_id)
         .execute(&state.pool)
         .await?;
-    let dest = book_dir(&state.data_dir, &row.owner_id, &id);
+    let dest = book_dir(&state.data_dir, &row.owner_id, &row.id);
     let _ = tokio::fs::remove_dir_all(dest).await;
     Ok(axum::http::StatusCode::NO_CONTENT)
 }
@@ -214,7 +219,20 @@ pub async fn patch_book(
     Path(id): Path<String>,
     Json(body): Json<PatchBook>,
 ) -> Result<Json<BookRecord>, ApiError> {
-    let _ = shared_book(&state, &authed.user_id, &id).await?;
+    let row = visible_book(&state, &authed.user_id, &id).await?;
+    if body.shared.is_some() && row.owner_id != authed.user_id {
+        return Err(ApiError::Forbidden(
+            "Only the person who added this book can change sharing.".into(),
+        ));
+    }
+    if let Some(shared) = body.shared {
+        sqlx::query("UPDATE books SET shared = ? WHERE id = ? AND user_id = ?")
+            .bind(if shared { 1 } else { 0 })
+            .bind(&row.id)
+            .bind(&authed.user_id)
+            .execute(&state.pool)
+            .await?;
+    }
     // Old phone builds still send postCount. Accept it, but never let a client
     // replace the count of the canonical server feed.
     if let Some(progress_index) = body.progress_index {
@@ -225,12 +243,12 @@ pub async fn patch_book(
              ON CONFLICT(user_id, book_id) DO UPDATE SET progress_index = excluded.progress_index",
         )
         .bind(&authed.user_id)
-        .bind(&id)
+        .bind(&row.id)
         .bind(progress_index)
         .execute(&state.pool)
         .await?;
     }
-    Ok(Json(shared_book(&state, &authed.user_id, &id).await?))
+    Ok(Json(book_record(&state, &authed.user_id, &row.id).await?))
 }
 
 pub async fn download_epub(
@@ -238,8 +256,8 @@ pub async fn download_epub(
     authed: Authed,
     Path(id): Path<String>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let row = book_row(&state, &authed.user_id, &id).await?;
-    let path = book_dir(&state.data_dir, &row.owner_id, &id).join("book.epub");
+    let row = visible_book(&state, &authed.user_id, &id).await?;
+    let path = book_dir(&state.data_dir, &row.owner_id, &row.id).join("book.epub");
     file_response(path, "application/epub+zip", "book.epub").await
 }
 
@@ -248,8 +266,8 @@ pub async fn download_cover(
     authed: Authed,
     Path(id): Path<String>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let row = book_row(&state, &authed.user_id, &id).await?;
-    let path = book_dir(&state.data_dir, &row.owner_id, &id).join("cover.jpg");
+    let row = visible_book(&state, &authed.user_id, &id).await?;
+    let path = book_dir(&state.data_dir, &row.owner_id, &row.id).join("cover.jpg");
     if !path.exists() {
         return Err(ApiError::NotFound);
     }
@@ -282,18 +300,22 @@ pub async fn get_posts(
     authed: Authed,
     Path(id): Path<String>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let row = book_row(&state, &authed.user_id, &id).await?;
+    let row = visible_book(&state, &authed.user_id, &id).await?;
     let dir = book_dir(&state.data_dir, &row.owner_id, &row.id);
     let bytes = match read_posts(&dir).await? {
         Some(bytes) => bytes,
-        None => fill_posts(&state, &row.id, &dir).await?,
+        None => fill_posts(&state, &authed.user_id, &row.id, &dir).await?,
     };
-    Ok(([(CONTENT_TYPE, HeaderValue::from_static("application/json"))], bytes))
+    Ok((
+        [(CONTENT_TYPE, HeaderValue::from_static("application/json"))],
+        bytes,
+    ))
 }
 
 /// Parses a book uploaded before the server parsed books, then caches it.
 async fn fill_posts(
     state: &AppState,
+    user_id: &str,
     book_id: &str,
     dir: &std::path::Path,
 ) -> Result<Vec<u8>, ApiError> {
@@ -307,11 +329,16 @@ async fn fill_posts(
     let posts = Posts {
         posts: parsed.posts,
     };
-    sqlx::query("UPDATE books SET post_count = ? WHERE id = ?")
-        .bind(posts.posts.len() as i64)
-        .bind(book_id)
-        .execute(&state.pool)
-        .await?;
+    sqlx::query(&format!(
+        "UPDATE books SET post_count = ? WHERE id IN (
+            SELECT b.id FROM books b WHERE b.id = ? AND {BOOK_VISIBLE_TO}
+        )"
+    ))
+    .bind(posts.posts.len() as i64)
+    .bind(book_id)
+    .bind(user_id)
+    .execute(&state.pool)
+    .await?;
     write_posts(dir, &posts).await
 }
 
@@ -350,7 +377,7 @@ pub async fn list_likes(
     authed: Authed,
     Path(id): Path<String>,
 ) -> Result<Json<LikeSet>, ApiError> {
-    let _ = shared_book(&state, &authed.user_id, &id).await?;
+    let _ = visible_book(&state, &authed.user_id, &id).await?;
     Ok(Json(likes_for(&state, &authed.user_id, &id).await?))
 }
 
@@ -359,7 +386,7 @@ pub async fn toggle_like(
     authed: Authed,
     Path((id, post_id)): Path<(String, String)>,
 ) -> Result<Json<LikeSet>, ApiError> {
-    let _ = shared_book(&state, &authed.user_id, &id).await?;
+    let _ = visible_book(&state, &authed.user_id, &id).await?;
     let inserted = sqlx::query(
         "INSERT INTO likes (user_id, book_id, post_id) VALUES (?, ?, ?)
          ON CONFLICT DO NOTHING",
@@ -385,7 +412,7 @@ pub async fn comment_index(
     authed: Authed,
     Path(id): Path<String>,
 ) -> Result<Json<CommentIndex>, ApiError> {
-    let _ = shared_book(&state, &authed.user_id, &id).await?;
+    let _ = visible_book(&state, &authed.user_id, &id).await?;
     let counts = sqlx::query_as::<_, (String, i64)>(
         "SELECT post_id, COUNT(*) FROM comments WHERE book_id = ? GROUP BY post_id",
     )
@@ -411,7 +438,7 @@ pub async fn list_comments(
     Path((id, post_id)): Path<(String, String)>,
 ) -> Result<Json<CommentThread>, ApiError> {
     let post_id = parse_post_id(&post_id)?;
-    let _ = shared_book(&state, &authed.user_id, &id).await?;
+    let _ = visible_book(&state, &authed.user_id, &id).await?;
     Ok(Json(
         thread_for(&state, &authed.user_id, &id, &post_id).await?,
     ))
@@ -424,7 +451,7 @@ pub async fn add_comment(
     Json(body): Json<NewComment>,
 ) -> Result<Json<CommentThread>, ApiError> {
     let post_id = parse_post_id(&post_id)?;
-    let _ = shared_book(&state, &authed.user_id, &id).await?;
+    let _ = visible_book(&state, &authed.user_id, &id).await?;
     let text = parse_comment_text(&body.text)?;
     let comment_id = Uuid::new_v4().to_string();
     sqlx::query(
@@ -462,14 +489,16 @@ pub async fn profile_replies(
             replies: vec![],
         }));
     };
-    let rows = sqlx::query_as::<_, ProfileReplyRow>(
+    let rows = sqlx::query_as::<_, ProfileReplyRow>(&format!(
         "SELECT c.id, c.book_id, c.post_id, u.username, c.text, c.created_at, c.user_id
          FROM comments c
          JOIN users u ON u.id = c.user_id
-         WHERE c.user_id = ?
-         ORDER BY c.created_at DESC, c.id DESC",
-    )
+         JOIN books b ON b.id = c.book_id
+         WHERE c.user_id = ? AND {BOOK_VISIBLE_TO}
+         ORDER BY c.created_at DESC, c.id DESC"
+    ))
     .bind(&user_id)
+    .bind(&authed.user_id)
     .fetch_all(&state.pool)
     .await?;
     Ok(Json(ProfileReplies {
@@ -497,7 +526,7 @@ pub async fn delete_comment(
     Path((id, post_id, comment_id)): Path<(String, String, String)>,
 ) -> Result<Json<CommentThread>, ApiError> {
     let post_id = parse_post_id(&post_id)?;
-    let _ = shared_book(&state, &authed.user_id, &id).await?;
+    let _ = visible_book(&state, &authed.user_id, &id).await?;
     let owner = sqlx::query_scalar::<_, String>(
         "SELECT user_id FROM comments WHERE id = ? AND book_id = ? AND post_id = ?",
     )
@@ -541,29 +570,38 @@ fn parse_book_id(id: &str) -> Result<Uuid, ApiError> {
 const BOOK_SELECT: &str = "
 SELECT b.id, b.title, b.author, b.handle, b.imported_at, b.post_count,
        COALESCE(p.progress_index, 0) as progress_index,
-       b.is_sample, b.user_id as owner_id
+       b.is_sample, b.shared, b.user_id as owner_id, owner.username as owner_username
 FROM books b
+JOIN users owner ON owner.id = b.user_id
 LEFT JOIN book_progress p ON p.book_id = b.id AND p.user_id = ?
 ";
 
-async fn shared_book(state: &AppState, user_id: &str, id: &str) -> Result<BookRecord, ApiError> {
-    Ok(book_row(state, user_id, id).await?.into_record(user_id))
+/// Book alias `b` is visible to the next bound user id. A hidden book is 404.
+/// Owned, shared by its owner, or the built-in sample.
+const BOOK_VISIBLE_TO: &str = "(b.user_id = ? OR b.shared = 1 OR b.is_sample = 1)";
+
+async fn book_record(state: &AppState, user_id: &str, id: &str) -> Result<BookRecord, ApiError> {
+    Ok(visible_book(state, user_id, id).await?.into_record(user_id))
 }
 
-async fn book_row(state: &AppState, user_id: &str, id: &str) -> Result<BookRow, ApiError> {
+async fn visible_book(state: &AppState, user_id: &str, id: &str) -> Result<BookRow, ApiError> {
     let id = parse_book_id(id)?.to_string();
-    let row = sqlx::query_as::<_, BookRow>(&format!("{BOOK_SELECT} WHERE b.id = ?"))
-        .bind(user_id)
-        .bind(&id)
-        .fetch_optional(&state.pool)
-        .await?;
+    let row = sqlx::query_as::<_, BookRow>(&format!(
+        "{BOOK_SELECT} WHERE b.id = ? AND {BOOK_VISIBLE_TO}"
+    ))
+    .bind(user_id)
+    .bind(&id)
+    .bind(user_id)
+    .fetch_optional(&state.pool)
+    .await?;
     row.ok_or(ApiError::NotFound)
 }
 
 async fn existing_sample(state: &AppState, user_id: &str) -> Result<Option<BookRecord>, ApiError> {
     let row = sqlx::query_as::<_, BookRow>(&format!(
-        "{BOOK_SELECT} WHERE b.is_sample = 1 ORDER BY b.imported_at ASC LIMIT 1"
+        "{BOOK_SELECT} WHERE b.is_sample = 1 AND {BOOK_VISIBLE_TO} ORDER BY b.imported_at ASC LIMIT 1"
     ))
+    .bind(user_id)
     .bind(user_id)
     .fetch_optional(&state.pool)
     .await?;

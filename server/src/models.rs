@@ -14,6 +14,10 @@ pub struct BookRecord {
     pub progress_index: i32,
     pub is_sample: bool,
     pub mine: bool,
+    /// Owner chose to show this book on other accounts' shelves.
+    pub shared: bool,
+    /// Username of the account that added the book.
+    pub owner_username: String,
 }
 
 #[derive(Debug, FromRow)]
@@ -26,7 +30,9 @@ pub struct BookRow {
     pub post_count: i64,
     pub progress_index: i64,
     pub is_sample: i64,
+    pub shared: i64,
     pub owner_id: String,
+    pub owner_username: String,
 }
 
 impl BookRow {
@@ -41,6 +47,8 @@ impl BookRow {
             progress_index: self.progress_index as i32,
             is_sample: self.is_sample != 0,
             mine: self.owner_id == user_id,
+            shared: self.shared != 0,
+            owner_username: self.owner_username,
         }
     }
 }
@@ -73,6 +81,8 @@ pub struct PatchBook {
     /// Accepted for old clients but ignored: posts and their count belong to the server.
     pub post_count: Option<i32>,
     pub progress_index: Option<i32>,
+    /// Only the owner may set this. Omitted leaves sharing unchanged.
+    pub shared: Option<bool>,
 }
 
 #[derive(Debug, Serialize)]
