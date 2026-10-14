@@ -49,10 +49,11 @@ struct MewoNav: View {
             VStack(spacing: 0) {
                 NavigationStack(path: $path) {
                     tabRoot
+                        .mewoHidesSystemNavigationBar()
                         .navigationDestination(for: Route.self) { route in
                             destination(route)
+                                .mewoHidesSystemNavigationBar()
                         }
-                        .navigationBarHidden(true)
                 }
                 HomeTabBar(
                     selected: tab,
@@ -116,7 +117,6 @@ struct MewoNav: View {
                 onBack: { path.removeLast() },
                 onOpenProfile: { handle, name in push(.profile(handle: handle, name: name)) }
             )
-            .navigationBarHidden(true)
         case .profile(let handle, let name):
             ProfileScreen(
                 env: app,
@@ -130,7 +130,6 @@ struct MewoNav: View {
                     }
                 }
             )
-            .navigationBarHidden(true)
         case .settings:
             SettingsHome(
                 onBack: { path.removeLast() },
@@ -138,13 +137,12 @@ struct MewoNav: View {
                 onOpenDisplay: { path.append(.settingsDisplay) },
                 onOpenLibrary: { path.append(.settingsLibrary) }
             )
-            .navigationBarHidden(true)
         case .settingsAccount:
-            SettingsAccountPage(onBack: { path.removeLast() }).navigationBarHidden(true)
+            SettingsAccountPage(onBack: { path.removeLast() })
         case .settingsDisplay:
-            SettingsDisplayPage(onBack: { path.removeLast() }).navigationBarHidden(true)
+            SettingsDisplayPage(onBack: { path.removeLast() })
         case .settingsLibrary:
-            SettingsLibraryPage(onBack: { path.removeLast() }).navigationBarHidden(true)
+            SettingsLibraryPage(onBack: { path.removeLast() })
         }
     }
 
@@ -169,5 +167,15 @@ struct MewoNav: View {
             path.append(route)
             drawerOpen = false
         }
+    }
+}
+
+private extension View {
+    /// `navigationBarHidden` hides the bar chrome and leaves its inset, so the
+    /// custom header sits under a tall empty band. Hiding the toolbar drops
+    /// that inset and keeps the status-bar inset.
+    func mewoHidesSystemNavigationBar() -> some View {
+        toolbar(.hidden, for: .navigationBar)
+            .toolbarBackground(.hidden, for: .navigationBar)
     }
 }

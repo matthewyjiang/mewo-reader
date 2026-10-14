@@ -102,7 +102,6 @@ struct ReaderScreen: View {
                             .font(MewoFont.bold(15))
                             .foregroundStyle(mewo.ink)
                             .lineLimit(1)
-                            .padding(.horizontal, 56)
                     }
                     .buttonStyle(.plain)
                     .accessibilityLabel("Chapters")

@@ -71,17 +71,18 @@ struct SearchScreen: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            MewoAppBar(leading: { ProfileButton(onClick: onOpenAccount) }) {
+            MewoAppBar(leading: { ProfileButton(onClick: onOpenAccount) }, content: {
                 TextField("Search books and posts", text: Binding(
                     get: { model.query },
                     set: { model.setQuery($0) }
                 ))
+                .textFieldStyle(.plain)
                 .font(MewoFont.regular(17))
                 .foregroundStyle(mewo.ink)
                 .focused($focused)
                 .padding(.trailing, 16)
                 .accessibilityIdentifier("search-field")
-            }
+            })
             results
         }
         .background(mewo.ground)
