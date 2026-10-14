@@ -5,6 +5,13 @@ WORKDIR /src/web
 COPY web/package.json web/package-lock.json ./
 RUN npm ci
 COPY web/ ./
+# Release tags arrive as MEWO_VERSION with the leading "v" removed.
+# Empty uses git describe when .git is present, then package.json.
+# This context does not include .git; the tag workflow passes the args.
+ARG MEWO_VERSION=
+ARG MEWO_COMMIT=
+ENV MEWO_VERSION=$MEWO_VERSION \
+    MEWO_COMMIT=$MEWO_COMMIT
 RUN npm run build
 
 FROM rust:1.88.0-bookworm AS builder
@@ -12,6 +19,13 @@ WORKDIR /src
 COPY server/Cargo.toml server/Cargo.lock server/rust-toolchain.toml ./
 COPY server/src ./src
 COPY server/migrations ./migrations
+COPY server/build.rs ./build.rs
+# Same build args as the web stage. build.rs prefers them, then git describe,
+# then the crate version. This context does not include .git.
+ARG MEWO_VERSION=
+ARG MEWO_COMMIT=
+ENV MEWO_VERSION=$MEWO_VERSION \
+    MEWO_COMMIT=$MEWO_COMMIT
 RUN cargo build --release --locked --bin mewo-server --jobs 8
 
 FROM debian:bookworm-slim

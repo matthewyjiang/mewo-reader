@@ -56,7 +56,7 @@
     const titles: Record<string, string> = {
       '/': 'Home', '/search': 'Search', '/likes': 'Likes', '/settings': 'Settings',
       '/settings/display': 'Display', '/settings/account': 'Account',
-      '/settings/library': 'Library',
+      '/settings/library': 'Library', '/settings/about': 'About',
     };
     return titles[path] ?? 'Mewo';
   }

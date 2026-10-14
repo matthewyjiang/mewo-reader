@@ -53,6 +53,16 @@ jobs:
 
       - uses: docker/setup-buildx-action@v3
 
+      # v0.1.2 becomes version 0.1.2. Other builds leave version empty.
+      # The image has no .git, so those builds use Cargo.toml / package.json.
+      # A local checkout derives the version with git describe instead.
+      - id: version
+        run: |
+          echo "commit=${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+          if [[ "$GITHUB_REF_TYPE" == "tag" ]]; then
+            echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+          fi
+
       - uses: docker/build-push-action@v6
         with:
           context: .
@@ -60,5 +70,8 @@ jobs:
           push: ${{ github.event_name != 'pull_request' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            MEWO_VERSION=${{ steps.version.outputs.version }}
+            MEWO_COMMIT=${{ steps.version.outputs.commit }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
