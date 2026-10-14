@@ -26,6 +26,7 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -38,9 +39,16 @@ import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import com.mewo.reader.BuildConfig
+import com.mewo.reader.data.BackendKind
+import com.mewo.reader.data.HostedClient
 import com.mewo.reader.data.LocalIdentity
+import com.mewo.reader.ui.LocalBackend
+import com.mewo.reader.ui.LocalHostedAuth
 import com.mewo.reader.ui.LocalProfile
 import com.mewo.reader.ui.components.LibrarySettings
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import com.mewo.reader.ui.components.MewoAppBar
 import com.mewo.reader.ui.components.ProfileForm
 import com.mewo.reader.ui.components.ProfilePreview
@@ -51,8 +59,39 @@ object SettingsRoutes {
     const val Account = "settings/account"
     const val Display = "settings/display"
     const val Library = "settings/library"
+    const val About = "settings/about"
 
     fun matches(route: String) = route.startsWith("settings")
+}
+
+data class AppBuild(
+    val versionName: String,
+    val versionCode: Int,
+    val commit: String?,
+) {
+    companion object {
+        fun current(): AppBuild = AppBuild(
+            versionName = BuildConfig.VERSION_NAME,
+            versionCode = BuildConfig.VERSION_CODE,
+            commit = BuildConfig.COMMIT.takeIf { it.isNotBlank() },
+        )
+    }
+}
+
+sealed interface ServerVersionState {
+    data object Loading : ServerVersionState
+    data object Unavailable : ServerVersionState
+    data class Ready(val version: String, val commit: String?) : ServerVersionState
+}
+
+internal fun formatAppVersion(name: String, code: Int, commit: String?): String {
+    val sha = commit?.takeIf { it.isNotBlank() }
+    return if (sha == null) "$name ($code)" else "$name ($code, $sha)"
+}
+
+internal fun formatServerVersion(version: String, commit: String?): String {
+    val sha = commit?.takeIf { it.isNotBlank() }
+    return if (sha == null) version else "$version ($sha)"
 }
 
 @Composable
@@ -61,6 +100,7 @@ fun SettingsHome(
     onOpenAccount: () -> Unit,
     onOpenDisplay: () -> Unit,
     onOpenLibrary: () -> Unit,
+    onOpenAbout: () -> Unit,
 ) {
     val profile = LocalProfile.current.profile
     SettingsScaffold(title = "Settings", onBack = onBack) {
@@ -90,6 +130,103 @@ fun SettingsHome(
         HorizontalDivider(
             color = MaterialTheme.colorScheme.outline,
             thickness = 0.6.dp,
+        )
+        SettingsCategoryRow(
+            title = "About",
+            body = "App and server versions.",
+            onClick = onOpenAbout,
+        )
+        HorizontalDivider(
+            color = MaterialTheme.colorScheme.outline,
+            thickness = 0.6.dp,
+        )
+    }
+}
+
+@Composable
+fun SettingsAboutPage(
+    onBack: () -> Unit,
+    app: AppBuild = AppBuild.current(),
+    server: ServerVersionState? = null,
+) {
+    val resolved = server ?: rememberServerVersion()
+    val url = LocalHostedAuth.current.session.normalizedUrl()
+    SettingsScaffold(title = "About", onBack = onBack) {
+        Column(
+            modifier = Modifier.padding(horizontal = 16.dp, vertical = 16.dp),
+            verticalArrangement = Arrangement.spacedBy(16.dp),
+        ) {
+            AboutFact(
+                label = "App",
+                value = formatAppVersion(app.versionName, app.versionCode, app.commit),
+            )
+            AboutFact(
+                label = "Server",
+                value = when (resolved) {
+                    ServerVersionState.Loading -> "Loading…"
+                    ServerVersionState.Unavailable -> "Unavailable"
+                    is ServerVersionState.Ready -> formatServerVersion(resolved.version, resolved.commit)
+                },
+                muted = resolved !is ServerVersionState.Ready,
+            )
+            AboutFact(
+                label = "Server URL",
+                value = url ?: "Unavailable",
+                muted = url == null,
+            )
+        }
+    }
+}
+
+@Composable
+private fun rememberServerVersion(): ServerVersionState {
+    val hosted = LocalBackend.current.kind == BackendKind.Hosted
+    val url = LocalHostedAuth.current.session.normalizedUrl()
+    var state by remember(hosted, url) {
+        mutableStateOf(
+            if (hosted && url != null) ServerVersionState.Loading else ServerVersionState.Unavailable,
+        )
+    }
+    if (hosted && url != null) {
+        val client = remember { HostedClient() }
+        LaunchedEffect(url) {
+            state = withContext(Dispatchers.IO) {
+                runCatching { client.version(url) }
+                    .mapCatching { info ->
+                        if (info.version.isBlank()) error("empty version")
+                        ServerVersionState.Ready(
+                            version = info.version,
+                            commit = info.commit?.takeIf { it.isNotBlank() },
+                        )
+                    }
+                    .getOrElse { ServerVersionState.Unavailable }
+            }
+        }
+    }
+    return state
+}
+
+@Composable
+private fun AboutFact(
+    label: String,
+    value: String,
+    muted: Boolean = false,
+) {
+    Column(modifier = Modifier.fillMaxWidth()) {
+        Text(
+            text = label,
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        Spacer(Modifier.size(4.dp))
+        Text(
+            text = value,
+            style = MaterialTheme.typography.bodyLarge,
+            color = if (muted) {
+                MaterialTheme.colorScheme.onSurfaceVariant
+            } else {
+                MaterialTheme.colorScheme.onSurface
+            },
         )
     }
 }

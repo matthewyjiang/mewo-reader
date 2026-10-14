@@ -24,6 +24,9 @@ import com.mewo.reader.ui.components.ProfileButton
 import com.mewo.reader.ui.library.BookPost
 import com.mewo.reader.ui.library.SectionLabel
 import com.mewo.reader.ui.onboarding.OnboardingScreen
+import com.mewo.reader.ui.settings.AppBuild
+import com.mewo.reader.ui.settings.ServerVersionState
+import com.mewo.reader.ui.settings.SettingsAboutPage
 import com.mewo.reader.ui.settings.SettingsHome
 import com.mewo.reader.ui.theme.DisplayTheme
 import com.mewo.reader.ui.theme.LocalMewoColors
@@ -57,6 +60,16 @@ class SurfaceScreenshots {
             onOpenAccount = {},
             onOpenDisplay = {},
             onOpenLibrary = {},
+            onOpenAbout = {},
+        )
+    }
+
+    @Test
+    fun about() = shoot("about") {
+        SettingsAboutPage(
+            onBack = {},
+            app = AppBuild(versionName = "0.1.1", versionCode = 1, commit = "abc1234"),
+            server = ServerVersionState.Ready(version = "0.1.2", commit = "def5678"),
         )
     }
 

@@ -44,6 +44,13 @@ data class PostsResponse(
     val posts: List<FeedPost> = emptyList(),
 )
 
+/** Public `GET /v1/version`. Commit is omitted when the server has none. */
+@Serializable
+data class ServerVersion(
+    val version: String = "",
+    val commit: String? = null,
+)
+
 class HostedClient(
     private val http: OkHttpClient = OkHttpClient.Builder()
         .connectTimeout(30, TimeUnit.SECONDS)
@@ -71,6 +78,15 @@ class HostedClient(
 
     fun library(session: HostedSession): LibrarySnapshot {
         return get(session, "/v1/library")
+    }
+
+    /** No session. The route is public. */
+    fun version(baseUrl: String): ServerVersion {
+        val base = normalizeBaseUrl(baseUrl).ifBlank {
+            throw HostedException("Set a server URL first.")
+        }
+        val req = Request.Builder().url("$base/v1/version").get().build()
+        return http.newCall(req).execute().use { it.decode() }
     }
 
     fun upload(
