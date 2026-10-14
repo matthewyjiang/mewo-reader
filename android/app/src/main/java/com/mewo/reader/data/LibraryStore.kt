@@ -12,8 +12,8 @@ import java.io.File
 
 /**
  * Library verbs the UI uses. Local keeps books on the device. Hosted
- * talks to a shared server shelf. Same calls either way. EPUB parse
- * stays on the phone; a hosted adapter downloads the file, then extracts here.
+ * talks to a shared server shelf. Same calls either way. Local books
+ * are parsed on the phone; hosted books are parsed by the server.
  */
 interface LibraryStore {
     val library: StateFlow<LibrarySnapshot>

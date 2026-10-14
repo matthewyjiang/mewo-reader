@@ -82,8 +82,10 @@ final class HostedClient: Sendable {
         return try await decode(request)
     }
 
-    func downloadEpub(_ hosted: HostedSession, id: String, dest: URL) async throws {
-        try await download(hosted, path: "/v1/books/\(id)/epub", dest: dest)
+    /// Timeline posts the server parsed from this book. Ids match likes and comments.
+    func posts(_ hosted: HostedSession, id: String) async throws -> [FeedPost] {
+        let body: PostsResponse = try await get(hosted, path: "/v1/books/\(id)/posts")
+        return body.posts
     }
 
     func downloadCover(_ hosted: HostedSession, id: String, dest: URL) async throws -> Bool {

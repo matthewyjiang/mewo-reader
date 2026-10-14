@@ -1,0 +1,7 @@
+.git
+android/
+ios/
+server/target/
+server/data/
+web/node_modules/
+web/dist/

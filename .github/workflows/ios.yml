@@ -1,0 +1,88 @@
+name: iOS
+
+on:
+  pull_request:
+    paths:
+      - ios/**
+      - .github/workflows/ios.yml
+  push:
+    branches: [main]
+    paths:
+      - ios/**
+      - .github/workflows/ios.yml
+  workflow_dispatch:
+
+concurrency:
+  group: ios-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    # macos-26 ships Xcode 26 and the iOS 26 SDK the project targets.
+    runs-on: macos-26
+    # Build + unit tests took 4m23s on run 38492130429; this is a hung-simulator tripwire.
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: ios
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Xcode version
+        run: xcodebuild -version
+
+      # project.yml is the source of truth; the committed Mewo.xcodeproj can lag
+      # behind it (it was missing UITestReset.swift and FeatureTests.swift).
+      - name: Generate Xcode project
+        run: |
+          brew install xcodegen
+          xcodegen generate
+
+      # Simulator names drift between runner image releases, so take the first
+      # available iPhone on an iOS 26 runtime instead of hard-coding one.
+      - name: Pick a simulator
+        id: sim
+        run: |
+          udid=$(xcrun simctl list devices available --json | python3 -c '
+          import json, sys
+          devices = json.load(sys.stdin)["devices"]
+          for runtime, items in sorted(devices.items(), reverse=True):
+              if "iOS-26" not in runtime:
+                  continue
+              for d in items:
+                  if d["name"].startswith("iPhone"):
+                      print(d["udid"]); sys.exit(0)
+          sys.exit("No iOS 26 iPhone simulator on this runner")
+          ')
+          echo "udid=$udid" >> "$GITHUB_OUTPUT"
+          xcrun simctl list devices available | grep "$udid"
+
+      - name: Build and test
+        run: |
+          # Full log goes to a file (uploaded on failure); the step's status is xcodebuild's.
+          status=0
+          xcodebuild test \
+            -project Mewo.xcodeproj \
+            -scheme Mewo \
+            -destination "id=${{ steps.sim.outputs.udid }}" \
+            -resultBundlePath "$RUNNER_TEMP/Mewo.xcresult" \
+            -only-testing:MewoTests \
+            -jobs 8 \
+            CODE_SIGNING_ALLOWED=NO \
+            > "$RUNNER_TEMP/xcodebuild.log" 2>&1 || status=$?
+          grep -E "error:|Test Suite .* (passed|failed)|Test Case .* failed|\*\* (BUILD|TEST)" \
+            "$RUNNER_TEMP/xcodebuild.log" | tail -200 || true
+          exit "$status"
+
+      - name: Upload results
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ios-test-results
+          path: |
+            ${{ runner.temp }}/Mewo.xcresult
+            ${{ runner.temp }}/xcodebuild.log
+          retention-days: 7

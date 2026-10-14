@@ -17,8 +17,10 @@ import java.io.File
 import java.util.UUID
 
 /**
- * Hosted shelf. Talks HTTP, then parses the EPUB on the phone.
- * Cache lives under filesDir/hosted so it never mixes with the local shelf.
+ * Hosted shelf. Talks HTTP. The server parses each book, so every client
+ * reads the same posts and post ids. Readium here only reads title, author,
+ * and cover for upload. Cache lives under filesDir/hosted so it never mixes
+ * with the local shelf.
  */
 class HostedLibraryStore(
     private val context: Context,
@@ -26,7 +28,6 @@ class HostedLibraryStore(
     private val sessions: HostedSessionStore,
     private val client: HostedClient,
     scope: CoroutineScope,
-    private val extractor: FeedExtractor = FeedExtractor(),
 ) : LibraryStore {
     private val json = Json {
         ignoreUnknownKeys = true
@@ -142,21 +143,17 @@ class HostedLibraryStore(
     override suspend fun feed(id: String): List<FeedPost> = withContext(Dispatchers.IO) {
         val session = requireSession()
         val safe = requireBookId(id)
-        val epub = ensureEpub(session, safe)
-        val cacheFile = File(bookDir(safe), "feed.json")
-        if (cacheFile.exists()) {
-            val cache = json.decodeFromString<FeedCache>(cacheFile.readText())
-            if (cache.version == FEED_CACHE_VERSION) {
-                return@withContext cache.posts
-            }
-        }
-        val posts = opener.open(epub) { publication ->
-            extractor.extract(publication)
-        }
-        bookDir(safe).mkdirs()
-        cacheFile.writeText(json.encodeToString(FeedCache(version = FEED_CACHE_VERSION, posts = posts)))
-        val updated = expireOn401 { client.patch(session, safe, PatchBook(postCount = posts.size)) }
-        replaceBook(updated)
+        cachedFeed(safe)?.let { return@withContext it }
+        val posts = expireOn401 { client.posts(session, safe) }
+        val dir = bookDir(safe).apply { mkdirs() }
+        // Builds before server parsing kept the EPUB and a Readium feed here.
+        File(dir, "book.epub").delete()
+        File(dir, "feed.json").delete()
+        File(dir, POSTS_CACHE).writeText(
+            json.encodeToString(FeedCache(version = HOSTED_POSTS_CACHE_VERSION, posts = posts)),
+        )
+        // The server set postCount when it parsed; mirror it so Finished works before the next load.
+        book(safe)?.takeIf { it.postCount != posts.size }?.let { replaceBook(it.copy(postCount = posts.size)) }
         posts
     }
 
@@ -279,7 +276,6 @@ class HostedLibraryStore(
         }
         val safe = requireBookId(record.id)
         val dest = bookDir(safe).apply { mkdirs() }
-        epub.copyTo(File(dest, "book.epub"), overwrite = true)
         if (cover.exists()) {
             cover.copyTo(File(dest, "cover.jpg"), overwrite = true)
         }
@@ -294,14 +290,6 @@ class HostedLibraryStore(
         }
     }
 
-    private fun ensureEpub(session: HostedSession, id: String): File {
-        val dest = File(bookDir(id), "book.epub")
-        if (!dest.exists() || dest.length() == 0L) {
-            expireOn401 { client.downloadEpub(session, id, dest) }
-        }
-        return dest
-    }
-
     private fun ensureCover(session: HostedSession, id: String) {
         val dest = File(bookDir(id), "cover.jpg")
         if (dest.exists() && dest.length() > 0L) return
@@ -310,11 +298,11 @@ class HostedLibraryStore(
 
     private fun cachedFeed(id: String): List<FeedPost>? {
         val safe = safeBookId(id) ?: return null
-        val cacheFile = File(bookDir(safe), "feed.json")
+        val cacheFile = File(bookDir(safe), POSTS_CACHE)
         if (!cacheFile.exists()) return null
         return runCatching {
             val cache = json.decodeFromString<FeedCache>(cacheFile.readText())
-            if (cache.version == FEED_CACHE_VERSION) cache.posts else null
+            if (cache.version == HOSTED_POSTS_CACHE_VERSION) cache.posts else null
         }.getOrNull()
     }
 
@@ -362,3 +350,7 @@ fun requireBookId(id: String): String {
 }
 
 const val HOSTED_NOT_SIGNED_IN = "Sign in to the hosted library first."
+
+/** Server posts cached per hosted book. Bump the version if the server's post shape changes. */
+private const val POSTS_CACHE = "posts.json"
+private const val HOSTED_POSTS_CACHE_VERSION = 1

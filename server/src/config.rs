@@ -15,23 +15,23 @@ pub const MAX_FORM_OVERHEAD_BYTES: u64 = 64 * 1024;
 pub fn request_body_limit(max_epub_bytes: u64) -> usize {
     max_epub_bytes
         .saturating_add(MAX_COVER_BYTES)
-        .saturating_add(MAX_FORM_OVERHEAD_BYTES)
-        as usize
+        .saturating_add(MAX_FORM_OVERHEAD_BYTES) as usize
 }
 
 #[derive(Clone, Debug)]
 pub struct Config {
     pub listen: String,
     pub data_dir: PathBuf,
+    /// Unset means API only. Docker sets this to /srv/web.
+    pub web_dir: Option<PathBuf>,
     pub allow_signup: bool,
     pub max_epub_bytes: u64,
 }
 
 impl Config {
     pub fn from_env() -> Self {
-        let data_dir = PathBuf::from(
-            std::env::var("MEWO_DATA_DIR").unwrap_or_else(|_| "data".into()),
-        );
+        let data_dir =
+            PathBuf::from(std::env::var("MEWO_DATA_DIR").unwrap_or_else(|_| "data".into()));
         let allow_signup = match std::env::var("MEWO_ALLOW_SIGNUP") {
             Ok(v) => matches!(v.to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"),
             Err(_) => true,
@@ -44,6 +44,9 @@ impl Config {
         Self {
             listen,
             data_dir,
+            web_dir: std::env::var_os("MEWO_WEB_DIR")
+                .filter(|v| !v.is_empty())
+                .map(PathBuf::from),
             allow_signup,
             max_epub_bytes,
         }

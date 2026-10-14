@@ -8,7 +8,7 @@ adaptive
 
 ## Stack
 
-delegated: Kotlin and Jetpack Compose on Android, SwiftUI on iPhone. Both phones use the matching Readium toolkit to parse EPUB into text elements. Rust (axum, sqlx, SQLite) for the optional hosted library. The server stores files and library state. It does not parse books.
+delegated: Kotlin and Jetpack Compose on Android, SwiftUI on iPhone, Svelte for the hosted web app. Both phones use the matching Readium toolkit to parse local EPUBs into text elements. Rust (axum, sqlx, SQLite) for the optional hosted library. The server stores files and library state, parses hosted books into posts once on upload, and serves the web app. Every client reads those posts, so post ids line up for likes and notes.
 
 ## Users
 
@@ -31,6 +31,7 @@ Used on a phone, often in bed or on a couch, one-handed. Books come from files t
 - Set a local handle on first launch, and after an APK update if none is saved. Name is optional. Change both later in Settings.
 - Import EPUB from the system file picker
 - Persist the library on device, or on a hosted server you sign into
+- Read the hosted shelf in a browser from the server's own address. The web app has no local shelf
 - Read as a vertical feed: one post per paragraph, including long ones
 - Start the feed at the first non-publisher TOC entry, not copyright or contents
 - Remember reading place per book. A book read to the last post sits under Finished on Home, and returns to the timeline if you leave off earlier

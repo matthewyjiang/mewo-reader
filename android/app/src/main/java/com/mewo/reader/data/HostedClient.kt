@@ -32,10 +32,15 @@ data class HostedErrorBody(
     val error: String = "",
 )
 
+/** Only reading place. The server owns postCount now that it parses books. */
 @Serializable
 data class PatchBook(
-    val postCount: Int? = null,
     val progressIndex: Int? = null,
+)
+
+@Serializable
+data class PostsResponse(
+    val posts: List<FeedPost> = emptyList(),
 )
 
 class HostedClient(
@@ -117,8 +122,10 @@ class HostedClient(
         return http.newCall(req).execute().use { it.decode() }
     }
 
-    fun downloadEpub(session: HostedSession, id: String, dest: File) {
-        download(session, "/v1/books/$id/epub", dest)
+    /** Timeline posts the server parsed from this book. Ids match likes and comments. */
+    fun posts(session: HostedSession, id: String): List<FeedPost> {
+        val body: PostsResponse = get(session, "/v1/books/$id/posts")
+        return body.posts
     }
 
     fun downloadCover(session: HostedSession, id: String, dest: File): Boolean {

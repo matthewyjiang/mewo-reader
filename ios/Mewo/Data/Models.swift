@@ -141,15 +141,18 @@ struct HostedErrorBody: Codable, Sendable {
     var error: String = ""
 }
 
+/// Only reading place. The server owns postCount now that it parses books.
 struct PatchBook: Codable, Sendable {
-    var postCount: Int?
     var progressIndex: Int?
 
     func encode(to encoder: Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)
-        try container.encodeIfPresent(postCount, forKey: .postCount)
         try container.encodeIfPresent(progressIndex, forKey: .progressIndex)
     }
+}
+
+struct PostsResponse: Codable, Sendable {
+    var posts: [FeedPost] = []
 }
 
 let feedCacheVersion = 4
