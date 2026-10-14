@@ -22,9 +22,6 @@
   let error = $state('');
   let active = true;
   let request = 0;
-  let ownProfile = $derived(
-    username.toLowerCase() === store.session?.username.toLowerCase(),
-  );
 
   export async function refresh(): Promise<void> {
     const latest = ++request;
@@ -68,13 +65,12 @@
     <div class="profile-avatar"><Avatar name={username} size={68} /></div>
     <div class="profile-info">
       <h2>{username}</h2>
-      <p class="meta">@{username}</p>
     </div>
     <div class="posts-tab">Posts</div>
   </section>
   {#if !replies.length}
     <p class="inline-status">
-      {ownProfile ? 'Reply to a line. It shows up here.' : 'No posts yet.'}
+      No posts
     </p>
   {:else}
     {#each replies as reply (reply.comment.id)}
@@ -122,10 +118,6 @@
 
 .profile-info {
   padding: 42px 16px 16px;
-}
-
-.profile-info p {
-  margin-top: 2px;
 }
 
 .posts-tab {

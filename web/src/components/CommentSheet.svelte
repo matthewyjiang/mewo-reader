@@ -138,14 +138,8 @@
             onfocus={() => focused = true}
             onblur={() => focused = false}
             oninput={() => error = ''}
-            aria-describedby="reply-budget reply-error"
+            aria-describedby={error || budgetError ? 'reply-error' : undefined}
           ></textarea>
-          <div class="composer-meta">
-            <span class="meta">Visible with this book</span>
-            <span id="reply-budget" class:danger={characters > budget} class="meta">
-              {characters} / {budget}
-            </span>
-          </div>
           <p id="reply-error" class="error" role="alert">{error || budgetError}</p>
         </div>
       </div>
@@ -187,13 +181,5 @@
 .compose-row .meta.accent {
   margin-top: 4px;
 }
-
-.composer-meta {
-  display: flex;
-  justify-content: space-between;
-  gap: 8px;
-  margin-bottom: 8px;
-}
-
 
 </style>

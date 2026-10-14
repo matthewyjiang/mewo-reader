@@ -136,8 +136,8 @@
         />
       {:else}
         <div class="end-card">
-          <p>{posts.length ? `End of ${book!.title}` : 'This book has no readable posts.'}</p>
-          <button class="text-button" onclick={() => router.go('/')}>Back to your shelf</button>
+          <p>{posts.length ? `End of ${book!.title}` : 'No posts'}</p>
+          <button class="text-button" onclick={() => router.go('/')}>Back to Home</button>
         </div>
       {/if}
     {/snippet}

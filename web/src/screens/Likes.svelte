@@ -39,8 +39,7 @@
   <FeedStatus {loading} {error} label="your likes" onretry={load} />
 {:else if !hits.length}
   <div class="empty-state">
-    <h2>No likes yet</h2>
-    <p class="muted">Heart a line. It stays here, across all your books.</p>
+    <h2>No likes</h2>
   </div>
 {:else}
   {#each hits as hit (`${hit.book.id}:${hit.post.id}`)}

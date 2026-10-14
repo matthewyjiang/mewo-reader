@@ -8,7 +8,6 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.text.KeyboardOptions
-import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
@@ -30,10 +29,11 @@ fun ProfilePreview(
     handle: String,
     modifier: Modifier = Modifier,
 ) {
-    val display = name.trim().ifBlank { LocalIdentity.normalizeHandle(handle).ifBlank { "Name" } }
     val tag = LocalIdentity.normalizeHandle(handle)
     val named = name.trim().isNotEmpty()
     val handled = tag.isNotEmpty()
+    val display = name.trim().ifBlank { tag }
+    val showHandle = handled && !display.equals(tag, ignoreCase = true)
     Column(modifier = modifier.fillMaxWidth()) {
         Row(
             modifier = Modifier.padding(vertical = 12.dp),
@@ -53,20 +53,18 @@ fun ProfilePreview(
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                 )
-                Spacer(Modifier.height(2.dp))
-                Text(
-                    text = if (handled) "@$tag" else "@handle",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                )
+                if (showHandle) {
+                    Spacer(Modifier.height(2.dp))
+                    Text(
+                        text = "@$tag",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
             }
         }
-        HorizontalDivider(
-            color = MaterialTheme.colorScheme.outline,
-            thickness = 0.6.dp,
-        )
     }
 }
 
@@ -100,7 +98,6 @@ fun ProfileForm(
             singleLine = true,
             isError = nameError != null,
             label = { Text("Name") },
-            placeholder = { Text("Optional") },
             supportingText = nameError?.let { { Text(it) } },
             keyboardOptions = KeyboardOptions(
                 capitalization = KeyboardCapitalization.Words,

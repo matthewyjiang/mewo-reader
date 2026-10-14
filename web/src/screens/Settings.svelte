@@ -68,86 +68,57 @@
 
 {#if path === '/settings'}
   <button class="settings-row" onclick={() => router.go('/settings/account')}>
-    <span>
-      <strong>Account</strong>
-      <span class="meta">@{store.session?.username}</span>
-    </span>
+    Account
     <Icon name="chevron" />
   </button>
   <button class="settings-row" onclick={() => router.go('/settings/display')}>
-    <span>
-      <strong>Display</strong>
-      <span class="meta">Twitter or X. Light or night. Font size. Mewo mode.</span>
-    </span>
+    Display
     <Icon name="chevron" />
   </button>
   <button class="settings-row" onclick={() => router.go('/settings/library')}>
-    <span>
-      <strong>Library</strong>
-      <span class="meta">Private until you share a book.</span>
-    </span>
+    Library
     <Icon name="chevron" />
   </button>
   <button class="settings-row" onclick={() => router.go('/settings/about')}>
-    <span>
-      <strong>About</strong>
-      <span class="meta">Web and server versions.</span>
-    </span>
+    About
     <Icon name="chevron" />
   </button>
 {:else if path === '/settings/display'}
   <DisplaySettings />
 {:else if path === '/settings/account' && store.session}
-  <section class="settings-content">
-    <div class="identity-preview">
-      <Avatar name={store.session.username} />
-      <div>
-        <strong>{store.session.username}</strong>
-        <p class="meta">@{store.session.username}</p>
-      </div>
-    </div>
-    <p class="muted">
-      Your hosted username is used on your profile and notes.
-      Account names are managed by the server.
-    </p>
-    <button class="text-button" onclick={() => onprofile(store.session!.username)}>
-      View profile
-    </button>
-    <button class="text-button danger" onclick={onsignout}>Sign out</button>
-  </section>
+  <div class="account-line">
+    <Avatar name={store.session.username} size={40} />
+    <strong>{store.session.username}</strong>
+  </div>
+  <button class="settings-row" onclick={() => onprofile(store.session!.username)}>
+    View profile
+  </button>
+  <button class="settings-row danger" onclick={onsignout}>Sign out</button>
 {:else if path === '/settings/library'}
-  <section class="settings-content">
-    <h2>Hosted library</h2>
-    <p class="muted">
-      Books you add stay private until you share them. Other accounts can read a
-      book you share, and the sample. Notes are visible to anyone who can read
-      the book. Likes and reading place stay yours. Only the person who added a
-      book can remove it or change sharing.
-    </p>
-    <p class="meta">{location.origin}</p>
-    <button class="pill" disabled={uploading} onclick={onadd}>Add an EPUB</button>
-    <button class="text-button" disabled={uploading} onclick={onsample}>Open a sample</button>
-  </section>
+  <div class="fact-row">
+    <span>Server URL</span>
+    <span>{location.origin}</span>
+  </div>
+  <button class="settings-row" disabled={uploading} onclick={onadd}>Add an EPUB</button>
+  <button class="settings-row" disabled={uploading} onclick={onsample}>Open a sample</button>
 {:else if path === '/settings/about'}
-  <section class="settings-content about" aria-label="App info">
-    <dl>
-      <div>
-        <dt>Web app</dt>
-        <dd>{formatBuild(webVersion, webCommit)}</dd>
-      </div>
-      <div>
-        <dt>Server</dt>
-        <dd class:muted={serverBuild.status !== 'ok'}>{serverLabel()}</dd>
-      </div>
-      <div>
-        <dt>Server URL</dt>
-        <dd>{location.origin}</dd>
-      </div>
-    </dl>
+  <section aria-label="App info">
+    <div class="fact-row">
+      <span>Web app</span>
+      <span>{formatBuild(webVersion, webCommit)}</span>
+    </div>
+    <div class="fact-row">
+      <span>Server</span>
+      <span class:muted={serverBuild.status !== 'ok'}>{serverLabel()}</span>
+    </div>
+    <div class="fact-row">
+      <span>Server URL</span>
+      <span>{location.origin}</span>
+    </div>
   </section>
 {:else}
   <div class="empty-state">
-    <h2>That page isn't here</h2>
+    <h2>Not found</h2>
     <button class="pill" onclick={() => router.go('/settings')}>Back to Settings</button>
   </div>
 {/if}
@@ -155,23 +126,16 @@
 <style>
 .settings-row {
   width: 100%;
-  padding: 20px 16px;
+  min-height: 52px;
+  padding: 0 16px;
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 16px;
   text-align: left;
   border-bottom: .6px solid var(--line);
-}
-
-.settings-row > span {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-}
-
-.settings-row strong {
   font-size: 1.0625rem;
+  font-weight: 700;
 }
 
 .settings-row :global(svg) {
@@ -179,42 +143,46 @@
   flex-shrink: 0;
 }
 
-.settings-row:hover {
+.settings-row:hover:not(:disabled) {
   background: var(--hover);
 }
 
-.settings-content {
-  padding: 24px 16px;
+.settings-row.danger {
+  color: var(--like);
+}
+
+.account-line {
+  min-height: 64px;
   display: flex;
-  flex-direction: column;
-  align-items: flex-start;
-  gap: 16px;
+  align-items: center;
+  gap: 12px;
+  padding: 0 16px;
+  border-bottom: .6px solid var(--line);
 }
 
-.about dl {
-  width: 100%;
-  margin: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 16px;
-}
-
-.about div {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-}
-
-.about dt {
-  color: var(--mute);
-  font-size: .8125rem;
-  line-height: 1.23;
-}
-
-.about dd {
-  margin: 0;
+.account-line strong {
+  font-size: 1.0625rem;
   overflow-wrap: anywhere;
 }
 
+.fact-row {
+  min-height: 52px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 8px 16px;
+  border-bottom: .6px solid var(--line);
+}
 
+.fact-row > :first-child {
+  font-weight: 700;
+  font-size: 1.0625rem;
+  flex: 0 0 auto;
+}
+
+.fact-row > :last-child {
+  text-align: right;
+  overflow-wrap: anywhere;
+}
 </style>

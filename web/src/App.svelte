@@ -171,7 +171,7 @@
       const book = await store.upload(file, sample, (percent) => uploadPercent = percent);
       if (store.session?.token === token) {
         if (!book.isSample && !book.shared) {
-          store.notice = `${book.title} is private. Use Share on Home when you want others to read it.`;
+          store.notice = `${book.title} is private.`;
         }
         router.go(readerUrl(book.id));
       }
@@ -316,7 +316,7 @@
               />
             {:else}
               <div class="empty-state">
-                <h2>That page isn't here</h2>
+                <h2>Not found</h2>
                 <button class="pill" onclick={() => router.go('/')}>Back to Home</button>
               </div>
             {/if}
@@ -344,7 +344,7 @@
       {#if uploading}
         <div class="upload-status" role="status">
           <strong>
-            {uploadPercent === 100 ? 'Making your timeline…' : 'Adding your EPUB…'}
+            Uploading…
           </strong>
           <progress max="100" value={uploadPercent} aria-label="EPUB upload progress"></progress>
           <span class="meta">{uploadPercent}% uploaded</span>

@@ -14,7 +14,7 @@
   </div>
 {:else if error}
   <div class="empty-state">
-    <h2>Couldn't open this timeline</h2>
+    <h2>Couldn't load</h2>
     <p class="error" role="alert">{error}</p>
     <button class="pill" onclick={onretry}>Try again</button>
   </div>

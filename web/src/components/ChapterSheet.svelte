@@ -33,7 +33,7 @@
   </header>
   <div class="chapter-list" bind:this={scroller}>
     {#if !headings.length}
-      <p class="inline-status">This book has no chapter headings.</p>
+      <p class="inline-status">No chapters</p>
     {:else if scroller}
       <Timeline bind:this={timeline} count={headings.length} {scroller}>
         {#snippet row(index: number)}

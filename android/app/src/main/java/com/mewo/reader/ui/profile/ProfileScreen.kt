@@ -123,16 +123,7 @@ fun ProfileScreen(
                     }
                     if (state.replies.isEmpty()) {
                         item {
-                            Text(
-                                text = if (viewingSelf) {
-                                    "Reply to a line. It shows up here."
-                                } else {
-                                    "No posts yet."
-                                },
-                                style = MaterialTheme.typography.bodyLarge,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                modifier = Modifier.padding(horizontal = 16.dp, vertical = 24.dp),
-                            )
+                            EmptyPosts()
                         }
                     } else {
                         items(
@@ -236,13 +227,15 @@ private fun ProfileHeader(
                 style = MaterialTheme.typography.titleLarge,
                 modifier = Modifier.padding(horizontal = 16.dp),
             )
-            Spacer(Modifier.height(2.dp))
-            Text(
-                text = "@$handle",
-                style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                modifier = Modifier.padding(horizontal = 16.dp),
-            )
+            if (!name.equals(handle, ignoreCase = true)) {
+                Spacer(Modifier.height(2.dp))
+                Text(
+                    text = "@$handle",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(horizontal = 16.dp),
+                )
+            }
             Spacer(Modifier.height(16.dp))
             PostsTab()
         }
@@ -343,6 +336,15 @@ private fun ProfileReplyRow(
         }
         HorizontalDivider(color = MaterialTheme.colorScheme.outline, thickness = 0.6.dp)
     }
+}
+
+@Composable
+internal fun EmptyPosts() {
+    Text(
+        text = "No posts",
+        style = MaterialTheme.typography.headlineLarge,
+        modifier = Modifier.padding(horizontal = 28.dp, vertical = 48.dp),
+    )
 }
 
 private fun quote(author: String?, title: String?, post: FeedPost): String {

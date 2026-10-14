@@ -10,6 +10,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -53,13 +54,6 @@ fun DisplaySettings(modifier: Modifier = Modifier) {
     val mewoMode = LocalMewoMode.current
     var iconError by remember { mutableStateOf<String?>(null) }
     Column(modifier = modifier.fillMaxWidth()) {
-        Text(
-            text = "Twitter kept a navy night. X went black.",
-            style = MaterialTheme.typography.bodyMedium,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-            modifier = Modifier.padding(horizontal = 16.dp),
-        )
-        Spacer(Modifier.height(20.dp))
         Column(
             modifier = Modifier
                 .padding(horizontal = 16.dp)
@@ -120,19 +114,15 @@ private fun FontSizeSection() {
     val font = LocalReaderFont.current
     val scale = font.scale
     Column(modifier = Modifier.fillMaxWidth()) {
-        Text(
-            "Font size",
-            style = MaterialTheme.typography.titleMedium,
-            modifier = Modifier.padding(horizontal = 16.dp),
-        )
-        Spacer(Modifier.height(4.dp))
-        Text(
-            text = "How big posts read. Bars and buttons stay the same.",
-            style = MaterialTheme.typography.bodyMedium,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-            modifier = Modifier.padding(horizontal = 16.dp),
-        )
-        Spacer(Modifier.height(16.dp))
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .heightIn(min = 52.dp)
+                .padding(horizontal = 16.dp),
+            contentAlignment = Alignment.CenterStart,
+        ) {
+            Text("Font size", style = MaterialTheme.typography.titleMedium)
+        }
         FontSizePreview(scale = scale)
         Spacer(Modifier.height(8.dp))
         Row(
@@ -197,7 +187,7 @@ private fun FontSizePreview(scale: ReaderTypeScale) {
                     )
                     Spacer(Modifier.width(6.dp))
                     Text(
-                        text = "@mewo · The first post",
+                        text = "@mewo",
                         style = MaterialTheme.typography.labelSmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         maxLines = 1,
@@ -207,7 +197,7 @@ private fun FontSizePreview(scale: ReaderTypeScale) {
                 }
                 Spacer(Modifier.height(4.dp))
                 Text(
-                    text = "I did not mean to become a timeline. I meant to be a book.",
+                    text = "The paragraph sits at this size.",
                     style = scale.bodyStyle(MaterialTheme.typography.bodyLarge),
                 )
             }
@@ -259,24 +249,20 @@ private fun MewoModeRow(
         Row(
             modifier = Modifier
                 .fillMaxWidth()
+                .heightIn(min = 52.dp)
                 .toggleable(
                     value = enabled,
                     onValueChange = onToggle,
                     role = Role.Switch,
-                )
-                .padding(vertical = 4.dp),
+                ),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(12.dp),
         ) {
-            Column(modifier = Modifier.weight(1f)) {
-                Text("Mewo mode", style = MaterialTheme.typography.titleMedium)
-                Spacer(Modifier.height(4.dp))
-                Text(
-                    text = "Use Teddy for the app icon, launch screen, and header. Your color theme stays the same.",
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            }
+            Text(
+                text = "Mewo mode",
+                style = MaterialTheme.typography.titleMedium,
+                modifier = Modifier.weight(1f),
+            )
             Switch(
                 checked = enabled,
                 onCheckedChange = null,

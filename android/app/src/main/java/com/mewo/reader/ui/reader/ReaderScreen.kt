@@ -151,7 +151,7 @@ fun ReaderScreen(
                         )
                     }
                     item {
-                        EndOfFeed(title = book?.title)
+                        EndOfFeed(title = book?.title, empty = state.posts.isEmpty())
                     }
                 }
                 commentTarget?.let { target ->
@@ -236,7 +236,7 @@ private fun ReaderBar(
 }
 
 @Composable
-private fun EndOfFeed(title: String?) {
+private fun EndOfFeed(title: String?, empty: Boolean) {
     Box(
         modifier = Modifier
             .fillMaxWidth()
@@ -244,7 +244,11 @@ private fun EndOfFeed(title: String?) {
         contentAlignment = Alignment.Center,
     ) {
         Text(
-            text = if (title != null) "End of $title" else "You're caught up",
+            text = when {
+                empty -> "No posts"
+                title != null -> "End of $title"
+                else -> "End"
+            },
             style = MaterialTheme.typography.bodyMedium,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )

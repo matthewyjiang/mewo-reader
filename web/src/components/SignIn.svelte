@@ -1,14 +1,21 @@
 <script lang="ts">
   import { store, message } from '../lib/store.svelte';
-  import Avatar from './Avatar.svelte';
   import Icon from './Icon.svelte';
+
+  const usernameRule = '3–32 characters: letters, digits, underscore.';
+  const passwordRule = 'At least 8 characters.';
 
   let mode = $state<'login' | 'register'>('login');
   let username = $state('');
   let password = $state('');
   let busy = $state(false);
   let error = $state('');
-  let valid = $derived(/^[A-Za-z0-9_]{3,32}$/.test(username.trim()) && password.length >= 8);
+  let usernameValue = $derived(username.trim());
+  let usernameOk = $derived(/^[A-Za-z0-9_]{3,32}$/.test(usernameValue));
+  let passwordOk = $derived(password.length >= 8);
+  let valid = $derived(usernameOk && passwordOk);
+  let usernameError = $derived(usernameValue && !usernameOk ? usernameRule : '');
+  let passwordError = $derived(password && !passwordOk ? passwordRule : '');
 
   async function submit(event: SubmitEvent): Promise<void> {
     event.preventDefault();
@@ -37,19 +44,7 @@
     <span class="sr-only">Mewo</span>
   </header>
   <form class="auth-form" onsubmit={submit}>
-    <h1>{mode === 'register' ? 'This is you.' : 'Your next paragraph awaits.'}</h1>
-    <p class="muted">
-      {mode === 'register'
-        ? 'Your profile and notes use this username.'
-        : 'Sign in to your hosted shelf. Your place and likes come with you.'}
-    </p>
-    <div class="identity-preview">
-      <Avatar name={username || 'Mewo'} />
-      <div>
-        <strong>{username || 'Your username'}</strong>
-        <div class="meta">@{username || 'you'}</div>
-      </div>
-    </div>
+    <h1>{mode === 'register' ? 'Create account' : 'Sign in'}</h1>
     <label for="username">Username</label>
     <input
       id="username"
@@ -63,9 +58,12 @@
       required
       bind:value={username}
       disabled={busy}
-      aria-describedby="username-help"
+      aria-invalid={usernameError ? 'true' : undefined}
+      aria-describedby={usernameError ? 'username-error' : undefined}
     />
-    <p id="username-help" class="meta">3–32 characters: letters, digits, underscore.</p>
+    {#if usernameError}
+      <p id="username-error" class="error">{usernameError}</p>
+    {/if}
     <label for="password">Password</label>
     <input
       id="password"
@@ -76,8 +74,12 @@
       required
       bind:value={password}
       disabled={busy}
+      aria-invalid={passwordError ? 'true' : undefined}
+      aria-describedby={passwordError ? 'password-error' : undefined}
     />
-    <p class="meta">At least 8 characters.</p>
+    {#if passwordError}
+      <p id="password-error" class="error">{passwordError}</p>
+    {/if}
     {#if error || store.notice}
       <p class="error" role="alert">{error || store.notice}</p>
     {/if}
@@ -85,7 +87,7 @@
       {busy ? 'Connecting…' : mode === 'login' ? 'Sign in' : 'Create account'}
     </button>
     <button type="button" class="text-button" disabled={busy} onclick={switchMode}>
-      {mode === 'login' ? 'Create an account' : 'Already have an account? Sign in'}
+      {mode === 'login' ? 'Create an account' : 'Sign in instead'}
     </button>
   </form>
 </div>
@@ -109,7 +111,7 @@
 }
 
 .auth-form {
-  padding: 48px 28px 24px;
+  padding: 24px 16px;
   display: flex;
   flex-direction: column;
   align-items: stretch;
@@ -118,17 +120,14 @@
 }
 
 .auth-form h1 {
-  font-size: 1.75rem;
-  margin-bottom: 12px;
-}
-
-.auth-form > .identity-preview {
-  margin-top: 32px;
-  margin-bottom: 12px;
+  font-size: 1.375rem;
+  line-height: 52px;
+  margin-bottom: 8px;
 }
 
 .auth-form > label {
-  margin: 20px 0 8px;
+  margin: 8px 0;
+  min-height: 24px;
   font-weight: 700;
 }
 
@@ -146,21 +145,17 @@
   border-color: var(--accent);
 }
 
-.auth-form > .meta {
+.auth-form > .error {
   margin-top: 6px;
 }
 
-.auth-form > .error {
-  margin-top: 16px;
-}
-
 .auth-submit {
-  margin-top: 28px;
-  align-self: flex-end;
+  margin-top: 20px;
+  width: 100%;
 }
 
 .auth-form > .text-button {
-  margin-top: 12px;
+  margin-top: 4px;
   text-align: center;
 }
 

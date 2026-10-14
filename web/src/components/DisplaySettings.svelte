@@ -5,7 +5,7 @@
 
 <section class="display-settings" aria-label="Display preferences">
   <fieldset class="palette-fieldset">
-    <legend>Choose your display</legend>
+    <legend class="sr-only">Theme</legend>
     <div class="palettes">
       {#each themes as theme}
         <button
@@ -49,18 +49,15 @@
     <div class="post-column">
       <div class="post-meta">
         <strong>Mewo</strong>
-        <span class="meta">@mewo · Preview</span>
+        <span class="meta">@mewo</span>
       </div>
       <p class="post-body">
-        The book is a timeline. One paragraph, one post. Make yourself comfortable.
+        The paragraph sits at this size.
       </p>
     </div>
   </div>
   <label class="switch-row">
-    <span>
-      <strong>Mewo mode</strong>
-      <span class="meta">Teddy in the header. Same palette.</span>
-    </span>
+    <span>Mewo mode</span>
     <input
       type="checkbox"
       role="switch"
@@ -69,12 +66,7 @@
     />
   </label>
   <label class="switch-row">
-    <span>
-      <strong>Always show navigation</strong>
-      <span class="meta">
-        Keep bars visible while reading, including with a screen reader.
-      </span>
-    </span>
+    <span>Always show navigation</span>
     <input
       type="checkbox"
       role="switch"
@@ -97,9 +89,6 @@
 
 .palette-fieldset legend {
   padding: 0;
-  font-weight: 700;
-  margin-bottom: 16px;
-  font-size: 1.0625rem;
 }
 
 .palettes {
@@ -188,15 +177,15 @@
   align-items: center;
   gap: 16px;
   justify-content: space-between;
-  padding: 20px 0;
+  min-height: 52px;
   border-bottom: .6px solid var(--line);
+  font-weight: 700;
+  font-size: 1.0625rem;
 }
 
 .switch-row > span {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
   flex: 1;
+  min-width: 0;
 }
 
 .switch-row input {

@@ -36,6 +36,8 @@ import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -98,11 +100,12 @@ fun SearchScreen(
                     modifier = Modifier
                         .weight(1f)
                         .padding(end = 16.dp)
-                        .focusRequester(focus),
+                        .focusRequester(focus)
+                        .semantics { contentDescription = "Search books and posts" },
                     decorationBox = { inner ->
                         if (state.query.isEmpty()) {
                             Text(
-                                "Search books and posts",
+                                "Search",
                                 style = MaterialTheme.typography.bodyLarge,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                             )
@@ -117,11 +120,9 @@ fun SearchScreen(
                 (state.result.books.isEmpty() && state.result.posts.isEmpty()),
         )
         when {
-            state.query.isBlank() -> {
-                Hint("Type a title, author, or a line you remember.")
-            }
+            state.query.isBlank() -> Unit
             state.result.books.isEmpty() && state.result.posts.isEmpty() -> {
-                Hint("No matches for \"${state.query}\".")
+                SearchEmpty()
             }
             else -> {
                 val listState = rememberLazyListState()
@@ -198,12 +199,11 @@ private fun SectionLabel(text: String) {
 }
 
 @Composable
-private fun Hint(text: String) {
+internal fun SearchEmpty() {
     Text(
-        text = text,
-        style = MaterialTheme.typography.bodyLarge,
-        color = MaterialTheme.colorScheme.onSurfaceVariant,
-        modifier = Modifier.padding(horizontal = 16.dp, vertical = 24.dp),
+        text = "No matches",
+        style = MaterialTheme.typography.headlineLarge,
+        modifier = Modifier.padding(horizontal = 28.dp, vertical = 48.dp),
     )
 }
 

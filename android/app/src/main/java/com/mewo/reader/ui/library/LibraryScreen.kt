@@ -93,7 +93,6 @@ fun LibraryScreen(
             hideOnScroll.ShowWhenIdle(state.books.isEmpty())
             if (state.books.isEmpty() && !state.busy) {
                 EmptyTimeline(
-                    hosted = hosted,
                     onAdd = { picker.launch(arrayOf("application/epub+zip", "application/octet-stream")) },
                     onSample = viewModel::importSample,
                 )
@@ -188,7 +187,7 @@ fun LibraryScreen(
 }
 
 @Composable
-private fun RemoveBookDialog(
+internal fun RemoveBookDialog(
     book: BookRecord,
     hosted: Boolean,
     onConfirm: () -> Unit,
@@ -201,8 +200,8 @@ private fun RemoveBookDialog(
         textContentColor = MaterialTheme.colorScheme.onSurfaceVariant,
         title = {
             Text(
-                text = "Remove from your library?",
-                style = MaterialTheme.typography.headlineLarge,
+                text = "Remove ${book.title}?",
+                style = MaterialTheme.typography.titleLarge,
             )
         },
         text = {
@@ -234,14 +233,11 @@ private fun HomeBar(onOpenAccount: () -> Unit, visible: Boolean) {
 }
 
 private fun removalCopy(book: BookRecord, hosted: Boolean): String {
-    if (!hosted) {
-        return "This removes ${book.title}, plus likes, notes, and where you left off. You can add the EPUB again."
-    }
+    if (!hosted) return "Removes it from this phone."
     return if (book.shared || book.isSample) {
-        "This removes ${book.title} for everyone who can read it, plus likes, notes, and reading place."
+        "Removes it for everyone who can read it."
     } else {
-        "This removes ${book.title} from your library, plus likes, notes, and reading place. " +
-            "It is private, so nobody else can read it."
+        "Removes it from your library."
     }
 }
 
@@ -262,8 +258,7 @@ private fun shelfGroups(books: List<BookRecord>): ShelfGroups {
 }
 
 @Composable
-private fun EmptyTimeline(
-    hosted: Boolean,
+internal fun EmptyTimeline(
     onAdd: () -> Unit,
     onSample: () -> Unit,
 ) {
@@ -275,19 +270,8 @@ private fun EmptyTimeline(
         horizontalAlignment = Alignment.Start,
     ) {
         Text(
-            text = "Your timeline is empty",
+            text = "No books",
             style = MaterialTheme.typography.headlineLarge,
-        )
-        Spacer(Modifier.height(8.dp))
-        Text(
-            text = if (hosted) {
-                "Drop in an EPUB and the author starts posting, one paragraph at a time. " +
-                    "It stays private until you share it."
-            } else {
-                "Drop in an EPUB and the author starts posting, one paragraph at a time."
-            },
-            style = MaterialTheme.typography.bodyLarge,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
         Spacer(Modifier.height(20.dp))
         TextButton(
@@ -299,7 +283,10 @@ private fun EmptyTimeline(
         ) {
             Text("Add a book", color = MaterialTheme.colorScheme.onPrimary)
         }
-        TextButton(onClick = onSample) {
+        TextButton(
+            onClick = onSample,
+            contentPadding = PaddingValues(0.dp),
+        ) {
             Text("Open a sample", color = MaterialTheme.colorScheme.primary)
         }
     }
