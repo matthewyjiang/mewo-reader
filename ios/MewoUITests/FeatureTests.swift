@@ -440,6 +440,69 @@ final class FeatureTests: XCTestCase {
     }
 }
 
+/// Opens and closes the account drawer with animations left on, in both a
+/// light theme and lights-out. Launch this without `--uitesting` so the
+/// slide is visible; the scrim tap must dismiss, and Settings must stay tappable.
+final class DrawerAnimationTests: XCTestCase {
+    func testScrimDismissesWhileThePanelSlides() {
+        let app = XCUIApplication()
+        app.launchArguments = []
+        app.launch()
+
+        if app.staticTexts["This is you"].waitForExistence(timeout: 8) {
+            let name = app.textFields["name-field"]
+            XCTAssertTrue(name.waitForExistence(timeout: 3))
+            name.tap()
+            name.typeText("Matt")
+            let handle = app.textFields["handle-field"]
+            XCTAssertTrue(handle.waitForExistence(timeout: 3))
+            handle.tap()
+            handle.typeText("matt")
+            if app.keyboards.buttons["return"].exists {
+                app.keyboards.buttons["return"].tap()
+            }
+            let next = app.buttons["Next"]
+            XCTAssertTrue(next.waitForExistence(timeout: 3))
+            XCTAssertTrue(next.isEnabled)
+            next.tap()
+        }
+
+        XCTAssertTrue(app.buttons["account-button"].waitForExistence(timeout: 10))
+        slideDrawer(app)
+        showTheme(app, "theme-x_light")
+        slideDrawer(app)
+        showTheme(app, "theme-x_lights_out")
+        slideDrawer(app)
+    }
+
+    private func slideDrawer(_ app: XCUIApplication) {
+        app.buttons["account-button"].tap()
+        let settings = app.buttons["drawer-settings"]
+        XCTAssertTrue(settings.waitForExistence(timeout: 5))
+        Thread.sleep(forTimeInterval: 0.9)
+        app.coordinate(withNormalizedOffset: CGVector(dx: 0.90, dy: 0.45)).tap()
+        XCTAssertTrue(settings.waitForNonExistence(timeout: 4))
+        Thread.sleep(forTimeInterval: 0.7)
+    }
+
+    private func showTheme(_ app: XCUIApplication, _ identifier: String) {
+        app.buttons["account-button"].tap()
+        let settings = app.buttons["drawer-settings"]
+        XCTAssertTrue(settings.waitForExistence(timeout: 5))
+        settings.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
+        let display = app.buttons["settings-display"]
+        XCTAssertTrue(display.waitForExistence(timeout: 5))
+        display.tap()
+        let theme = app.buttons[identifier]
+        XCTAssertTrue(theme.waitForExistence(timeout: 5))
+        theme.tap()
+        app.buttons["Back"].firstMatch.tap()
+        app.buttons["Back"].firstMatch.tap()
+        XCTAssertTrue(app.buttons["account-button"].waitForExistence(timeout: 5))
+        Thread.sleep(forTimeInterval: 0.4)
+    }
+}
+
 private extension XCUIElement {
     func clearAndType(_ text: String) {
         tap()
