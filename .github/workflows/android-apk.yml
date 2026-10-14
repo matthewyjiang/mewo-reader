@@ -22,15 +22,46 @@ permissions:
   contents: write
 
 jobs:
-  build:
+  test:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
+      # Paparazzi 2.0.0-alpha05.1 configures only on JDK 21. The app still targets 17.
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: 17
+          java-version: 21
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          build-root-directory: android
+
+      - uses: android-actions/setup-android@v3
+        with:
+          packages: platform-tools
+
+      - name: Install Android platform 36
+        run: sdkmanager --install "platforms;android-36" "build-tools;36.0.0"
+
+      - name: Write local.properties
+        run: echo "sdk.dir=$ANDROID_HOME" > android/local.properties
+
+      - name: Verify Paparazzi goldens and unit tests
+        working-directory: android
+        run: ./gradlew :app:verifyPaparazziDebug :app:testDebugUnitTest --max-workers=4 --no-daemon
+
+  build:
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # The Paparazzi plugin is applied to :app, so this Gradle run needs JDK 21 too.
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
 
       - uses: gradle/actions/setup-gradle@v4
         with:
@@ -59,6 +90,9 @@ jobs:
           echo "MEWO_VERSION_NAME=$version" >> "$GITHUB_ENV"
           echo "MEWO_VERSION_CODE=$code" >> "$GITHUB_ENV"
           echo "versionName=$version versionCode=$code (major*1000000 + minor*1000 + patch)"
+
+      - name: Commit from the checkout
+        run: echo "MEWO_COMMIT=${GITHUB_SHA::7}" >> "$GITHUB_ENV"
 
       - name: Version from dispatch
         if: github.event_name == 'workflow_dispatch' && inputs.version != ''
