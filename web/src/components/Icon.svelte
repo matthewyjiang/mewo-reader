@@ -2,7 +2,7 @@
   export type IconName =
     | 'home' | 'search' | 'heart' | 'comment' | 'quote' | 'share'
     | 'back' | 'close' | 'plus' | 'trash' | 'settings' | 'chevron'
-    | 'more' | 'x' | 'bird' | 'book';
+    | 'more' | 'book';
   const paths: Record<IconName, string> = {
     home: 'M3 10 12 3l9 7v10a1 1 0 0 1-1 1h-5v-7H9v7H4a1 1 0 0 1-1-1Z',
     search: 'M21 21l-5-5M18 10a8 8 0 1 1-16 0 8 8 0 0 1 16 0',
@@ -19,14 +19,6 @@
       + 'm7 9a4 4 0 1 1-8 0 4 4 0 0 1 8 0',
     chevron: 'm9 5 7 7-7 7',
     more: 'M4 12h.01M12 12h.01M20 12h.01',
-    x: 'M18.9 2H22l-6.8 7.8L23.2 22h-6.3l-5-7.6L5.2 22H2l7.5-8.6L1 2h6.5'
-      + 'l4.6 6.9ZM17.8 20h1.7L6.5 4H4.7Z',
-    bird: 'M23 4.8a9 9 0 0 1-2.7.8 4.7 4.7 0 0 0 2.1-2.6'
-      + ' 9.4 9.4 0 0 1-3 1.1A4.7 4.7 0 0 0 11.4 8a13.4 13.4 0 0 1-9.7-4.9'
-      + ' 4.7 4.7 0 0 0 1.4 6.3 4.7 4.7 0 0 1-2.1-.6'
-      + ' 4.7 4.7 0 0 0 3.8 4.7 4.7 4.7 0 0 1-2.1.1'
-      + ' 4.7 4.7 0 0 0 4.4 3.3A9.5 9.5 0 0 1 1 19'
-      + 'a13.3 13.3 0 0 0 20.5-11.2V7A9.5 9.5 0 0 0 23 4.8Z',
     book: 'M12 5C8 2 4 3 2 4v16c4-2 7-1 10 1m0-16c4-3 8-2 10-1v16'
       + 'c-4-2-7-1-10 1V5',
   };
@@ -38,15 +30,14 @@
     filled?: boolean;
     size?: number;
   } = $props();
-  let solid = $derived(filled || name === 'x' || name === 'bird');
 </script>
 
 <svg
   width={size}
   height={size}
   viewBox="0 0 24 24"
-  fill={solid ? 'currentColor' : 'none'}
-  stroke={solid ? 'none' : 'currentColor'}
+  fill={filled ? 'currentColor' : 'none'}
+  stroke={filled ? 'none' : 'currentColor'}
   stroke-width="1.8"
   stroke-linecap="round"
   stroke-linejoin="round"
