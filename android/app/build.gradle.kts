@@ -3,6 +3,8 @@ plugins {
     id("org.jetbrains.kotlin.android")
     id("org.jetbrains.kotlin.plugin.compose")
     id("org.jetbrains.kotlin.plugin.serialization")
+    // 2.0.0-alpha05.1 is the newest Paparazzi that still runs on AGP 8.13 (pre-AGP 9).
+    id("app.cash.paparazzi") version "2.0.0-alpha05.1"
 }
 
 fun envOrProp(name: String): String? {
