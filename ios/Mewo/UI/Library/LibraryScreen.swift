@@ -301,11 +301,11 @@ struct LibraryScreen: View {
     }
 
     private func bookRow(_ book: BookRecord) -> some View {
-        HStack(alignment: .top, spacing: 8) {
+        HStack(alignment: .center, spacing: 0) {
             Button {
                 onOpenBook(book.id)
             } label: {
-                HStack(alignment: .top, spacing: 12) {
+                HStack(alignment: .center, spacing: 12) {
                     Avatar(name: book.author, cover: app.library.coverFile(id: book.id), size: 40)
                     VStack(alignment: .leading, spacing: 2) {
                         HStack(spacing: 6) {
@@ -326,40 +326,41 @@ struct LibraryScreen: View {
                 }
             }
             .buttonStyle(.plain)
-            if hosted && book.mine {
-                shareControl(book)
-            }
-            if book.mine {
-                Button {
-                    pendingDelete = book
-                } label: {
-                    Image(systemName: "trash")
-                        .foregroundStyle(mewo.mute)
-                        .frame(width: 40, height: 40)
+            HStack(alignment: .center, spacing: 0) {
+                if hosted && book.mine {
+                    shelfAction(
+                        symbol: book.shared ? "person.2.fill" : "person.2",
+                        label: book.shared ? "Make private" : "Share",
+                        identifier: "share-\(book.id)"
+                    ) {
+                        model.setShared(id: book.id, shared: !book.shared)
+                    }
                 }
-                .buttonStyle(.plain)
-                .accessibilityLabel("Remove \(book.title)")
+                if book.mine {
+                    shelfAction(symbol: "trash", label: "Remove \(book.title)", identifier: "remove-\(book.id)") {
+                        pendingDelete = book
+                    }
+                }
             }
         }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 12)
+        .padding(.leading, 16)
+        .padding(.trailing, 4)
+        .padding(.vertical, 8)
         .accessibilityIdentifier("book-\(book.id)")
         .accessibilityElement(children: .contain)
     }
 
-    private func shareControl(_ book: BookRecord) -> some View {
-        Toggle(isOn: Binding(
-            get: { book.shared },
-            set: { model.setShared(id: book.id, shared: $0) }
-        )) {
-            Text(book.shared ? "Shared" : "Share")
-                .font(MewoFont.regular(13))
+    /// Same 40pt cell as remove, so the two icons share one vertical axis.
+    private func shelfAction(symbol: String, label: String, identifier: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: symbol)
+                .font(.system(size: 17))
                 .foregroundStyle(mewo.mute)
+                .frame(width: 40, height: 40, alignment: .center)
         }
-        .tint(mewo.accent)
-        .fixedSize()
-        .accessibilityLabel(book.shared ? "Stop sharing \(book.title)" : "Share \(book.title)")
-        .accessibilityIdentifier("share-\(book.id)")
+        .buttonStyle(.plain)
+        .accessibilityLabel(label)
+        .accessibilityIdentifier(identifier)
     }
 }
 
