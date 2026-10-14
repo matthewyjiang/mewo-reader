@@ -182,6 +182,28 @@ async fn upload_fields(
 }
 
 #[tokio::test]
+async fn version_is_public() {
+    let (app, _tmp) = app().await;
+    let (status, body) = empty_req(&app, "GET", "/v1/version", None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_version(&body);
+
+    let (status, body) = empty_req(&app, "GET", "/v1/version", Some("not-a-session")).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_version(&body);
+}
+
+fn assert_version(body: &Value) {
+    let object = body.as_object().expect("version json");
+    assert_eq!(object.len(), 2);
+    assert_eq!(body["version"], mewo_server::version::version());
+    match mewo_server::version::commit() {
+        Some(sha) => assert_eq!(body["commit"], sha),
+        None => assert!(body["commit"].is_null()),
+    }
+}
+
+#[tokio::test]
 async fn register_login_me_logout() {
     let (app, _tmp) = app().await;
     let token = register(&app, "matt", "password1").await;

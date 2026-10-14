@@ -14,6 +14,8 @@ cargo run
 
 Listens on `0.0.0.0:8787`. Data lands in `./data` (`mewo.db` plus uploaded files).
 
+`GET /v1/version` reports this crate's version. A release image replaces it with the git tag; see Docker.
+
 On a phone on the same LAN, the server URL is `http://<that-machine>:8787`.
 
 ## Docker
@@ -27,7 +29,16 @@ docker run --rm -p 8787:8787 -v mewo-data:/data mewo-server
 
 Same env vars as below. The image serves the built web app at `/` with `MEWO_WEB_DIR=/srv/web`. Keep `/data` on a volume or the next `docker run` starts with an empty shelf.
 
-Pushes to `main` that touch `server/` or `web/` publish `ghcr.io/matthewyjiang/mewo-reader/server`. Tags: `latest`, `sha-<commit>`, and a semver tag if you push `v*`.
+Pass the release identity as build args. `MEWO_VERSION` is the tag without the leading `v` (`v0.1.2` → `0.1.2`). `MEWO_COMMIT` is the short git sha. The tag workflow sets both. Omit them and the binary uses the `Cargo.toml` version and a null commit; the web bundle in the image uses `web/package.json`. These are compile-time values. Setting them on `docker run` does not change `GET /v1/version`.
+
+```bash
+docker build -f server/Dockerfile \
+  --build-arg MEWO_VERSION=0.1.2 \
+  --build-arg MEWO_COMMIT=abc1234 \
+  -t mewo-server .
+```
+
+Pushes to `main` that touch `server/` or `web/` publish `ghcr.io/matthewyjiang/mewo-reader/server`. Tags: `latest`, `sha-<commit>`, and a semver tag if you push `v*`. A `v*` tag bakes that version and the short sha into the server and the web bundle.
 
 ```bash
 docker pull ghcr.io/matthewyjiang/mewo-reader/server:latest
@@ -59,12 +70,13 @@ Username and password. Argon2 hashes. Opaque bearer tokens. A session lasts unti
 
 `POST /v1/auth/register` and `POST /v1/auth/login` take `{ "username": "...", "password": "..." }` and return `{ "token", "username" }`. Username is 3 to 32 characters, letters, digits, underscore. Unique case-insensitively. Password is at least 8 characters.
 
-All remaining API routes need `Authorization: Bearer <token>`. Static web files are public.
+`GET /v1/version` is public. All remaining API routes need `Authorization: Bearer <token>`. Static web files are public.
 
 ## Routes
 
 Prefix `/v1`.
 
+- `GET /version` → `{ "version": "0.1.1", "commit": null }`. Public. `version` is the release tag with the leading `v` removed, compiled into the binary. A build that is not a release tag uses the `Cargo.toml` version. `commit` is the short git sha, or `null` when the build had none.
 - `POST /auth/register`
 - `POST /auth/login`
 - `POST /auth/logout`
@@ -105,4 +117,4 @@ A comment is at most 2000 characters. The compose field shows about 8 lines of 4
 cargo test
 ```
 
-Register, login, real EPUB uploads and metadata defaults, canonical posts, lazy cache fills, bad EPUBs, cover MIME detection, static/history routing, progress, likes, comments, profile replies, download, delete, per-book sharing, private books, the sharing migration, per-person progress, signup off, oversized EPUB. Parser unit tests cover EPUB3 nav, EPUB2 NCX, a broken NCX, front matter, heading de-duplication, entities/segmentation, JSoup inline tags, the text budget, and the bundled sample.
+Register, login, public version, real EPUB uploads and metadata defaults, canonical posts, lazy cache fills, bad EPUBs, cover MIME detection, static/history routing, progress, likes, comments, profile replies, download, delete, per-book sharing, private books, the sharing migration, per-person progress, signup off, oversized EPUB. Parser unit tests cover EPUB3 nav, EPUB2 NCX, a broken NCX, front matter, heading de-duplication, entities/segmentation, JSoup inline tags, the text budget, and the bundled sample.

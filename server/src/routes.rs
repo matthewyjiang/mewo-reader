@@ -10,6 +10,7 @@ use crate::models::{
     CommentThread, LibrarySnapshot, LikeSet, MeResponse, NewComment, PatchBook, ProfileReplies,
     ProfileReplyRecord, ProfileReplyRow, MAX_COMMENT_CHARS, MAX_POST_ID_CHARS,
 };
+use crate::version::VersionInfo;
 use crate::AppState;
 use axum::extract::{Multipart, Path, State};
 use axum::http::header::{CONTENT_DISPOSITION, CONTENT_TYPE};
@@ -20,6 +21,10 @@ use std::path::PathBuf;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio_util::io::ReaderStream;
 use uuid::Uuid;
+
+pub async fn version() -> Json<VersionInfo> {
+    Json(crate::version::current())
+}
 
 pub async fn register(
     State(state): State<AppState>,

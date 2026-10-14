@@ -6,6 +6,7 @@ pub mod error;
 pub mod feed;
 pub mod models;
 pub mod routes;
+pub mod version;
 
 #[cfg(test)]
 #[path = "../tests/common/mod.rs"]
@@ -38,6 +39,7 @@ pub fn router(state: AppState) -> Router {
     let body_limit = request_body_limit(state.max_epub_bytes);
     let web_dir = state.web_dir.clone().filter(|dir| dir.is_dir());
     let api = Router::new()
+        .route("/v1/version", get(routes::version))
         .route("/v1/auth/register", post(routes::register))
         .route("/v1/auth/login", post(routes::login))
         .route("/v1/auth/logout", post(routes::logout))

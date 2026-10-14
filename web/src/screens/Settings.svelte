@@ -3,9 +3,36 @@
   import Avatar from '../components/Avatar.svelte';
   import DisplaySettings from '../components/DisplaySettings.svelte';
   import Icon from '../components/Icon.svelte';
+  import { webCommit, webVersion } from '../lib/build';
   import { router } from '../lib/router.svelte';
   import { restoreScroll } from '../lib/screen';
   import { store } from '../lib/store.svelte';
+
+  type ServerBuild =
+    | { status: 'loading' }
+    | { status: 'error' }
+    | { status: 'ok'; version: string; commit: string | null };
+
+  let serverBuild = $state<ServerBuild>({ status: 'loading' });
+
+  function formatBuild(version: string, commit: string | null): string {
+    return commit ? `${version} (${commit})` : version;
+  }
+
+  function serverLabel(): string {
+    if (serverBuild.status === 'loading') return 'Loading…';
+    if (serverBuild.status === 'error') return 'Unavailable';
+    return formatBuild(serverBuild.version, serverBuild.commit);
+  }
+
+  function readServerVersion(body: unknown): ServerBuild | null {
+    if (!body || typeof body !== 'object' || !('version' in body)) return null;
+    if (typeof body.version !== 'string' || body.version.length === 0) return null;
+    const commit = 'commit' in body && typeof body.commit === 'string' && body.commit.length > 0
+      ? body.commit
+      : null;
+    return { status: 'ok', version: body.version, commit };
+  }
 
   let { path, scroller, uploading, onadd, onsample, onprofile, onsignout }: {
     path: string;
@@ -16,6 +43,25 @@
     onprofile: (username: string) => void;
     onsignout: () => void;
   } = $props();
+
+  $effect(() => {
+    if (path !== '/settings/about') return;
+    const controller = new AbortController();
+    serverBuild = { status: 'loading' };
+    void fetch('/v1/version', { signal: controller.signal })
+      .then(async (response) => {
+        if (!response.ok) throw new Error(String(response.status));
+        return readServerVersion(await response.json());
+      })
+      .then((info) => {
+        if (controller.signal.aborted) return;
+        serverBuild = info ?? { status: 'error' };
+      })
+      .catch(() => {
+        if (!controller.signal.aborted) serverBuild = { status: 'error' };
+      });
+    return () => controller.abort();
+  });
 
   onMount(() => restoreScroll(scroller));
 </script>
@@ -39,6 +85,13 @@
     <span>
       <strong>Library</strong>
       <span class="meta">Private until you share a book.</span>
+    </span>
+    <Icon name="chevron" />
+  </button>
+  <button class="settings-row" onclick={() => router.go('/settings/about')}>
+    <span>
+      <strong>About</strong>
+      <span class="meta">Web and server versions.</span>
     </span>
     <Icon name="chevron" />
   </button>
@@ -74,6 +127,23 @@
     <p class="meta">{location.origin}</p>
     <button class="pill" disabled={uploading} onclick={onadd}>Add an EPUB</button>
     <button class="text-button" disabled={uploading} onclick={onsample}>Open a sample</button>
+  </section>
+{:else if path === '/settings/about'}
+  <section class="settings-content about" aria-label="App info">
+    <dl>
+      <div>
+        <dt>Web app</dt>
+        <dd>{formatBuild(webVersion, webCommit)}</dd>
+      </div>
+      <div>
+        <dt>Server</dt>
+        <dd class:muted={serverBuild.status !== 'ok'}>{serverLabel()}</dd>
+      </div>
+      <div>
+        <dt>Server URL</dt>
+        <dd>{location.origin}</dd>
+      </div>
+    </dl>
   </section>
 {:else}
   <div class="empty-state">
@@ -119,6 +189,31 @@
   flex-direction: column;
   align-items: flex-start;
   gap: 16px;
+}
+
+.about dl {
+  width: 100%;
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.about div {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.about dt {
+  color: var(--mute);
+  font-size: .8125rem;
+  line-height: 1.23;
+}
+
+.about dd {
+  margin: 0;
+  overflow-wrap: anywhere;
 }
 
 
