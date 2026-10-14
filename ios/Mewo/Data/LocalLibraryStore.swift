@@ -86,7 +86,7 @@ final class LocalLibraryStore: LibraryStore {
             book.id == id ? BookRecord(
                 id: book.id, title: book.title, author: book.author, handle: book.handle,
                 importedAt: book.importedAt, postCount: posts.count, progressIndex: 0,
-                isSample: book.isSample, mine: book.mine
+                isSample: book.isSample, mine: book.mine, shared: book.shared, ownerUsername: book.ownerUsername
             ) : book
         }
         writeLibrary(LibrarySnapshot(books: updated))
@@ -98,7 +98,8 @@ final class LocalLibraryStore: LibraryStore {
             book.id == id ? BookRecord(
                 id: book.id, title: book.title, author: book.author, handle: book.handle,
                 importedAt: book.importedAt, postCount: book.postCount,
-                progressIndex: max(0, index), isSample: book.isSample, mine: book.mine
+                progressIndex: max(0, index), isSample: book.isSample, mine: book.mine,
+                shared: book.shared, ownerUsername: book.ownerUsername
             ) : book
         }
         writeLibrary(LibrarySnapshot(books: updated))

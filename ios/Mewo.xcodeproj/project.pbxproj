@@ -35,6 +35,7 @@
 		B25B1852F3E23482F103FA49 /* MewoNav.swift in Sources */ = {isa = PBXBuildFile; fileRef = 55F78BF6CC0B65A066768C02 /* MewoNav.swift */; };
 		B5CA2DDD074618ED494DA07B /* LibraryScreen.swift in Sources */ = {isa = PBXBuildFile; fileRef = AFEC328398E1A0775329DF3B /* LibraryScreen.swift */; };
 		B9470F3D756CCE831B5EFC90 /* ProfileScreen.swift in Sources */ = {isa = PBXBuildFile; fileRef = D6800081EED54B5FD6932F36 /* ProfileScreen.swift */; };
+		A11CE5C44000100A110003 /* UITestReset.swift in Sources */ = {isa = PBXBuildFile; fileRef = A11CE5C44000100A110004 /* UITestReset.swift */; };
 		C34B86E48FE9C9ABFE3E66CE /* MewoApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB3B10368441863852AAF842 /* MewoApp.swift */; };
 		C780526290172A5F85ACF442 /* atkinson_hyperlegible_bold.ttf in Resources */ = {isa = PBXBuildFile; fileRef = ED562555052DC0650FBC08AF /* atkinson_hyperlegible_bold.ttf */; };
 		CAABF2658C368BE3B19F37E6 /* AccountDrawer.swift in Sources */ = {isa = PBXBuildFile; fileRef = D8FE96DF3C1E12D54449DFE0 /* AccountDrawer.swift */; };
@@ -44,6 +45,7 @@
 		E947D6F44A53440535E00535 /* LocalLibraryStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = A87BC9915B9BC9822A230626 /* LocalLibraryStore.swift */; };
 		F0AC78A999A10B4743D26556 /* HostedClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = 404AC86C65664DDDBD207B14 /* HostedClient.swift */; };
 		F4D72E012E66016633505213 /* Chrome.swift in Sources */ = {isa = PBXBuildFile; fileRef = CEE8A942A4FC81D91F91B828 /* Chrome.swift */; };
+		B7E4A91C5C44000100A11001 /* SharingTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B7E4A91C5C44000100A11002 /* SharingTests.swift */; };
 		F5951F6394A0F8940EE096EA /* FeedStartTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = EF7D5E18C99DDD9FB7E68FA4 /* FeedStartTests.swift */; };
 		FFD8D061C84A9E53308029BD /* AppEnvironment.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0CCB64C15AD4564BF9E84C6D /* AppEnvironment.swift */; };
 /* End PBXBuildFile section */
@@ -87,6 +89,7 @@
 		AD30442210FA84820F34AFFA /* BrandShapes.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BrandShapes.swift; sourceTree = "<group>"; };
 		AFEC328398E1A0775329DF3B /* LibraryScreen.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LibraryScreen.swift; sourceTree = "<group>"; };
 		B66F3FB253EE6724518758AD /* Palette.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Palette.swift; sourceTree = "<group>"; };
+		A11CE5C44000100A110004 /* UITestReset.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UITestReset.swift; sourceTree = "<group>"; };
 		BB3B10368441863852AAF842 /* MewoApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MewoApp.swift; sourceTree = "<group>"; };
 		BC966410684CE1362C015057 /* ReaderScreen.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReaderScreen.swift; sourceTree = "<group>"; };
 		C72FEE25BCAF45B0E834EF44 /* Keychain.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Keychain.swift; sourceTree = "<group>"; };
@@ -97,6 +100,7 @@
 		DD3458C195D8CB450E09C030 /* LibraryStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LibraryStore.swift; sourceTree = "<group>"; };
 		DF0D3BC3A891755D9AC55253 /* LikesScreen.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LikesScreen.swift; sourceTree = "<group>"; };
 		ED562555052DC0650FBC08AF /* atkinson_hyperlegible_bold.ttf */ = {isa = PBXFileReference; lastKnownFileType = file; path = atkinson_hyperlegible_bold.ttf; sourceTree = "<group>"; };
+		B7E4A91C5C44000100A11002 /* SharingTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SharingTests.swift; sourceTree = "<group>"; };
 		EF7D5E18C99DDD9FB7E68FA4 /* FeedStartTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FeedStartTests.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
@@ -135,6 +139,7 @@
 			children = (
 				0CCB64C15AD4564BF9E84C6D /* AppEnvironment.swift */,
 				BB3B10368441863852AAF842 /* MewoApp.swift */,
+				A11CE5C44000100A110004 /* UITestReset.swift */,
 			);
 			path = App;
 			sourceTree = "<group>";
@@ -290,6 +295,7 @@
 			isa = PBXGroup;
 			children = (
 				EF7D5E18C99DDD9FB7E68FA4 /* FeedStartTests.swift */,
+				B7E4A91C5C44000100A11002 /* SharingTests.swift */,
 			);
 			path = MewoTests;
 			sourceTree = "<group>";
@@ -398,6 +404,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				F5951F6394A0F8940EE096EA /* FeedStartTests.swift in Sources */,
+				B7E4A91C5C44000100A11001 /* SharingTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -426,6 +433,7 @@
 				60E574DB0C2B9EED9BAAAD63 /* LocalIdentity.swift in Sources */,
 				E947D6F44A53440535E00535 /* LocalLibraryStore.swift in Sources */,
 				C34B86E48FE9C9ABFE3E66CE /* MewoApp.swift in Sources */,
+				A11CE5C44000100A110003 /* UITestReset.swift in Sources */,
 				B25B1852F3E23482F103FA49 /* MewoNav.swift in Sources */,
 				4F744DD8DCE299549B68601D /* Models.swift in Sources */,
 				6F3277E21AEF9848E3E12467 /* OnboardingScreen.swift in Sources */,
