@@ -1,8 +1,10 @@
 //! Identity compiled into the binary.
 //!
-//! `MEWO_VERSION` is the release tag with the leading `v` removed.
-//! `MEWO_COMMIT` is the short git sha. The server image workflow sets both.
-//! Empty or unset falls back to the crate version and no commit.
+//! `build.rs` resolves the values. `MEWO_VERSION` and `MEWO_COMMIT` win when
+//! the build sets them (the release image passes the tag with `v` removed and
+//! the short sha). Otherwise the version is `git describe --tags --always
+//! --dirty` with one leading `v` removed, and the commit is a 7-character sha.
+//! If git is unavailable, the version is the crate version and there is no commit.
 
 use serde::Serialize;
 

@@ -6,7 +6,8 @@ COPY web/package.json web/package-lock.json ./
 RUN npm ci
 COPY web/ ./
 # Release tags arrive as MEWO_VERSION with the leading "v" removed.
-# Empty falls back to web/package.json and a null commit.
+# Empty uses git describe when .git is present, then package.json.
+# This context does not include .git; the tag workflow passes the args.
 ARG MEWO_VERSION=
 ARG MEWO_COMMIT=
 ENV MEWO_VERSION=$MEWO_VERSION \
@@ -18,7 +19,9 @@ WORKDIR /src
 COPY server/Cargo.toml server/Cargo.lock server/rust-toolchain.toml ./
 COPY server/src ./src
 COPY server/migrations ./migrations
-# Same build args as the web stage. option_env! reads them at compile time.
+COPY server/build.rs ./build.rs
+# Same build args as the web stage. build.rs prefers them, then git describe,
+# then the crate version. This context does not include .git.
 ARG MEWO_VERSION=
 ARG MEWO_COMMIT=
 ENV MEWO_VERSION=$MEWO_VERSION \

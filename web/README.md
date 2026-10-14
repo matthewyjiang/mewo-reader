@@ -28,7 +28,7 @@ npm run check
 npm run build
 ```
 
-`MEWO_VERSION` and `MEWO_COMMIT`, when set for `npm run build`, are the version and short commit shown under Settings → About. An empty `MEWO_VERSION` uses `package.json`. The Docker image passes the same args the server binary gets.
+`MEWO_VERSION` and `MEWO_COMMIT`, when set for `npm run build`, are the version and short commit shown under Settings → About. When they are unset, the build uses `git describe --tags --always --dirty` (one leading `v` removed) and `git rev-parse --short=7 HEAD`. If git is unavailable, the version is `package.json` and the commit is omitted. The Docker image passes the same args the server binary gets.
 
 Vite writes the production site to `web/dist`. For local same-origin serving, start the Rust server with the built directory configured:
 

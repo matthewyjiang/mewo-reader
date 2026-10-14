@@ -1,4 +1,6 @@
+import { execFileSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import { defineConfig } from 'vite';
 import { svelte } from '@sveltejs/vite-plugin-svelte';
 
@@ -20,8 +22,30 @@ function packageVersion(): string {
   return '0.0.0';
 }
 
-const version = nonempty(process.env.MEWO_VERSION) ?? packageVersion();
-const commit = nonempty(process.env.MEWO_COMMIT) ?? null;
+const root = fileURLToPath(new URL('.', import.meta.url));
+
+function gitOutput(args: string[]): string | undefined {
+  try {
+    const out = execFileSync('git', args, { cwd: root, encoding: 'utf8' }).trim();
+    return out || undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** `git describe --tags --always --dirty`, with one leading `v` removed. */
+function gitVersion(): string | undefined {
+  const described = gitOutput(['describe', '--tags', '--always', '--dirty']);
+  if (!described) return undefined;
+  return described.startsWith('v') ? described.slice(1) : described;
+}
+
+function gitCommit(): string | undefined {
+  return gitOutput(['rev-parse', '--short=7', 'HEAD']);
+}
+
+const version = nonempty(process.env.MEWO_VERSION) ?? gitVersion() ?? packageVersion();
+const commit = nonempty(process.env.MEWO_COMMIT) ?? gitCommit() ?? null;
 
 export default defineConfig({
   plugins: [svelte()],

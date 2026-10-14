@@ -14,7 +14,7 @@ cargo run
 
 Listens on `0.0.0.0:8787`. Data lands in `./data` (`mewo.db` plus uploaded files).
 
-`GET /v1/version` reports this crate's version. A release image replaces it with the git tag; see Docker.
+`GET /v1/version` reports `git describe --tags --always --dirty` for this checkout, with one leading `v` removed, and the 7-character sha. A release image uses the tag instead; see Docker.
 
 On a phone on the same LAN, the server URL is `http://<that-machine>:8787`.
 
@@ -29,7 +29,7 @@ docker run --rm -p 8787:8787 -v mewo-data:/data mewo-server
 
 Same env vars as below. The image serves the built web app at `/` with `MEWO_WEB_DIR=/srv/web`. Keep `/data` on a volume or the next `docker run` starts with an empty shelf.
 
-Pass the release identity as build args. `MEWO_VERSION` is the tag without the leading `v` (`v0.1.2` → `0.1.2`). `MEWO_COMMIT` is the short git sha. The tag workflow sets both. Omit them and the binary uses the `Cargo.toml` version and a null commit; the web bundle in the image uses `web/package.json`. These are compile-time values. Setting them on `docker run` does not change `GET /v1/version`.
+Pass the release identity as build args. `MEWO_VERSION` is the tag without the leading `v` (`v0.1.2` → `0.1.2`). `MEWO_COMMIT` is the short git sha. The tag workflow sets both, and they override git. The image has no `.git` directory, so omitting the args uses the `Cargo.toml` version, a null commit, and `web/package.json` for the bundle. A local build inside a checkout uses `git describe --tags --always --dirty` (one leading `v` removed) and `git rev-parse --short=7 HEAD` when the args are unset. These are compile-time values. Setting them on `docker run` does not change `GET /v1/version`.
 
 ```bash
 docker build -f server/Dockerfile \
@@ -76,7 +76,7 @@ Username and password. Argon2 hashes. Opaque bearer tokens. A session lasts unti
 
 Prefix `/v1`.
 
-- `GET /version` → `{ "version": "0.1.1", "commit": null }`. Public. `version` is the release tag with the leading `v` removed, compiled into the binary. A build that is not a release tag uses the `Cargo.toml` version. `commit` is the short git sha, or `null` when the build had none.
+- `GET /version` → `{ "version": "0.1.2-1-gabcdef0", "commit": "abcdef0" }`. Public. Release images set `version` from the tag (`v` removed) and `commit` from the short sha. Other builds use `git describe --tags --always --dirty` (one leading `v` removed) and a 7-character sha. With no git and no build args, `version` is the `Cargo.toml` version and `commit` is null.
 - `POST /auth/register`
 - `POST /auth/login`
 - `POST /auth/logout`
