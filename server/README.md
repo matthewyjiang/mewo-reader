@@ -2,7 +2,7 @@
 
 Hosted library and optional web app for Mewo. Phones talk to the API through `HostedLibraryStore`.
 
-Local and hosted are different shelves. This process is the hosted one. Books are a shared shelf. Likes and reading place stay per account. Notes on a line are public. The server parses hosted EPUBs into one canonical feed for Android, iOS, and the web app. Local phone books still use Readium.
+Local and hosted are different shelves. This process is the hosted one. A book is private to the account that added it until that account shares it. The built-in sample stays visible to every signed-in account. Likes and reading place stay per account. Notes on a line are visible to accounts that can see the book. The server parses hosted EPUBs into one canonical feed for Android, iOS, and the web app. Local phone books still use Readium.
 
 ## Run
 
@@ -76,7 +76,7 @@ Prefix `/v1`.
 - `GET /books/{id}/epub`
 - `GET /books/{id}/posts` → `{ "posts": [ { "id": "0", "kind": "Heading" | "Body", "text": "...", "chapter": "..." } ] }`
 - `GET /books/{id}/cover`
-- `PATCH /books/{id}` `{ "progressIndex"? }` (`postCount` is accepted for old clients but ignored; the server owns it)
+- `PATCH /books/{id}` `{ "progressIndex"?, "shared"? }` (`postCount` is accepted for old clients but ignored; the server owns it). Only the owner may set `shared`. Another account that can see the book gets 403. A book you cannot see is 404.
 - `GET /books/{id}/likes` `{ "ids": [...] }`
 - `POST /books/{id}/likes/{postId}` toggle
 - `GET /books/{id}/comments` `{ "counts": { "0": 2 }, "mine": ["0"] }`
@@ -85,9 +85,9 @@ Prefix `/v1`.
 - `DELETE /books/{id}/comments/{postId}/{commentId}`
 - `GET /profiles/{username}/replies` `{ "username", "replies": [ { "bookId", "postId", "comment" } ] }` newest first. Unknown username is an empty list.
 
-Book JSON matches the phone's `BookRecord`: `id`, `title`, `author`, `handle`, `importedAt`, `postCount`, `progressIndex`, `isSample`, `mine`.
+Book JSON: `id`, `title`, `author`, `handle`, `importedAt`, `postCount`, `progressIndex`, `isSample`, `mine`, `shared`, `ownerUsername`. `mine` is true when you added it. `shared` is true when the owner has shared it. `ownerUsername` is that account.
 
-Every signed-in account can read every book. `mine` is true when you added it. Only that account can delete it. Reading place is per account.
+`GET /library` returns books you added, books other accounts shared, and the built-in sample. A new upload is private (`shared` false). Books already on the shelf when sharing shipped stay shared. Opening, downloading, or commenting on a book you cannot see is 404, including that book's lines in `GET /profiles/{username}/replies`. Only the owner can delete a book or change `shared`. Anyone who can see a book can move their own reading place, like a post, and comment. Reading place and likes stay per account.
 
 Uploads are parsed before entering the shelf. Missing or empty title/author fields use OPF metadata, then `Untitled` / `Unknown`. Missing handles use the phone's slug rule: lowercase ASCII letters/digits, first 18, or `author` when empty. A missing cover uses the EPUB's cover image if it fits the existing 4 MiB cover budget. Covers keep the `cover.jpg` filename on disk, but the response identifies JPEG, PNG, GIF, or WebP from magic bytes. Bad EPUBs return 400 `Could not read that EPUB: <reason>`.
 
@@ -105,4 +105,4 @@ A comment is at most 2000 characters. The compose field shows about 8 lines of 4
 cargo test
 ```
 
-Register, login, real EPUB uploads and metadata defaults, canonical posts, lazy cache fills, bad EPUBs, cover MIME detection, static/history routing, progress, likes, comments, profile replies, download, delete, shared books, per-person progress, signup off, oversized EPUB. Parser unit tests cover EPUB3 nav, EPUB2 NCX, a broken NCX, front matter, heading de-duplication, entities/segmentation, JSoup inline tags, the text budget, and the bundled sample.
+Register, login, real EPUB uploads and metadata defaults, canonical posts, lazy cache fills, bad EPUBs, cover MIME detection, static/history routing, progress, likes, comments, profile replies, download, delete, per-book sharing, private books, the sharing migration, per-person progress, signup off, oversized EPUB. Parser unit tests cover EPUB3 nav, EPUB2 NCX, a broken NCX, front matter, heading de-duplication, entities/segmentation, JSoup inline tags, the text budget, and the bundled sample.

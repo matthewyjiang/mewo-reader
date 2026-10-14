@@ -4,6 +4,7 @@ use http_body_util::BodyExt;
 use mewo_server::build;
 use mewo_server::config::Config;
 use serde_json::{json, Value};
+use sqlx::migrate::Migrate;
 use tempfile::TempDir;
 use tower::ServiceExt;
 
@@ -149,6 +150,19 @@ async fn upload(
     upload_fields(app, token, &fields).await
 }
 
+async fn share(app: &axum::Router, token: &str, id: &str) {
+    let (status, body) = json_req(
+        app,
+        "PATCH",
+        &format!("/v1/books/{id}"),
+        Some(token),
+        json!({ "shared": true }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["shared"], true);
+}
+
 async fn upload_fields(
     app: &axum::Router,
     token: &str,
@@ -260,6 +274,8 @@ async fn upload_list_progress_like_download_delete() {
     assert_eq!(book["title"], "Pride");
     assert_eq!(book["isSample"], false);
     assert_eq!(book["mine"], true);
+    assert_eq!(book["shared"], false);
+    assert_eq!(book["ownerUsername"], "matt");
 
     let (status, library) = empty_req(&app, "GET", "/v1/library", Some(&token)).await;
     assert_eq!(status, StatusCode::OK);
@@ -345,6 +361,7 @@ async fn second_user_sees_shared_book_but_cannot_delete() {
     assert_eq!(status, StatusCode::OK, "{book}");
     let id = book["id"].as_str().unwrap();
     assert_eq!(book["mine"], true);
+    share(&app, &matt, id).await;
 
     let (status, seen) = empty_req(&app, "GET", &format!("/v1/books/{id}"), Some(&ted)).await;
     assert_eq!(status, StatusCode::OK, "{seen}");
@@ -377,6 +394,7 @@ async fn progress_and_likes_stay_per_person() {
     let (status, book) = upload(&app, &matt, "Pride", "Jane", &common::epub(), None, false).await;
     assert_eq!(status, StatusCode::OK, "{book}");
     let id = book["id"].as_str().unwrap();
+    share(&app, &matt, id).await;
 
     let (status, patched) = json_req(
         &app,
@@ -415,6 +433,7 @@ async fn comments_are_public_on_the_shared_book() {
     let (status, book) = upload(&app, &matt, "Pride", "Jane", &common::epub(), None, false).await;
     assert_eq!(status, StatusCode::OK, "{book}");
     let id = book["id"].as_str().unwrap();
+    share(&app, &matt, id).await;
 
     let (status, thread) = json_req(
         &app,
@@ -502,6 +521,7 @@ async fn profile_lists_that_users_replies() {
     let (status, book) = upload(&app, &matt, "Pride", "Jane", &common::epub(), None, false).await;
     assert_eq!(status, StatusCode::OK, "{book}");
     let id = book["id"].as_str().unwrap();
+    share(&app, &matt, id).await;
 
     let (status, _) = json_req(
         &app,
@@ -566,6 +586,20 @@ async fn second_sample_returns_the_first() {
     assert_eq!(library["books"].as_array().unwrap().len(), 1);
 
     let ted = register(&app, "ted", "password1").await;
+    let (status, library) = empty_req(&app, "GET", "/v1/library", Some(&ted)).await;
+    assert_eq!(status, StatusCode::OK, "{library}");
+    assert_eq!(library["books"].as_array().unwrap().len(), 1);
+    assert_eq!(library["books"][0]["id"], first["id"]);
+    assert_eq!(library["books"][0]["isSample"], true);
+    assert_eq!(library["books"][0]["shared"], false);
+    assert_eq!(library["books"][0]["mine"], false);
+    assert_eq!(library["books"][0]["ownerUsername"], "matt");
+    let sample_id = first["id"].as_str().unwrap();
+    let (status, seen) =
+        empty_req(&app, "GET", &format!("/v1/books/{sample_id}"), Some(&ted)).await;
+    assert_eq!(status, StatusCode::OK, "{seen}");
+    assert_eq!(seen["title"], "Sample");
+
     let (status, ted_sample) =
         upload(&app, &ted, "Sample", "Mewo", &common::epub(), None, true).await;
     assert_eq!(status, StatusCode::OK, "{ted_sample}");
@@ -772,4 +806,381 @@ async fn static_history_fallback_does_not_swallow_unknown_api_routes() {
         assert_eq!(status, StatusCode::NOT_FOUND, "{path}: {body}");
         assert_eq!(body["error"], "Not found.");
     }
+}
+
+#[tokio::test]
+async fn private_book_is_invisible_on_every_route() {
+    let (app, _tmp) = app().await;
+    let matt = register(&app, "matt", "password1").await;
+    let ted = register(&app, "ted", "password1").await;
+    let (status, book) = upload(
+        &app,
+        &matt,
+        "Diary",
+        "Matt",
+        &common::epub(),
+        Some(b"jpeg"),
+        false,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{book}");
+    assert_eq!(book["shared"], false);
+    assert_eq!(book["mine"], true);
+    assert_eq!(book["ownerUsername"], "matt");
+    let id = book["id"].as_str().unwrap();
+
+    let (status, mine) = empty_req(&app, "GET", "/v1/library", Some(&matt)).await;
+    assert_eq!(status, StatusCode::OK, "{mine}");
+    assert_eq!(mine["books"].as_array().unwrap().len(), 1);
+    assert_eq!(mine["books"][0]["shared"], false);
+
+    let owner_cover = Request::builder()
+        .uri(format!("/v1/books/{id}/cover"))
+        .header(header::AUTHORIZATION, format!("Bearer {matt}"))
+        .body(Body::empty())
+        .unwrap();
+    let (status, bytes) = send(&app, owner_cover).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(bytes.as_ref(), b"jpeg");
+
+    let (status, shelf) = empty_req(&app, "GET", "/v1/library", Some(&ted)).await;
+    assert_eq!(status, StatusCode::OK, "{shelf}");
+    assert_eq!(shelf["books"], json!([]));
+
+    let hidden = [
+        format!("/v1/books/{id}"),
+        format!("/v1/books/{id}/epub"),
+        format!("/v1/books/{id}/cover"),
+        format!("/v1/books/{id}/posts"),
+        format!("/v1/books/{id}/likes"),
+        format!("/v1/books/{id}/comments"),
+        format!("/v1/books/{id}/comments/0"),
+    ];
+    for path in &hidden {
+        let (status, body) = empty_req(&app, "GET", path, Some(&ted)).await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "GET {path} {body}");
+        assert_eq!(body["error"], "Not found.");
+    }
+    for (method, path) in [
+        ("POST", format!("/v1/books/{id}/likes/0")),
+        ("DELETE", format!("/v1/books/{id}")),
+        ("DELETE", format!("/v1/books/{id}/comments/0/missing")),
+    ] {
+        let (status, body) = empty_req(&app, method, &path, Some(&ted)).await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{method} {path} {body}");
+        assert_eq!(body["error"], "Not found.");
+    }
+    for body in [
+        json!({ "progressIndex": 2 }),
+        json!({ "shared": true }),
+        json!({ "shared": false, "progressIndex": 1 }),
+    ] {
+        let (status, response) =
+            json_req(&app, "PATCH", &format!("/v1/books/{id}"), Some(&ted), body).await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{response}");
+    }
+    let (status, response) = json_req(
+        &app,
+        "POST",
+        &format!("/v1/books/{id}/comments/0"),
+        Some(&ted),
+        json!({ "text": "nope" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{response}");
+
+    let (status, patched) = json_req(
+        &app,
+        "PATCH",
+        &format!("/v1/books/{id}"),
+        Some(&matt),
+        json!({ "progressIndex": 2 }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{patched}");
+    assert_eq!(patched["progressIndex"], 2);
+    assert_eq!(patched["shared"], false);
+
+    let (status, thread) = json_req(
+        &app,
+        "POST",
+        &format!("/v1/books/{id}/comments/0"),
+        Some(&matt),
+        json!({ "text": "secret" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{thread}");
+
+    let (status, ted_feed) = empty_req(&app, "GET", "/v1/profiles/matt/replies", Some(&ted)).await;
+    assert_eq!(status, StatusCode::OK, "{ted_feed}");
+    assert_eq!(ted_feed["replies"], json!([]));
+    let (status, matt_feed) =
+        empty_req(&app, "GET", "/v1/profiles/matt/replies", Some(&matt)).await;
+    assert_eq!(status, StatusCode::OK, "{matt_feed}");
+    assert_eq!(matt_feed["replies"].as_array().unwrap().len(), 1);
+    assert_eq!(matt_feed["replies"][0]["comment"]["text"], "secret");
+    assert_eq!(matt_feed["replies"][0]["bookId"], id);
+}
+
+#[tokio::test]
+async fn owner_can_share_a_book_and_a_non_owner_cannot_toggle_it() {
+    let (app, _tmp) = app().await;
+    let matt = register(&app, "matt", "password1").await;
+    let ted = register(&app, "ted", "password1").await;
+    let (status, private_book) = upload(
+        &app,
+        &matt,
+        "Diary",
+        "Matt",
+        &common::epub(),
+        Some(b"jpeg"),
+        false,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{private_book}");
+    let private_id = private_book["id"].as_str().unwrap();
+    let (status, _) = json_req(
+        &app,
+        "POST",
+        &format!("/v1/books/{private_id}/comments/0"),
+        Some(&matt),
+        json!({ "text": "secret" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (status, book) = upload(
+        &app,
+        &matt,
+        "Pride",
+        "Jane",
+        &common::epub(),
+        Some(b"jpeg"),
+        false,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{book}");
+    assert_eq!(book["shared"], false);
+    let id = book["id"].as_str().unwrap().to_string();
+    let (status, shared) = json_req(
+        &app,
+        "PATCH",
+        &format!("/v1/books/{id}"),
+        Some(&matt),
+        json!({ "shared": true }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{shared}");
+    assert_eq!(shared["shared"], true);
+    assert_eq!(shared["mine"], true);
+    assert_eq!(shared["ownerUsername"], "matt");
+
+    let (status, _) = json_req(
+        &app,
+        "POST",
+        &format!("/v1/books/{id}/comments/1"),
+        Some(&matt),
+        json!({ "text": "public" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (status, shelf) = empty_req(&app, "GET", "/v1/library", Some(&ted)).await;
+    assert_eq!(status, StatusCode::OK, "{shelf}");
+    assert_eq!(shelf["books"].as_array().unwrap().len(), 1);
+    assert_eq!(shelf["books"][0]["id"], id);
+    assert_eq!(shelf["books"][0]["shared"], true);
+    assert_eq!(shelf["books"][0]["mine"], false);
+    assert_eq!(shelf["books"][0]["ownerUsername"], "matt");
+
+    let (status, seen) = empty_req(&app, "GET", &format!("/v1/books/{id}"), Some(&ted)).await;
+    assert_eq!(status, StatusCode::OK, "{seen}");
+    assert_eq!(seen["title"], "Pride");
+    assert_eq!(seen["progressIndex"], 0);
+
+    let epub = Request::builder()
+        .uri(format!("/v1/books/{id}/epub"))
+        .header(header::AUTHORIZATION, format!("Bearer {ted}"))
+        .body(Body::empty())
+        .unwrap();
+    let (status, bytes) = send(&app, epub).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(bytes.as_ref(), common::epub());
+    let cover = Request::builder()
+        .uri(format!("/v1/books/{id}/cover"))
+        .header(header::AUTHORIZATION, format!("Bearer {ted}"))
+        .body(Body::empty())
+        .unwrap();
+    let (status, bytes) = send(&app, cover).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(bytes.as_ref(), b"jpeg");
+    let (status, posts) =
+        empty_req(&app, "GET", &format!("/v1/books/{id}/posts"), Some(&ted)).await;
+    assert_eq!(status, StatusCode::OK, "{posts}");
+    assert_eq!(posts["posts"].as_array().unwrap().len(), 3);
+
+    let (status, patched) = json_req(
+        &app,
+        "PATCH",
+        &format!("/v1/books/{id}"),
+        Some(&ted),
+        json!({ "progressIndex": 4 }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{patched}");
+    assert_eq!(patched["progressIndex"], 4);
+    assert_eq!(patched["shared"], true);
+    let (status, owner) = empty_req(&app, "GET", &format!("/v1/books/{id}"), Some(&matt)).await;
+    assert_eq!(status, StatusCode::OK, "{owner}");
+    assert_eq!(owner["progressIndex"], 0);
+
+    let (status, likes) =
+        empty_req(&app, "POST", &format!("/v1/books/{id}/likes/1"), Some(&ted)).await;
+    assert_eq!(status, StatusCode::OK, "{likes}");
+    assert_eq!(likes["ids"], json!(["1"]));
+    let (status, likes) =
+        empty_req(&app, "GET", &format!("/v1/books/{id}/likes"), Some(&ted)).await;
+    assert_eq!(status, StatusCode::OK, "{likes}");
+    assert_eq!(likes["ids"], json!(["1"]));
+
+    let (status, thread) = json_req(
+        &app,
+        "POST",
+        &format!("/v1/books/{id}/comments/1"),
+        Some(&ted),
+        json!({ "text": "same" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{thread}");
+    assert_eq!(thread["comments"].as_array().unwrap().len(), 2);
+    let (status, index) =
+        empty_req(&app, "GET", &format!("/v1/books/{id}/comments"), Some(&ted)).await;
+    assert_eq!(status, StatusCode::OK, "{index}");
+    assert_eq!(index["counts"]["1"], 2);
+    let (status, listed) = empty_req(
+        &app,
+        "GET",
+        &format!("/v1/books/{id}/comments/1"),
+        Some(&ted),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{listed}");
+    assert_eq!(listed["comments"].as_array().unwrap().len(), 2);
+
+    let (status, feed) = empty_req(&app, "GET", "/v1/profiles/matt/replies", Some(&ted)).await;
+    assert_eq!(status, StatusCode::OK, "{feed}");
+    let texts: Vec<&str> = feed["replies"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|row| row["comment"]["text"].as_str().unwrap())
+        .collect();
+    assert_eq!(texts, vec!["public"]);
+
+    let (status, rejected) = json_req(
+        &app,
+        "PATCH",
+        &format!("/v1/books/{id}"),
+        Some(&ted),
+        json!({ "shared": false, "progressIndex": 9 }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{rejected}");
+    let (status, still) = empty_req(&app, "GET", &format!("/v1/books/{id}"), Some(&ted)).await;
+    assert_eq!(status, StatusCode::OK, "{still}");
+    assert_eq!(still["shared"], true);
+    assert_eq!(still["progressIndex"], 4);
+
+    let (status, hidden) = json_req(
+        &app,
+        "PATCH",
+        &format!("/v1/books/{id}"),
+        Some(&matt),
+        json!({ "shared": false }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{hidden}");
+    assert_eq!(hidden["shared"], false);
+    let (status, gone) = empty_req(&app, "GET", &format!("/v1/books/{id}"), Some(&ted)).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{gone}");
+    let (status, shelf) = empty_req(&app, "GET", "/v1/library", Some(&ted)).await;
+    assert_eq!(status, StatusCode::OK, "{shelf}");
+    assert_eq!(shelf["books"], json!([]));
+    let (status, feed) = empty_req(&app, "GET", "/v1/profiles/matt/replies", Some(&ted)).await;
+    assert_eq!(status, StatusCode::OK, "{feed}");
+    assert_eq!(feed["replies"], json!([]));
+    let (status, owner_feed) =
+        empty_req(&app, "GET", "/v1/profiles/matt/replies", Some(&matt)).await;
+    assert_eq!(status, StatusCode::OK, "{owner_feed}");
+    assert_eq!(owner_feed["replies"].as_array().unwrap().len(), 2);
+    let (status, own) = empty_req(&app, "GET", "/v1/profiles/ted/replies", Some(&ted)).await;
+    assert_eq!(status, StatusCode::OK, "{own}");
+    assert_eq!(own["replies"], json!([]));
+
+    let (status, _) = empty_req(&app, "GET", &format!("/v1/books/{private_id}"), Some(&ted)).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn migration_marks_existing_books_shared() {
+    let tmp = TempDir::new().unwrap();
+    let url = format!("sqlite://{}?mode=rwc", tmp.path().join("mewo.db").display());
+    let pool = sqlx::SqlitePool::connect(&url).await.unwrap();
+    let migrator = sqlx::migrate!("./migrations");
+    let mut conn = pool.acquire().await.unwrap();
+    Migrate::ensure_migrations_table(&mut *conn).await.unwrap();
+    for migration in migrator.iter() {
+        if migration.version < 4 {
+            Migrate::apply(&mut *conn, migration).await.unwrap();
+        }
+    }
+    drop(conn);
+
+    sqlx::query(
+        "INSERT INTO users (id, username, username_norm, password_hash, created_at)
+         VALUES ('user', 'matt', 'matt', 'x', 1)",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO books (id, user_id, title, author, handle, imported_at)
+         VALUES ('book', 'user', 'Old', 'Author', 'author', 1)",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    let before = sqlx::query_scalar::<_, i64>("SELECT shared FROM books WHERE id = 'book'")
+        .fetch_one(&pool)
+        .await;
+    assert!(before.is_err(), "shared column exists before migration 004");
+
+    sqlx::migrate!("./migrations").run(&pool).await.unwrap();
+
+    let shared: i64 = sqlx::query_scalar("SELECT shared FROM books WHERE id = 'book'")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(shared, 1);
+
+    sqlx::query(
+        "INSERT INTO books (id, user_id, title, author, handle, imported_at)
+         VALUES ('new', 'user', 'New', 'Author', 'author', 2)",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    let shared: i64 = sqlx::query_scalar("SELECT shared FROM books WHERE id = 'new'")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(shared, 0);
+
+    let index: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = 'books_shared_owner'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(index, 1);
 }
