@@ -1,14 +1,47 @@
+import java.util.concurrent.TimeUnit
+
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
     id("org.jetbrains.kotlin.plugin.compose")
     id("org.jetbrains.kotlin.plugin.serialization")
+    // 2.0.0-alpha05.1 is the newest Paparazzi that still runs on AGP 8.13 (pre-AGP 9).
+    id("app.cash.paparazzi") version "2.0.0-alpha05.1"
 }
 
 fun envOrProp(name: String): String? {
     val fromEnv = System.getenv(name)?.trim().orEmpty()
     if (fromEnv.isNotEmpty()) return fromEnv
     return (findProperty(name) as String?)?.trim()?.takeIf { it.isNotEmpty() }
+}
+
+/** Short git sha when the build has one. Release tags still own versionName. */
+fun buildCommit(): String? {
+    val raw = envOrProp("MEWO_COMMIT") ?: gitShortCommit() ?: return null
+    val sha = raw.lowercase()
+    if (!sha.matches(Regex("[0-9a-f]{7,40}"))) return null
+    return sha.take(7)
+}
+
+fun gitShortCommit(): String? {
+    return try {
+        val process = ProcessBuilder("git", "rev-parse", "--short=7", "HEAD")
+            .directory(rootProject.projectDir)
+            .redirectError(ProcessBuilder.Redirect.DISCARD)
+            .start()
+        val text = process.inputStream.bufferedReader().readText().trim()
+        val finished = process.waitFor(5, TimeUnit.SECONDS)
+        if (!finished) {
+            process.destroyForcibly()
+            null
+        } else if (process.exitValue() == 0 && text.isNotEmpty()) {
+            text
+        } else {
+            null
+        }
+    } catch (_: Exception) {
+        null
+    }
 }
 
 val releaseStoreFile = envOrProp("MEWO_STORE_FILE")
@@ -35,7 +68,9 @@ android {
         minSdk = 26
         targetSdk = 36
         versionCode = envOrProp("MEWO_VERSION_CODE")?.toInt() ?: 1
+        // Release APKs set MEWO_VERSION_NAME from the v* tag in android-apk.yml.
         versionName = envOrProp("MEWO_VERSION_NAME") ?: "0.1.1"
+        buildConfigField("String", "COMMIT", "\"${buildCommit().orEmpty()}\"")
     }
 
     signingConfigs {
@@ -70,6 +105,7 @@ android {
 
     buildFeatures {
         compose = true
+        buildConfig = true
     }
 
     packaging {

@@ -49,6 +49,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.mewo.reader.data.BackendKind
@@ -333,7 +334,7 @@ private fun LazyListScope.bookRows(
 }
 
 @Composable
-private fun SectionLabel(text: String) {
+internal fun SectionLabel(text: String) {
     Text(
         text = text,
         style = MaterialTheme.typography.labelSmall,
@@ -394,6 +395,7 @@ internal fun BookPost(
                         text = book.title,
                         style = MaterialTheme.typography.titleSmall,
                         maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
                         modifier = Modifier.weight(1f, fill = false),
                     )
                     Spacer(Modifier.width(6.dp))
@@ -402,6 +404,7 @@ internal fun BookPost(
                         style = MaterialTheme.typography.labelSmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         maxLines = 1,
+                        softWrap = false,
                     )
                 }
                 Spacer(Modifier.height(2.dp))

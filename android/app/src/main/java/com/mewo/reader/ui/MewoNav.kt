@@ -48,6 +48,7 @@ import com.mewo.reader.ui.reader.ReaderScreen
 import com.mewo.reader.ui.reader.ReaderViewModel
 import com.mewo.reader.ui.search.SearchScreen
 import com.mewo.reader.ui.search.SearchViewModel
+import com.mewo.reader.ui.settings.SettingsAboutPage
 import com.mewo.reader.ui.settings.SettingsAccountPage
 import com.mewo.reader.ui.settings.SettingsDisplayPage
 import com.mewo.reader.ui.settings.SettingsHome
@@ -292,6 +293,7 @@ fun MewoNav() {
                         onOpenAccount = { nav.navigate(SettingsRoutes.Account) },
                         onOpenDisplay = { nav.navigate(SettingsRoutes.Display) },
                         onOpenLibrary = { nav.navigate(SettingsRoutes.Library) },
+                        onOpenAbout = { nav.navigate(SettingsRoutes.About) },
                     )
                 }
                 composable(
@@ -324,6 +326,17 @@ fun MewoNav() {
                     popExitTransition = { settingsPopExit() },
                 ) {
                     SettingsLibraryPage(
+                        onBack = { nav.popBackStack() },
+                    )
+                }
+                composable(
+                    route = SettingsRoutes.About,
+                    enterTransition = { settingsEnter() },
+                    exitTransition = { settingsExit() },
+                    popEnterTransition = { settingsPopEnter() },
+                    popExitTransition = { settingsPopExit() },
+                ) {
+                    SettingsAboutPage(
                         onBack = { nav.popBackStack() },
                     )
                 }

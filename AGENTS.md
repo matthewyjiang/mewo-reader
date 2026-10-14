@@ -49,6 +49,15 @@ The AVD is a medium phone (1080x2400, API 36, Google APIs, x86_64), not a Pixel 
 
 Nested KVM on this cloud kernel is broken. `/dev/kvm` opens and `emulator -accel-check` says KVM is usable, then `kvm_arch_vcpu_create` hits a kernel BUG and the guest never runs. The script uses `-accel off`. The first cold boot, which dexopts the system image, reached `sys.boot_completed` in 13 minutes 38 seconds. A later cold boot of the same AVD, started by the script, took 4 minutes 4 seconds. Both are too slow for a routine UI check. Prefer Paparazzi or Robolectric for layout screenshots. Use the emulator when the shot has to come from a system image. Leave `MEWO_EMULATOR_ACCEL` unset.
 
+For an Android UI change, record Paparazzi goldens and inspect the PNGs. Zoom in and use the UI quality rule. Use the emulator only when the shot has to come from a system image.
+
+```bash
+cd android
+./gradlew :app:recordPaparazziDebug
+```
+
+`./gradlew :app:verifyPaparazziDebug` checks `android/app/src/test/snapshots`. Paparazzi runs on JDK 21. The app still targets JVM 17.
+
 ## UI quality
 
 Every UI change on web, Android, and iOS is checked by eye before the PR opens. Screenshot the simulator, emulator, or browser, including a narrow width. Zoom in. Controls in a row share one vertical center line. Sibling actions match in size. Spacing stays even. Text is not clipped or overflowing. In a list row, prefer a compact icon button over a large switch or a text label. Attach the screenshots to the PR.
