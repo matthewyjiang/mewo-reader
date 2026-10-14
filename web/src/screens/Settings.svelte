@@ -38,7 +38,7 @@
   <button class="settings-row" onclick={() => router.go('/settings/library')}>
     <span>
       <strong>Library</strong>
-      <span class="meta">The shared hosted shelf.</span>
+      <span class="meta">Private until you share a book.</span>
     </span>
     <Icon name="chevron" />
   </button>
@@ -54,7 +54,7 @@
       </div>
     </div>
     <p class="muted">
-      Your hosted username is used on your profile and public notes.
+      Your hosted username is used on your profile and notes.
       Account names are managed by the server.
     </p>
     <button class="text-button" onclick={() => onprofile(store.session!.username)}>
@@ -66,8 +66,10 @@
   <section class="settings-content">
     <h2>Hosted library</h2>
     <p class="muted">
-      One shared shelf for everyone on this server. Notes are public.
-      Likes and reading place stay yours. Only the person who added a book can remove it.
+      Books you add stay private until you share them. Other accounts can read a
+      book you share, and the sample. Notes are visible to anyone who can read
+      the book. Likes and reading place stay yours. Only the person who added a
+      book can remove it or change sharing.
     </p>
     <p class="meta">{location.origin}</p>
     <button class="pill" disabled={uploading} onclick={onadd}>Add an EPUB</button>

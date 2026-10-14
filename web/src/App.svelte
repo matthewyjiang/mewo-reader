@@ -169,7 +169,12 @@
     const token = store.session?.token;
     try {
       const book = await store.upload(file, sample, (percent) => uploadPercent = percent);
-      if (store.session?.token === token) router.go(readerUrl(book.id));
+      if (store.session?.token === token) {
+        if (!book.isSample && !book.shared) {
+          store.notice = `${book.title} is private. Use Share on Home when you want others to read it.`;
+        }
+        router.go(readerUrl(book.id));
+      }
     } catch (error) {
       store.notice = message(error);
     } finally {

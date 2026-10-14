@@ -13,7 +13,7 @@ const initialSession = savedSession
   && typeof savedSession.token === 'string' && typeof savedSession.username === 'string'
   ? savedSession : null;
 
-/** One hosted shelf. Logout and book removal invalidate pending responses. */
+/** Hosted library. Logout and book removal invalidate pending responses. */
 class HostedStore {
   session = $state<AuthResponse | null>(initialSession);
   books = $state<BookRecord[]>([]);
@@ -36,6 +36,10 @@ class HostedStore {
   private socialGeneration = new Map<string, number>();
   private socialRequests = new Map<string, number>();
   private mutationQueues = new Map<string, Promise<void>>();
+  // Optimistic share writes are serialized per book. Rollback uses the last
+  // value the server confirmed, and a newer toggle keeps the checkbox.
+  private shareTails = new Map<string, Promise<void>>();
+  private confirmedShare = new Map<string, boolean>();
   private progress = new PendingProgress(async (id, index, keepalive) => {
     const epoch = this.epoch;
     const response = await this.api.progress(id, index, keepalive);
@@ -67,6 +71,8 @@ class HostedStore {
     this.socialGeneration.clear();
     this.socialRequests.clear();
     this.mutationQueues.clear();
+    this.shareTails.clear();
+    this.confirmedShare.clear();
     this.progress.clear();
     this.notice = notice;
   }
@@ -311,6 +317,53 @@ class HostedStore {
       void this.loadCover(book.id).catch(() => {});
     }
     return book;
+  }
+
+  async setShared(id: string, shared: boolean): Promise<void> {
+    const epoch = this.epoch;
+    const book = this.books.find((row) => row.id === id);
+    if (!book || this.removed.has(id)) return;
+    if (!book.mine) {
+      throw new Error('Only the person who added this book can change sharing.');
+    }
+    if (book.shared === shared && !this.shareTails.has(id)) return;
+    if (!this.shareTails.has(id)) this.confirmedShare.set(id, book.shared);
+    if (book.shared !== shared) this.replaceBook({ ...book, shared });
+
+    const previous = this.shareTails.get(id) ?? Promise.resolve();
+    const task = previous.catch(() => {}).then(async () => {
+      try {
+        const next = await this.api.setShared(id, shared);
+        if (!this.valid(id, epoch)) return;
+        this.confirmedShare.set(id, next.shared);
+        const current = this.books.find((row) => row.id === id);
+        if (current && current.shared === shared) {
+          this.replaceBook({
+            ...current,
+            shared: next.shared,
+            mine: next.mine,
+            ownerUsername: next.ownerUsername,
+          });
+        }
+      } catch (error) {
+        if (!this.valid(id, epoch)) return;
+        const current = this.books.find((row) => row.id === id);
+        // A newer toggle already shows the user's latest choice.
+        if (!current || current.shared !== shared) return;
+        const confirmed = this.confirmedShare.get(id);
+        if (confirmed !== undefined) this.replaceBook({ ...current, shared: confirmed });
+        throw error;
+      }
+    });
+    const settled = task.then(() => {}, () => {});
+    this.shareTails.set(id, settled);
+    void settled.then(() => {
+      if (this.shareTails.get(id) === settled) {
+        this.shareTails.delete(id);
+        this.confirmedShare.delete(id);
+      }
+    });
+    return task;
   }
 
   async remove(book: BookRecord): Promise<void> {

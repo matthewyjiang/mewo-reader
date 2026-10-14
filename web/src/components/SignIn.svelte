@@ -40,7 +40,7 @@
     <h1>{mode === 'register' ? 'This is you.' : 'Your next paragraph awaits.'}</h1>
     <p class="muted">
       {mode === 'register'
-        ? 'Your profile and public notes use this username.'
+        ? 'Your profile and notes use this username.'
         : 'Sign in to your hosted shelf. Your place and likes come with you.'}
     </p>
     <div class="identity-preview">
