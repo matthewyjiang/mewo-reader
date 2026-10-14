@@ -95,6 +95,11 @@ export class HostedClient {
     await this.response(this.bookPath(id), { method: 'DELETE' });
   }
 
+  /** Owner-only. Other accounts that can see the book get 403. */
+  setShared(id: string, shared: boolean): Promise<BookRecord> {
+    return this.json(this.bookPath(id), 'PATCH', { shared });
+  }
+
   progress(id: string, progressIndex: number, keepalive = false): Promise<Response> {
     return this.response(this.bookPath(id), {
       method: 'PATCH',

@@ -128,7 +128,7 @@
           {#if focused || draft}
             <p class="meta accent">Replying to @{target.book.handle}</p>
           {/if}
-          <label class="sr-only" for="reply-draft">Reply, public on this server</label>
+          <label class="sr-only" for="reply-draft">Reply, visible to anyone who can read this book</label>
           <textarea
             id="reply-draft"
             rows="8"
@@ -141,7 +141,7 @@
             aria-describedby="reply-budget reply-error"
           ></textarea>
           <div class="composer-meta">
-            <span class="meta">Public on this server</span>
+            <span class="meta">Visible with this book</span>
             <span id="reply-budget" class:danger={characters > budget} class="meta">
               {characters} / {budget}
             </span>

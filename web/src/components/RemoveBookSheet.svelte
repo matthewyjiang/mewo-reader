@@ -1,6 +1,6 @@
 <script lang="ts">
   import Sheet from './Sheet.svelte';
-  import type { BookRecord } from '../lib/models';
+  import { visibleToOthers, type BookRecord } from '../lib/models';
   import { store, message } from '../lib/store.svelte';
 
   let { book, onclose }: { book: BookRecord; onclose: () => void } = $props();
@@ -24,10 +24,14 @@
 
 <Sheet label="Remove book" onclose={() => { if (!removing) onclose(); }}>
   <section class="confirm-remove">
-    <h2>Remove from the shared library?</h2>
+    <h2>Remove {book.title}?</h2>
     <p class="muted">
-      This removes {book.title} for everyone on this server, plus likes, notes,
-      and reading place.
+      {#if visibleToOthers(book)}
+        This removes it for everyone who can read it, plus likes, notes, and reading place.
+      {:else}
+        This removes it from your library, plus likes, notes, and reading place.
+        It is private, so nobody else can read it.
+      {/if}
     </p>
     {#if error}<p class="error" role="alert">{error}</p>{/if}
     <div class="confirm-actions">

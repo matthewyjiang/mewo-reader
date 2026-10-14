@@ -9,6 +9,10 @@ export interface BookRecord {
   progressIndex: number;
   isSample: boolean;
   mine: boolean;
+  /** Owner chose to show this book on other accounts' shelves. */
+  shared: boolean;
+  /** Username of the account that added the book. */
+  ownerUsername: string;
 }
 
 export interface FeedPost {
@@ -53,6 +57,23 @@ export interface ProfileReplies {
 // A one-post book finishes only on the end card, not when first opened.
 export const isFinished = (book: BookRecord): boolean =>
   book.postCount > 0 && book.progressIndex >= Math.max(1, book.postCount - 1);
+
+/** The sample stays readable by every account. Other books need the owner to share them. */
+export const visibleToOthers = (book: BookRecord): boolean => book.shared || book.isSample;
+
+export function shelfGroups(books: BookRecord[]): {
+  mine: BookRecord[];
+  sharedWithMe: BookRecord[];
+  finished: BookRecord[];
+} {
+  const finished = books.filter(isFinished);
+  const active = books.filter((book) => !isFinished(book));
+  return {
+    mine: active.filter((book) => book.mine),
+    sharedWithMe: active.filter((book) => !book.mine),
+    finished,
+  };
+}
 
 export function statusLine(book: BookRecord): string {
   const count = book.postCount ? `${book.postCount.toLocaleString()} posts` : 'Ready to read';
