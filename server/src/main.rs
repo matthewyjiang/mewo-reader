@@ -1,5 +1,5 @@
-use mewo_server::config::Config;
 use mewo_server::build;
+use mewo_server::config::Config;
 
 #[tokio::main]
 async fn main() {

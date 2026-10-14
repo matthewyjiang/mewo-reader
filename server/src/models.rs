@@ -70,6 +70,7 @@ pub struct MeResponse {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PatchBook {
+    /// Accepted for old clients but ignored: posts and their count belong to the server.
     pub post_count: Option<i32>,
     pub progress_index: Option<i32>,
 }

@@ -1,7 +1,10 @@
-use crate::auth::{check_password, hash_password, new_token, normalize_username, verify_password, Authed};
+use crate::auth::{
+    check_password, hash_password, new_token, normalize_username, verify_password, Authed,
+};
 use crate::config::MAX_COVER_BYTES;
 use crate::db::now_ms;
 use crate::error::ApiError;
+use crate::feed::{slug, Posts};
 use crate::models::{
     AuthRequest, AuthResponse, BookRecord, BookRow, CommentIndex, CommentRecord, CommentRow,
     CommentThread, LibrarySnapshot, LikeSet, MeResponse, NewComment, PatchBook, ProfileReplies,
@@ -14,7 +17,7 @@ use axum::http::HeaderValue;
 use axum::response::IntoResponse;
 use axum::Json;
 use std::path::PathBuf;
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio_util::io::ReaderStream;
 use uuid::Uuid;
 
@@ -95,12 +98,10 @@ pub async fn library(
     State(state): State<AppState>,
     authed: Authed,
 ) -> Result<Json<LibrarySnapshot>, ApiError> {
-    let rows = sqlx::query_as::<_, BookRow>(&format!(
-        "{BOOK_SELECT} ORDER BY b.imported_at DESC"
-    ))
-    .bind(&authed.user_id)
-    .fetch_all(&state.pool)
-    .await?;
+    let rows = sqlx::query_as::<_, BookRow>(&format!("{BOOK_SELECT} ORDER BY b.imported_at DESC"))
+        .bind(&authed.user_id)
+        .fetch_all(&state.pool)
+        .await?;
     Ok(Json(LibrarySnapshot {
         books: rows
             .into_iter()
@@ -124,17 +125,14 @@ pub async fn upload_book(
     let id = Uuid::new_v4().to_string();
     let imported_at = now_ms();
     let dest = book_dir(&state.data_dir, &authed.user_id, &id);
-    tokio::fs::create_dir_all(&dest).await?;
-    tokio::fs::rename(&parsed.epub_path, dest.join("book.epub")).await?;
-    if let Some(cover) = parsed.cover_path {
-        tokio::fs::rename(&cover, dest.join("cover.jpg")).await?;
-    }
-    let _ = tokio::fs::remove_dir_all(&parsed.temp_dir).await;
+    tokio::fs::create_dir_all(dest.parent().ok_or(ApiError::Internal)?).await?;
+    // The complete EPUB, cover and posts cache become visible together.
+    tokio::fs::rename(&parsed.temp_dir, &dest).await?;
 
     let inserted = sqlx::query(
         "INSERT INTO books
          (id, user_id, title, author, handle, imported_at, post_count, progress_index, is_sample)
-         VALUES (?, ?, ?, ?, ?, ?, 0, 0, ?)",
+         VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?)",
     )
     .bind(&id)
     .bind(&authed.user_id)
@@ -142,6 +140,7 @@ pub async fn upload_book(
     .bind(&parsed.author)
     .bind(&parsed.handle)
     .bind(imported_at)
+    .bind(parsed.post_count)
     .bind(if parsed.is_sample { 1 } else { 0 })
     .execute(&state.pool)
     .await;
@@ -161,13 +160,11 @@ pub async fn upload_book(
         }
     }
 
-    sqlx::query(
-        "INSERT INTO book_progress (user_id, book_id, progress_index) VALUES (?, ?, 0)",
-    )
-    .bind(&authed.user_id)
-    .bind(&id)
-    .execute(&state.pool)
-    .await?;
+    sqlx::query("INSERT INTO book_progress (user_id, book_id, progress_index) VALUES (?, ?, 0)")
+        .bind(&authed.user_id)
+        .bind(&id)
+        .execute(&state.pool)
+        .await?;
 
     Ok(Json(BookRecord {
         id,
@@ -175,7 +172,7 @@ pub async fn upload_book(
         author: parsed.author,
         handle: parsed.handle,
         imported_at,
-        post_count: 0,
+        post_count: parsed.post_count,
         progress_index: 0,
         is_sample: parsed.is_sample,
         mine: true,
@@ -217,13 +214,9 @@ pub async fn patch_book(
     Path(id): Path<String>,
     Json(body): Json<PatchBook>,
 ) -> Result<Json<BookRecord>, ApiError> {
-    let current = shared_book(&state, &authed.user_id, &id).await?;
-    let post_count = body.post_count.unwrap_or(current.post_count);
-    sqlx::query("UPDATE books SET post_count = ? WHERE id = ?")
-        .bind(post_count)
-        .bind(&id)
-        .execute(&state.pool)
-        .await?;
+    let _ = shared_book(&state, &authed.user_id, &id).await?;
+    // Old phone builds still send postCount. Accept it, but never let a client
+    // replace the count of the canonical server feed.
     if let Some(progress_index) = body.progress_index {
         let progress_index = progress_index.max(0);
         sqlx::query(
@@ -260,7 +253,96 @@ pub async fn download_cover(
     if !path.exists() {
         return Err(ApiError::NotFound);
     }
-    file_response(path, "image/jpeg", "cover.jpg").await
+    let mut magic = Vec::new();
+    tokio::fs::File::open(&path)
+        .await?
+        .take(12)
+        .read_to_end(&mut magic)
+        .await?;
+    file_response(path, cover_content_type(&magic), "cover.jpg").await
+}
+
+fn cover_content_type(bytes: &[u8]) -> &'static str {
+    if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
+        "image/png"
+    } else if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") {
+        "image/gif"
+    } else if bytes.starts_with(b"RIFF") && bytes.get(8..12) == Some(b"WEBP".as_slice()) {
+        "image/webp"
+    } else {
+        // JPEG magic (ff d8 ff) and unknown legacy covers both use JPEG.
+        "image/jpeg"
+    }
+}
+
+/// Serves the cached posts.json bytes as-is; the cache is written once by
+/// upload or by the legacy fill below, so hits never decode and re-encode.
+pub async fn get_posts(
+    State(state): State<AppState>,
+    authed: Authed,
+    Path(id): Path<String>,
+) -> Result<impl IntoResponse, ApiError> {
+    let row = book_row(&state, &authed.user_id, &id).await?;
+    let dir = book_dir(&state.data_dir, &row.owner_id, &row.id);
+    let bytes = match read_posts(&dir).await? {
+        Some(bytes) => bytes,
+        None => fill_posts(&state, &row.id, &dir).await?,
+    };
+    Ok(([(CONTENT_TYPE, HeaderValue::from_static("application/json"))], bytes))
+}
+
+/// Parses a book uploaded before the server parsed books, then caches it.
+async fn fill_posts(
+    state: &AppState,
+    book_id: &str,
+    dir: &std::path::Path,
+) -> Result<Vec<u8>, ApiError> {
+    // Simple global lock for legacy fills; cache hits and new uploads bypass it.
+    // Recheck after locking so concurrent requests don't duplicate the parse.
+    let _guard = state.lazy_parse_lock.lock().await;
+    if let Some(bytes) = read_posts(dir).await? {
+        return Ok(bytes);
+    }
+    let parsed = parse_epub(dir.join("book.epub")).await?;
+    let posts = Posts {
+        posts: parsed.posts,
+    };
+    sqlx::query("UPDATE books SET post_count = ? WHERE id = ?")
+        .bind(posts.posts.len() as i64)
+        .bind(book_id)
+        .execute(&state.pool)
+        .await?;
+    write_posts(dir, &posts).await
+}
+
+async fn parse_epub(path: PathBuf) -> Result<crate::epub::ParsedEpub, ApiError> {
+    tokio::task::spawn_blocking(move || crate::epub::parse_file(&path, MAX_COVER_BYTES))
+        .await
+        .map_err(|err| {
+            tracing::error!(error = %err, "EPUB parser task failed");
+            ApiError::Internal
+        })?
+        .map_err(|reason| ApiError::BadRequest(format!("Could not read that EPUB: {reason}")))
+}
+
+async fn read_posts(dir: &std::path::Path) -> Result<Option<Vec<u8>>, ApiError> {
+    match tokio::fs::read(dir.join("posts.json")).await {
+        Ok(bytes) => Ok(Some(bytes)),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(err) => Err(err.into()),
+    }
+}
+
+/// Atomically writes posts.json and returns the bytes written.
+async fn write_posts(dir: &std::path::Path, posts: &Posts) -> Result<Vec<u8>, ApiError> {
+    let bytes = serde_json::to_vec(posts).map_err(|_| ApiError::Internal)?;
+    let temp = dir.join(format!("posts-{}.tmp", Uuid::new_v4()));
+    tokio::fs::write(&temp, &bytes).await?;
+    if let Err(err) = tokio::fs::rename(&temp, dir.join("posts.json")).await {
+        let _ = tokio::fs::remove_file(&temp).await;
+        return Err(err.into());
+    }
+    Ok(bytes)
 }
 
 pub async fn list_likes(
@@ -330,7 +412,9 @@ pub async fn list_comments(
 ) -> Result<Json<CommentThread>, ApiError> {
     let post_id = parse_post_id(&post_id)?;
     let _ = shared_book(&state, &authed.user_id, &id).await?;
-    Ok(Json(thread_for(&state, &authed.user_id, &id, &post_id).await?))
+    Ok(Json(
+        thread_for(&state, &authed.user_id, &id, &post_id).await?,
+    ))
 }
 
 pub async fn add_comment(
@@ -355,7 +439,9 @@ pub async fn add_comment(
     .bind(now_ms())
     .execute(&state.pool)
     .await?;
-    Ok(Json(thread_for(&state, &authed.user_id, &id, &post_id).await?))
+    Ok(Json(
+        thread_for(&state, &authed.user_id, &id, &post_id).await?,
+    ))
 }
 
 pub async fn profile_replies(
@@ -412,12 +498,14 @@ pub async fn delete_comment(
 ) -> Result<Json<CommentThread>, ApiError> {
     let post_id = parse_post_id(&post_id)?;
     let _ = shared_book(&state, &authed.user_id, &id).await?;
-    let owner = sqlx::query_scalar::<_, String>("SELECT user_id FROM comments WHERE id = ? AND book_id = ? AND post_id = ?")
-        .bind(&comment_id)
-        .bind(&id)
-        .bind(&post_id)
-        .fetch_optional(&state.pool)
-        .await?;
+    let owner = sqlx::query_scalar::<_, String>(
+        "SELECT user_id FROM comments WHERE id = ? AND book_id = ? AND post_id = ?",
+    )
+    .bind(&comment_id)
+    .bind(&id)
+    .bind(&post_id)
+    .fetch_optional(&state.pool)
+    .await?;
     let Some(owner) = owner else {
         return Err(ApiError::NotFound);
     };
@@ -430,7 +518,9 @@ pub async fn delete_comment(
         .bind(&comment_id)
         .execute(&state.pool)
         .await?;
-    Ok(Json(thread_for(&state, &authed.user_id, &id, &post_id).await?))
+    Ok(Json(
+        thread_for(&state, &authed.user_id, &id, &post_id).await?,
+    ))
 }
 
 async fn issue_session(state: &AppState, user_id: &str) -> Result<String, ApiError> {
@@ -552,16 +642,12 @@ struct ParsedUpload {
     author: String,
     handle: String,
     is_sample: bool,
-    epub_path: PathBuf,
-    cover_path: Option<PathBuf>,
+    post_count: i32,
     temp_dir: PathBuf,
 }
 
 async fn read_upload(state: &AppState, mut multipart: Multipart) -> Result<ParsedUpload, ApiError> {
-    let temp_dir = state
-        .data_dir
-        .join("tmp")
-        .join(Uuid::new_v4().to_string());
+    let temp_dir = state.data_dir.join("tmp").join(Uuid::new_v4().to_string());
     tokio::fs::create_dir_all(&temp_dir).await?;
     let mut title = None;
     let mut author = None;
@@ -579,10 +665,7 @@ async fn read_upload(state: &AppState, mut multipart: Multipart) -> Result<Parse
                 "handle" => handle = Some(field_text(field, 32).await?),
                 "isSample" | "is_sample" => {
                     let value = field_text(field, 16).await?;
-                    is_sample = matches!(
-                        value.to_ascii_lowercase().as_str(),
-                        "1" | "true" | "yes"
-                    );
+                    is_sample = matches!(value.to_ascii_lowercase().as_str(), "1" | "true" | "yes");
                 }
                 "epub" => {
                     let dest = temp_dir.join("book.epub");
@@ -608,29 +691,55 @@ async fn read_upload(state: &AppState, mut multipart: Multipart) -> Result<Parse
         return Err(err);
     }
 
-    let title = title.filter(|s| !s.is_empty()).ok_or_else(|| {
-        let _ = std::fs::remove_dir_all(&temp_dir);
-        ApiError::BadRequest("Title is required.".into())
-    })?;
-    let author = author.filter(|s| !s.is_empty()).ok_or_else(|| {
-        let _ = std::fs::remove_dir_all(&temp_dir);
-        ApiError::BadRequest("Author is required.".into())
-    })?;
-    let handle = handle.filter(|s| !s.is_empty()).unwrap_or_else(|| "author".into());
     let Some(epub_path) = epub_path else {
-        let _ = std::fs::remove_dir_all(&temp_dir);
+        let _ = tokio::fs::remove_dir_all(&temp_dir).await;
         return Err(ApiError::BadRequest("EPUB file is required.".into()));
     };
-
-    Ok(ParsedUpload {
-        title,
-        author,
-        handle,
-        is_sample,
-        epub_path,
-        cover_path,
-        temp_dir,
-    })
+    let result = async {
+        let parsed = parse_epub(epub_path).await?;
+        let title = title
+            .filter(|s| !s.is_empty())
+            .or(parsed.title)
+            .unwrap_or_else(|| "Untitled".into());
+        let author = author
+            .filter(|s| !s.is_empty())
+            .or(parsed.author)
+            .unwrap_or_else(|| "Unknown".into());
+        let handle = handle
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| slug(&author));
+        if cover_path.is_none() {
+            if let Some(cover) = parsed.cover {
+                tokio::fs::write(temp_dir.join("cover.jpg"), cover).await?;
+            }
+        }
+        let post_count = i32::try_from(parsed.posts.len()).map_err(|_| {
+            ApiError::BadRequest(format!(
+                "Post count exceeds BookRecord's signed 32-bit representation (asked {}).",
+                parsed.posts.len()
+            ))
+        })?;
+        write_posts(
+            &temp_dir,
+            &Posts {
+                posts: parsed.posts,
+            },
+        )
+        .await?;
+        Ok(ParsedUpload {
+            title,
+            author,
+            handle,
+            is_sample,
+            post_count,
+            temp_dir: temp_dir.clone(),
+        })
+    }
+    .await;
+    if result.is_err() {
+        let _ = tokio::fs::remove_dir_all(&temp_dir).await;
+    }
+    result
 }
 
 async fn field_text(
@@ -654,7 +763,9 @@ async fn skip_field(
     while let Some(chunk) = field.chunk().await? {
         written += chunk.len() as u64;
         if written > max {
-            return Err(ApiError::BadRequest("Unknown upload field is too large.".into()));
+            return Err(ApiError::BadRequest(
+                "Unknown upload field is too large.".into(),
+            ));
         }
     }
     Ok(())
@@ -667,10 +778,7 @@ async fn write_limited(
 ) -> Result<(), ApiError> {
     if let Some(len) = field.headers().typed_get_content_length() {
         if len > limit {
-            return Err(ApiError::PayloadTooLarge {
-                asked: len,
-                limit,
-            });
+            return Err(ApiError::PayloadTooLarge { asked: len, limit });
         }
     }
     let mut file = tokio::fs::File::create(dest).await?;
@@ -710,7 +818,9 @@ async fn file_response(
     content_type: &'static str,
     filename: &'static str,
 ) -> Result<impl IntoResponse, ApiError> {
-    let file = tokio::fs::File::open(&path).await.map_err(|_| ApiError::NotFound)?;
+    let file = tokio::fs::File::open(&path)
+        .await
+        .map_err(|_| ApiError::NotFound)?;
     let stream = ReaderStream::new(file);
     let mut headers = axum::http::HeaderMap::new();
     headers.insert(CONTENT_TYPE, HeaderValue::from_static(content_type));

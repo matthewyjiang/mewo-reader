@@ -1,17 +1,20 @@
 use axum::body::{Body, Bytes};
 use axum::http::{header, Request, StatusCode};
 use http_body_util::BodyExt;
-use mewo_server::config::Config;
 use mewo_server::build;
+use mewo_server::config::Config;
 use serde_json::{json, Value};
 use tempfile::TempDir;
 use tower::ServiceExt;
+
+mod common;
 
 async fn app_with(allow_signup: bool, max_epub_bytes: u64) -> (axum::Router, TempDir) {
     let tmp = TempDir::new().unwrap();
     let config = Config {
         listen: "127.0.0.1:0".into(),
         data_dir: tmp.path().to_path_buf(),
+        web_dir: None,
         allow_signup,
         max_epub_bytes,
     };
@@ -49,7 +52,8 @@ async fn json_req(
     let value = if bytes.is_empty() {
         Value::Null
     } else {
-        serde_json::from_slice(&bytes).unwrap_or(Value::String(String::from_utf8_lossy(&bytes).into()))
+        serde_json::from_slice(&bytes)
+            .unwrap_or(Value::String(String::from_utf8_lossy(&bytes).into()))
     };
     (status, value)
 }
@@ -131,14 +135,26 @@ async fn upload(
         (
             "isSample",
             None,
-            if is_sample { b"true".as_slice() } else { b"false".as_slice() },
+            if is_sample {
+                b"true".as_slice()
+            } else {
+                b"false".as_slice()
+            },
         ),
         ("epub", Some("book.epub"), epub),
     ];
     if let Some(cover) = cover {
         fields.push(("cover", Some("cover.jpg"), cover));
     }
-    let (content_type, body) = multipart(&fields);
+    upload_fields(app, token, &fields).await
+}
+
+async fn upload_fields(
+    app: &axum::Router,
+    token: &str,
+    fields: &[(&str, Option<&str>, &[u8])],
+) -> (StatusCode, Value) {
+    let (content_type, body) = multipart(fields);
     let req = Request::builder()
         .method("POST")
         .uri("/v1/books")
@@ -234,7 +250,7 @@ async fn upload_list_progress_like_download_delete() {
         &token,
         "Pride",
         "Jane",
-        b"epub-bytes",
+        &common::epub(),
         Some(b"jpeg"),
         false,
     )
@@ -259,7 +275,7 @@ async fn upload_list_progress_like_download_delete() {
     .await;
     assert_eq!(status, StatusCode::OK, "{patched}");
     assert_eq!(patched["progressIndex"], 4);
-    assert_eq!(patched["postCount"], 12);
+    assert_eq!(patched["postCount"], 3); // Client's postCount was ignored.
 
     let (status, likes) = empty_req(
         &app,
@@ -289,7 +305,8 @@ async fn upload_list_progress_like_download_delete() {
     )
     .await;
     assert_eq!(status, StatusCode::OK);
-    let (status, listed) = empty_req(&app, "GET", &format!("/v1/books/{id}/likes"), Some(&token)).await;
+    let (status, listed) =
+        empty_req(&app, "GET", &format!("/v1/books/{id}/likes"), Some(&token)).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(listed["ids"], likes["ids"]);
 
@@ -301,7 +318,7 @@ async fn upload_list_progress_like_download_delete() {
         .unwrap();
     let (status, bytes) = send(&app, req).await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(bytes.as_ref(), b"epub-bytes");
+    assert_eq!(bytes.as_ref(), common::epub());
 
     let req = Request::builder()
         .method("GET")
@@ -324,7 +341,7 @@ async fn second_user_sees_shared_book_but_cannot_delete() {
     let (app, _tmp) = app().await;
     let matt = register(&app, "matt", "password1").await;
     let ted = register(&app, "ted", "password1").await;
-    let (status, book) = upload(&app, &matt, "Pride", "Jane", b"epub", None, false).await;
+    let (status, book) = upload(&app, &matt, "Pride", "Jane", &common::epub(), None, false).await;
     assert_eq!(status, StatusCode::OK, "{book}");
     let id = book["id"].as_str().unwrap();
     assert_eq!(book["mine"], true);
@@ -343,7 +360,7 @@ async fn second_user_sees_shared_book_but_cannot_delete() {
         .unwrap();
     let (status, bytes) = send(&app, req).await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(bytes.as_ref(), b"epub");
+    assert_eq!(bytes.as_ref(), common::epub());
 
     let (status, body) = empty_req(&app, "DELETE", &format!("/v1/books/{id}"), Some(&ted)).await;
     assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
@@ -357,7 +374,7 @@ async fn progress_and_likes_stay_per_person() {
     let (app, _tmp) = app().await;
     let matt = register(&app, "matt", "password1").await;
     let ted = register(&app, "ted", "password1").await;
-    let (status, book) = upload(&app, &matt, "Pride", "Jane", b"epub", None, false).await;
+    let (status, book) = upload(&app, &matt, "Pride", "Jane", &common::epub(), None, false).await;
     assert_eq!(status, StatusCode::OK, "{book}");
     let id = book["id"].as_str().unwrap();
 
@@ -395,7 +412,7 @@ async fn comments_are_public_on_the_shared_book() {
     let (app, _tmp) = app().await;
     let matt = register(&app, "matt", "password1").await;
     let ted = register(&app, "ted", "password1").await;
-    let (status, book) = upload(&app, &matt, "Pride", "Jane", b"epub", None, false).await;
+    let (status, book) = upload(&app, &matt, "Pride", "Jane", &common::epub(), None, false).await;
     assert_eq!(status, StatusCode::OK, "{book}");
     let id = book["id"].as_str().unwrap();
 
@@ -482,7 +499,7 @@ async fn profile_lists_that_users_replies() {
     let (app, _tmp) = app().await;
     let matt = register(&app, "matt", "password1").await;
     let ted = register(&app, "ted", "password1").await;
-    let (status, book) = upload(&app, &matt, "Pride", "Jane", b"epub", None, false).await;
+    let (status, book) = upload(&app, &matt, "Pride", "Jane", &common::epub(), None, false).await;
     assert_eq!(status, StatusCode::OK, "{book}");
     let id = book["id"].as_str().unwrap();
 
@@ -514,8 +531,7 @@ async fn profile_lists_that_users_replies() {
     .await;
     assert_eq!(status, StatusCode::OK);
 
-    let (status, matt_feed) =
-        empty_req(&app, "GET", "/v1/profiles/matt/replies", Some(&ted)).await;
+    let (status, matt_feed) = empty_req(&app, "GET", "/v1/profiles/matt/replies", Some(&ted)).await;
     assert_eq!(status, StatusCode::OK, "{matt_feed}");
     assert_eq!(matt_feed["username"], "matt");
     let replies = matt_feed["replies"].as_array().unwrap();
@@ -539,9 +555,10 @@ async fn profile_lists_that_users_replies() {
 async fn second_sample_returns_the_first() {
     let (app, _tmp) = app().await;
     let token = register(&app, "matt", "password1").await;
-    let (status, first) = upload(&app, &token, "Sample", "Mewo", b"one", None, true).await;
+    let (status, first) = upload(&app, &token, "Sample", "Mewo", &common::epub(), None, true).await;
     assert_eq!(status, StatusCode::OK, "{first}");
-    let (status, second) = upload(&app, &token, "Sample", "Mewo", b"two", None, true).await;
+    let (status, second) =
+        upload(&app, &token, "Sample", "Mewo", &common::epub(), None, true).await;
     assert_eq!(status, StatusCode::OK, "{second}");
     assert_eq!(first["id"], second["id"]);
     let (status, library) = empty_req(&app, "GET", "/v1/library", Some(&token)).await;
@@ -549,7 +566,8 @@ async fn second_sample_returns_the_first() {
     assert_eq!(library["books"].as_array().unwrap().len(), 1);
 
     let ted = register(&app, "ted", "password1").await;
-    let (status, ted_sample) = upload(&app, &ted, "Sample", "Mewo", b"three", None, true).await;
+    let (status, ted_sample) =
+        upload(&app, &ted, "Sample", "Mewo", &common::epub(), None, true).await;
     assert_eq!(status, StatusCode::OK, "{ted_sample}");
     assert_eq!(ted_sample["id"], first["id"]);
 }
@@ -562,14 +580,17 @@ async fn oversized_epub_is_413() {
     assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE, "{body}");
     let error = body["error"].as_str().unwrap();
     assert!(error.contains("MEWO_MAX_EPUB_BYTES=64"), "{error}");
-    assert!(error.contains("asked 65") || error.contains("asked 200"), "{error}");
+    assert!(
+        error.contains("asked 65") || error.contains("asked 200"),
+        "{error}"
+    );
 }
 
 #[tokio::test]
 async fn epub_over_two_megabytes_is_accepted() {
     let (app, _tmp) = app_with(true, 4 * 1024 * 1024).await;
     let token = register(&app, "matt", "password1").await;
-    let epub = vec![0u8; 3 * 1024 * 1024];
+    let epub = common::book(true, 3 * 1024 * 1024);
     let (status, book) = upload(&app, &token, "Big", "A", &epub, None, false).await;
     assert_eq!(status, StatusCode::OK, "{book}");
     let id = book["id"].as_str().unwrap();
@@ -595,5 +616,160 @@ async fn bad_book_id_is_404() {
     ] {
         let (status, body) = empty_req(&app, "GET", path, Some(&token)).await;
         assert_eq!(status, StatusCode::NOT_FOUND, "{path} {body}");
+    }
+}
+
+#[tokio::test]
+async fn epub_only_upload_uses_metadata_and_exposes_canonical_posts_and_cover() {
+    let (app, _tmp) = app().await;
+    let token = register(&app, "matt", "password1").await;
+    let epub = common::epub();
+    let (status, book) = upload_fields(&app, &token, &[("epub", Some("book.epub"), &epub)]).await;
+    assert_eq!(status, StatusCode::OK, "{book}");
+    assert_eq!(book["title"], "Fixture Book");
+    assert_eq!(book["author"], "Jane A. Writer");
+    assert_eq!(book["handle"], "janeawriter");
+    assert_eq!(book["postCount"], 3);
+    let id = book["id"].as_str().unwrap();
+    let (status, feed) =
+        empty_req(&app, "GET", &format!("/v1/books/{id}/posts"), Some(&token)).await;
+    assert_eq!(status, StatusCode::OK, "{feed}");
+    assert_eq!(
+        feed["posts"],
+        json!([
+            { "id": "0", "kind": "Heading", "text": "Chapter I", "chapter": "Chapter I" },
+            { "id": "1", "kind": "Body", "text": "First\u{a0} paragraph & second.", "chapter": "Chapter I" },
+            { "id": "2", "kind": "Body", "text": "Last paragraph.", "chapter": "Chapter I" },
+        ])
+    );
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(format!("/v1/books/{id}/cover"))
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers()[header::CONTENT_TYPE], "image/png");
+    assert_eq!(
+        response
+            .into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes()
+            .as_ref(),
+        b"\x89PNG\r\n\x1a\nfixture"
+    );
+}
+
+#[tokio::test]
+async fn missing_posts_cache_is_filled_once_for_concurrent_readers() {
+    let (app, tmp) = app().await;
+    let token = register(&app, "matt", "password1").await;
+    let (status, book) = upload(&app, &token, "Book", "Writer", &common::epub(), None, false).await;
+    assert_eq!(status, StatusCode::OK, "{book}");
+    let id = book["id"].as_str().unwrap();
+    let mut owners = tokio::fs::read_dir(tmp.path().join("books")).await.unwrap();
+    let dir = owners.next_entry().await.unwrap().unwrap().path().join(id);
+    tokio::fs::remove_file(dir.join("posts.json"))
+        .await
+        .unwrap();
+    let pool = sqlx::SqlitePool::connect(&format!(
+        "sqlite://{}",
+        tmp.path().join("mewo.db").display()
+    ))
+    .await
+    .unwrap();
+    sqlx::query("UPDATE books SET post_count = 99 WHERE id = ?")
+        .bind(id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    pool.close().await;
+    let path = format!("/v1/books/{id}/posts");
+    let (first, second) = tokio::join!(
+        empty_req(&app, "GET", &path, Some(&token)),
+        empty_req(&app, "GET", &path, Some(&token))
+    );
+    assert_eq!(first.0, StatusCode::OK, "{}", first.1);
+    assert_eq!(first, second);
+    assert_eq!(first.1["posts"].as_array().unwrap().len(), 3);
+    let cached: Value =
+        serde_json::from_slice(&tokio::fs::read(dir.join("posts.json")).await.unwrap()).unwrap();
+    assert_eq!(cached, first.1);
+    let (_, book) = empty_req(&app, "GET", &format!("/v1/books/{id}"), Some(&token)).await;
+    assert_eq!(book["postCount"], 3);
+}
+
+#[tokio::test]
+async fn invalid_epub_is_400_and_does_not_enter_the_library() {
+    let (app, tmp) = app().await;
+    let token = register(&app, "matt", "password1").await;
+    let (status, body) =
+        upload_fields(&app, &token, &[("epub", Some("bad.epub"), b"not an epub")]).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body["error"]
+        .as_str()
+        .unwrap()
+        .starts_with("Could not read that EPUB: "));
+    let (_, shelf) = empty_req(&app, "GET", "/v1/library", Some(&token)).await;
+    assert_eq!(shelf["books"], json!([]));
+    assert!(tokio::fs::read_dir(tmp.path().join("tmp"))
+        .await
+        .unwrap()
+        .next_entry()
+        .await
+        .unwrap()
+        .is_none());
+}
+
+#[tokio::test]
+async fn static_history_fallback_does_not_swallow_unknown_api_routes() {
+    let tmp = TempDir::new().unwrap();
+    let web = tmp.path().join("web");
+    tokio::fs::create_dir(&web).await.unwrap();
+    tokio::fs::write(web.join("index.html"), "<h1>Mewo</h1>")
+        .await
+        .unwrap();
+    tokio::fs::write(web.join("app.js"), "console.log('Mewo')")
+        .await
+        .unwrap();
+    let app = build(Config {
+        listen: "127.0.0.1:0".into(),
+        data_dir: tmp.path().join("data"),
+        web_dir: Some(web),
+        allow_signup: true,
+        max_epub_bytes: 1024 * 1024,
+    })
+    .await
+    .unwrap();
+    for path in ["/", "/some/route"] {
+        let (status, bytes) = send(
+            &app,
+            Request::builder().uri(path).body(Body::empty()).unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(bytes.as_ref(), b"<h1>Mewo</h1>");
+    }
+    let (status, bytes) = send(
+        &app,
+        Request::builder()
+            .uri("/app.js")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(bytes.as_ref(), b"console.log('Mewo')");
+    for path in ["/v1", "/v1/", "/v1/nope", "/v1/books/nope/missing"] {
+        let (status, body) = empty_req(&app, "GET", path, None).await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{path}: {body}");
+        assert_eq!(body["error"], "Not found.");
     }
 }
