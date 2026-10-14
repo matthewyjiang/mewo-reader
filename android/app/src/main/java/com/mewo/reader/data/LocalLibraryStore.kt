@@ -68,6 +68,10 @@ class LocalLibraryStore(
         }
     }
 
+    override suspend fun setShared(id: String, shared: Boolean) {
+        error("Sharing is only on the hosted library.")
+    }
+
     override suspend fun book(id: String): BookRecord? = _library.value.books.find { it.id == id }
 
     private fun epubFile(id: String): File = File(root, "$id/book.epub")

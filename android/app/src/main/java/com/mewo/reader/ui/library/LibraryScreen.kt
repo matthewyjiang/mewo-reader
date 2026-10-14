@@ -24,8 +24,10 @@ import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.People
 import androidx.compose.material.icons.outlined.Add
 import androidx.compose.material.icons.outlined.Delete
+import androidx.compose.material.icons.outlined.Lock
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.FloatingActionButton
@@ -44,6 +46,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.unit.dp
@@ -76,7 +79,7 @@ fun LibraryScreen(
     val picker = rememberLauncherForActivityResult(
         ActivityResultContracts.OpenDocument(),
     ) { uri: Uri? ->
-        if (uri != null) viewModel.import(uri)
+        if (uri != null) viewModel.import(uri, hosted)
     }
 
     Box(
@@ -89,14 +92,13 @@ fun LibraryScreen(
             hideOnScroll.ShowWhenIdle(state.books.isEmpty())
             if (state.books.isEmpty() && !state.busy) {
                 EmptyTimeline(
+                    hosted = hosted,
                     onAdd = { picker.launch(arrayOf("application/epub+zip", "application/octet-stream")) },
                     onSample = viewModel::importSample,
                 )
             } else {
                 val listState = rememberLazyListState()
                 hideOnScroll.BindListTop(listState)
-                val reading = state.books.filterNot { it.isFinished }
-                val finished = state.books.filter { it.isFinished }
                 LazyColumn(
                     state = listState,
                     modifier = Modifier
@@ -104,10 +106,28 @@ fun LibraryScreen(
                         .nestedScroll(hideOnScroll.connection),
                     contentPadding = PaddingValues(bottom = 96.dp),
                 ) {
-                    bookRows(reading, library, onOpenBook) { pendingDelete = it }
-                    if (finished.isNotEmpty()) {
-                        item(key = "section-finished") { SectionLabel("Finished") }
-                        bookRows(finished, library, onOpenBook) { pendingDelete = it }
+                    if (hosted) {
+                        val groups = shelfGroups(state.books)
+                        if (groups.mine.isNotEmpty()) {
+                            item(key = "section-mine") { SectionLabel("My books") }
+                            bookRows(groups.mine, library, hosted, onOpenBook, { pendingDelete = it }, viewModel::setShared)
+                        }
+                        if (groups.sharedWithMe.isNotEmpty()) {
+                            item(key = "section-shared") { SectionLabel("Shared with me") }
+                            bookRows(groups.sharedWithMe, library, hosted, onOpenBook, { pendingDelete = it }, viewModel::setShared)
+                        }
+                        if (groups.finished.isNotEmpty()) {
+                            item(key = "section-finished") { SectionLabel("Finished") }
+                            bookRows(groups.finished, library, hosted, onOpenBook, { pendingDelete = it }, viewModel::setShared)
+                        }
+                    } else {
+                        val reading = state.books.filterNot { it.isFinished }
+                        val finished = state.books.filter { it.isFinished }
+                        bookRows(reading, library, hosted = false, onOpenBook, { pendingDelete = it }, viewModel::setShared)
+                        if (finished.isNotEmpty()) {
+                            item(key = "section-finished") { SectionLabel("Finished") }
+                            bookRows(finished, library, hosted = false, onOpenBook, { pendingDelete = it }, viewModel::setShared)
+                        }
                     }
                 }
             }
@@ -155,7 +175,7 @@ fun LibraryScreen(
         pendingDelete?.let { book ->
             RemoveBookDialog(
                 book = book,
-                shared = hosted,
+                hosted = hosted,
                 onConfirm = {
                     viewModel.delete(book.id)
                     pendingDelete = null
@@ -169,7 +189,7 @@ fun LibraryScreen(
 @Composable
 private fun RemoveBookDialog(
     book: BookRecord,
-    shared: Boolean,
+    hosted: Boolean,
     onConfirm: () -> Unit,
     onDismiss: () -> Unit,
 ) {
@@ -186,11 +206,7 @@ private fun RemoveBookDialog(
         },
         text = {
             Text(
-                text = if (shared) {
-                    "This removes ${book.title} for everyone on this server, plus likes, notes, and reading place."
-                } else {
-                    "This removes ${book.title}, plus likes, notes, and where you left off. You can add the EPUB again."
-                },
+                text = removalCopy(book, hosted),
                 style = MaterialTheme.typography.bodyLarge,
             )
         },
@@ -216,8 +232,37 @@ private fun HomeBar(onOpenAccount: () -> Unit, visible: Boolean) {
     )
 }
 
+private fun removalCopy(book: BookRecord, hosted: Boolean): String {
+    if (!hosted) {
+        return "This removes ${book.title}, plus likes, notes, and where you left off. You can add the EPUB again."
+    }
+    return if (book.shared || book.isSample) {
+        "This removes ${book.title} for everyone who can read it, plus likes, notes, and reading place."
+    } else {
+        "This removes ${book.title} from your library, plus likes, notes, and reading place. " +
+            "It is private, so nobody else can read it."
+    }
+}
+
+private data class ShelfGroups(
+    val mine: List<BookRecord>,
+    val sharedWithMe: List<BookRecord>,
+    val finished: List<BookRecord>,
+)
+
+private fun shelfGroups(books: List<BookRecord>): ShelfGroups {
+    val finished = books.filter { it.isFinished }
+    val active = books.filterNot { it.isFinished }
+    return ShelfGroups(
+        mine = active.filter { it.mine },
+        sharedWithMe = active.filterNot { it.mine },
+        finished = finished,
+    )
+}
+
 @Composable
 private fun EmptyTimeline(
+    hosted: Boolean,
     onAdd: () -> Unit,
     onSample: () -> Unit,
 ) {
@@ -234,7 +279,12 @@ private fun EmptyTimeline(
         )
         Spacer(Modifier.height(8.dp))
         Text(
-            text = "Drop in an EPUB and the author starts posting, one paragraph at a time.",
+            text = if (hosted) {
+                "Drop in an EPUB and the author starts posting, one paragraph at a time. " +
+                    "It stays private until you share it."
+            } else {
+                "Drop in an EPUB and the author starts posting, one paragraph at a time."
+            },
             style = MaterialTheme.typography.bodyLarge,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
@@ -257,16 +307,24 @@ private fun EmptyTimeline(
 private fun LazyListScope.bookRows(
     books: List<BookRecord>,
     library: LibraryStore,
+    hosted: Boolean,
     onOpenBook: (String) -> Unit,
     onDelete: (BookRecord) -> Unit,
+    onShare: (String, Boolean) -> Unit,
 ) {
     items(books, key = { it.id }) { book ->
         ShelfBook(
             book = book,
             cover = library.coverFile(book.id),
+            showOwner = hosted && !book.mine,
             onOpen = { onOpenBook(book.id) },
             onDelete = if (book.mine) {
                 { onDelete(book) }
+            } else {
+                null
+            },
+            onShare = if (hosted && book.mine) {
+                { shared -> onShare(book.id, shared) }
             } else {
                 null
             },
@@ -288,10 +346,19 @@ private fun SectionLabel(text: String) {
 private fun ShelfBook(
     book: BookRecord,
     cover: File?,
+    showOwner: Boolean,
     onOpen: () -> Unit,
     onDelete: (() -> Unit)?,
+    onShare: ((Boolean) -> Unit)?,
 ) {
-    BookPost(book = book, cover = cover, onOpen = onOpen, onDelete = onDelete)
+    BookPost(
+        book = book,
+        cover = cover,
+        showOwner = showOwner,
+        onOpen = onOpen,
+        onDelete = onDelete,
+        onShare = onShare,
+    )
     HorizontalDivider(
         color = MaterialTheme.colorScheme.outline,
         thickness = 0.6.dp,
@@ -299,54 +366,113 @@ private fun ShelfBook(
 }
 
 @Composable
-private fun BookPost(
+internal fun BookPost(
     book: BookRecord,
     cover: File?,
+    showOwner: Boolean,
     onOpen: () -> Unit,
     onDelete: (() -> Unit)?,
+    onShare: ((Boolean) -> Unit)?,
+    modifier: Modifier = Modifier,
 ) {
     Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .clickable(role = Role.Button, onClick = onOpen)
-            .padding(horizontal = 16.dp, vertical = 12.dp),
+        modifier = modifier.fillMaxWidth(),
+        verticalAlignment = Alignment.CenterVertically,
     ) {
-        Avatar(name = book.author, coverFile = cover, size = 40.dp)
-        Spacer(Modifier.width(12.dp))
-        Column(Modifier.weight(1f)) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
+        Row(
+            modifier = Modifier
+                .weight(1f)
+                .clickable(role = Role.Button, onClick = onOpen)
+                .padding(start = 16.dp, top = 12.dp, bottom = 12.dp, end = 4.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Avatar(name = book.author, coverFile = cover, size = 40.dp)
+            Spacer(Modifier.width(12.dp))
+            Column(Modifier.weight(1f)) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        text = book.title,
+                        style = MaterialTheme.typography.titleSmall,
+                        maxLines = 1,
+                        modifier = Modifier.weight(1f, fill = false),
+                    )
+                    Spacer(Modifier.width(6.dp))
+                    Text(
+                        text = "@${book.handle}",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1,
+                    )
+                }
+                Spacer(Modifier.height(2.dp))
                 Text(
-                    text = book.title,
-                    style = MaterialTheme.typography.titleSmall,
-                    maxLines = 1,
-                    modifier = Modifier.weight(1f, fill = false),
+                    text = statusLine(book),
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurface,
                 )
-                Spacer(Modifier.width(6.dp))
-                Text(
-                    text = "@${book.handle}",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    maxLines = 1,
-                )
+                if (showOwner && !book.ownerUsername.isNullOrBlank()) {
+                    Spacer(Modifier.height(2.dp))
+                    Text(
+                        text = if (book.shared) {
+                            "Shared by @${book.ownerUsername}"
+                        } else {
+                            "Added by @${book.ownerUsername}"
+                        },
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1,
+                    )
+                }
             }
-            Spacer(Modifier.height(2.dp))
-            Text(
-                text = statusLine(book),
-                style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.onSurface,
-            )
         }
-        if (onDelete != null) {
-            IconButton(onClick = onDelete, modifier = Modifier.size(40.dp)) {
-                Icon(
-                    Icons.Outlined.Delete,
-                    contentDescription = "Remove ${book.title}",
-                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
+        if (onShare != null || onDelete != null) {
+            Row(
+                modifier = Modifier.padding(end = 8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                if (onShare != null) {
+                    val shared = book.shared
+                    RowActionButton(
+                        onClick = { onShare(!shared) },
+                        icon = if (shared) Icons.Filled.People else Icons.Outlined.Lock,
+                        contentDescription = if (shared) "Make private" else "Share",
+                    )
+                }
+                if (onDelete != null) {
+                    RowActionButton(
+                        onClick = onDelete,
+                        icon = Icons.Outlined.Delete,
+                        contentDescription = "Remove ${book.title}",
+                    )
+                }
             }
+        } else {
+            Spacer(Modifier.width(16.dp))
         }
     }
 }
+
+@Composable
+private fun RowActionButton(
+    onClick: () -> Unit,
+    icon: ImageVector,
+    contentDescription: String,
+) {
+    IconButton(
+        onClick = onClick,
+        modifier = Modifier.size(RowActionSize),
+    ) {
+        Icon(
+            imageVector = icon,
+            contentDescription = contentDescription,
+            modifier = Modifier.size(RowActionIconSize),
+            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+    }
+}
+
+private val RowActionSize = 40.dp
+private val RowActionIconSize = 24.dp
 
 private fun statusLine(book: BookRecord): String {
     val count = if (book.postCount > 0) "${book.postCount} posts" else "Not opened yet"

@@ -38,6 +38,10 @@ class HostedLibraryStore(
     private var epoch = 0
     private val _library = MutableStateFlow(LibrarySnapshot())
     override val library: StateFlow<LibrarySnapshot> = _library.asStateFlow()
+    private val shares = HostedShareToggle(
+        books = { _library.value.books },
+        replace = { replaceBook(it) },
+    )
 
     init {
         scope.launch {
@@ -130,6 +134,16 @@ class HostedLibraryStore(
             _library.value = _library.value.copy(
                 books = _library.value.books.filterNot { it.id == safe },
             )
+        }
+    }
+
+    override suspend fun setShared(id: String, shared: Boolean) {
+        val session = requireSession()
+        val safe = requireBookId(id)
+        shares.setShared(safe, shared) {
+            withContext(Dispatchers.IO) {
+                expireOn401 { client.setShared(session, safe, shared) }
+            }
         }
     }
 

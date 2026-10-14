@@ -32,10 +32,11 @@ data class HostedErrorBody(
     val error: String = "",
 )
 
-/** Only reading place. The server owns postCount now that it parses books. */
+/** Reading place and sharing. The server owns postCount now that it parses books. */
 @Serializable
 data class PatchBook(
     val progressIndex: Int? = null,
+    val shared: Boolean? = null,
 )
 
 @Serializable
@@ -120,6 +121,11 @@ class HostedClient(
             .patch(json.encodeToString(body).toRequestBody(JSON))
             .build()
         return http.newCall(req).execute().use { it.decode() }
+    }
+
+    /** Owner-only. Another account that can see the book gets 403. */
+    fun setShared(session: HostedSession, id: String, shared: Boolean): BookRecord {
+        return patch(session, id, PatchBook(shared = shared))
     }
 
     /** Timeline posts the server parsed from this book. Ids match likes and comments. */
