@@ -414,7 +414,7 @@ final class FeatureTests: XCTestCase {
 
     private func typeInto(_ element: XCUIElement, _ text: String) {
         XCTAssertTrue(element.waitForExistence(timeout: 5))
-        element.tap()
+        element.tapForTyping()
         element.typeText(text)
     }
 
@@ -441,8 +441,21 @@ final class FeatureTests: XCTestCase {
 }
 
 private extension XCUIElement {
-    func clearAndType(_ text: String) {
+    /// CI simulators sometimes drop the focusing tap, and typeText then fails with
+    /// "Neither element nor any descendant has keyboard focus". Tap again once if so.
+    func tapForTyping() {
         tap()
+        let focused = XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "hasKeyboardFocus == true"),
+            object: self
+        )
+        if XCTWaiter().wait(for: [focused], timeout: 2) != .completed {
+            tap()
+        }
+    }
+
+    func clearAndType(_ text: String) {
+        tapForTyping()
         guard let current = value as? String, !current.isEmpty else {
             typeText(text)
             return

@@ -4,11 +4,13 @@ on:
   pull_request:
     paths:
       - ios/**
+      - server/**
       - .github/workflows/ios.yml
   push:
     branches: [main]
     paths:
       - ios/**
+      - server/**
       - .github/workflows/ios.yml
   workflow_dispatch:
 
@@ -61,6 +63,20 @@ jobs:
           echo "udid=$udid" >> "$GITHUB_OUTPUT"
           xcrun simctl list devices available | grep "$udid"
 
+      # testHostedCreateAccountImportSampleAndLike signs into http://127.0.0.1:8787.
+      # The simulator shares the runner's network, so run the real server here.
+      - name: Start hosted server
+        working-directory: server
+        run: |
+          cargo build --release --locked --jobs 8
+          MEWO_DATA_DIR="$RUNNER_TEMP/mewo-data" \
+            nohup ./target/release/mewo-server > "$RUNNER_TEMP/server.log" 2>&1 &
+          for _ in $(seq 30); do
+            curl -s -o /dev/null http://127.0.0.1:8787/v1/me && exit 0
+            sleep 1
+          done
+          cat "$RUNNER_TEMP/server.log"
+          exit 1
       - name: Build and test
         run: |
           # Full log goes to a file (uploaded on failure); the step's status is xcodebuild's.
@@ -85,4 +101,5 @@ jobs:
           path: |
             ${{ runner.temp }}/Mewo.xcresult
             ${{ runner.temp }}/xcodebuild.log
+            ${{ runner.temp }}/server.log
           retention-days: 7
