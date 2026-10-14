@@ -46,6 +46,8 @@
 		F0AC78A999A10B4743D26556 /* HostedClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = 404AC86C65664DDDBD207B14 /* HostedClient.swift */; };
 		F4D72E012E66016633505213 /* Chrome.swift in Sources */ = {isa = PBXBuildFile; fileRef = CEE8A942A4FC81D91F91B828 /* Chrome.swift */; };
 		B7E4A91C5C44000100A11001 /* SharingTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B7E4A91C5C44000100A11002 /* SharingTests.swift */; };
+		C0FFEE14B302000100000002 /* BuildInfo.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0FFEE14B302000100000001 /* BuildInfo.swift */; };
+		C0FFEE14B302000100000004 /* ServerVersionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0FFEE14B302000100000003 /* ServerVersionTests.swift */; };
 		F5951F6394A0F8940EE096EA /* FeedStartTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = EF7D5E18C99DDD9FB7E68FA4 /* FeedStartTests.swift */; };
 		FFD8D061C84A9E53308029BD /* AppEnvironment.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0CCB64C15AD4564BF9E84C6D /* AppEnvironment.swift */; };
 /* End PBXBuildFile section */
@@ -101,6 +103,8 @@
 		DF0D3BC3A891755D9AC55253 /* LikesScreen.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LikesScreen.swift; sourceTree = "<group>"; };
 		ED562555052DC0650FBC08AF /* atkinson_hyperlegible_bold.ttf */ = {isa = PBXFileReference; lastKnownFileType = file; path = atkinson_hyperlegible_bold.ttf; sourceTree = "<group>"; };
 		B7E4A91C5C44000100A11002 /* SharingTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SharingTests.swift; sourceTree = "<group>"; };
+		C0FFEE14B302000100000001 /* BuildInfo.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BuildInfo.swift; sourceTree = "<group>"; };
+		C0FFEE14B302000100000003 /* ServerVersionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ServerVersionTests.swift; sourceTree = "<group>"; };
 		EF7D5E18C99DDD9FB7E68FA4 /* FeedStartTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FeedStartTests.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
@@ -273,6 +277,7 @@
 		F1AA73F53C09F830773137D7 /* Data */ = {
 			isa = PBXGroup;
 			children = (
+				C0FFEE14B302000100000001 /* BuildInfo.swift */,
 				078011F30AFF7C862CC84EA2 /* Chapters.swift */,
 				54867A6C884E240F996C501B /* EpubOpener.swift */,
 				2BA5FDBC274BF117C398912D /* FeedExtractor.swift */,
@@ -295,6 +300,7 @@
 			isa = PBXGroup;
 			children = (
 				EF7D5E18C99DDD9FB7E68FA4 /* FeedStartTests.swift */,
+				C0FFEE14B302000100000003 /* ServerVersionTests.swift */,
 				B7E4A91C5C44000100A11002 /* SharingTests.swift */,
 			);
 			path = MewoTests;
@@ -310,6 +316,7 @@
 				23ED91217D0060143D8F90C6 /* Sources */,
 				22E5410D7F4A41F6FBE447AA /* Resources */,
 				D52988C34E0ED94AC9B7CE79 /* Frameworks */,
+				C0FFEE14B302000100000005 /* Embed git identity */,
 			);
 			buildRules = (
 			);
@@ -398,12 +405,38 @@
 		};
 /* End PBXResourcesBuildPhase section */
 
+/* Begin PBXShellScriptBuildPhase section */
+		C0FFEE14B302000100000005 /* Embed git identity */ = {
+			isa = PBXShellScriptBuildPhase;
+			alwaysOutOfDate = 1;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			inputFileListPaths = (
+			);
+			inputPaths = (
+				"$(TARGET_BUILD_DIR)/$(INFOPLIST_PATH)",
+			);
+			name = "Embed git identity";
+			outputFileListPaths = (
+			);
+			outputPaths = (
+				"$(DERIVED_FILE_DIR)/mewo-git-identity-stamp",
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/sh;
+			shellScript = "/bin/sh \"${SRCROOT}/scripts/embed-build-identity.sh\"\n";
+			showEnvVarsInLog = 0;
+		};
+/* End PBXShellScriptBuildPhase section */
+
 /* Begin PBXSourcesBuildPhase section */
 		055BD3CDCD47CE0DB4DD78F9 /* Sources */ = {
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
 				F5951F6394A0F8940EE096EA /* FeedStartTests.swift in Sources */,
+				C0FFEE14B302000100000004 /* ServerVersionTests.swift in Sources */,
 				B7E4A91C5C44000100A11001 /* SharingTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
@@ -415,6 +448,7 @@
 				CAABF2658C368BE3B19F37E6 /* AccountDrawer.swift in Sources */,
 				FFD8D061C84A9E53308029BD /* AppEnvironment.swift in Sources */,
 				DEEBA4AEB0A2810678AE75A8 /* BrandShapes.swift in Sources */,
+				C0FFEE14B302000100000002 /* BuildInfo.swift in Sources */,
 				DD931482001A225BEDC8D12E /* Chapters.swift in Sources */,
 				F4D72E012E66016633505213 /* Chrome.swift in Sources */,
 				A1FDCEF022CA0872C2772BDB /* CommentSheet.swift in Sources */,
@@ -483,6 +517,7 @@
 				ASSETCATALOG_COMPILER_ALTERNATE_APPICON_NAMES = AppIconTeddy;
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_IDENTITY = "iPhone Developer";
+				ENABLE_USER_SCRIPT_SANDBOXING = NO;
 				INFOPLIST_FILE = Mewo/Resources/Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = Mewo;
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.books";
@@ -504,6 +539,7 @@
 				ASSETCATALOG_COMPILER_ALTERNATE_APPICON_NAMES = AppIconTeddy;
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_IDENTITY = "iPhone Developer";
+				ENABLE_USER_SCRIPT_SANDBOXING = NO;
 				INFOPLIST_FILE = Mewo/Resources/Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = Mewo;
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.books";

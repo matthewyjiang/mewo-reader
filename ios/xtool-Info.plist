@@ -6,6 +6,9 @@
   Mewo/Resources/Info.plist and the versions in project.yml.
   Asset-catalog keys (icons, launch screen color/image) are left out because
   xtool does not compile Assets.xcassets.
+  Xcode's embed-build-identity script overwrites CFBundleShortVersionString
+  from git describe and adds MewoGitCommit. xtool does not run that script,
+  so the version here stays the project.yml fallback and the commit is omitted.
 -->
 <plist version="1.0">
 <dict>
