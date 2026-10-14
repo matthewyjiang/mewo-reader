@@ -48,10 +48,7 @@
   {#if rail && store.session}
     <button onclick={onaccount} class="rail-account">
       <Avatar name={store.session.username} />
-      <span>
-        <strong>{store.session.username}</strong>
-        <span class="meta">@{store.session.username}</span>
-      </span>
+      <strong>{store.session.username}</strong>
       <Icon name="more" />
     </button>
   {/if}
@@ -139,12 +136,13 @@
   text-align: left;
 }
 
-.rail-account > span:not(.avatar) {
-  display: flex;
-  flex-direction: column;
+.rail-account > strong {
   flex: 1;
   min-width: 0;
-  overflow-wrap: anywhere;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 1.0625rem;
 }
 
 .rail-account :global(.avatar) {
@@ -173,7 +171,7 @@
     padding: 12px;
   }
   .nav-rail > a:not(.rail-brand) > span,
-  .rail-account > span:not(.avatar), .rail-account > :global(svg) {
+  .rail-account > strong, .rail-account > :global(svg) {
     display: none;
   }
   .rail-account {

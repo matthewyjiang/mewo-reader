@@ -45,7 +45,7 @@
       <label class="search-field">
         <Icon name="search" size={18} />
         <span class="sr-only">Search books and opened posts</span>
-        <input bind:this={searchInput} type="search" placeholder="Search Mewo" bind:value={query} />
+        <input bind:this={searchInput} type="search" placeholder="Search" bind:value={query} />
         {#if query}
           <button
             class="icon-button"

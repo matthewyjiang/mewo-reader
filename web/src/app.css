@@ -349,6 +349,7 @@ strong {
 
 .empty-state .text-button {
   margin-top: -4px;
+  padding-inline: 0;
 }
 
 .inline-status {
@@ -425,16 +426,6 @@ strong {
 textarea::placeholder, input::placeholder {
   color: var(--mute);
   opacity: 1;
-}
-
-.identity-preview {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-}
-
-.identity-preview .meta {
-  margin-top: 2px;
 }
 
 @media (prefers-reduced-motion: reduce) {

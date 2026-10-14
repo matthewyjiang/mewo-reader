@@ -22,7 +22,6 @@
     <button class="drawer-profile" onclick={() => onprofile(store.session!.username)}>
       <Avatar name={store.session.username} size={48} />
       <strong>{store.session.username}</strong>
-      <span class="meta">@{store.session.username}</span>
     </button>
   {/if}
   <button
@@ -32,7 +31,10 @@
     <Icon name="settings" />
     Settings
   </button>
-  <button class="drawer-row" onclick={onsignout}>Sign out</button>
+  <button class="drawer-row" onclick={onsignout}>
+    <span class="drawer-slot" aria-hidden="true"></span>
+    Sign out
+  </button>
 </Sheet>
 
 <style>
@@ -48,7 +50,7 @@
   align-items: flex-start;
   flex-direction: column;
   gap: 4px;
-  padding: 0 24px 24px;
+  padding: 8px 16px 16px;
   text-align: left;
   border-bottom: .6px solid var(--line);
 }
@@ -59,6 +61,7 @@
 
 .drawer-profile strong {
   font-size: 1.25rem;
+  line-height: 1.2;
   overflow-wrap: anywhere;
 }
 
@@ -67,10 +70,17 @@
   width: 100%;
   align-items: center;
   gap: 16px;
-  padding: 20px 24px;
+  min-height: 52px;
+  padding: 0 16px;
   text-align: left;
   font-size: 1.0625rem;
   font-weight: 700;
+}
+
+.drawer-slot {
+  width: 22px;
+  height: 22px;
+  flex: 0 0 22px;
 }
 
 .drawer-row:hover {

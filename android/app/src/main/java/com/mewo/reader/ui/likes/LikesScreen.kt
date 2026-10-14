@@ -76,12 +76,7 @@ fun LikesScreen(
                 }
             }
             state.hits.isEmpty() -> {
-                Text(
-                    text = "Heart a line while you read. It shows up here.",
-                    style = MaterialTheme.typography.bodyLarge,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 24.dp),
-                )
+                EmptyLikes()
             }
             else -> {
                 val listState = rememberLazyListState()
@@ -128,6 +123,15 @@ fun LikesScreen(
             }
         }
     }
+}
+
+@Composable
+internal fun EmptyLikes() {
+    Text(
+        text = "No likes",
+        style = MaterialTheme.typography.headlineLarge,
+        modifier = Modifier.padding(horizontal = 28.dp, vertical = 48.dp),
+    )
 }
 
 private fun quote(author: String?, title: String?, post: FeedPost): String {

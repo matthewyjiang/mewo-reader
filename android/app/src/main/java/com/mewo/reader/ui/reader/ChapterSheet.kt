@@ -70,7 +70,7 @@ fun ChapterSheet(
             )
             if (headings.isEmpty()) {
                 Text(
-                    text = "This book has no chapter headings.",
+                    text = "No chapters",
                     style = MaterialTheme.typography.bodyLarge,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp),

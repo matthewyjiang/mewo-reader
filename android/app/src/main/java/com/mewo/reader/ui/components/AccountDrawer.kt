@@ -83,7 +83,7 @@ fun AccountDrawer(
 }
 
 @Composable
-private fun AccountDrawerContent(
+internal fun AccountDrawerContent(
     onOpenSettings: () -> Unit,
     onOpenProfile: (handle: String, name: String) -> Unit,
 ) {
@@ -104,12 +104,14 @@ private fun AccountDrawerContent(
             Avatar(name = me.name, size = 56.dp)
             Spacer(Modifier.height(12.dp))
             Text(me.name, style = MaterialTheme.typography.titleMedium)
-            Spacer(Modifier.height(2.dp))
-            Text(
-                text = "@${me.handle}",
-                style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
+            if (!me.name.equals(me.handle, ignoreCase = true)) {
+                Spacer(Modifier.height(2.dp))
+                Text(
+                    text = "@${me.handle}",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
         }
         HorizontalDivider(
             color = MaterialTheme.colorScheme.outline,
@@ -120,7 +122,7 @@ private fun AccountDrawerContent(
                 .fillMaxWidth()
                 .heightIn(min = 52.dp)
                 .clickable(role = Role.Button, onClick = onOpenSettings)
-                .padding(horizontal = 16.dp, vertical = 14.dp),
+                .padding(horizontal = 16.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Text(

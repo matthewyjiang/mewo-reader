@@ -5,12 +5,13 @@ import androidx.activity.compose.LocalActivity
 import androidx.activity.compose.PredictiveBackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
@@ -75,21 +76,23 @@ fun OnboardingScreen() {
                 .fillMaxWidth()
                 .verticalScroll(rememberScrollState())
                 .padding(horizontal = 16.dp)
-                .padding(top = 24.dp, bottom = 16.dp),
+                .padding(bottom = 16.dp),
         ) {
-            Text(
-                text = "This is you",
-                style = MaterialTheme.typography.headlineLarge,
-            )
-            Spacer(Modifier.height(8.dp))
-            Text(
-                text = "The drawer and your notes use this.",
-                style = MaterialTheme.typography.bodyLarge,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-            Spacer(Modifier.height(24.dp))
-            ProfilePreview(name = name, handle = handle)
-            Spacer(Modifier.height(20.dp))
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(min = 52.dp),
+                contentAlignment = Alignment.CenterStart,
+            ) {
+                Text(
+                    text = "Account",
+                    style = MaterialTheme.typography.titleLarge,
+                )
+            }
+            if (name.isNotBlank() || handle.isNotBlank()) {
+                ProfilePreview(name = name, handle = handle)
+                Spacer(Modifier.height(12.dp))
+            }
             ProfileForm(
                 name = name,
                 handle = handle,
@@ -115,17 +118,17 @@ fun OnboardingScreen() {
             color = MaterialTheme.colorScheme.outline,
             thickness = 0.6.dp,
         )
-        Row(
+        Box(
             modifier = Modifier
                 .fillMaxWidth()
                 .navigationBarsPadding()
                 .height(56.dp)
                 .padding(horizontal = 16.dp),
-            verticalAlignment = Alignment.CenterVertically,
+            contentAlignment = Alignment.Center,
         ) {
-            Spacer(Modifier.weight(1f))
             NextPill(
                 enabled = canContinue,
+                modifier = Modifier.fillMaxWidth(),
                 onClick = {
                     parsed
                         .onSuccess { profile.save(it.name, it.handle) }
@@ -142,18 +145,23 @@ fun OnboardingScreen() {
 private fun NextPill(
     enabled: Boolean,
     onClick: () -> Unit,
+    modifier: Modifier = Modifier,
 ) {
     val accent = MaterialTheme.colorScheme.primary
-    Text(
-        text = "Next",
-        color = MaterialTheme.colorScheme.onPrimary,
-        style = MaterialTheme.typography.labelLarge,
-        fontWeight = FontWeight.Bold,
-        modifier = Modifier
+    Box(
+        modifier = modifier
+            .height(40.dp)
             .clip(RoundedCornerShape(999.dp))
             .background(if (enabled) accent else accent.copy(alpha = 0.35f))
             .clickable(enabled = enabled, role = Role.Button, onClick = onClick)
-            .padding(horizontal = 16.dp, vertical = 8.dp)
             .semantics { contentDescription = "Next" },
-    )
+        contentAlignment = Alignment.Center,
+    ) {
+        Text(
+            text = "Next",
+            color = MaterialTheme.colorScheme.onPrimary,
+            style = MaterialTheme.typography.labelLarge,
+            fontWeight = FontWeight.Bold,
+        )
+    }
 }

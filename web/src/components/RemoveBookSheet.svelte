@@ -27,10 +27,9 @@
     <h2>Remove {book.title}?</h2>
     <p class="muted">
       {#if visibleToOthers(book)}
-        This removes it for everyone who can read it, plus likes, notes, and reading place.
+        Removes it for everyone who can read it.
       {:else}
-        This removes it from your library, plus likes, notes, and reading place.
-        It is private, so nobody else can read it.
+        Removes it from your library.
       {/if}
     </p>
     {#if error}<p class="error" role="alert">{error}</p>{/if}

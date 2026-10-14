@@ -1,6 +1,7 @@
 package com.mewo.reader.ui
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -18,21 +19,33 @@ import com.mewo.reader.data.BackendKind
 import com.mewo.reader.data.BookRecord
 import com.mewo.reader.data.HostedSession
 import com.mewo.reader.data.LocalProfile
+import com.mewo.reader.ui.components.AccountDrawerContent
 import com.mewo.reader.ui.components.BrandMark
 import com.mewo.reader.ui.components.MewoAppBar
 import com.mewo.reader.ui.components.ProfileButton
 import com.mewo.reader.ui.library.BookPost
+import com.mewo.reader.ui.library.EmptyTimeline
+import com.mewo.reader.ui.library.RemoveBookDialog
 import com.mewo.reader.ui.library.SectionLabel
+import com.mewo.reader.ui.likes.EmptyLikes
 import com.mewo.reader.ui.onboarding.OnboardingScreen
+import com.mewo.reader.ui.profile.EmptyPosts
+import com.mewo.reader.ui.search.SearchEmpty
 import com.mewo.reader.ui.settings.AppBuild
 import com.mewo.reader.ui.settings.ServerVersionState
 import com.mewo.reader.ui.settings.SettingsAboutPage
+import com.mewo.reader.ui.settings.SettingsAccountPage
+import com.mewo.reader.ui.settings.SettingsDisplayPage
 import com.mewo.reader.ui.settings.SettingsHome
+import com.mewo.reader.ui.settings.SettingsLibraryPage
 import com.mewo.reader.ui.theme.DisplayTheme
 import com.mewo.reader.ui.theme.LocalMewoColors
 import com.mewo.reader.ui.theme.LocalMewoMode
+import com.mewo.reader.ui.theme.LocalReaderFont
 import com.mewo.reader.ui.theme.LocalThemeController
 import com.mewo.reader.ui.theme.MewoModeController
+import com.mewo.reader.ui.theme.ReaderFontController
+import com.mewo.reader.ui.theme.ReaderTypeScale
 import com.mewo.reader.ui.theme.ThemeController
 import com.mewo.reader.ui.theme.mewoTypography
 import com.mewo.reader.ui.theme.toColorScheme
@@ -76,7 +89,69 @@ class SurfaceScreenshots {
     @Test
     fun onboarding() = shoot("onboarding") { OnboardingScreen() }
 
-    private fun shoot(name: String, content: @Composable () -> Unit) {
+    @Test
+    fun signIn() = shoot("sign-in", signedIn = false) {
+        SettingsLibraryPage(onBack = {})
+    }
+
+    @Test
+    fun createAccount() = shoot("create-account", signedIn = false) {
+        SettingsLibraryPage(onBack = {}, startOnCreate = true)
+    }
+
+    @Test
+    fun libraryAccount() = shoot("library-account") {
+        SettingsLibraryPage(onBack = {})
+    }
+
+    @Test
+    fun display() = shoot("display") {
+        SettingsDisplayPage(onBack = {})
+    }
+
+    @Test
+    fun account() = shoot("account") {
+        SettingsAccountPage(onBack = {})
+    }
+
+    @Test
+    fun drawer() = shoot("drawer") {
+        Surface {
+            AccountDrawerContent(onOpenSettings = {}, onOpenProfile = { _, _ -> })
+        }
+    }
+
+    @Test
+    fun emptyLibrary() = shoot("empty-library") {
+        Surface {
+            EmptyTimeline(onAdd = {}, onSample = {})
+        }
+    }
+
+    @Test
+    fun removeBook() = shoot("remove-book") {
+        RemoveBookDialog(
+            book = privateBook,
+            hosted = true,
+            onConfirm = {},
+            onDismiss = {},
+        )
+    }
+
+    @Test
+    fun likesEmpty() = shoot("likes-empty") { Surface { EmptyLikes() } }
+
+    @Test
+    fun searchEmpty() = shoot("search-empty") { Surface { SearchEmpty() } }
+
+    @Test
+    fun postsEmpty() = shoot("posts-empty") { Surface { EmptyPosts() } }
+
+    private fun shoot(
+        name: String,
+        signedIn: Boolean = true,
+        content: @Composable () -> Unit,
+    ) {
         val profile = if (name == "onboarding") {
             LocalProfile()
         } else {
@@ -86,10 +161,26 @@ class SurfaceScreenshots {
             paparazzi.unsafeUpdateConfig(deviceConfig = device)
             for ((themeName, theme) in themes) {
                 paparazzi.snapshot(name = "${name}_${deviceName}_$themeName") {
-                    Frame(theme = theme, profile = profile, content = content)
+                    Frame(
+                        theme = theme,
+                        profile = profile,
+                        signedIn = signedIn,
+                        content = content,
+                    )
                 }
             }
         }
+    }
+}
+
+@Composable
+private fun Surface(content: @Composable () -> Unit) {
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(MaterialTheme.colorScheme.background),
+    ) {
+        content()
     }
 }
 
@@ -112,6 +203,7 @@ private val themes = listOf(
 private fun Frame(
     theme: DisplayTheme,
     profile: LocalProfile,
+    signedIn: Boolean,
     content: @Composable () -> Unit,
 ) {
     val palette = theme.palette
@@ -119,14 +211,22 @@ private fun Frame(
         LocalMewoColors provides palette,
         LocalThemeController provides ThemeController(current = theme, setTheme = {}),
         LocalMewoMode provides MewoModeController(enabled = false, setEnabled = {}),
+        LocalReaderFont provides ReaderFontController(
+            scale = ReaderTypeScale.Default,
+            setStep = {},
+        ),
         LocalProfile provides LocalProfileController(profile = profile, save = { _, _ -> }),
         LocalBackend provides BackendController(kind = BackendKind.Hosted, setKind = {}),
         LocalHostedAuth provides HostedAuthController(
-            session = HostedSession(
-                baseUrl = "https://mewo.example",
-                username = "ada",
-                token = "token",
-            ),
+            session = if (signedIn) {
+                HostedSession(
+                    baseUrl = "https://mewo.example",
+                    username = "ada",
+                    token = "token",
+                )
+            } else {
+                HostedSession(baseUrl = "https://mewo.example")
+            },
             setBaseUrl = {},
             signIn = { _, _ -> },
             createAccount = { _, _ -> },

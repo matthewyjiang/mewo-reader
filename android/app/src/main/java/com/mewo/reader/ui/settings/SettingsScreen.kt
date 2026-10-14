@@ -38,6 +38,7 @@ import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import com.mewo.reader.BuildConfig
 import com.mewo.reader.data.BackendKind
@@ -102,40 +103,23 @@ fun SettingsHome(
     onOpenLibrary: () -> Unit,
     onOpenAbout: () -> Unit,
 ) {
-    val profile = LocalProfile.current.profile
     SettingsScaffold(title = "Settings", onBack = onBack) {
-        SettingsCategoryRow(
-            title = "Account",
-            body = if (profile.ready) "@${profile.handle}" else "Name and handle.",
-            onClick = onOpenAccount,
-        )
+        SettingsCategoryRow(title = "Account", onClick = onOpenAccount)
         HorizontalDivider(
             color = MaterialTheme.colorScheme.outline,
             thickness = 0.6.dp,
         )
-        SettingsCategoryRow(
-            title = "Display",
-            body = "Twitter or X. Light or night. Font size. Mewo mode.",
-            onClick = onOpenDisplay,
-        )
+        SettingsCategoryRow(title = "Display", onClick = onOpenDisplay)
         HorizontalDivider(
             color = MaterialTheme.colorScheme.outline,
             thickness = 0.6.dp,
         )
-        SettingsCategoryRow(
-            title = "Library",
-            body = "On this phone, or a hosted server.",
-            onClick = onOpenLibrary,
-        )
+        SettingsCategoryRow(title = "Library", onClick = onOpenLibrary)
         HorizontalDivider(
             color = MaterialTheme.colorScheme.outline,
             thickness = 0.6.dp,
         )
-        SettingsCategoryRow(
-            title = "About",
-            body = "App and server versions.",
-            onClick = onOpenAbout,
-        )
+        SettingsCategoryRow(title = "About", onClick = onOpenAbout)
         HorizontalDivider(
             color = MaterialTheme.colorScheme.outline,
             thickness = 0.6.dp,
@@ -152,29 +136,27 @@ fun SettingsAboutPage(
     val resolved = server ?: rememberServerVersion()
     val url = LocalHostedAuth.current.session.normalizedUrl()
     SettingsScaffold(title = "About", onBack = onBack) {
-        Column(
-            modifier = Modifier.padding(horizontal = 16.dp, vertical = 16.dp),
-            verticalArrangement = Arrangement.spacedBy(16.dp),
-        ) {
-            AboutFact(
-                label = "App",
-                value = formatAppVersion(app.versionName, app.versionCode, app.commit),
-            )
-            AboutFact(
-                label = "Server",
-                value = when (resolved) {
-                    ServerVersionState.Loading -> "Loading…"
-                    ServerVersionState.Unavailable -> "Unavailable"
-                    is ServerVersionState.Ready -> formatServerVersion(resolved.version, resolved.commit)
-                },
-                muted = resolved !is ServerVersionState.Ready,
-            )
-            AboutFact(
-                label = "Server URL",
-                value = url ?: "Unavailable",
-                muted = url == null,
-            )
-        }
+        AboutFact(
+            label = "App",
+            value = formatAppVersion(app.versionName, app.versionCode, app.commit),
+        )
+        HorizontalDivider(color = MaterialTheme.colorScheme.outline, thickness = 0.6.dp)
+        AboutFact(
+            label = "Server",
+            value = when (resolved) {
+                ServerVersionState.Loading -> "Loading…"
+                ServerVersionState.Unavailable -> "Unavailable"
+                is ServerVersionState.Ready -> formatServerVersion(resolved.version, resolved.commit)
+            },
+            muted = resolved !is ServerVersionState.Ready,
+        )
+        HorizontalDivider(color = MaterialTheme.colorScheme.outline, thickness = 0.6.dp)
+        AboutFact(
+            label = "Server URL",
+            value = url ?: "Unavailable",
+            muted = url == null,
+        )
+        HorizontalDivider(color = MaterialTheme.colorScheme.outline, thickness = 0.6.dp)
     }
 }
 
@@ -212,13 +194,19 @@ private fun AboutFact(
     value: String,
     muted: Boolean = false,
 ) {
-    Column(modifier = Modifier.fillMaxWidth()) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .heightIn(min = 52.dp)
+            .padding(horizontal = 16.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(16.dp),
+    ) {
         Text(
             text = label,
-            style = MaterialTheme.typography.labelSmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            style = MaterialTheme.typography.titleMedium,
+            modifier = Modifier.weight(1f, fill = false),
         )
-        Spacer(Modifier.size(4.dp))
         Text(
             text = value,
             style = MaterialTheme.typography.bodyLarge,
@@ -227,6 +215,8 @@ private fun AboutFact(
             } else {
                 MaterialTheme.colorScheme.onSurface
             },
+            textAlign = TextAlign.End,
+            modifier = Modifier.weight(1f),
         )
     }
 }
@@ -244,10 +234,12 @@ fun SettingsAccountPage(onBack: () -> Unit) {
 
     SettingsScaffold(title = "Account", onBack = onBack) {
         Column(
-            modifier = Modifier.padding(horizontal = 16.dp, vertical = 16.dp),
+            modifier = Modifier.padding(horizontal = 16.dp),
         ) {
-            ProfilePreview(name = name, handle = handle)
-            Spacer(Modifier.size(20.dp))
+            if (name.isNotBlank() || handle.isNotBlank()) {
+                ProfilePreview(name = name, handle = handle)
+                Spacer(Modifier.size(12.dp))
+            }
             ProfileForm(
                 name = name,
                 handle = handle,
@@ -261,21 +253,17 @@ fun SettingsAccountPage(onBack: () -> Unit) {
                 },
             )
             Spacer(Modifier.size(16.dp))
-            Row(
+            SavePill(
+                enabled = canSave,
                 modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.End,
-            ) {
-                SavePill(
-                    enabled = canSave,
-                    onClick = {
-                        parsed
-                            .onSuccess { store.save(it.name, it.handle) }
-                            .onFailure { err ->
-                                error = err.message ?: "Could not save that."
-                            }
-                    },
-                )
-            }
+                onClick = {
+                    parsed
+                        .onSuccess { store.save(it.name, it.handle) }
+                        .onFailure { err ->
+                            error = err.message ?: "Could not save that."
+                        }
+                },
+            )
             error?.let { message ->
                 Spacer(Modifier.size(8.dp))
                 Text(
@@ -291,17 +279,19 @@ fun SettingsAccountPage(onBack: () -> Unit) {
 @Composable
 fun SettingsDisplayPage(onBack: () -> Unit) {
     SettingsScaffold(title = "Display", onBack = onBack) {
-        DisplaySettings(
-            modifier = Modifier.padding(vertical = 16.dp),
-        )
+        DisplaySettings()
     }
 }
 
 @Composable
-fun SettingsLibraryPage(onBack: () -> Unit) {
+fun SettingsLibraryPage(
+    onBack: () -> Unit,
+    startOnCreate: Boolean = false,
+) {
     SettingsScaffold(title = "Library", onBack = onBack) {
         LibrarySettings(
-            modifier = Modifier.padding(horizontal = 16.dp, vertical = 16.dp),
+            modifier = Modifier.padding(horizontal = 16.dp),
+            startOnCreate = startOnCreate,
         )
     }
 }
@@ -363,26 +353,30 @@ private fun SettingsBar(
 private fun SavePill(
     enabled: Boolean,
     onClick: () -> Unit,
+    modifier: Modifier = Modifier,
 ) {
     val accent = MaterialTheme.colorScheme.primary
-    Text(
-        text = "Save",
-        color = MaterialTheme.colorScheme.onPrimary,
-        style = MaterialTheme.typography.labelLarge,
-        fontWeight = FontWeight.Bold,
-        modifier = Modifier
+    Box(
+        modifier = modifier
             .clip(RoundedCornerShape(999.dp))
             .background(if (enabled) accent else accent.copy(alpha = 0.35f))
             .clickable(enabled = enabled, role = Role.Button, onClick = onClick)
-            .padding(horizontal = 16.dp, vertical = 8.dp)
+            .padding(horizontal = 16.dp, vertical = 10.dp)
             .semantics { contentDescription = "Save" },
-    )
+        contentAlignment = Alignment.Center,
+    ) {
+        Text(
+            text = "Save",
+            color = MaterialTheme.colorScheme.onPrimary,
+            style = MaterialTheme.typography.labelLarge,
+            fontWeight = FontWeight.Bold,
+        )
+    }
 }
 
 @Composable
 private fun SettingsCategoryRow(
     title: String,
-    body: String,
     onClick: () -> Unit,
 ) {
     Row(
@@ -390,18 +384,14 @@ private fun SettingsCategoryRow(
             .fillMaxWidth()
             .heightIn(min = 52.dp)
             .clickable(role = Role.Button, onClick = onClick)
-            .padding(horizontal = 16.dp, vertical = 14.dp),
+            .padding(horizontal = 16.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Column(modifier = Modifier.weight(1f)) {
-            Text(title, style = MaterialTheme.typography.titleMedium)
-            Spacer(Modifier.size(4.dp))
-            Text(
-                text = body,
-                style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-        }
+        Text(
+            text = title,
+            style = MaterialTheme.typography.titleMedium,
+            modifier = Modifier.weight(1f),
+        )
         Icon(
             imageVector = Icons.AutoMirrored.Outlined.KeyboardArrowRight,
             contentDescription = null,

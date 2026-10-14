@@ -26,11 +26,7 @@
 
 {#if !store.books.length}
   <div class="empty-state shelf-empty">
-    <h2>Your timeline is empty</h2>
-    <p class="muted">
-      Drop in an EPUB and the author starts posting, one paragraph at a time.
-      It stays private until you share it.
-    </p>
+    <h2>No books</h2>
     <button class="pill" disabled={uploading} onclick={onadd}>Add a book</button>
     <button class="text-button" disabled={uploading} onclick={onsample}>
       Open a sample

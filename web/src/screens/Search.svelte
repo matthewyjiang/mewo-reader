@@ -19,15 +19,9 @@
   onMount(() => restoreScroll(scroller));
 </script>
 
-{#if !query.trim()}
-  <div class="empty-state">
-    <h2>Find a line</h2>
-    <p class="muted">Search your shelf and posts from books loaded this session.</p>
-  </div>
-{:else if !results.books.length && !results.posts.length}
+{#if query.trim() && !results.books.length && !results.posts.length}
   <div class="empty-state">
     <h2>No matches</h2>
-    <p class="muted">Try another word. Open a book to include its posts in search.</p>
   </div>
 {:else}
   {#if results.books.length}
