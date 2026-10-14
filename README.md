@@ -7,7 +7,8 @@ This repo holds both sides:
 ```
 android/   Android phone app
 ios/       iPhone app
-server/    hosted library API
+server/    hosted library API, also serves the web app
+web/       browser app for the hosted shelf (Svelte)
 ```
 
 Import a file from the picker, or tap **Open a sample** if you just want to see the feed.
@@ -148,3 +149,9 @@ docker run --rm -p 8787:8787 -v mewo-data:/data ghcr.io/matthewyjiang/mewo-reade
 ```
 
 That listens on port 8787. In the app, open the account drawer, pick **Hosted server**, and sign in with that URL. Local books stay on the phone. Hosted books live on the server. They do not merge. See [server/README.md](server/README.md) for env vars and the Dockerfile.
+
+The server parses hosted books, so Android, iPhone, and the web app all read the same posts. Readium on the phones only parses local books.
+
+## Web
+
+The image also serves a browser app for the hosted shelf at `/` on the same port. Open `http://<server>:8787` and sign in. It has no local shelf. See [web/README.md](web/README.md) for running it against a dev server.
