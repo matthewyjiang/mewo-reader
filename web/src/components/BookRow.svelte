@@ -42,16 +42,15 @@
   </a>
   {#if book.mine}
     <div class="book-actions">
-      <label class="share-switch">
-        <span>{book.shared ? 'Shared' : 'Share'}</span>
-        <input
-          type="checkbox"
-          role="switch"
-          checked={book.shared}
-          aria-label={`${book.shared ? 'Stop sharing' : 'Share'} ${book.title}`}
-          onchange={(event) => { void share(event.currentTarget.checked); }}
-        />
-      </label>
+      <button
+        class="icon-button"
+        title={book.shared ? 'Make private' : 'Share'}
+        aria-label={book.shared ? 'Make private' : 'Share'}
+        aria-pressed={book.shared}
+        onclick={() => { void share(!book.shared); }}
+      >
+        <Icon name={book.shared ? 'people' : 'lock'} filled size={18} />
+      </button>
       {#if onremove}
         <button
           class="icon-button"
@@ -98,38 +97,37 @@
   line-height: 1.23;
 }
 
+.book-row .post-meta {
+  height: 21px;
+}
+
 .book-actions {
   display: flex;
   align-items: center;
   flex: 0 0 auto;
-  margin-top: 6px;
+  gap: 0;
+  /* 12px matches the link padding. 21px is the title line, so the 40px buttons center on it. */
+  margin-top: 12px;
+  height: 21px;
+  min-height: 0;
 }
 
 .book-actions > .icon-button {
+  width: 40px;
+  height: 40px;
+  padding: 0;
+  line-height: 0;
   color: var(--mute);
 }
 
-.share-switch {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  min-height: 40px;
-  padding-inline: 4px;
-  color: var(--mute);
-  font-size: .8125rem;
-  cursor: pointer;
-}
-
-.share-switch input {
-  width: 36px;
-  height: 24px;
-  margin: 0;
-  cursor: pointer;
+.book-actions > .icon-button :global(svg) {
+  display: block;
 }
 
 .book-row .post-meta > strong {
   max-width: 70%;
   font-size: 1.0625rem;
+  line-height: 21px;
 }
 
 
