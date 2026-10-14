@@ -7,6 +7,8 @@ options:
   createIntermediateGroups: true
 settings:
   base:
+    # Fallback when git is unavailable. scripts/embed-build-identity.sh
+    # overwrites CFBundleShortVersionString from git describe.
     MARKETING_VERSION: 0.1.1
     CURRENT_PROJECT_VERSION: 2
     SWIFT_VERSION: 5.10
@@ -45,6 +47,17 @@ targets:
         INFOPLIST_KEY_LSApplicationCategoryType: public.app-category.books
         SUPPORTS_XR_DESIGNED_FOR_IPHONE_IPAD: false
         SUPPORTS_MAC_DESIGNED_FOR_IPHONE_IPAD: false
+        ENABLE_USER_SCRIPT_SANDBOXING: NO
+    postBuildScripts:
+      - name: Embed git identity
+        basedOnDependencyAnalysis: false
+        showEnvVarsInLog: false
+        inputFiles:
+          - $(TARGET_BUILD_DIR)/$(INFOPLIST_PATH)
+        outputFiles:
+          - $(DERIVED_FILE_DIR)/mewo-git-identity-stamp
+        script: |
+          /bin/sh "${SRCROOT}/scripts/embed-build-identity.sh"
     dependencies:
       - package: Readium
         product: ReadiumShared

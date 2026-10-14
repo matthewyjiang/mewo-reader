@@ -7,6 +7,7 @@ enum Route: Hashable {
     case settingsAccount
     case settingsDisplay
     case settingsLibrary
+    case settingsAbout
 }
 
 struct MewoNav: View {
@@ -20,7 +21,7 @@ struct MewoNav: View {
     private var onCover: Bool {
         if let last = path.last {
             switch last {
-            case .reader, .settings, .settingsAccount, .settingsDisplay, .settingsLibrary:
+            case .reader, .settings, .settingsAccount, .settingsDisplay, .settingsLibrary, .settingsAbout:
                 return true
             case .profile:
                 return true
@@ -32,7 +33,7 @@ struct MewoNav: View {
     private var hideTabs: Bool {
         guard let last = path.last else { return false }
         switch last {
-        case .settings, .settingsAccount, .settingsDisplay, .settingsLibrary, .reader:
+        case .settings, .settingsAccount, .settingsDisplay, .settingsLibrary, .settingsAbout, .reader:
             return true
         case .profile:
             return false
@@ -135,7 +136,8 @@ struct MewoNav: View {
                 onBack: { path.removeLast() },
                 onOpenAccount: { path.append(.settingsAccount) },
                 onOpenDisplay: { path.append(.settingsDisplay) },
-                onOpenLibrary: { path.append(.settingsLibrary) }
+                onOpenLibrary: { path.append(.settingsLibrary) },
+                onOpenAbout: { path.append(.settingsAbout) }
             )
         case .settingsAccount:
             SettingsAccountPage(onBack: { path.removeLast() })
@@ -143,6 +145,8 @@ struct MewoNav: View {
             SettingsDisplayPage(onBack: { path.removeLast() })
         case .settingsLibrary:
             SettingsLibraryPage(onBack: { path.removeLast() })
+        case .settingsAbout:
+            SettingsAboutPage(onBack: { path.removeLast() })
         }
     }
 

@@ -7,6 +7,7 @@ struct SettingsHome: View {
     var onOpenAccount: () -> Void
     var onOpenDisplay: () -> Void
     var onOpenLibrary: () -> Void
+    var onOpenAbout: () -> Void
 
     var body: some View {
         SettingsScaffold(title: "Settings", onBack: onBack) {
@@ -15,6 +16,8 @@ struct SettingsHome: View {
             row("Display", body: "Twitter or X. Light or night. Font size. Mewo mode.", action: onOpenDisplay)
             Hairline()
             row("Library", body: "On this phone, or a hosted server.", action: onOpenLibrary)
+            Hairline()
+            row("About", body: "App and server versions.", action: onOpenAbout)
             Hairline()
         }
     }
@@ -94,6 +97,78 @@ struct SettingsLibraryPage: View {
     var body: some View {
         SettingsScaffold(title: "Library", onBack: onBack) {
             LibrarySettings().padding(16)
+        }
+    }
+}
+
+struct SettingsAboutPage: View {
+    @Environment(\.mewo) private var mewo
+    @Environment(\.app) private var app
+    var onBack: () -> Void
+    @State private var serverStatus = "Unavailable"
+
+    var body: some View {
+        SettingsScaffold(title: "About", onBack: onBack) {
+            infoRow("App", body: AppBuild.displayLabel, id: "about-app")
+            Hairline()
+            infoRow("Server", body: serverStatus, id: "about-server")
+            Hairline()
+            infoRow("Server URL", body: serverURL, id: "about-url")
+            Hairline()
+        }
+        .task(id: serverTaskID) { await loadServer() }
+    }
+
+    private var serverTaskID: String {
+        "\(app.backend.kind.rawValue)|\(app.hostedSession.session.baseUrl)"
+    }
+
+    private var serverURL: String {
+        let url = normalizeBaseUrl(app.hostedSession.session.baseUrl)
+        return url.isEmpty ? "Not set" : url
+    }
+
+    private func infoRow(_ title: String, body: String, id: String) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(title)
+                .font(MewoFont.bold(17))
+                .foregroundStyle(mewo.ink)
+            Text(body)
+                .font(MewoFont.regular(13))
+                .foregroundStyle(mewo.mute)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.horizontal, 16)
+        .padding(.vertical, 14)
+        .frame(minHeight: 52, alignment: .leading)
+        .accessibilityElement(children: .combine)
+        .accessibilityIdentifier(id)
+        .accessibilityLabel("\(title), \(body)")
+    }
+
+    private func loadServer() async {
+        guard app.backend.kind == .hosted else {
+            serverStatus = "Unavailable"
+            return
+        }
+        let base = app.hostedSession.session.baseUrl
+        guard !normalizeBaseUrl(base).isEmpty else {
+            serverStatus = "Unavailable"
+            return
+        }
+        serverStatus = "Loading…"
+        do {
+            let info = try await app.client.serverVersion(baseUrl: base)
+            if Task.isCancelled { return }
+            serverStatus = info.label
+        } catch is CancellationError {
+            return
+        } catch let error as URLError where error.code == .cancelled {
+            return
+        } catch {
+            if Task.isCancelled { return }
+            serverStatus = "Unavailable"
         }
     }
 }

@@ -35,6 +35,22 @@ final class HostedClient: Sendable {
         try await get(hosted, path: "/v1/library")
     }
 
+    /// Public version. No session token. `GET /v1/version`.
+    func serverVersion(baseUrl: String) async throws -> ServerVersion {
+        let base = normalizeBaseUrl(baseUrl)
+        guard !base.isEmpty, let url = URL(string: base + "/v1/version") else {
+            throw HostedException(message: "Set a server URL first.")
+        }
+        var request = URLRequest(url: url)
+        request.httpMethod = "GET"
+        request.timeoutInterval = 15
+        let data = try await expectOk(request)
+        guard let version = ServerVersion.decode(from: data) else {
+            throw HostedException(message: "Could not read the server response.")
+        }
+        return version
+    }
+
     func upload(
         _ hosted: HostedSession,
         epub: URL,
