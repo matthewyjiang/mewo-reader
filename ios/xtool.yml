@@ -1,0 +1,13 @@
+# xtool build config for Linux. See README.md "iPhone > Build on Linux".
+version: 1
+bundleID: com.mewo.reader
+product: Mewo
+# Merged over xtool's generated Info.plist. Mewo/Resources/Info.plist uses
+# Xcode build variables, which xtool would copy in literally.
+infoPath: xtool-Info.plist
+# xtool can't compile Assets.xcassets, so the icon is a plain PNG.
+iconPath: Mewo/Resources/Assets.xcassets/AppIcon.appiconset/AppIcon.png
+resources:
+  - Mewo/Resources/sample.epub
+  - Mewo/Resources/Fonts/atkinson_hyperlegible_regular.ttf
+  - Mewo/Resources/Fonts/atkinson_hyperlegible_bold.ttf

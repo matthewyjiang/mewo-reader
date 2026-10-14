@@ -3,3 +3,9 @@ DerivedData/
 *.xcuserstate
 .DS_Store
 build/
+# xtool / SwiftPM (Linux builds)
+/.build/
+/.swiftpm/
+/.sourcekit-lsp/
+/xtool/
+/.bsp/

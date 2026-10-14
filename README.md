@@ -15,6 +15,16 @@ Import a file from the picker, or tap **Open a sample** if you just want to see 
 
 Android is Kotlin, Jetpack Compose, and [Readium](https://github.com/readium/kotlin-toolkit) for parsing. iPhone is SwiftUI and the [Readium Swift toolkit](https://github.com/readium/swift-toolkit). The reader itself is the app's timeline, not Readium's page navigator. Open `android/` in Android Studio, or `ios/Mewo.xcodeproj` in Xcode.
 
+## Toolchains
+
+[mise](https://mise.jdx.dev) pins everything in `mise.toml`: JDK 17, Node 22, Rust 1.88, and Swift 6.4 plus [xtool](https://github.com/xtool-org/xtool) for iPhone builds on Linux. From the repo root:
+
+```bash
+mise install
+```
+
+mise sets `JAVA_HOME` for you. The Android SDK and `usbmuxd` (xtool) still come from outside mise.
+
 ## Android
 
 ### Requirements
@@ -26,7 +36,7 @@ Android is Kotlin, Jetpack Compose, and [Readium](https://github.com/readium/kot
 ### Build
 
 ```bash
-export JAVA_HOME=/path/to/jdk-21
+export JAVA_HOME=/path/to/jdk-21   # skip if you use mise
 export ANDROID_HOME=/path/to/Android/Sdk
 cd android
 ./gradlew :app:assembleDebug --max-workers=12
@@ -123,15 +133,42 @@ The `mewo` AVD in this repo's notes is a medium phone image, not a Pixel with a 
 - The iOS 26 SDK
 - [XcodeGen](https://github.com/yonaskolb/XcodeGen) if you need to regenerate `Mewo.xcodeproj` (`brew install xcodegen`)
 
-### Build
+### Build on a Mac
 
 ```bash
 cd ios
 xcodegen generate
-xcodebuild -scheme Mewo -destination 'platform=iOS Simulator,name=iPhone 17' -jobs 12 build
+xcodebuild -project Mewo.xcodeproj -scheme Mewo -destination 'platform=iOS Simulator,name=iPhone 17' -jobs 12 build
 ```
 
 Install from Xcode onto a phone or Simulator. This is not an App Store listing. Friends get a TestFlight build or an Xcode install, same idea as the Android APK.
+
+### Build on Linux
+
+[xtool](https://github.com/xtool-org/xtool) builds `ios/Package.swift` into an `.app` and installs it on a USB-connected iPhone. There is no Simulator on Linux. `mise install` provides Swift 6.4 and xtool. You also need:
+
+- `usbmuxd` (`sudo apt-get install usbmuxd`)
+- an `Xcode.xip` from <https://developer.apple.com/download/all/?q=Xcode> (Apple ID login, browser only)
+
+One-time setup. This logs in to Apple and builds the iOS SDK from the xip:
+
+```bash
+xtool setup
+```
+
+Then build, or build and install on the plugged-in phone:
+
+```bash
+cd ios
+xtool dev build
+xtool dev
+```
+
+`Package.swift`, `xtool.yml`, and `xtool-Info.plist` exist only for xtool. Xcode builds still use `project.yml`. If you add a Swift package, a bundled resource, or an `Info.plist` key, update both sides.
+
+`ios/mise.toml` points `PKG_CONFIG_PATH` at a stub `zlib.pc` in `ios/xtool-pkgconfig/`. Without it, Readium's ZIPFoundation picks up the Linux host's zlib and the iOS link fails with `libz.so: unhandled file type` ([xtool#140](https://github.com/xtool-org/xtool/issues/140)). Run xtool from `ios/` with mise active so the stub applies. If an old failed build is cached, `rm .build/manifest.pif` first.
+
+xtool can't compile `Assets.xcassets`. Linux builds get the plain `AppIcon.png` and no alternate Teddy icon, `MewoTeddy` header image, accent color, or launch screen image. Use a Mac build to check those.
 
 ## Server
 

@@ -1,0 +1,7 @@
+# Applies when running from ios/ (e.g. `xtool dev build`), on top of ../mise.toml.
+
+[env]
+# ReadiumZIPFoundation's Package.swift checks the host (Linux) to decide it
+# needs zlib via pkg-config, which leaks host library paths into the iOS link
+# (https://github.com/xtool-org/xtool/issues/140). The stub shadows the host zlib.pc.
+PKG_CONFIG_PATH = "{{config_root}}/xtool-pkgconfig"

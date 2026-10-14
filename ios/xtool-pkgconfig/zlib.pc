@@ -1,0 +1,8 @@
+# Stub so ReadiumZIPFoundation's pkg-config lookup doesn't add the Linux host's
+# -L/usr/lib/x86_64-linux-gnu to iOS links. -lz then resolves to the iOS SDK.
+# Put on PKG_CONFIG_PATH by ios/mise.toml.
+Name: zlib
+Description: zlib from the iOS SDK
+Version: 1.2.12
+Libs: -lz
+Cflags:
