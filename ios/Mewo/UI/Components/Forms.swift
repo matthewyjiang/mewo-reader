@@ -94,7 +94,7 @@ struct LibrarySettings: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text("Books, likes, notes, and where you left off. Local is yours. Hosted is a shared shelf.")
+            Text("Books, likes, notes, and where you left off. Local stays on this phone. On a hosted server, books you add stay private until you share them.")
                 .font(MewoFont.regular(15))
                 .foregroundStyle(mewo.mute)
             backendRow(
@@ -108,7 +108,7 @@ struct LibrarySettings: View {
                 title: "Hosted server",
                 body: app.hostedSession.session.signedIn
                     ? "Signed in as @\(app.hostedSession.session.username ?? "")."
-                    : "A shared shelf. Sign in with a server URL.",
+                    : "Sign in with a server URL. Books you add stay private until you share them.",
                 selected: app.backend.kind == .hosted
             ) {
                 app.backend.setKind(.hosted)

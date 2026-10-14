@@ -13,6 +13,9 @@ final class HostedLibraryStore: LibraryStore {
     private let client: HostedClient
     private let root: URL
     private var epoch = 0
+    private var shareConfirmed: [String: Bool] = [:]
+    private var shareTails: [String: Task<Void, Never>] = [:]
+    private var shareTokens: [String: UUID] = [:]
     private(set) var books: [BookRecord] = []
 
     init(opener: EpubOpener, sessions: HostedSessionStore, client: HostedClient, files: URL) {
@@ -46,10 +49,10 @@ final class HostedLibraryStore: LibraryStore {
             }
             remote.books = remote.books.filter { safeBookId($0.id) != nil }
             if epoch == start {
-                books = remote.books
+                books = keepingInFlightShare(remote.books)
             } else {
                 let extras = books.filter { local in remote.books.contains { $0.id == local.id } == false }
-                books = (remote.books + extras).sorted { $0.importedAt > $1.importedAt }
+                books = keepingInFlightShare(remote.books + extras).sorted { $0.importedAt > $1.importedAt }
             }
         } catch let err as HostedException where err.code == 401 {
             await MainActor.run { sessions.signOut() }
@@ -119,13 +122,74 @@ final class HostedLibraryStore: LibraryStore {
         return posts
     }
 
+    func setShared(id: String, shared: Bool) async throws {
+        let session = try requireSession()
+        let safe = try requireBookId(id)
+        guard let book = books.first(where: { $0.id == safe }) else { return }
+        let pending = shareTails[safe] == nil ? nil : ShareToggle(
+            confirmed: shareConfirmed[safe] ?? book.shared,
+            displayed: book.shared
+        )
+        switch startShareToggle(book: book, requested: shared, pending: pending) {
+        case .ignore:
+            return
+        case .forbidden:
+            throw NSError(
+                domain: "mewo",
+                code: 11,
+                userInfo: [NSLocalizedDescriptionKey: "Only the person who added this book can change sharing."]
+            )
+        case .update(let toggle):
+            if shareConfirmed[safe] == nil {
+                shareConfirmed[safe] = toggle.confirmed
+            }
+            if book.shared != toggle.displayed {
+                var next = book
+                next.shared = toggle.displayed
+                replaceBook(next)
+            }
+        }
+
+        let previous = shareTails[safe]
+        let token = UUID()
+        shareTokens[safe] = token
+        let task = Task { @MainActor () throws -> Void in
+            if let previous {
+                _ = await previous.value
+            }
+            do {
+                let updated = try await self.expireOn401 {
+                    try await self.client.patch(session, id: safe, body: PatchBook(shared: shared))
+                }
+                self.finishShare(id: safe, requested: shared, server: updated, failed: false)
+            } catch {
+                self.finishShare(id: safe, requested: shared, server: nil, failed: true)
+                throw error
+            }
+        }
+        shareTails[safe] = Task { @MainActor in
+            _ = try? await task.value
+        }
+        do {
+            try await task.value
+        } catch {
+            clearShareTail(safe, token: token)
+            throw error
+        }
+        clearShareTail(safe, token: token)
+    }
+
     func saveProgress(id: String, index: Int) async throws {
         let session = try requireSession()
         let safe = try requireBookId(id)
         let updated = try await expireOn401 {
             try await client.patch(session, id: safe, body: PatchBook(progressIndex: max(0, index)))
         }
-        replaceBook(updated)
+        var record = updated
+        if shareTails[safe] != nil, let shown = books.first(where: { $0.id == safe })?.shared {
+            record.shared = shown
+        }
+        replaceBook(record)
     }
 
     func likes(id: String) async throws -> Set<String> {
@@ -246,6 +310,42 @@ final class HostedLibraryStore: LibraryStore {
             return nil
         }
         return cache.posts
+    }
+
+    private func finishShare(id: String, requested: Bool, server: BookRecord?, failed: Bool) {
+        guard let current = books.first(where: { $0.id == id }) else { return }
+        if failed {
+            if let confirmed = shareConfirmed[id],
+               let rolled = applyShareFailure(book: current, requested: requested, confirmed: confirmed) {
+                replaceBook(rolled)
+            }
+            return
+        }
+        guard let server else { return }
+        shareConfirmed[id] = server.shared
+        if let merged = applyShareSuccess(book: current, requested: requested, server: server) {
+            replaceBook(merged)
+        }
+    }
+
+    private func clearShareTail(_ id: String, token: UUID) {
+        guard shareTokens[id] == token else { return }
+        shareTails[id] = nil
+        shareTokens[id] = nil
+        shareConfirmed[id] = nil
+    }
+
+    /// A refresh that lands mid-toggle must not paint over the switch.
+    private func keepingInFlightShare(_ incoming: [BookRecord]) -> [BookRecord] {
+        guard !shareTails.isEmpty else { return incoming }
+        return incoming.map { book in
+            guard shareTails[book.id] != nil,
+                  let shown = books.first(where: { $0.id == book.id })?.shared,
+                  shown != book.shared else { return book }
+            var copy = book
+            copy.shared = shown
+            return copy
+        }
     }
 
     private func replaceBook(_ record: BookRecord) {

@@ -14,12 +14,52 @@ struct BookRecord: Codable, Equatable, Identifiable, Hashable, Sendable {
     var progressIndex: Int = 0
     var isSample: Bool = false
     var mine: Bool = true
+    /// Owner chose to show this book on other accounts' shelves.
+    var shared: Bool = false
+    /// Username of the account that added the book. Nil on the local shelf.
+    var ownerUsername: String? = nil
+
+    enum CodingKeys: String, CodingKey {
+        case id, title, author, handle, importedAt, postCount, progressIndex, isSample, mine, shared, ownerUsername
+    }
 
     /// Saved place is the last post. Index 0 is the start, so an unopened
     /// book stays on the timeline. A one-post book finishes when the reader
     /// scrolls onto the end card and the index moves past 0.
     var isFinished: Bool {
         postCount > 0 && progressIndex >= max(1, postCount - 1)
+    }
+}
+
+extension BookRecord {
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(String.self, forKey: .id)
+        title = try container.decode(String.self, forKey: .title)
+        author = try container.decode(String.self, forKey: .author)
+        handle = try container.decode(String.self, forKey: .handle)
+        importedAt = try container.decode(Int64.self, forKey: .importedAt)
+        postCount = try container.decodeIfPresent(Int.self, forKey: .postCount) ?? 0
+        progressIndex = try container.decodeIfPresent(Int.self, forKey: .progressIndex) ?? 0
+        isSample = try container.decodeIfPresent(Bool.self, forKey: .isSample) ?? false
+        mine = try container.decodeIfPresent(Bool.self, forKey: .mine) ?? true
+        shared = try container.decodeIfPresent(Bool.self, forKey: .shared) ?? false
+        ownerUsername = try container.decodeIfPresent(String.self, forKey: .ownerUsername)
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(id, forKey: .id)
+        try container.encode(title, forKey: .title)
+        try container.encode(author, forKey: .author)
+        try container.encode(handle, forKey: .handle)
+        try container.encode(importedAt, forKey: .importedAt)
+        try container.encode(postCount, forKey: .postCount)
+        try container.encode(progressIndex, forKey: .progressIndex)
+        try container.encode(isSample, forKey: .isSample)
+        try container.encode(mine, forKey: .mine)
+        try container.encode(shared, forKey: .shared)
+        try container.encodeIfPresent(ownerUsername, forKey: .ownerUsername)
     }
 }
 
@@ -141,14 +181,81 @@ struct HostedErrorBody: Codable, Sendable {
     var error: String = ""
 }
 
-/// Only reading place. The server owns postCount now that it parses books.
+/// Reading place, or an owner-only share change. Omitted fields stay as they are.
 struct PatchBook: Codable, Sendable {
     var progressIndex: Int?
+    var shared: Bool?
 
     func encode(to encoder: Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)
         try container.encodeIfPresent(progressIndex, forKey: .progressIndex)
+        try container.encodeIfPresent(shared, forKey: .shared)
     }
+}
+
+/// Active hosted shelf. Finished books of either kind stay in one section.
+struct HostedShelfGroups: Equatable, Sendable {
+    var mine: [BookRecord] = []
+    var sharedWithMe: [BookRecord] = []
+    var finished: [BookRecord] = []
+}
+
+func hostedShelfGroups(_ books: [BookRecord]) -> HostedShelfGroups {
+    let finished = books.filter(\.isFinished)
+    let active = books.filter { !$0.isFinished }
+    return HostedShelfGroups(
+        mine: active.filter(\.mine),
+        sharedWithMe: active.filter { !$0.mine },
+        finished: finished
+    )
+}
+
+func ownerCredit(_ book: BookRecord) -> String? {
+    guard !book.mine, let name = book.ownerUsername?.trimmingCharacters(in: .whitespacesAndNewlines), !name.isEmpty else {
+        return nil
+    }
+    return "\(book.shared ? "Shared" : "Added") by @\(name)"
+}
+
+func privateUploadNotice(for book: BookRecord) -> String? {
+    guard !book.isSample, !book.shared else { return nil }
+    return "\(book.title) is private. Use Share on Home when you want others to read it."
+}
+
+/// Last server value for a share chain, and the value on screen.
+struct ShareToggle: Equatable, Sendable {
+    var confirmed: Bool
+    var displayed: Bool
+}
+
+enum ShareToggleStart: Equatable, Sendable {
+    case ignore
+    case forbidden
+    case update(ShareToggle)
+}
+
+func startShareToggle(book: BookRecord, requested: Bool, pending: ShareToggle?) -> ShareToggleStart {
+    guard book.mine else { return .forbidden }
+    if book.shared == requested && pending == nil { return .ignore }
+    return .update(ShareToggle(confirmed: pending?.confirmed ?? book.shared, displayed: requested))
+}
+
+/// Keep a newer toggle on screen. Returns nil when this response is stale.
+func applyShareSuccess(book: BookRecord, requested: Bool, server: BookRecord) -> BookRecord? {
+    guard book.shared == requested else { return nil }
+    var next = book
+    next.shared = server.shared
+    next.mine = server.mine
+    next.ownerUsername = server.ownerUsername
+    return next
+}
+
+/// Roll back only the toggle that failed. A newer choice stays put.
+func applyShareFailure(book: BookRecord, requested: Bool, confirmed: Bool) -> BookRecord? {
+    guard book.shared == requested else { return nil }
+    var next = book
+    next.shared = confirmed
+    return next
 }
 
 struct PostsResponse: Codable, Sendable {
