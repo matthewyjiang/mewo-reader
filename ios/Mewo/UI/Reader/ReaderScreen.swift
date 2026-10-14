@@ -21,6 +21,8 @@ final class ReaderViewModel {
     }
 
     func load() async {
+        loading = true
+        error = nil
         do {
             var found = env.library.book(id: bookId)
             if found == nil {
@@ -156,14 +158,31 @@ struct ReaderScreen: View {
         if model.loading {
             ProgressView().tint(mewo.accent).frame(maxWidth: .infinity, maxHeight: .infinity)
         } else if let error = model.error {
-            VStack(spacing: 12) {
-                Text(error).font(MewoFont.regular(17)).foregroundStyle(mewo.ink)
-                Button("Back", action: onBack).foregroundStyle(mewo.accent)
+            VStack(alignment: .leading, spacing: 12) {
+                Text("Couldn't load")
+                    .font(MewoFont.bold(22))
+                    .foregroundStyle(mewo.ink)
+                Text(error)
+                    .font(MewoFont.regular(17))
+                    .foregroundStyle(mewo.like)
+                Button("Try again") {
+                    Task { await model.load() }
+                }
+                .font(MewoFont.bold(14))
+                .foregroundStyle(mewo.accent)
+                .buttonStyle(.plain)
             }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .padding(.horizontal, 28)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         } else {
             feed
         }
+    }
+
+    private var endCopy: String {
+        if model.posts.isEmpty { return "No posts" }
+        let title = model.book?.title.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return title.isEmpty ? "End" : "End of \(title)"
     }
 
     private var feed: some View {
@@ -192,7 +211,7 @@ struct ReaderScreen: View {
                         .id(post.id)
                         .onAppear { model.saveProgress(index) }
                     }
-                    Text(model.book.map { "End of \($0.title)" } ?? "You're caught up")
+                    Text(endCopy)
                         .font(MewoFont.regular(15))
                         .foregroundStyle(mewo.mute)
                         .frame(maxWidth: .infinity)

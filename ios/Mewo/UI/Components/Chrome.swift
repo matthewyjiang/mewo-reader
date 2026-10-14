@@ -222,6 +222,7 @@ struct PillButton: View {
     @Environment(\.mewo) private var mewo
     var title: String
     var enabled: Bool
+    var fill: Bool = false
     var action: () -> Void
 
     var body: some View {
@@ -229,6 +230,7 @@ struct PillButton: View {
             Text(title)
                 .font(MewoFont.bold(14))
                 .foregroundStyle(mewo.onAccent)
+                .frame(maxWidth: fill ? .infinity : nil)
                 .padding(.horizontal, 16)
                 .padding(.vertical, 8)
                 .background(mewo.accent.opacity(enabled ? 1 : 0.35), in: Capsule())

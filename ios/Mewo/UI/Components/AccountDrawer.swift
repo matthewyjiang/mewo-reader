@@ -57,8 +57,14 @@ struct AccountDrawer<Content: View>: View {
             } label: {
                 VStack(alignment: .leading, spacing: 12) {
                     Avatar(name: app.readerIdentity.name, size: 56)
-                    Text(app.readerIdentity.name).font(MewoFont.bold(17)).foregroundStyle(mewo.ink)
-                    Text("@\(app.readerIdentity.handle)").font(MewoFont.regular(13)).foregroundStyle(mewo.mute)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(app.readerIdentity.name).font(MewoFont.bold(17)).foregroundStyle(mewo.ink)
+                        if LocalIdentity.showsHandle(name: app.readerIdentity.name, handle: app.readerIdentity.handle) {
+                            Text("@\(app.readerIdentity.handle)")
+                                .font(MewoFont.regular(13))
+                                .foregroundStyle(mewo.mute)
+                        }
+                    }
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(.horizontal, 16)
@@ -79,8 +85,7 @@ struct AccountDrawer<Content: View>: View {
                     Image(systemName: "chevron.right").foregroundStyle(mewo.mute)
                 }
                 .padding(.horizontal, 16)
-                .padding(.vertical, 14)
-                .frame(minHeight: 52)
+                .frame(height: 52)
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)

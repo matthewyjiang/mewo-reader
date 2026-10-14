@@ -68,11 +68,31 @@ final class SharingTests: XCTestCase {
         XCTAssertNil(ownerCredit(makeBook(id: "x", shared: true, mine: false, owner: "  ")))
     }
 
+    func testFieldRulesStayHiddenUntilTheValueIsInvalid() {
+        XCTAssertNil(usernameFieldError(""))
+        XCTAssertNil(usernameFieldError("ada"))
+        XCTAssertEqual(usernameFieldError("ab"), usernameRule)
+        XCTAssertEqual(usernameFieldError("bad name"), usernameRule)
+        XCTAssertNil(passwordFieldError(""))
+        XCTAssertNil(passwordFieldError("12345678"))
+        XCTAssertEqual(passwordFieldError("short"), passwordRule)
+        XCTAssertNil(commentBudgetError("ok"))
+        XCTAssertEqual(
+            commentBudgetError(String(repeating: "a", count: 2001)),
+            "Comment budget: asked 2001 characters, limit is 2000."
+        )
+        XCTAssertFalse(LocalIdentity.showsHandle(name: "Matt", handle: "matt"))
+        XCTAssertTrue(LocalIdentity.showsHandle(name: "Matt", handle: "matthew"))
+        XCTAssertFalse(LocalIdentity.showsHandle(name: "", handle: ""))
+        XCTAssertFalse(hostedAuthReady(username: "ab", password: "12345678", baseUrl: "http://127.0.0.1:8787"))
+        XCTAssertTrue(hostedAuthReady(username: "ada", password: "12345678", baseUrl: "127.0.0.1:8787"))
+    }
+
     func testPrivateUploadNotice() {
         let book = makeBook(id: "1", title: "Notes", shared: false, mine: true, owner: "bea")
         XCTAssertEqual(
             privateUploadNotice(for: book),
-            "Notes is private. Use Share on Home when you want others to read it."
+            "Notes is private."
         )
         XCTAssertNil(privateUploadNotice(for: makeBook(id: "2", shared: true, mine: true, owner: "bea")))
         XCTAssertNil(privateUploadNotice(for: makeBook(id: "3", shared: false, mine: true, owner: "bea", sample: true)))

@@ -13,7 +13,7 @@ final class FeatureTests: XCTestCase {
     }
 
     func testOnboardingRejectsShortHandle() {
-        XCTAssertTrue(app.staticTexts["This is you"].waitForExistence(timeout: 10))
+        XCTAssertTrue(app.staticTexts["Account"].waitForExistence(timeout: 10))
         XCTAssertFalse(app.buttons["Next"].isEnabled)
         typeInto(field("handle-field"), "ab")
         XCTAssertFalse(app.buttons["Next"].isEnabled)
@@ -62,7 +62,7 @@ final class FeatureTests: XCTestCase {
         XCTAssertTrue(waitAny(8, [
             app.staticTexts["1 post"],
             app.staticTexts["0 posts"],
-            app.staticTexts["Reply to a line. It shows up here."]
+            app.staticTexts["No posts"]
         ]), "profile did not open")
         XCTAssertTrue(app.staticTexts["this line stayed with me"].waitForExistence(timeout: 8))
         XCTAssertTrue(app.staticTexts["1 post"].exists)
@@ -119,7 +119,7 @@ final class FeatureTests: XCTestCase {
         remove.tap()
         XCTAssertTrue(app.buttons["Remove"].waitForExistence(timeout: 5))
         app.buttons["Remove"].tap()
-        XCTAssertTrue(app.staticTexts["Your timeline is empty"].waitForExistence(timeout: 8))
+        XCTAssertTrue(app.staticTexts["No books"].waitForExistence(timeout: 8))
     }
 
     func testChangeHandleInSettings() {
@@ -172,9 +172,10 @@ final class FeatureTests: XCTestCase {
         tapHosted()
         XCTAssertTrue(field("server-url").waitForExistence(timeout: 5))
         XCTAssertTrue(app.buttons["Sign in"].exists)
-        XCTAssertTrue(app.buttons["Create account"].exists)
-        tapLocal()
+        XCTAssertTrue(app.buttons["Create an account"].exists)
         XCTAssertFalse(app.buttons["Create account"].exists)
+        tapLocal()
+        XCTAssertFalse(app.buttons["Create an account"].exists)
     }
 
     func testHostedCreateAccountImportSampleAndLike() {
@@ -182,6 +183,7 @@ final class FeatureTests: XCTestCase {
         openSettings()
         tapSettings("library")
         tapHosted()
+        app.buttons["Create an account"].tap()
         let url = field("server-url")
         url.clearAndType("http://127.0.0.1:8787")
         typeInto(field("hosted-username"), "simuser")
@@ -189,8 +191,9 @@ final class FeatureTests: XCTestCase {
         dismissKeyboard()
         app.buttons["Create account"].tap()
         let signedIn = [app.buttons["hosted-sign-out"], app.buttons["Sign out"]]
-        if firstExisting(signedIn, timeout: 8) == nil, app.buttons["Sign in"].exists {
-            app.buttons["Sign in"].tap()
+        if firstExisting(signedIn, timeout: 8) == nil {
+            if app.buttons["Sign in instead"].exists { app.buttons["Sign in instead"].tap() }
+            if app.buttons["Sign in"].exists { app.buttons["Sign in"].tap() }
         }
         XCTAssertTrue(waitAny(15, signedIn), "hosted account did not sign in")
         tapCenter("Back")
@@ -252,7 +255,7 @@ final class FeatureTests: XCTestCase {
     }
 
     private func onboard(name: String = "Matt", handle: String = "matt") {
-        XCTAssertTrue(app.staticTexts["This is you"].waitForExistence(timeout: 10))
+        XCTAssertTrue(app.staticTexts["Account"].waitForExistence(timeout: 10))
         if !name.isEmpty {
             typeInto(field("name-field"), name)
         }
@@ -425,7 +428,7 @@ final class FeatureTests: XCTestCase {
         } else if app.buttons["Done"].exists {
             app.buttons["Done"].tap()
         } else {
-            app.staticTexts["This is you"].tap()
+            app.staticTexts["Account"].tap()
         }
     }
 
@@ -449,7 +452,7 @@ final class DrawerAnimationTests: XCTestCase {
         app.launchArguments = []
         app.launch()
 
-        if app.staticTexts["This is you"].waitForExistence(timeout: 8) {
+        if app.staticTexts["Account"].waitForExistence(timeout: 8) {
             let name = app.textFields["name-field"]
             XCTAssertTrue(name.waitForExistence(timeout: 3))
             name.tap()

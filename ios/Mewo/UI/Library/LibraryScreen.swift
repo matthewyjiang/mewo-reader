@@ -127,7 +127,16 @@ struct LibraryScreen: View {
                     .frame(maxWidth: .infinity, alignment: .bottom)
             }
             if model.busy {
-                ProgressView().tint(mewo.accent).padding(.bottom, 24).frame(maxWidth: .infinity, alignment: .center)
+                VStack(spacing: 8) {
+                    Text("Uploading…")
+                        .font(MewoFont.bold(15))
+                        .foregroundStyle(mewo.ink)
+                    ProgressView().tint(mewo.accent)
+                }
+                .padding(.bottom, 24)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
+                .accessibilityElement(children: .combine)
+                .accessibilityLabel("Uploading…")
             }
         }
         .background(mewo.ground)
@@ -136,7 +145,7 @@ struct LibraryScreen: View {
                 model.importFile(url)
             }
         }
-        .alert("Remove from your library?", isPresented: Binding(
+        .alert(pendingDelete.map { "Remove \($0.title)?" } ?? "Remove?", isPresented: Binding(
             get: { pendingDelete != nil },
             set: { if !$0 { pendingDelete = nil } }
         )) {
@@ -168,21 +177,15 @@ struct LibraryScreen: View {
     private var empty: some View {
         VStack(alignment: .leading, spacing: 0) {
             Spacer()
-            Text("Your timeline is empty")
+            Text("No books")
                 .font(MewoFont.bold(22))
                 .foregroundStyle(mewo.ink)
-            Spacer().frame(height: 8)
-            Text(hosted
-                 ? "Drop in an EPUB and the author starts posting, one paragraph at a time. It stays private until you share it."
-                 : "Drop in an EPUB and the author starts posting, one paragraph at a time.")
-                .font(MewoFont.regular(17))
-                .foregroundStyle(mewo.mute)
             Spacer().frame(height: 20)
             Button {
                 picking = true
             } label: {
                 Text("Add a book")
-                    .font(MewoFont.regular(15))
+                    .font(MewoFont.bold(14))
                     .foregroundStyle(mewo.onAccent)
                     .padding(.horizontal, 16)
                     .padding(.vertical, 8)
@@ -270,13 +273,9 @@ struct LibraryScreen: View {
     }
 
     private func removeDetail(_ book: BookRecord) -> String {
-        if !hosted {
-            return "This removes \(book.title), plus likes, notes, and where you left off. You can add the EPUB again."
-        }
-        if book.shared || book.isSample {
-            return "This removes \(book.title) for everyone who can read it, plus likes, notes, and reading place."
-        }
-        return "This removes \(book.title) from your library, plus likes, notes, and reading place. It is private, so nobody else can read it."
+        if !hosted { return "Removes it from this phone." }
+        if book.shared || book.isSample { return "Removes it for everyone who can read it." }
+        return "Removes it from your library."
     }
 
     private func sectionLabel(_ text: String) -> some View {
