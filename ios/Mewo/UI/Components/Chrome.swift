@@ -72,21 +72,34 @@ struct MewoAppBar<Leading: View, Trailing: View, Center: View, Content: View>: V
             if visible {
                 Group {
                     if let content {
+                        // Inline title or field. It takes the space beside the
+                        // avatar; the centered overlay below would paint it on top.
                         HStack(spacing: 0) {
                             leading
+                                .layoutPriority(1)
                             content
+                                .frame(maxWidth: .infinity, alignment: .leading)
                             trailing
+                                .layoutPriority(1)
                         }
+                        .frame(maxWidth: .infinity)
                         .frame(height: 56)
                     } else {
+                        // Side actions sit above the centered mark so a long
+                        // title cannot cover the avatar or the back button.
                         ZStack {
+                            center
+                                .padding(.horizontal, 56)
+                                .frame(maxWidth: .infinity)
                             HStack(spacing: 0) {
                                 leading
+                                    .layoutPriority(1)
                                 Spacer(minLength: 0)
                                 trailing
+                                    .layoutPriority(1)
                             }
-                            center
                         }
+                        .frame(maxWidth: .infinity)
                         .frame(height: 56)
                     }
                 }
@@ -94,12 +107,18 @@ struct MewoAppBar<Leading: View, Trailing: View, Center: View, Content: View>: V
                 Hairline()
             }
         }
-        .background(mewo.ground)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        // Color the status-bar strip. The row itself stays in the safe area.
+        .background(mewo.ground, ignoresSafeAreaEdges: .top)
         .animation(.easeInOut(duration: 0.2), value: visible)
     }
 }
 
 extension MewoAppBar where Content == EmptyView {
+    /// Disfavored so a trailing closure binds to inline `content`.
+    /// This init uses fewer defaulted arguments, and Swift would otherwise
+    /// treat that closure as `center` and overlay it on the avatar.
+    @_disfavoredOverload
     init(
         visible: Bool = true,
         @ViewBuilder leading: () -> Leading,
@@ -139,7 +158,8 @@ struct HomeTabBar: View {
                 .transition(.move(edge: .bottom).combined(with: .opacity))
             }
         }
-        .background(mewo.ground)
+        // Icons stay above the home indicator; the fill runs to the screen edge.
+        .background(mewo.ground, ignoresSafeAreaEdges: .bottom)
         .animation(.easeInOut(duration: 0.2), value: visible)
     }
 
@@ -190,9 +210,9 @@ struct ProfileButton: View {
     var body: some View {
         Button(action: onClick) {
             Avatar(name: app.readerIdentity.name, size: 32)
-                .padding(.horizontal, 12)
         }
         .buttonStyle(.plain)
+        .frame(width: 56, height: 56)
         .accessibilityLabel("Account")
         .accessibilityIdentifier("account-button")
     }

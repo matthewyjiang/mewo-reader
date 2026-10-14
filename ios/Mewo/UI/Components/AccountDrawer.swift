@@ -26,12 +26,15 @@ struct AccountDrawer<Content: View>: View {
                 // tap cannot land on the dismiss gesture instead.
                 HStack(spacing: 0) {
                     panel
-                    mewo.ink.opacity(0.2)
-                        .ignoresSafeArea()
+                    // The scrim's fill runs under the status bar. Its layout
+                    // frame stays in the safe area so it cannot stretch the
+                    // panel up over the clock.
+                    Color.clear
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
                         .contentShape(Rectangle())
                         .onTapGesture { withAnimation(.easeInOut(duration: 0.22)) { open = false } }
                         .gesture(closeGesture)
+                        .background(mewo.ink.opacity(0.2), ignoresSafeAreaEdges: .all)
                         .accessibilityHidden(true)
                 }
                 .transition(.move(edge: .leading))
@@ -76,12 +79,14 @@ struct AccountDrawer<Content: View>: View {
             .buttonStyle(.plain)
             .accessibilityLabel("Settings")
             .accessibilityIdentifier("drawer-settings")
-            Spacer()
+            Spacer(minLength: 0)
         }
         .frame(width: 300)
-        .frame(maxHeight: .infinity)
-        .background(mewo.ground)
-        .ignoresSafeArea(edges: .vertical)
+        .frame(maxHeight: .infinity, alignment: .top)
+        // Fill behind the clock and the home indicator. The avatar stays
+        // in the safe area; ignoring safe area on the whole panel pulled it
+        // up over the status bar.
+        .background(mewo.ground, ignoresSafeAreaEdges: .vertical)
     }
 
     private var openGesture: some Gesture {

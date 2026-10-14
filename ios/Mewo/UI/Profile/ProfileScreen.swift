@@ -91,7 +91,7 @@ struct ProfileScreen: View {
                 }
                 .buttonStyle(.plain)
                 .accessibilityLabel("Back")
-            }) {
+            }, content: {
                 VStack(alignment: .leading, spacing: 0) {
                     Text(name).font(MewoFont.bold(15)).foregroundStyle(mewo.ink).lineLimit(1)
                     Text(model.replies.count == 1 ? "1 post" : "\(model.replies.count) posts")
@@ -99,7 +99,7 @@ struct ProfileScreen: View {
                         .foregroundStyle(mewo.mute)
                 }
                 .padding(.trailing, 16)
-            }
+            })
             if model.loading {
                 ProgressView().tint(mewo.accent).frame(maxWidth: .infinity, maxHeight: .infinity)
             } else if let error = model.error {

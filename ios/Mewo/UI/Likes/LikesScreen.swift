@@ -64,9 +64,9 @@ struct LikesScreen: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            MewoAppBar(visible: chrome.visible, leading: { ProfileButton(onClick: onOpenAccount) }) {
+            MewoAppBar(visible: chrome.visible, leading: { ProfileButton(onClick: onOpenAccount) }, content: {
                 Text("Likes").font(MewoFont.bold(20)).foregroundStyle(mewo.ink).padding(.trailing, 16)
-            }
+            })
             if model.loading {
                 ProgressView().tint(mewo.accent).frame(maxWidth: .infinity, maxHeight: .infinity)
             } else if model.hits.isEmpty {
