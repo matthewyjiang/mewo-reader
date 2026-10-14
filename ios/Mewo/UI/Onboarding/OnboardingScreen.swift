@@ -13,16 +13,15 @@ struct OnboardingScreen: View {
             MewoAppBar(leading: { Color.clear.frame(width: 1) }, center: { BrandMark() })
             ScrollView {
                 VStack(alignment: .leading, spacing: 0) {
-                    Text("This is you")
+                    Text("Account")
                         .font(MewoFont.bold(22))
                         .foregroundStyle(mewo.ink)
-                    Spacer().frame(height: 8)
-                    Text("The drawer and your notes use this.")
-                        .font(MewoFont.regular(17))
-                        .foregroundStyle(mewo.mute)
-                    Spacer().frame(height: 24)
-                    ProfilePreview(name: name, handle: handle)
-                    Spacer().frame(height: 20)
+                        .frame(maxWidth: .infinity, minHeight: 52, alignment: .leading)
+                    if !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                        || !LocalIdentity.normalizeHandle(handle).isEmpty {
+                        ProfilePreview(name: name, handle: handle)
+                        Spacer().frame(height: 12)
+                    }
                     ProfileForm(name: $name, handle: $handle)
                     if let submitError {
                         Spacer().frame(height: 8)
@@ -30,13 +29,10 @@ struct OnboardingScreen: View {
                     }
                 }
                 .padding(.horizontal, 16)
-                .padding(.top, 24)
                 .padding(.bottom, 16)
             }
             Hairline()
-            HStack {
-                Spacer()
-                PillButton(title: "Next", enabled: parsed.isSuccess) {
+            PillButton(title: "Next", enabled: parsed.isSuccess, fill: true) {
                     if let profile = parsed.profile {
                         do {
                             try app.localProfile.save(name: profile.name, handle: profile.handle)
@@ -46,10 +42,9 @@ struct OnboardingScreen: View {
                     } else {
                         submitError = parsed.error ?? "Could not save that."
                     }
-                }
             }
-            .frame(height: 56)
             .padding(.horizontal, 16)
+            .frame(height: 56)
         }
         .background(mewo.ground)
         .onChange(of: name) { _, _ in submitError = nil }

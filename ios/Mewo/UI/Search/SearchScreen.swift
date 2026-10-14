@@ -72,7 +72,7 @@ struct SearchScreen: View {
     var body: some View {
         VStack(spacing: 0) {
             MewoAppBar(leading: { ProfileButton(onClick: onOpenAccount) }, content: {
-                TextField("Search books and posts", text: Binding(
+                TextField("Search", text: Binding(
                     get: { model.query },
                     set: { model.setQuery($0) }
                 ))
@@ -81,6 +81,7 @@ struct SearchScreen: View {
                 .foregroundStyle(mewo.ink)
                 .focused($focused)
                 .padding(.trailing, 16)
+                .accessibilityLabel("Search books and posts")
                 .accessibilityIdentifier("search-field")
             })
             results
@@ -112,9 +113,14 @@ struct SearchScreen: View {
     @ViewBuilder
     private var results: some View {
         if model.query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            hint("Type a title, author, or a line you remember.")
+            Color.clear
         } else if model.result.books.isEmpty && model.result.posts.isEmpty {
-            hint("No matches for \"\(model.query)\".")
+            Text("No matches")
+                .font(MewoFont.bold(22))
+                .foregroundStyle(mewo.ink)
+                .padding(.horizontal, 28)
+                .padding(.vertical, 48)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         } else {
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 0) {
@@ -179,12 +185,4 @@ struct SearchScreen: View {
             .padding(.vertical, 10)
     }
 
-    private func hint(_ text: String) -> some View {
-        Text(text)
-            .font(MewoFont.regular(17))
-            .foregroundStyle(mewo.mute)
-            .padding(.horizontal, 16)
-            .padding(.vertical, 24)
-            .frame(maxWidth: .infinity, alignment: .leading)
-    }
 }

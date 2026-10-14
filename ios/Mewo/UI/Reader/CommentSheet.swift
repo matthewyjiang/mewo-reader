@@ -71,7 +71,11 @@ struct CommentSheet: View {
                 .buttonStyle(.plain)
                 .accessibilityLabel("Close")
                 Spacer()
-                PillButton(title: "Reply", enabled: !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && !sending, action: postReply)
+                PillButton(
+                    title: "Reply",
+                    enabled: !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && commentBudgetError(draft) == nil && !sending,
+                    action: postReply
+                )
                     .padding(.trailing, 16)
             }
             Hairline()
@@ -94,10 +98,10 @@ struct CommentSheet: View {
                     .focused($fieldFocused)
                     .disabled(sending)
                     .onChange(of: fieldFocused) { _, on in focused = on }
-                    .accessibilityLabel(publicNotes ? "Reply, public on this server" : "Reply")
+                    .accessibilityLabel(publicNotes ? "Reply, visible to anyone who can read this book" : "Reply")
                     .accessibilityIdentifier("reply-field")
-                if let error {
-                    Text(error).font(MewoFont.regular(15)).foregroundStyle(mewo.like)
+                if let message = error ?? commentBudgetError(draft) {
+                    Text(message).font(MewoFont.regular(15)).foregroundStyle(mewo.like)
                 }
             }
         }
@@ -223,7 +227,7 @@ struct ChapterSheet: View {
                 .padding(.bottom, 8)
                 .accessibilityIdentifier("chapter-sheet")
             if headings.isEmpty {
-                Text("This book has no chapter headings.")
+                Text("No chapters")
                     .font(MewoFont.regular(17))
                     .foregroundStyle(mewo.mute)
                     .padding(.horizontal, 16)

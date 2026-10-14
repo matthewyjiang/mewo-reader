@@ -23,6 +23,13 @@ enum LocalIdentity {
         return trimmed.hasPrefix("@") ? String(trimmed.dropFirst()) : trimmed
     }
 
+    /// The second line is the handle only when it is not the same as the name.
+    static func showsHandle(name: String, handle: String) -> Bool {
+        let tag = normalizeHandle(handle)
+        guard !tag.isEmpty else { return false }
+        return name.trimmingCharacters(in: .whitespacesAndNewlines).caseInsensitiveCompare(tag) != .orderedSame
+    }
+
     static func nameError(_ raw: String) -> String? {
         let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         if trimmed.count <= nameMax { return nil }

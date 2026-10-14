@@ -2,7 +2,6 @@ import SwiftUI
 
 struct SettingsHome: View {
     @Environment(\.mewo) private var mewo
-    @Environment(\.app) private var app
     var onBack: () -> Void
     var onOpenAccount: () -> Void
     var onOpenDisplay: () -> Void
@@ -11,30 +10,28 @@ struct SettingsHome: View {
 
     var body: some View {
         SettingsScaffold(title: "Settings", onBack: onBack) {
-            row("Account", body: app.localProfile.profile.ready ? "@\(app.localProfile.profile.handle)" : "Name and handle.", action: onOpenAccount)
-            Hairline()
-            row("Display", body: "Twitter or X. Light or night. Font size. Mewo mode.", action: onOpenDisplay)
-            Hairline()
-            row("Library", body: "On this phone, or a hosted server.", action: onOpenLibrary)
-            Hairline()
-            row("About", body: "App and server versions.", action: onOpenAbout)
-            Hairline()
+            VStack(spacing: 0) {
+                row("Account", action: onOpenAccount)
+                Hairline()
+                row("Display", action: onOpenDisplay)
+                Hairline()
+                row("Library", action: onOpenLibrary)
+                Hairline()
+                row("About", action: onOpenAbout)
+                Hairline()
+            }
         }
     }
 
-    private func row(_ title: String, body: String, action: @escaping () -> Void) -> some View {
+    private func row(_ title: String, action: @escaping () -> Void) -> some View {
         Button(action: action) {
             HStack {
-                VStack(alignment: .leading, spacing: 4) {
-                    Text(title).font(MewoFont.bold(17)).foregroundStyle(mewo.ink)
-                    Text(body).font(MewoFont.regular(13)).foregroundStyle(mewo.mute)
-                }
+                Text(title).font(MewoFont.bold(17)).foregroundStyle(mewo.ink)
                 Spacer()
                 Image(systemName: "chevron.right").foregroundStyle(mewo.mute)
             }
             .padding(.horizontal, 16)
-            .padding(.vertical, 14)
-            .frame(minHeight: 52)
+            .frame(height: 52)
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
@@ -55,23 +52,27 @@ struct SettingsAccountPage: View {
         let parsed = LocalIdentity.parse(name: name, handle: handle)
         let dirty = name.trimmingCharacters(in: .whitespacesAndNewlines) != app.localProfile.profile.name
             || LocalIdentity.normalizeHandle(handle) != app.localProfile.profile.handle
+        let showPreview = !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            || !LocalIdentity.normalizeHandle(handle).isEmpty
         SettingsScaffold(title: "Account", onBack: onBack) {
-            VStack(alignment: .leading, spacing: 16) {
-                ProfilePreview(name: name, handle: handle)
+            VStack(alignment: .leading, spacing: 0) {
+                if showPreview {
+                    ProfilePreview(name: name, handle: handle)
+                    Spacer().frame(height: 12)
+                }
                 ProfileForm(name: $name, handle: $handle)
-                HStack {
-                    Spacer()
-                    PillButton(title: "Save", enabled: parsed.isSuccess && dirty) {
-                        if let profile = parsed.profile {
-                            do { try app.localProfile.save(name: profile.name, handle: profile.handle) }
-                            catch { self.error = error.localizedDescription }
-                        } else {
-                            error = parsed.error ?? "Could not save that."
-                        }
+                Spacer().frame(height: 16)
+                PillButton(title: "Save", enabled: parsed.isSuccess && dirty, fill: true) {
+                    if let profile = parsed.profile {
+                        do { try app.localProfile.save(name: profile.name, handle: profile.handle) }
+                        catch { self.error = error.localizedDescription }
+                    } else {
+                        error = parsed.error ?? "Could not save that."
                     }
                 }
                 if let error {
                     Text(error).font(MewoFont.regular(15)).foregroundStyle(mewo.like)
+                        .padding(.top, 8)
                 }
             }
             .padding(16)
@@ -87,7 +88,7 @@ struct SettingsDisplayPage: View {
     var onBack: () -> Void
     var body: some View {
         SettingsScaffold(title: "Display", onBack: onBack) {
-            DisplaySettings().padding(.vertical, 16)
+            DisplaySettings()
         }
     }
 }
@@ -96,7 +97,7 @@ struct SettingsLibraryPage: View {
     var onBack: () -> Void
     var body: some View {
         SettingsScaffold(title: "Library", onBack: onBack) {
-            LibrarySettings().padding(16)
+            LibrarySettings().padding(.horizontal, 16)
         }
     }
 }
@@ -109,12 +110,14 @@ struct SettingsAboutPage: View {
 
     var body: some View {
         SettingsScaffold(title: "About", onBack: onBack) {
-            infoRow("App", body: AppBuild.displayLabel, id: "about-app")
-            Hairline()
-            infoRow("Server", body: serverStatus, id: "about-server")
-            Hairline()
-            infoRow("Server URL", body: serverURL, id: "about-url")
-            Hairline()
+            VStack(spacing: 0) {
+                infoRow("App", body: AppBuild.displayLabel, muted: false, id: "about-app")
+                Hairline()
+                infoRow("Server", body: serverStatus, muted: serverStatus == "Loading…" || serverStatus == "Unavailable", id: "about-server")
+                Hairline()
+                infoRow("Server URL", body: serverURL, muted: serverURL == "Unavailable", id: "about-url")
+                Hairline()
+            }
         }
         .task(id: serverTaskID) { await loadServer() }
     }
@@ -125,23 +128,24 @@ struct SettingsAboutPage: View {
 
     private var serverURL: String {
         let url = normalizeBaseUrl(app.hostedSession.session.baseUrl)
-        return url.isEmpty ? "Not set" : url
+        return url.isEmpty ? "Unavailable" : url
     }
 
-    private func infoRow(_ title: String, body: String, id: String) -> some View {
-        VStack(alignment: .leading, spacing: 4) {
+    private func infoRow(_ title: String, body: String, muted: Bool, id: String) -> some View {
+        HStack(alignment: .center, spacing: 16) {
             Text(title)
                 .font(MewoFont.bold(17))
                 .foregroundStyle(mewo.ink)
+                .fixedSize(horizontal: true, vertical: false)
             Text(body)
-                .font(MewoFont.regular(13))
-                .foregroundStyle(mewo.mute)
+                .font(MewoFont.regular(17))
+                .foregroundStyle(muted ? mewo.mute : mewo.ink)
+                .multilineTextAlignment(.trailing)
+                .frame(maxWidth: .infinity, alignment: .trailing)
                 .fixedSize(horizontal: false, vertical: true)
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
         .padding(.horizontal, 16)
-        .padding(.vertical, 14)
-        .frame(minHeight: 52, alignment: .leading)
+        .frame(maxWidth: .infinity, minHeight: 52, alignment: .center)
         .accessibilityElement(children: .combine)
         .accessibilityIdentifier(id)
         .accessibilityLabel("\(title), \(body)")

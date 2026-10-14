@@ -70,11 +70,11 @@ struct LikesScreen: View {
             if model.loading {
                 ProgressView().tint(mewo.accent).frame(maxWidth: .infinity, maxHeight: .infinity)
             } else if model.hits.isEmpty {
-                Text("Heart a line while you read. It shows up here.")
-                    .font(MewoFont.regular(17))
-                    .foregroundStyle(mewo.mute)
-                    .padding(.horizontal, 16)
-                    .padding(.vertical, 24)
+                Text("No likes")
+                    .font(MewoFont.bold(22))
+                    .foregroundStyle(mewo.ink)
+                    .padding(.horizontal, 28)
+                    .padding(.vertical, 48)
                     .frame(maxWidth: .infinity, alignment: .leading)
             } else {
                 ScrollView {

@@ -113,11 +113,11 @@ struct ProfileScreen: View {
                         .frame(height: 0)
                         header(name: name, handle: handle)
                         if model.replies.isEmpty {
-                            Text(viewingSelf ? "Reply to a line. It shows up here." : "No posts yet.")
-                                .font(MewoFont.regular(17))
-                                .foregroundStyle(mewo.mute)
-                                .padding(.horizontal, 16)
-                                .padding(.vertical, 24)
+                            Text("No posts")
+                                .font(MewoFont.bold(22))
+                                .foregroundStyle(mewo.ink)
+                                .padding(.horizontal, 28)
+                                .padding(.vertical, 48)
                                 .frame(maxWidth: .infinity, alignment: .leading)
                         } else {
                             ForEach(model.replies, id: \.comment.id) { hit in
@@ -165,7 +165,9 @@ struct ProfileScreen: View {
                 mewo.hover.frame(height: 125)
                 Spacer().frame(height: 42)
                 Text(name).font(MewoFont.bold(20)).foregroundStyle(mewo.ink).padding(.horizontal, 16)
-                Text("@\(handle)").font(MewoFont.regular(13)).foregroundStyle(mewo.mute).padding(.horizontal, 16)
+                if LocalIdentity.showsHandle(name: name, handle: handle) {
+                    Text("@\(handle)").font(MewoFont.regular(13)).foregroundStyle(mewo.mute).padding(.horizontal, 16)
+                }
                 Spacer().frame(height: 16)
                 VStack(spacing: 10) {
                     Text("Posts").font(MewoFont.bold(15)).foregroundStyle(mewo.ink)

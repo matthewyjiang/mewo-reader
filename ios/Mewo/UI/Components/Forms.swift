@@ -7,28 +7,24 @@ struct ProfilePreview: View {
 
     var body: some View {
         let tag = LocalIdentity.normalizeHandle(handle)
-        let display = name.trimmingCharacters(in: .whitespacesAndNewlines).ifBlank {
-            tag.ifBlank { "Name" }
-        }
-        let named = !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-        let handled = !tag.isEmpty
-        VStack(alignment: .leading, spacing: 0) {
-            HStack(spacing: 12) {
-                Avatar(name: display, size: 40)
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(display)
-                        .font(MewoFont.bold(15))
-                        .foregroundStyle(named || handled ? mewo.ink : mewo.mute)
-                        .lineLimit(1)
-                    Text(handled ? "@\(tag)" : "@handle")
+        let display = name.trimmingCharacters(in: .whitespacesAndNewlines).ifBlank { tag }
+        HStack(spacing: 12) {
+            Avatar(name: display, size: 40)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(display)
+                    .font(MewoFont.bold(15))
+                    .foregroundStyle(mewo.ink)
+                    .lineLimit(1)
+                if LocalIdentity.showsHandle(name: display, handle: tag) {
+                    Text("@\(tag)")
                         .font(MewoFont.regular(13))
                         .foregroundStyle(mewo.mute)
                         .lineLimit(1)
                 }
             }
-            .padding(.vertical, 12)
-            Hairline()
         }
+        .padding(.vertical, 12)
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 }
 
@@ -41,15 +37,15 @@ struct ProfileForm: View {
         let nameErr = LocalIdentity.nameError(name)
         let handleErr = LocalIdentity.handleError(handle)
         VStack(alignment: .leading, spacing: 8) {
-            field("Name", text: $name, placeholder: "Optional", error: nameErr, prefix: nil)
+            field("Name", text: $name, error: nameErr, prefix: nil)
             field("Handle", text: Binding(
                 get: { handle },
                 set: { handle = $0.hasPrefix("@") ? String($0.dropFirst()) : $0 }
-            ), placeholder: nil, error: handleErr, prefix: "@")
+            ), error: handleErr, prefix: "@")
         }
     }
 
-    private func field(_ label: String, text: Binding<String>, placeholder: String?, error: String?, prefix: String?) -> some View {
+    private func field(_ label: String, text: Binding<String>, error: String?, prefix: String?) -> some View {
         VStack(alignment: .leading, spacing: 4) {
             Text(label)
                 .font(MewoFont.regular(13))
@@ -58,7 +54,7 @@ struct ProfileForm: View {
                 if let prefix {
                     Text(prefix).font(MewoFont.regular(15)).foregroundStyle(mewo.mute)
                 }
-                TextField(placeholder ?? "", text: text)
+                TextField("", text: text)
                     .font(MewoFont.regular(15))
                     .foregroundStyle(mewo.ink)
                     .textInputAutocapitalization(prefix == nil ? .words : .never)
@@ -84,53 +80,41 @@ extension String {
     }
 }
 
+private enum HostedAuthMode {
+    case signIn, create
+}
+
 struct LibrarySettings: View {
     @Environment(\.mewo) private var mewo
     @Environment(\.app) private var app
+    @State private var mode = HostedAuthMode.signIn
     @State private var username = ""
     @State private var password = ""
     @State private var busy = false
     @State private var error: String?
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Text("Books, likes, notes, and where you left off. Local stays on this phone. On a hosted server, books you add stay private until you share them.")
-                .font(MewoFont.regular(15))
-                .foregroundStyle(mewo.mute)
-            backendRow(
-                title: "On this phone",
-                body: "EPUB files stay on the device.",
-                selected: app.backend.kind == .local
-            ) {
+        VStack(alignment: .leading, spacing: 0) {
+            backendRow("On this phone", selected: app.backend.kind == .local) {
                 app.backend.setKind(.local)
             }
-            backendRow(
-                title: "Hosted server",
-                body: app.hostedSession.session.signedIn
-                    ? "Signed in as @\(app.hostedSession.session.username ?? "")."
-                    : "Sign in with a server URL. Books you add stay private until you share them.",
-                selected: app.backend.kind == .hosted
-            ) {
+            backendRow("Hosted server", selected: app.backend.kind == .hosted) {
                 app.backend.setKind(.hosted)
             }
             if app.backend.kind == .hosted {
                 hostedForm
             }
         }
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
-    private func backendRow(title: String, body: String, selected: Bool, onSelect: @escaping () -> Void) -> some View {
+    private func backendRow(_ title: String, selected: Bool, onSelect: @escaping () -> Void) -> some View {
         Button(action: onSelect) {
-            VStack(alignment: .leading, spacing: 4) {
-                Text(title)
-                    .font(MewoFont.bold(17))
-                    .foregroundStyle(selected ? mewo.ink : mewo.mute)
-                Text(body)
-                    .font(MewoFont.regular(15))
-                    .foregroundStyle(mewo.mute)
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(.vertical, 8)
+            Text(title)
+                .font(MewoFont.bold(17))
+                .foregroundStyle(selected ? mewo.ink : mewo.mute)
+                .frame(maxWidth: .infinity, minHeight: 52, alignment: .leading)
+                .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
         .accessibilityIdentifier(title == "On this phone" ? "backend-local" : "backend-hosted")
@@ -138,50 +122,115 @@ struct LibrarySettings: View {
     }
 
     private var hostedForm: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            outlined("Server URL", text: Binding(
-                get: { app.hostedSession.session.baseUrl },
-                set: { app.hostedSession.setBaseUrl($0) }
-            ), enabled: !app.hostedSession.session.signedIn && !busy, secret: false, id: "server-url")
+        let userError = usernameFieldError(username)
+        let passError = passwordFieldError(password)
+        let ready = !busy && hostedAuthReady(
+            username: username,
+            password: password,
+            baseUrl: app.hostedSession.session.baseUrl
+        )
+        return VStack(alignment: .leading, spacing: 0) {
             if app.hostedSession.session.signedIn {
-                Button("Sign out") { run { await app.hostedAuth.signOut() } }
-                    .accessibilityIdentifier("hosted-sign-out")
-                    .disabled(busy)
-                    .foregroundStyle(mewo.accent)
-                    .font(MewoFont.regular(15))
-            } else {
-                outlined("Username", text: $username, enabled: !busy, secret: false, id: "hosted-username")
-                outlined("Password", text: $password, enabled: !busy, secret: true, id: "hosted-password")
-                HStack {
-                    Button("Sign in") { run { try await app.hostedAuth.signIn(username: username, password: password) } }
-                    Button("Create account") { run { try await app.hostedAuth.createAccount(username: username, password: password) } }
+                Text("@\(app.hostedSession.session.username ?? "")")
+                    .font(MewoFont.bold(17))
+                    .foregroundStyle(mewo.ink)
+                    .frame(maxWidth: .infinity, minHeight: 52, alignment: .leading)
+                Button { run { await app.hostedAuth.signOut() } } label: {
+                    Text("Sign out")
+                        .font(MewoFont.bold(17))
+                        .foregroundStyle(mewo.accent)
+                        .frame(maxWidth: .infinity, minHeight: 52, alignment: .leading)
+                        .contentShape(Rectangle())
                 }
+                .buttonStyle(.plain)
                 .disabled(busy)
-                .foregroundStyle(mewo.accent)
-                .font(MewoFont.regular(15))
-            }
-            if let error {
-                Text(error).font(MewoFont.regular(15)).foregroundStyle(mewo.like)
+                .accessibilityIdentifier("hosted-sign-out")
+            } else {
+                Text(mode == .signIn ? "Sign in" : "Create account")
+                    .font(MewoFont.bold(22))
+                    .foregroundStyle(mewo.ink)
+                    .frame(maxWidth: .infinity, minHeight: 52, alignment: .leading)
+                VStack(alignment: .leading, spacing: 8) {
+                    outlined("Server URL", text: Binding(
+                        get: { app.hostedSession.session.baseUrl },
+                        set: {
+                            app.hostedSession.setBaseUrl($0)
+                            error = nil
+                        }
+                    ), enabled: !busy, secret: false, id: "server-url", error: nil)
+                    outlined("Username", text: Binding(
+                        get: { username },
+                        set: {
+                            username = $0
+                            error = nil
+                        }
+                    ), enabled: !busy, secret: false, id: "hosted-username", error: userError)
+                    outlined("Password", text: Binding(
+                        get: { password },
+                        set: {
+                            password = $0
+                            error = nil
+                        }
+                    ), enabled: !busy, secret: true, id: "hosted-password", error: passError)
+                }
+                if let error {
+                    Text(error)
+                        .font(MewoFont.regular(15))
+                        .foregroundStyle(mewo.like)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.top, 8)
+                }
+                PillButton(
+                    title: busy ? "Connecting…" : (mode == .signIn ? "Sign in" : "Create account"),
+                    enabled: ready,
+                    fill: true
+                ) {
+                    run {
+                        if mode == .signIn {
+                            try await app.hostedAuth.signIn(username: username, password: password)
+                        } else {
+                            try await app.hostedAuth.createAccount(username: username, password: password)
+                        }
+                    }
+                }
+                .padding(.top, 12)
+                Button {
+                    mode = mode == .signIn ? .create : .signIn
+                    error = nil
+                } label: {
+                    Text(mode == .signIn ? "Create an account" : "Sign in instead")
+                        .font(MewoFont.regular(17))
+                        .foregroundStyle(mewo.accent)
+                        .frame(maxWidth: .infinity, minHeight: 40)
+                }
+                .buttonStyle(.plain)
+                .disabled(busy)
             }
         }
         .onAppear { username = app.hostedSession.session.username ?? "" }
     }
 
-    private func outlined(_ label: String, text: Binding<String>, enabled: Bool, secret: Bool, id: String) -> some View {
+    private func outlined(_ label: String, text: Binding<String>, enabled: Bool, secret: Bool, id: String, error: String?) -> some View {
         VStack(alignment: .leading, spacing: 4) {
-            Text(label).font(MewoFont.regular(13)).foregroundStyle(mewo.mute)
+            Text(label).font(MewoFont.regular(13)).foregroundStyle(error == nil ? mewo.mute : mewo.like)
             Group {
                 if secret {
                     SecureField("", text: text).disabled(!enabled)
                 } else {
-                    TextField("", text: text).disabled(!enabled)
+                    TextField("", text: text)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                        .disabled(!enabled)
                 }
             }
             .font(MewoFont.regular(15))
             .foregroundStyle(mewo.ink)
             .padding(.vertical, 8)
             .accessibilityIdentifier(id)
-            mewo.mute.frame(height: 1)
+            (error == nil ? mewo.mute : mewo.like).frame(height: 1)
+            if let error {
+                Text(error).font(MewoFont.regular(13)).foregroundStyle(mewo.like)
+            }
         }
     }
 
@@ -208,11 +257,6 @@ struct DisplaySettings: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            Text("Twitter kept a navy night. X went black.")
-                .font(MewoFont.regular(15))
-                .foregroundStyle(mewo.mute)
-                .padding(.horizontal, 16)
-            Spacer().frame(height: 20)
             VStack(spacing: 12) {
                 HStack(spacing: 12) {
                     swatch(.twitterLight)
@@ -272,13 +316,13 @@ struct DisplaySettings: View {
 
     private var fontSize: some View {
         VStack(alignment: .leading, spacing: 0) {
-            Text("Font size").font(MewoFont.bold(17)).padding(.horizontal, 16)
-            Spacer().frame(height: 4)
-            Text("How big posts read. Bars and buttons stay the same.")
-                .font(MewoFont.regular(15))
-                .foregroundStyle(mewo.mute)
-                .padding(.horizontal, 16)
-            Spacer().frame(height: 16)
+            HStack(spacing: 8) {
+                Text("Font size").font(MewoFont.bold(17)).foregroundStyle(mewo.ink)
+                Text(scale.talkBackLabel).font(MewoFont.regular(15)).foregroundStyle(mewo.mute)
+                Spacer(minLength: 0)
+            }
+            .padding(.horizontal, 16)
+            .frame(maxWidth: .infinity, minHeight: 52, alignment: .leading)
             preview
             HStack {
                 stepButton("Aa", size: 13, enabled: scale.step > ReaderTypeScale.minStep, label: "Smaller text") {
@@ -311,12 +355,12 @@ struct DisplaySettings: View {
                 VStack(alignment: .leading, spacing: 4) {
                     HStack(spacing: 6) {
                         Text("Mewo").font(MewoFont.bold(15)).lineLimit(1)
-                        Text("@mewo · The first post")
+                        Text("@mewo")
                             .font(MewoFont.regular(13))
                             .foregroundStyle(mewo.mute)
                             .lineLimit(1)
                     }
-                    Text("I did not mean to become a timeline. I meant to be a book.")
+                    Text("The paragraph sits at this size.")
                         .font(MewoFont.regular(scale.bodySize))
                         .lineSpacing(max(0, scale.bodyLine - scale.bodySize))
                 }
@@ -353,14 +397,10 @@ struct DisplaySettings: View {
                     }
                 }
             )) {
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("Mewo mode").font(MewoFont.bold(17)).foregroundStyle(mewo.ink)
-                    Text("Use Teddy for the app icon, launch screen, and header. Your color theme stays the same.")
-                        .font(MewoFont.regular(15))
-                        .foregroundStyle(mewo.mute)
-                }
+                Text("Mewo mode").font(MewoFont.bold(17)).foregroundStyle(mewo.ink)
             }
             .tint(mewo.accent)
+            .frame(minHeight: 52)
             .accessibilityIdentifier("mewo-mode")
             .accessibilityLabel("Mewo mode")
             if let iconError {

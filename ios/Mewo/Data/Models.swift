@@ -219,7 +219,35 @@ func ownerCredit(_ book: BookRecord) -> String? {
 
 func privateUploadNotice(for book: BookRecord) -> String? {
     guard !book.isSample, !book.shared else { return nil }
-    return "\(book.title) is private. Use Share on Home when you want others to read it."
+    return "\(book.title) is private."
+}
+
+let usernameRule = "3–32 characters: letters, digits, underscore."
+let passwordRule = "At least 8 characters."
+
+func usernameFieldError(_ value: String) -> String? {
+    let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+    if trimmed.isEmpty { return nil }
+    if trimmed.range(of: #"^[A-Za-z0-9_]{3,32}$"#, options: .regularExpression) != nil { return nil }
+    return usernameRule
+}
+
+func passwordFieldError(_ value: String) -> String? {
+    if value.isEmpty || value.count >= 8 { return nil }
+    return passwordRule
+}
+
+func hostedAuthReady(username: String, password: String, baseUrl: String) -> Bool {
+    let name = username.trimmingCharacters(in: .whitespacesAndNewlines)
+    return name.range(of: #"^[A-Za-z0-9_]{3,32}$"#, options: .regularExpression) != nil
+        && password.count >= 8
+        && !normalizeBaseUrl(baseUrl).isEmpty
+}
+
+func commentBudgetError(_ draft: String) -> String? {
+    let asked = draft.trimmingCharacters(in: .whitespacesAndNewlines).count
+    guard asked > maxCommentChars else { return nil }
+    return "Comment budget: asked \(asked) characters, limit is \(maxCommentChars)."
 }
 
 /// Last server value for a share chain, and the value on screen.

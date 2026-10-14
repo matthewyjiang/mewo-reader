@@ -137,12 +137,8 @@ final class LocalLibraryStore: LibraryStore {
         if trimmed.isEmpty {
             throw NSError(domain: "mewo", code: 6, userInfo: [NSLocalizedDescriptionKey: "Write something first."])
         }
-        if trimmed.count > maxCommentChars {
-            throw NSError(
-                domain: "mewo",
-                code: 7,
-                userInfo: [NSLocalizedDescriptionKey: "Comment is longer than \(maxCommentChars) characters (asked \(trimmed.count))."]
-            )
+        if let budget = commentBudgetError(trimmed) {
+            throw NSError(domain: "mewo", code: 7, userInfo: [NSLocalizedDescriptionKey: budget])
         }
         var current = readComments(id)
         var next = current.posts
