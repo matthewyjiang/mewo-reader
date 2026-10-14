@@ -35,6 +35,13 @@ jobs:
       - name: Xcode version
         run: xcodebuild -version
 
+      # project.yml is the source of truth; the committed Mewo.xcodeproj can lag
+      # behind it (it was missing UITestReset.swift and FeatureTests.swift).
+      - name: Generate Xcode project
+        run: |
+          brew install xcodegen
+          xcodegen generate
+
       # Simulator names drift between runner image releases, so take the first
       # available iPhone on an iOS 26 runtime instead of hard-coding one.
       - name: Pick a simulator
