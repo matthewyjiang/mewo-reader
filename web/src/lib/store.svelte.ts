@@ -242,19 +242,6 @@ class HostedStore {
     };
   }
 
-  search(query: string): { books: BookRecord[]; posts: PostHit[] } {
-    const q = query.trim().toLocaleLowerCase();
-    if (!q) return { books: [], posts: [] };
-    return {
-      books: this.books.filter((book) => [book.title, book.author, book.handle]
-        .some((value) => value.toLocaleLowerCase().includes(q))),
-      posts: this.books.flatMap((book) => (this.feeds[book.id] ?? [])
-        .filter((post) => post.text.toLocaleLowerCase().includes(q)
-          || post.chapter.toLocaleLowerCase().includes(q))
-        .map((post) => ({ book, post }))),
-    };
-  }
-
   async loadLikes(): Promise<void> {
     const epoch = this.epoch;
     await Promise.all(this.books.map(async (book) => {

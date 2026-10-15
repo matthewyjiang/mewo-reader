@@ -20,7 +20,10 @@ Open the URL Vite prints. It proxies `/v1` to `http://localhost:8787`. If signup
 
 ## Check and build
 
+Tests use Node 22 or newer for its built-in TypeScript support.
+
 ```bash
+npm test
 npm run check
 npm run build
 ```

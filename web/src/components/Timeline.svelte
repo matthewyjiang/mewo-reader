@@ -110,17 +110,24 @@
     if (!count) return;
     jumping = true;
     index = Math.min(Math.max(0, index), count - 1);
-    scroller.scrollTop = top() + offset(index) + within - inset;
-    update(false);
-    await tick();
-    if (!active) return;
-    // Measure synchronously before the final alignment; RO also handles reflow later.
-    for (const [i, node] of nodes) measure(i, node.getBoundingClientRect().height);
-    await tick();
-    if (!active) return;
-    scroller.scrollTop = top() + offset(index) + within - inset;
-    update(false);
-    await tick();
+    // Measuring estimated rows can bring more rows into the render window.
+    // Settle that window before the final alignment, or a late measurement
+    // above the target can move the restored row by an entire paragraph.
+    while (active) {
+      scroller.scrollTop = top() + offset(index) + within - inset;
+      update(false);
+      await tick();
+      if (!active) return;
+      for (const [i, node] of nodes) measure(i, node.getBoundingClientRect().height);
+      await tick();
+      if (!active) return;
+      scroller.scrollTop = top() + offset(index) + within - inset;
+      const previousStart = start;
+      const previousEnd = end;
+      update(false);
+      await tick();
+      if (start === previousStart && end === previousEnd) break;
+    }
     jumping = false;
   }
 

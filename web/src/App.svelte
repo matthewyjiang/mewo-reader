@@ -25,6 +25,7 @@
   let main = $state<HTMLElement>();
   let fileInput = $state<HTMLInputElement>();
   let reader = $state<{ openChapters: () => void; capture: () => void }>();
+  let search = $state<{ capture: () => void }>();
   let profile = $state<{ refresh: () => Promise<void> }>();
   let drawer = $state(false);
   let commentTarget = $state<PostHit | null>(null);
@@ -131,6 +132,7 @@
   onMount(() => {
     router.beforeChange = () => {
       if (readerId) reader?.capture();
+      else if (path === '/search') search?.capture();
       else if (main) {
         router.scroll.set(router.current.key, main.scrollTop);
         if (root) router.tabScroll.set(router.current.tab, main.scrollTop);
@@ -292,7 +294,7 @@
                 onbusy={(busy) => readerBusy = busy}
               />
             {:else if path === '/search'}
-              <Search scroller={main} {query} oncomment={openComments} />
+              <Search bind:this={search} scroller={main} {query} oncomment={openComments} />
             {:else if path === '/likes'}
               <Likes scroller={main} oncomment={openComments} />
             {:else if profileName}

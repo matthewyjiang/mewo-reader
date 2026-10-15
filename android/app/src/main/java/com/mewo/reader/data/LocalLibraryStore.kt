@@ -4,6 +4,7 @@ import android.content.Context
 import android.graphics.Bitmap
 import android.net.Uri
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -211,8 +212,11 @@ class LocalLibraryStore(
                 book.handle.contains(q, ignoreCase = true)
         }
         val postHits = books.flatMap { book ->
+            // Feed reads and long feeds are slow. Stop when a newer keystroke cancels us.
+            ensureActive()
             val posts = cachedFeed(book.id) ?: return@flatMap emptyList()
             posts.filter { post ->
+                ensureActive()
                 post.text.contains(q, ignoreCase = true) ||
                     post.chapter.contains(q, ignoreCase = true)
             }.map { PostHit(book, it) }

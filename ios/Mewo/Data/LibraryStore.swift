@@ -69,3 +69,41 @@ final class SwitchingLibraryStore: LibraryStore {
     }
     func coverFile(id: String) -> URL? { active.coverFile(id: id) }
 }
+
+/// One book and the cached feed file a search reads for it. Stores build these
+/// on the main actor so the scan can run without touching the store.
+struct SearchSource: Sendable {
+    var book: BookRecord
+    /// Nil when the book has no safe cache path.
+    var feedFile: URL?
+    /// The `FeedCache.version` this store accepts.
+    var cacheVersion: Int
+}
+
+/// Matches books by title, author, or handle, and cached posts by text or
+/// chapter. Runs off the main actor and checks for cancellation between books
+/// and posts, so a newer keystroke stops it.
+@concurrent
+func scanSearch(query: String, sources: [SearchSource]) async throws -> SearchResult {
+    let q = query.trimmingCharacters(in: .whitespacesAndNewlines)
+    if q.isEmpty { return SearchResult() }
+    let books = sources.map(\.book).filter {
+        $0.title.localizedCaseInsensitiveContains(q)
+            || $0.author.localizedCaseInsensitiveContains(q)
+            || $0.handle.localizedCaseInsensitiveContains(q)
+    }
+    var posts: [PostHit] = []
+    for source in sources {
+        try Task.checkCancellation()
+        guard let file = source.feedFile,
+              let cache = JSONFiles.read(FeedCache.self, from: file),
+              cache.version == source.cacheVersion else { continue }
+        for post in cache.posts {
+            try Task.checkCancellation()
+            if post.text.localizedCaseInsensitiveContains(q) || post.chapter.localizedCaseInsensitiveContains(q) {
+                posts.append(PostHit(book: source.book, post: post))
+            }
+        }
+    }
+    return SearchResult(books: books, posts: posts)
+}

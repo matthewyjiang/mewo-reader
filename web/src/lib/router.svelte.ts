@@ -33,7 +33,7 @@ class Router {
   url = $state(new URL(location.href));
   current = $state<Entry>(entry());
   scroll = new Map<string, number | ReaderAnchor>();
-  tabScroll = new Map<Tab, number>();
+  tabScroll = new Map<Tab, number | ReaderAnchor>();
   fromTab = $state(false);
   beforeChange: (() => void) | undefined;
 
