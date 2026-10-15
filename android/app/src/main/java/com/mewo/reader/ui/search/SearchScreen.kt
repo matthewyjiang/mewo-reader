@@ -76,6 +76,8 @@ fun SearchScreen(
     val keyboard = LocalSoftwareKeyboardController.current
     val view = LocalView.current
     LaunchedEffect(Unit) { focus.requestFocus() }
+    // Likes and comments may have changed in the reader since the screen was last shown.
+    LaunchedEffect(Unit) { viewModel.refreshSocial() }
     DisposableEffect(Unit) {
         onDispose {
             focusManager.clearFocus(force = true)

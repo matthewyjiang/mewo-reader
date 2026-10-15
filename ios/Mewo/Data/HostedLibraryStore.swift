@@ -223,20 +223,14 @@ final class HostedLibraryStore: LibraryStore {
     }
 
     func search(query: String) async throws -> SearchResult {
-        let q = query.trimmingCharacters(in: .whitespacesAndNewlines)
-        if q.isEmpty { return SearchResult() }
-        let bookHits = books.filter {
-            $0.title.localizedCaseInsensitiveContains(q)
-                || $0.author.localizedCaseInsensitiveContains(q)
-                || $0.handle.localizedCaseInsensitiveContains(q)
+        let sources = books.map { book in
+            SearchSource(
+                book: book,
+                feedFile: safeBookId(book.id).map { bookDir($0).appendingPathComponent(hostedPostsCache) },
+                cacheVersion: hostedPostsCacheVersion
+            )
         }
-        let postHits = books.flatMap { book -> [PostHit] in
-            guard let posts = cachedFeed(book.id) else { return [] }
-            return posts.filter {
-                $0.text.localizedCaseInsensitiveContains(q) || $0.chapter.localizedCaseInsensitiveContains(q)
-            }.map { PostHit(book: book, post: $0) }
-        }
-        return SearchResult(books: bookHits, posts: postHits)
+        return try await scanSearch(query: query, sources: sources)
     }
 
     func likedPosts() async throws -> [PostHit] {

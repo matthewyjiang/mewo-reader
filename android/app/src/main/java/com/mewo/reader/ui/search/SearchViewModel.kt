@@ -7,6 +7,7 @@ import com.mewo.reader.data.CommentIndex
 import com.mewo.reader.data.LibraryStore
 import com.mewo.reader.data.PostComment
 import com.mewo.reader.data.SearchResult
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -26,46 +27,42 @@ class SearchViewModel(
     private val _state = MutableStateFlow(SearchUiState())
     val state: StateFlow<SearchUiState> = _state.asStateFlow()
 
+    // Likes and comment counts belong to books, not queries, so they outlive
+    // every keystroke. The search job below never touches them.
+    private val social = BookSocial(store, viewModelScope) { likes, comments ->
+        _state.update { it.copy(likes = likes, comments = comments) }
+    }
+
+    // The one search that may still publish. A keystroke cancels it and bumps
+    // [generation], so a stale run that ignores cancellation still cannot
+    // publish, even when the text goes back to an older value (a, ab, a).
+    private var searchJob: Job? = null
+    private var generation = 0L
+
+    /**
+     * Shows [query] right away, then publishes its hits as soon as the scan
+     * ends. Likes and comment counts for the hit books load after that, so a
+     * slow network never holds back the results.
+     */
     fun setQuery(query: String) {
+        val gen = ++generation
         _state.update { it.copy(query = query) }
-        viewModelScope.launch {
-            runCatching {
-                val hits = store.search(query)
-                val bookIds = hits.posts.map { it.book.id }.distinct()
-                val likes = bookIds.associateWith { store.likes(it) }
-                val comments = bookIds.associateWith {
-                    runCatching { store.commentIndex(it) }.getOrDefault(CommentIndex())
-                }
-                Triple(hits, likes, comments)
-            }.onSuccess { (hits, likes, comments) ->
-                _state.update { now ->
-                    if (now.query == query) {
-                        now.copy(
-                            result = hits,
-                            likes = now.likes + likes,
-                            comments = now.comments + comments,
-                        )
-                    } else {
-                        now
-                    }
-                }
-            }
+        searchJob?.cancel()
+        searchJob = viewModelScope.launch {
+            val hits = attempt { store.search(query) } ?: return@launch
+            if (gen != generation) return@launch
+            _state.update { it.copy(result = hits) }
+            social.show(hits.posts.map { it.book.id }.distinct())
         }
     }
 
-    fun onCommentsChanged(bookId: String, postId: String, comments: List<PostComment>) {
-        _state.update { now ->
-            val current = now.comments[bookId] ?: CommentIndex()
-            now.copy(comments = now.comments + (bookId to current.afterThread(postId, comments)))
-        }
-    }
+    /** Reloads likes and comment counts for the shown books, e.g. when the screen comes back. */
+    fun refreshSocial() = social.markStale()
 
-    fun toggleLike(bookId: String, postId: String) {
-        viewModelScope.launch {
-            val next = store.toggleLike(bookId, postId)
-            _state.update { it.copy(likes = it.likes + (bookId to next)) }
-        }
-    }
+    fun onCommentsChanged(bookId: String, postId: String, comments: List<PostComment>) =
+        social.onThreadChanged(bookId, postId, comments)
+
+    fun toggleLike(bookId: String, postId: String) = social.toggleLike(bookId, postId)
 
     companion object {
         fun factory(store: LibraryStore) = object : ViewModelProvider.Factory {

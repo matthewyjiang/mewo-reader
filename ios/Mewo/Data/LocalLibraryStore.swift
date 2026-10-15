@@ -158,21 +158,12 @@ final class LocalLibraryStore: LibraryStore {
     }
 
     func search(query: String) async throws -> SearchResult {
-        let q = query.trimmingCharacters(in: .whitespacesAndNewlines)
-        if q.isEmpty { return SearchResult() }
+        if query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { return SearchResult() }
         if books.isEmpty { books = readLibrary().books }
-        let bookHits = books.filter {
-            $0.title.localizedCaseInsensitiveContains(q)
-                || $0.author.localizedCaseInsensitiveContains(q)
-                || $0.handle.localizedCaseInsensitiveContains(q)
+        let sources = books.map {
+            SearchSource(book: $0, feedFile: root.appendingPathComponent($0.id).appendingPathComponent("feed.json"), cacheVersion: feedCacheVersion)
         }
-        let postHits = books.flatMap { book -> [PostHit] in
-            guard let posts = cachedFeed(book.id) else { return [] }
-            return posts.filter {
-                $0.text.localizedCaseInsensitiveContains(q) || $0.chapter.localizedCaseInsensitiveContains(q)
-            }.map { PostHit(book: book, post: $0) }
-        }
-        return SearchResult(books: bookHits, posts: postHits)
+        return try await scanSearch(query: query, sources: sources)
     }
 
     func likedPosts() async throws -> [PostHit] {

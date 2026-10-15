@@ -12,6 +12,7 @@
     onjump: (index: number) => void;
     onclose: () => void;
   } = $props();
+  let keys = $derived(headings.map(({ post }) => post.id));
   let scroller = $state<HTMLDivElement>();
   let timeline = $state<ReturnType<typeof Timeline>>();
 
@@ -35,7 +36,7 @@
     {#if !headings.length}
       <p class="inline-status">No chapters</p>
     {:else if scroller}
-      <Timeline bind:this={timeline} count={headings.length} {scroller}>
+      <Timeline bind:this={timeline} {keys} {scroller}>
         {#snippet row(index: number)}
           <button
             class="chapter-row"

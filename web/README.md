@@ -20,10 +20,22 @@ Open the URL Vite prints. It proxies `/v1` to `http://localhost:8787`. If signup
 
 ## Check and build
 
+Tests use Node 22 or newer for its built-in TypeScript support.
+
 ```bash
+npm test
 npm run check
 npm run build
 ```
+
+Browser tests check keyboard focus and scroll when background updates change search results:
+
+```bash
+npx playwright install chromium
+npm run test:browser
+```
+
+The server-image workflow runs these tests in Chromium as well as the unit tests and type checks.
 
 Vite writes `web/dist`. `MEWO_VERSION` and `MEWO_COMMIT`, when set for `npm run build`, are the version and short commit under Settings → About. When unset, the build uses `git describe` and `git rev-parse --short=7 HEAD`.
 

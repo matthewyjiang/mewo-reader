@@ -25,6 +25,7 @@
   let error = $state('');
   let chapters = $state(false);
   let visibleIndex = $state(0);
+  let postKeys = $derived([...posts.map((post) => `post:${post.id}`), 'end']);
   let headings = $derived(
     posts.flatMap((post, index) => post.kind === 'Heading' ? [{ post, index }] : []),
   );
@@ -61,7 +62,7 @@
       await tick();
       if (!active) return;
       const saved = router.scroll.get(entryKey);
-      if (saved && typeof saved !== 'number') await jump(saved.index, false, saved.offset);
+      if (saved && typeof saved !== 'number') await timeline?.restore(saved);
       else if (posts.length) await jump(visibleIndex, false);
       else scroller.scrollTop = 0;
       chrome.reset(scroller.scrollTop);
@@ -120,7 +121,7 @@
 {:else if book}
   <Timeline
     bind:this={timeline}
-    count={posts.length + 1}
+    keys={postKeys}
     {scroller}
     inset={chrome.shown ? 56 : 0}
     onvisible={track}
