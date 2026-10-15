@@ -65,4 +65,15 @@ adb install -r android/app/build/outputs/apk/debug/app-debug.apk
 adb shell am start -n com.mewo.reader/.MainActivity
 ```
 
-The headless `mewo` AVD is `bash scripts/android-emulator.sh`. Specs, KVM, and when to use it: [AGENTS.md](../AGENTS.md).
+## Headless emulator
+
+`scripts/android-emulator.sh` installs the `mewo` AVD when it is missing, boots it, and waits until `sys.boot_completed` is 1. The image is a medium phone (1080x2400, API 36, Google APIs, x86_64) with no camera cutout. A cutout sits on the status bar and covers the top of the app.
+
+```bash
+bash scripts/android-emulator.sh
+adb install -r android/app/build/outputs/apk/debug/app-debug.apk
+adb shell am start -n com.mewo.reader/.MainActivity
+adb exec-out screencap -p > /tmp/mewo.png
+```
+
+`scripts/android-emulator.sh install` installs the system image and creates the AVD, then exits. Layout screenshots belong in Paparazzi. See [AGENTS.md](../AGENTS.md). Use this emulator when the shot has to come from a system image.
