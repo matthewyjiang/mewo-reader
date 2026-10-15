@@ -8,57 +8,57 @@ adaptive
 
 ## Stack
 
-delegated: Kotlin and Jetpack Compose on Android, SwiftUI on iPhone, Svelte for the hosted web app. Both phones use the matching Readium toolkit to parse local EPUBs into text elements. Rust (axum, sqlx, SQLite) for the optional hosted library. The server stores files and library state, parses hosted books into posts once on upload, and serves the web app. Every client reads those posts, so post ids line up for likes and notes.
+delegated: Kotlin and Jetpack Compose on Android, SwiftUI on iPhone, Svelte for the hosted web app. Both phones use the matching Readium toolkit to parse local EPUBs. Rust (axum, sqlx, SQLite) for the hosted library. The server parses hosted books once on upload and serves the web app. Clients read those posts, so post ids line up for likes and notes.
 
 ## Users
 
-Matt and a few people he might hand an APK or an Xcode/TestFlight install to. They sideload EPUB files from the device and read them. Hosted mode is for the same people on a server they run, each with their own account.
+People who sideload an APK or install from Xcode or TestFlight, and who may sign into a server they run. No catalog and no store listing.
 
 ## Product Purpose
 
-Mewo is a phone EPUB reader. You import a book from the file picker and read it as a vertical feed, one paragraph per post. Success is opening a real EPUB and scrolling it like a timeline without fighting pagination.
+Import an EPUB and read it as a vertical feed, one paragraph per post.
 
 ## Positioning
 
-The book is a timeline. Each paragraph is a post from the author. Neighboring readers paginate or scroll a typeset page; this one does not.
+The book is a timeline. Each paragraph is a post. The chrome is Twitter or X, light or dark.
 
 ## Operating Context
 
-Used on a phone, often in bed or on a couch, one-handed. Books come from files the user already has, or from a hosted shelf they signed into. Local asks for a handle on first launch, and after an APK update if none is saved. Name is optional. This is not a password. Hosted still uses a server account. No catalog. Share the APK, not a store listing.
+Phone first, one-handed. Books come from files already on the device, or from a hosted shelf. Local asks for a handle on first launch, and after an update if none is saved. Name is optional. That handle is not a password. Hosted uses a server account.
 
 ## Capabilities and Constraints
 
-- Set a local handle on first launch, and after an APK update if none is saved. Name is optional. Change both later in Settings.
-- Import EPUB from the system file picker
-- Persist the library on device, or on a hosted server you sign into
-- Read the hosted shelf in a browser from the server's own address. The web app has no local shelf
-- Read as a vertical feed: one post per paragraph, including long ones
-- Start the feed at the first non-publisher TOC entry, not copyright or contents
-- Remember reading place per book. A book read to the last post sits under Finished on Home, and returns to the timeline if you leave off earlier
-- Jump to a heading from the chapter line or the reader title
-- Hide the title bar and tab bar when scrolling down a feed, show them when scrolling up
-- Like a passage and keep that like
-- Leave a note on a line. Local notes stay on the phone. Hosted notes are public to everyone on that server
-- Search books and opened posts
-- See liked lines in one feed
-- Open a profile from the account drawer or a reply. Posts are that person's replies, each shown with the original line. Own posts come later.
-- Pick Twitter or X display, light or dark
-- Pick how big posts read; bars and buttons stay on the system size
-- Local shelf uses the name and handle you set. Hosted shelf uses username and password. Hosted books are one shelf for every account. Likes and reading place stay per person. Notes on a line are public. The two shelves do not merge or sync.
-- No OPDS or DRM in this version
+- Set a local handle on first launch, and after an update if none is saved. Name is optional. Change both in Settings → Account.
+- Import an EPUB from the system file picker, or open the bundled sample.
+- Keep a library on the device, or sign into a hosted server. The two shelves do not merge or sync.
+- Read the hosted shelf in a browser at the server's own address. The web app has no local shelf. See [web/README.md](web/README.md).
+- Read as a vertical feed: one post per paragraph, including long ones.
+- Start the feed at the first non-publisher table-of-contents entry.
+- Remember reading place per book, per account on a host. A book left on the last post sits under Finished on Home, and returns to the timeline if you leave off earlier.
+- Jump to a heading from the chapter line or the reader title.
+- Hide the title bar and tab bar when scrolling down a feed, and show them when scrolling up.
+- Like a passage. Likes stay per account.
+- Leave a note on a line. Local notes stay on the phone. Hosted notes are visible to accounts that can see the book.
+- Search books and posts from books already opened.
+- See liked lines in one feed.
+- Open a profile from the account drawer or a reply. The profile lists that person's replies, each with the original line.
+- Pick Twitter or X, light or dark. Pick how big posts read. Bars and buttons stay on the system size.
+- On a hosted shelf, a new book is private until the owner shares it. The built-in sample is on every signed-in shelf. Home groups My books, Shared with me, and Finished. Only the owner can delete a book or change sharing. Anyone who can see a book can read it, like a post, comment, and move their own reading place.
+- Settings → About shows the app build and, when a host is signed in, `GET /v1/version` plus the server URL.
+- No OPDS or DRM.
 
 ## Brand Commitments
 
 - Name: Mewo
-- Reading surface is pinned: it should look and feel like scrolling a timeline. Avatar, name, handle, body, action row, hairline dividers, vertical infinite scroll. Not a typeset book page. Chrome is Twitter or X, light or dark, chosen by the user.
+- The reading surface is a timeline: avatar, name, handle, body, action row, hairline dividers, vertical scroll. Visual rules: [DESIGN.md](DESIGN.md).
 
 ## Evidence on Hand
 
-No real library, covers, or user books in the repo. Bundle a short public-domain sample so the empty state can open something immediately. Do not invent reviews, user counts, or store claims.
+No personal library is in the repo. A short public-domain sample is bundled so the empty state can open a book. Do not invent reviews, user counts, or store claims.
 
 ## Product Principles
 
-- The feed is the reader. If it looks like a book layout, it failed.
-- Local reading does not need a network. Hosted is a shared shelf you opt into.
-- One-handed phone use is the default scene.
-- Friends getting an APK or an Xcode/TestFlight install should understand the app without a tour.
+- The feed is the reader.
+- Local reading does not need a network. Hosted is a shelf you opt into.
+- One-handed phone use is the default.
+- Someone who receives an APK or a TestFlight install should understand the app without a tour.

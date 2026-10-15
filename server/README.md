@@ -1,120 +1,112 @@
 # Server
 
-Hosted library and optional web app for Mewo. Phones talk to the API through `HostedLibraryStore`.
+Hosted library for Mewo, and the process that serves the web app. Phones call it through `HostedLibraryStore`. Local phone books stay on the device and still use Readium.
 
-Local and hosted are different shelves. This process is the hosted one. A book is private to the account that added it until that account shares it. The built-in sample stays visible to every signed-in account. Likes and reading place stay per account. Notes on a line are visible to accounts that can see the book. The server parses hosted EPUBs into one canonical feed for Android, iOS, and the web app. Local phone books still use Readium.
+A book is private to the account that added it until that account shares it. The built-in sample is visible to every signed-in account. Likes and reading place stay per account. Notes on a line are visible to accounts that can see the book. `GET /library` returns books you added, books other accounts shared, and the sample.
+
+Rust 1.88 (`rust-toolchain.toml`). Version strings: [root README](../README.md#version-and-release).
 
 ## Run
-
-Rust 1.88. From this directory:
 
 ```bash
 cargo run
 ```
 
-Listens on `0.0.0.0:8787`. Data lands in `./data` (`mewo.db` plus uploaded files).
+Listens on `0.0.0.0:8787`. Data lands in `./data` (`mewo.db` plus uploaded files). On a phone on the same LAN the URL is `http://<that-machine>:8787`.
 
-`GET /v1/version` reports `git describe --tags --always --dirty` for this checkout, with one leading `v` removed, and the 7-character sha. A release image uses the tag instead; see Docker.
-
-On a phone on the same LAN, the server URL is `http://<that-machine>:8787`.
+`GET /v1/version` is public and reports the version compiled into this binary.
 
 ## Docker
 
-From the repository root (the image builds both `server/` and `web/`):
+From the repository root. The image builds `server/` and `web/`.
 
 ```bash
 docker build -f server/Dockerfile -t mewo-server .
 docker run --rm -p 8787:8787 -v mewo-data:/data mewo-server
 ```
 
-Same env vars as below. The image serves the built web app at `/` with `MEWO_WEB_DIR=/srv/web`. Keep `/data` on a volume or the next `docker run` starts with an empty shelf.
-
-Pass the release identity as build args. `MEWO_VERSION` is the tag without the leading `v` (`v0.1.2` → `0.1.2`). `MEWO_COMMIT` is the short git sha. The tag workflow sets both, and they override git. The image has no `.git` directory, so omitting the args uses the `Cargo.toml` version, a null commit, and `web/package.json` for the bundle. A local build inside a checkout uses `git describe --tags --always --dirty` (one leading `v` removed) and `git rev-parse --short=7 HEAD` when the args are unset. These are compile-time values. Setting them on `docker run` does not change `GET /v1/version`.
+`.dockerignore` excludes `.git`, so a plain `docker build` has nothing for `git describe` to read. Pass the release identity as build args, or the image uses the `Cargo.toml` / `web/package.json` version and a null commit. `MEWO_VERSION` is the tag with the leading `v` removed (`v0.1.5` → `0.1.5`). `MEWO_COMMIT` is the 7-character sha. Both are compile-time. Setting them on `docker run` does not change `GET /v1/version`.
 
 ```bash
 docker build -f server/Dockerfile \
-  --build-arg MEWO_VERSION=0.1.2 \
+  --build-arg MEWO_VERSION=0.1.5 \
   --build-arg MEWO_COMMIT=abc1234 \
   -t mewo-server .
 ```
 
-Pushes to `main` that touch `server/` or `web/` publish `ghcr.io/matthewyjiang/mewo-reader/server`. Tags: `latest`, `sha-<commit>`, and a semver tag if you push `v*`. A `v*` tag bakes that version and the short sha into the server and the web bundle.
+The image serves the web build at `/` with `MEWO_WEB_DIR=/srv/web`. Keep `/data` on a volume. The process runs as uid 10001. A bind-mounted host directory has to be writable by that uid.
+
+Pushes to `main` that touch `server/`, `web/`, `.dockerignore`, or `.github/workflows/server-image.yml` publish `ghcr.io/matthewyjiang/mewo-reader/server`, tagged `latest` and `sha-<commit>`. Those builds pass the sha and an empty version, so `/v1/version` reports the crate version plus that sha. A `v*` tag publishes the image tagged with that version and bakes the tag and sha into the binary and the web bundle. `workflow_dispatch` publishes too. The same tag builds the Android APK. Deploying the image is outside this repo.
 
 ```bash
 docker pull ghcr.io/matthewyjiang/mewo-reader/server:latest
 docker run --rm -p 8787:8787 -v mewo-data:/data ghcr.io/matthewyjiang/mewo-reader/server:latest
 ```
 
-The package is private until you flip it public under the repo's Packages tab. A 403 on pull means log in with a token that can read packages, or make the package public.
-
-The process runs as uid 10001. If you bind-mount a host directory, that directory needs to be writable by that uid.
+The package is private until it is made public. A 403 on pull means the token cannot read packages, or the package is still private.
 
 ## Env
 
-- `MEWO_LISTEN` default `0.0.0.0:8787`
-- `MEWO_DATA_DIR` default `data`
-- `MEWO_WEB_DIR` unset by default (API only). When set to an existing directory, serves its static files and falls back to `index.html` for client-side routes. Relative paths are relative to the process's working directory. Unknown `/v1/...` routes always return a JSON 404, never the web app. For a local web build, run from `server/` with `MEWO_WEB_DIR=../web/dist`.
-- `MEWO_DATABASE_URL` default `sqlite://<data>/mewo.db?mode=rwc`
-- `MEWO_ALLOW_SIGNUP` default on. Set `0` or `false` when the box faces the internet.
-- `MEWO_MAX_EPUB_BYTES` default `67108864` (64 MiB)
+Runtime:
 
-Parsing reads at most `MAX_EPUB_TEXT_BYTES` (32 MiB) of inflated XML/XHTML per book. The most text measured is War and Peace (epub3.images) at 4_240_089 bytes, and a retail novel at 1_070_316, so 32 MiB is about 8x the biggest real book and stops a ZIP bomb before it becomes a DOM. Over budget is a 400 that names the budget, the limit, and the asked size. A missing or broken NCX is treated as no table of contents, like Readium.
+- `MEWO_LISTEN` — default `0.0.0.0:8787`
+- `MEWO_DATA_DIR` — default `data`
+- `MEWO_WEB_DIR` — unset means API only. An existing directory is served as static files, with `index.html` for other non-API paths. Relative paths are relative to the process working directory. Unknown `/v1/...` routes stay a JSON 404. From `server/`, a local web build is `MEWO_WEB_DIR=../web/dist`. The image sets `/srv/web`
+- `MEWO_DATABASE_URL` — default `sqlite://<data>/mewo.db?mode=rwc`. SQLite only
+- `MEWO_ALLOW_SIGNUP` — default on when unset. A set value is on only for `1`, `true`, `yes`, or `on` (any case). Use `false` when the server faces the internet
+- `MEWO_MAX_EPUB_BYTES` — default `67108864` (64 MiB)
 
-The cap is 64 MiB because the bundled sample is 2_886 bytes, Gutenberg War and Peace (epub3.images) is 1_824_099, and illustrated Pride and Prejudice (epub3.images) is 24_835_578. That leaves room for a heavy illustrated novel and still rejects a dump. The HTTP body limit is that cap plus 4 MiB for a cover and 64 KiB of form fields. A 413 names the budget, the limit, and the asked size.
+Compile-time, via `build.rs`: `MEWO_VERSION`, `MEWO_COMMIT`. See [Version and release](../README.md#version-and-release).
 
-Postgres is not wired. The schema stays boring (text ids, integer millis) so that can be a URL swap later.
+Parsing reads at most `MAX_EPUB_TEXT_BYTES` (32 MiB) of inflated XML/XHTML per book (`src/epub.rs`). A cover is at most 4 MiB. The HTTP body limit is the EPUB cap plus 4 MiB plus 64 KiB of form fields. Over budget is a 400 or 413 that names the budget, the limit, and the asked size.
 
 ## Auth
 
 Username and password. Argon2 hashes. Opaque bearer tokens. A session lasts until logout.
 
-`POST /v1/auth/register` and `POST /v1/auth/login` take `{ "username": "...", "password": "..." }` and return `{ "token", "username" }`. Username is 3 to 32 characters, letters, digits, underscore. Unique case-insensitively. Password is at least 8 characters.
+`POST /v1/auth/register` and `POST /v1/auth/login` take `{ "username", "password" }` and return `{ "token", "username" }`. Username is 3 to 32 characters, letters, digits, underscore, unique case-insensitively. Password is 8 to 256 characters.
 
-`GET /v1/version` is public. All remaining API routes need `Authorization: Bearer <token>`. Static web files are public.
+`GET /v1/version` is public. Static web files are public. Every other `/v1` route needs `Authorization: Bearer <token>`.
 
 ## Routes
 
 Prefix `/v1`.
 
-- `GET /version` → `{ "version": "0.1.2-1-gabcdef0", "commit": "abcdef0" }`. Public. Release images set `version` from the tag (`v` removed) and `commit` from the short sha. Other builds use `git describe --tags --always --dirty` (one leading `v` removed) and a 7-character sha. With no git and no build args, `version` is the `Cargo.toml` version and `commit` is null.
+- `GET /version` → `{ "version", "commit" }`. `commit` is a string or null. Public
 - `POST /auth/register`
 - `POST /auth/login`
-- `POST /auth/logout`
-- `GET /me`
+- `POST /auth/logout` → 204
+- `GET /me` → `{ "username" }`
 - `GET /library` → `{ "books": [ BookRecord ] }`
-- `POST /books` multipart: required `epub`; optional `cover`, `title`, `author`, `handle`, `isSample`
+- `POST /books` multipart. Required `epub`. Optional `cover`, `title`, `author`, `handle`, `isSample`
 - `GET /books/{id}`
-- `DELETE /books/{id}`
+- `PATCH /books/{id}` `{ "progressIndex"?, "shared"? }`. `postCount` is accepted and ignored. Only the owner may set `shared`. Another account that can see the book gets 403. A book you cannot see is 404
+- `DELETE /books/{id}` → 204. Owner only. Anyone else who can see it gets 403
 - `GET /books/{id}/epub`
-- `GET /books/{id}/posts` → `{ "posts": [ { "id": "0", "kind": "Heading" | "Body", "text": "...", "chapter": "..." } ] }`
+- `GET /books/{id}/posts` → `{ "posts": [ { "id": "0", "kind": "Heading" | "Body", "text", "chapter" } ] }`
 - `GET /books/{id}/cover`
-- `PATCH /books/{id}` `{ "progressIndex"?, "shared"? }` (`postCount` is accepted for old clients but ignored; the server owns it). Only the owner may set `shared`. Another account that can see the book gets 403. A book you cannot see is 404.
-- `GET /books/{id}/likes` `{ "ids": [...] }`
-- `POST /books/{id}/likes/{postId}` toggle
-- `GET /books/{id}/comments` `{ "counts": { "0": 2 }, "mine": ["0"] }`
-- `GET /books/{id}/comments/{postId}` `{ "comments": [ Comment ] }`
-- `POST /books/{id}/comments/{postId}` `{ "text": "..." }`
+- `GET /books/{id}/likes` → `{ "ids" }`
+- `POST /books/{id}/likes/{postId}` toggles
+- `GET /books/{id}/comments` → `{ "counts": { "0": 2 }, "mine": ["0"] }`
+- `GET /books/{id}/comments/{postId}` → `{ "comments": [ { "id", "username", "text", "createdAt", "mine" } ] }`
+- `POST /books/{id}/comments/{postId}` `{ "text" }`
 - `DELETE /books/{id}/comments/{postId}/{commentId}`
-- `GET /profiles/{username}/replies` `{ "username", "replies": [ { "bookId", "postId", "comment" } ] }` newest first. Unknown username is an empty list.
+- `GET /profiles/{username}/replies` → `{ "username", "replies": [ { "bookId", "postId", "comment" } ] }`, newest first. An unknown username is an empty list. Lines from a book you cannot see are omitted
 
-Book JSON: `id`, `title`, `author`, `handle`, `importedAt`, `postCount`, `progressIndex`, `isSample`, `mine`, `shared`, `ownerUsername`. `mine` is true when you added it. `shared` is true when the owner has shared it. `ownerUsername` is that account.
+Book JSON: `id`, `title`, `author`, `handle`, `importedAt`, `postCount`, `progressIndex`, `isSample`, `mine`, `shared`, `ownerUsername`.
 
-`GET /library` returns books you added, books other accounts shared, and the built-in sample. A new upload is private (`shared` false). Books already on the shelf when sharing shipped stay shared. Opening, downloading, or commenting on a book you cannot see is 404, including that book's lines in `GET /profiles/{username}/replies`. Only the owner can delete a book or change `shared`. Anyone who can see a book can move their own reading place, like a post, and comment. Reading place and likes stay per account.
+A new upload is private (`shared` false). Books already on the shelf when sharing shipped stay shared. Opening, downloading, or commenting on a book you cannot see is 404. Anyone who can see a book can move their own reading place, like a post, and comment.
 
-Uploads are parsed before entering the shelf. Missing or empty title/author fields use OPF metadata, then `Untitled` / `Unknown`. Missing handles use the phone's slug rule: lowercase ASCII letters/digits, first 18, or `author` when empty. A missing cover uses the EPUB's cover image if it fits the existing 4 MiB cover budget. Covers keep the `cover.jpg` filename on disk, but the response identifies JPEG, PNG, GIF, or WebP from magic bytes. Bad EPUBs return 400 `Could not read that EPUB: <reason>`.
+Uploads are parsed before they enter the shelf. Empty title or author uses OPF metadata, then `Untitled` / `Unknown`. An empty handle uses the phone slug rule: lowercase ASCII letters and digits, first 18, or `author`. A missing cover uses the EPUB cover when it fits the 4 MiB cover budget. The file on disk is named `cover.jpg`; the response content type comes from magic bytes (JPEG, PNG, GIF, or WebP). A bad EPUB is 400 `Could not read that EPUB: <reason>`.
 
-Posts are stored in each book's `posts.json`; IDs are sequential decimal index strings. Books uploaded before server parsing get their feed and `postCount` filled lazily on the first `GET /books/{id}/posts`. Concurrent fills are serialized and caches use a temporary file plus atomic rename.
+Posts live in each book's `posts.json`. IDs are sequential decimal index strings. Books uploaded before server parsing get their feed and `postCount` filled on the first `GET /books/{id}/posts`. Feed assembly is in `src/epub.rs` and `src/feed.rs`.
 
-Feed assembly ports Android's TOC title selection, publisher-chrome skipping, heading de-duplication and chapter tracking. HTML segmentation follows Readium Kotlin 3.3.0's block/media/line-break boundaries, using the block tag table from JSoup 1.22.2 (the version Readium 3.3.0 ships), so `ins`, `del`, `canvas`, `audio`, and `video` stay inline and whitespace rules (including non-breaking spaces). See `src/epub.rs` for deviations: HTML5 tree repair, one entity-decoding pass, UTF-8 input, skipping noscript/template fallback text, and explicit h1–h6 heading roles (Readium currently emits Body roles). Heading recognition changes kinds/chapters, not indexes; parser differences in unusual/malformed documents can affect legacy phone indexes. The parser does not render CSS or support DRM.
+`isSample=true` keeps one sample. A second sample upload returns the first row.
 
-`isSample=true` keeps one sample for the server. A second upload returns the first row.
-
-A comment is at most 2000 characters. The compose field shows about 8 lines of 40 characters. A long paragraph in the sample books stays under 1000. 2000 is six times the visible field. A 400 names the budget and the asked length. Empty text is 400 "Write something first."
+A comment is at most 2000 characters. Empty text is 400 `Write something first.` A 400 names the budget and the asked length.
 
 ## Tests
 
 ```bash
 cargo test
 ```
-
-Register, login, public version, real EPUB uploads and metadata defaults, canonical posts, lazy cache fills, bad EPUBs, cover MIME detection, static/history routing, progress, likes, comments, profile replies, download, delete, per-book sharing, private books, the sharing migration, per-person progress, signup off, oversized EPUB. Parser unit tests cover EPUB3 nav, EPUB2 NCX, a broken NCX, front matter, heading de-duplication, entities/segmentation, JSoup inline tags, the text budget, and the bundled sample.

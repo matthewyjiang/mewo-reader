@@ -2,7 +2,8 @@
 # System packages mise can't provide (usbmuxd for xtool) are listed in README.md.
 
 [tools]
-# android/: matches CI (actions/setup-java temurin 17) and the app's JVM target.
+# App bytecode target is JVM 17. Gradle needs JDK 21: Paparazzi is applied
+# to :app and CI uses Temurin 21. This pin is the bytecode JDK, not JAVA_HOME.
 java = "temurin-17"
 # web/ and the server image's web stage (node:22-bookworm-slim).
 node = "22"
