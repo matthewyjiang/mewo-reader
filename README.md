@@ -1,139 +1,32 @@
 # Mewo
 
-An EPUB reader that turns a book into an X-style timeline. One paragraph is one post. You scroll. You can comment on a line, like it, quote it, or share it.
+An EPUB reader that turns a book into a timeline. One paragraph is one post. Like a line, comment on it, quote it, or share it.
 
-This repo holds both sides:
+## Layout
 
 ```
-android/   Android phone app
-ios/       iPhone app
-server/    hosted library API, also serves the web app
-web/       browser app for the hosted shelf (Svelte)
+android/   phone app (Kotlin, Jetpack Compose)
+ios/       phone app (SwiftUI)
+server/    hosted library API; also serves the web app
+web/       hosted shelf in the browser (Svelte)
 ```
 
-Import a file from the picker, or tap **Open a sample** if you just want to see the feed.
-
-Android is Kotlin, Jetpack Compose, and [Readium](https://github.com/readium/kotlin-toolkit) for parsing. iPhone is SwiftUI and the [Readium Swift toolkit](https://github.com/readium/swift-toolkit). The reader itself is the app's timeline, not Readium's page navigator. Open `android/` in Android Studio, or `ios/Mewo.xcodeproj` in Xcode.
+Phones use [Readium](https://github.com/readium/kotlin-toolkit) to parse local books. The server parses hosted books, so Android, iPhone, and the web app read the same posts. Local and hosted shelves stay separate.
 
 ## Toolchains
 
-[mise](https://mise.jdx.dev) pins everything in `mise.toml`: JDK 17, Node 22, Rust 1.88, and Swift 6.4 plus [xtool](https://github.com/xtool-org/xtool) for iPhone builds on Linux. From the repo root:
+`mise install` at the repo root installs the pins in `mise.toml`: Node 22, Rust 1.88, Swift 6.4, and [xtool](https://github.com/xtool-org/xtool) on Linux. Android Gradle needs JDK 21 because Paparazzi is applied to `:app`. The app still targets JVM 17. The Android SDK, and `usbmuxd` for xtool, come from outside mise.
+
+## Quick start
+
+**Android.** JDK 21 and Android SDK 36. [android/README.md](android/README.md)
 
 ```bash
-mise install
-```
-
-mise sets `JAVA_HOME` for you. The Android SDK and `usbmuxd` (xtool) still come from outside mise.
-
-## Android
-
-### Requirements
-
-- Android 8 (API 26) or newer
-- JDK 17+ to build
-- Android SDK with `platforms;android-36`
-
-### Build
-
-```bash
-export JAVA_HOME=/path/to/jdk-21   # skip if you use mise
-export ANDROID_HOME=/path/to/Android/Sdk
 cd android
 ./gradlew :app:assembleDebug --max-workers=12
 ```
 
-The APK lands at `android/app/build/outputs/apk/debug/app-debug.apk`.
-
-### Release
-
-A tag `vMAJOR.MINOR.PATCH` (example: `v0.1.0`) runs `:app:assembleRelease` in CI. The workflow sets `versionName` from the tag and `versionCode` to `major * 1000000 + minor * 1000 + patch`, then attaches `mewo-<version>.apk` to the GitHub Release.
-
-PRs that touch `android/` run the same Gradle task without signing, so a broken release compile fails the PR. `workflow_dispatch` builds a signed APK when you want one without tagging.
-
-Friends who already installed a debug APK have to uninstall it before a release APK will install. The signatures differ. Later `v*` releases then upgrade in place.
-
-#### Signing secrets
-
-CI signs with a release keystore. Create one and keep a backup outside this repo:
-
-```bash
-keytool -genkeypair -v \
-  -keystore mewo-release.jks \
-  -keyalg RSA -keysize 2048 -validity 10000 \
-  -alias mewo \
-  -storetype JKS
-```
-
-Set these repo Actions secrets (`gh secret set NAME`):
-
-- `MEWO_STORE_BASE64` - `base64 -w0 mewo-release.jks` (on macOS: `base64 < mewo-release.jks | tr -d '\n'`)
-- `MEWO_STORE_PASSWORD`
-- `MEWO_KEY_ALIAS` - `mewo` if you used the command above
-- `MEWO_KEY_PASSWORD`
-
-A tagged release fails out loud if any of those are missing.
-
-#### Local release build
-
-```bash
-export MEWO_STORE_FILE=/path/to/mewo-release.jks
-export MEWO_STORE_PASSWORD=...
-export MEWO_KEY_ALIAS=mewo
-export MEWO_KEY_PASSWORD=...
-cd android
-./gradlew :app:assembleRelease --max-workers=12
-```
-
-The APK lands at `android/app/build/outputs/apk/release/app-release.apk`. You can put the same four names in `~/.gradle/gradle.properties` instead of exporting them.
-
-### Sideload
-
-Mewo is not on the Play Store. You install the APK yourself.
-
-#### On a phone
-
-1. Copy `app-debug.apk` onto the phone (USB, Drive, AirDrop-to-adjacent-Android, whatever).
-2. Open the file. Android will ask you to allow installs from that app (Files, Drive, Messages, etc.). Allow it.
-3. Tap Install.
-
-If the phone refuses the package, check Settings > Apps > Special app access > Install unknown apps, and turn it on for the app you used to open the APK.
-
-#### With adb
-
-Plug the phone in, turn on USB debugging (Settings > Developer options), then:
-
-```bash
-adb install -r android/app/build/outputs/apk/debug/app-debug.apk
-adb shell am start -n com.mewo.reader/.MainActivity
-```
-
-Same commands work on an emulator.
-
-#### Handing it to a friend
-
-Send them the APK. Tell them to open the file on the phone and allow the one-time "install unknown apps" prompt. First open asks for a handle. They do not need Android Studio, adb, or a Google account for Mewo.
-
-Debug builds expire in the sense that you can overwrite them with `adb install -r`. They use the local debug keystore, not the release key. Send friends a GitHub Release APK, not `app-debug.apk`.
-
-### Emulator
-
-```bash
-export ANDROID_HOME=/path/to/Android/Sdk
-export QT_QPA_PLATFORM=xcb   # if you're on Wayland
-$ANDROID_HOME/emulator/emulator -avd mewo -gpu host
-```
-
-The `mewo` AVD in this repo's notes is a medium phone image, not a Pixel with a camera hole. The hole covers the system status bar and makes the top of the app look broken.
-
-## iPhone
-
-### Requirements
-
-- A Mac with full Xcode 26 or newer (the Command Line Tools package is not enough)
-- The iOS 26 SDK
-- [XcodeGen](https://github.com/yonaskolb/XcodeGen) if you need to regenerate `Mewo.xcodeproj` (`brew install xcodegen`)
-
-### Build on a Mac
+**iPhone.** [ios/README.md](ios/README.md)
 
 ```bash
 cd ios
@@ -141,54 +34,27 @@ xcodegen generate
 xcodebuild -project Mewo.xcodeproj -scheme Mewo -destination 'platform=iOS Simulator,name=iPhone 17' -jobs 12 build
 ```
 
-Install from Xcode onto a phone or Simulator. This is not an App Store listing. Friends get a TestFlight build or an Xcode install, same idea as the Android APK.
-
-### Build on Linux
-
-[xtool](https://github.com/xtool-org/xtool) builds `ios/Package.swift` into an `.app` and installs it on a USB-connected iPhone. There is no Simulator on Linux. `mise install` provides Swift 6.4 and xtool. You also need:
-
-- `usbmuxd` (`sudo apt-get install usbmuxd`)
-- an `Xcode.xip` from <https://developer.apple.com/download/all/?q=Xcode> (Apple ID login, browser only)
-
-One-time setup. This logs in to Apple and builds the iOS SDK from the xip:
-
-```bash
-xtool setup
-```
-
-Then build, or build and install on the plugged-in phone:
-
-```bash
-cd ios
-xtool dev build
-xtool dev
-```
-
-`Package.swift`, `xtool.yml`, and `xtool-Info.plist` exist only for xtool. Xcode builds still use `project.yml`. If you add a Swift package, a bundled resource, or an `Info.plist` key, update both sides.
-
-`ios/mise.toml` points `PKG_CONFIG_PATH` at a stub `zlib.pc` in `ios/xtool-pkgconfig/`. Without it, Readium's ZIPFoundation picks up the Linux host's zlib and the iOS link fails with `libz.so: unhandled file type` ([xtool#140](https://github.com/xtool-org/xtool/issues/140)). Run xtool from `ios/` with mise active so the stub applies. If an old failed build is cached, `rm .build/manifest.pif` first.
-
-xtool can't compile `Assets.xcassets`. Linux builds get the plain `AppIcon.png` and no alternate Teddy icon, `MewoTeddy` header image, accent color, or launch screen image. Use a Mac build to check those.
-
-## Server
-
-Rust API for the hosted shelf. See [server/README.md](server/README.md).
+**Server.** Rust 1.88. Listens on `0.0.0.0:8787`. [server/README.md](server/README.md)
 
 ```bash
 cd server
 cargo run
 ```
 
-Or pull the image CI publishes to GHCR:
+**Web.** Node 22. The dev server proxies `/v1` to port 8787. [web/README.md](web/README.md)
 
 ```bash
-docker run --rm -p 8787:8787 -v mewo-data:/data ghcr.io/matthewyjiang/mewo-reader/server:latest
+cd web
+npm ci
+npm run dev
 ```
 
-That listens on port 8787. In the app, open the account drawer, pick **Hosted server**, and sign in with that URL. Local books stay on the phone. Hosted books live on the server. They do not merge. See [server/README.md](server/README.md) for env vars and the Dockerfile.
+## Version and release
 
-The server parses hosted books, so Android, iPhone, and the web app all read the same posts. Readium on the phones only parses local books.
+This is the version source of truth. Component READMEs only add how each build passes it through.
 
-## Web
+`git describe --tags --always --dirty`, with one leading `v` removed, is the version for a server binary, a web bundle, and an iOS app built in a checkout. Describe only sees tags that clone has fetched. `MEWO_VERSION` overrides it. `MEWO_COMMIT` overrides `git rev-parse --short=7 HEAD`. With no git and no override, the server and the web bundle use the version in `Cargo.toml` or `web/package.json` and omit the commit. iOS then keeps `MARKETING_VERSION` from `ios/project.yml`.
 
-The image also serves a browser app for the hosted shelf at `/` on the same port. Open `http://<server>:8787` and sign in. It has no local shelf. See [web/README.md](web/README.md) for running it against a dev server.
+Android `versionName` is `MEWO_VERSION_NAME`. When that is unset, Gradle uses the `versionName` default in `android/app/build.gradle.kts`. `versionCode` is `MEWO_VERSION_CODE`, or `1`. The short commit is `MEWO_COMMIT` or `git rev-parse --short=7 HEAD`, stored in `BuildConfig.COMMIT`. Android does not use `git describe` for `versionName`.
+
+Pushing a `vMAJOR.MINOR.PATCH` tag (the `v0.1.*` releases) builds the server image and a signed Android APK, and attaches `mewo-<version>.apk` to the GitHub Release. CI sets `MEWO_VERSION` / `MEWO_VERSION_NAME` from the tag with the leading `v` removed, and `versionCode` to `major * 1000000 + minor * 1000 + patch`. Deploying the image is outside this repo.
