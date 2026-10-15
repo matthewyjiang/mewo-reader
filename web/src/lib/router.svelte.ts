@@ -1,6 +1,7 @@
 /** Tiny history router: real URLs, browser Back, and per-entry feed scroll positions. */
+import type { TimelineAnchor } from './timeline';
+
 export type Tab = 'home' | 'search' | 'likes';
-export interface ReaderAnchor { index: number; offset: number }
 
 interface Entry {
   mewo: true;
@@ -32,8 +33,8 @@ function entry(): Entry {
 class Router {
   url = $state(new URL(location.href));
   current = $state<Entry>(entry());
-  scroll = new Map<string, number | ReaderAnchor>();
-  tabScroll = new Map<Tab, number | ReaderAnchor>();
+  scroll = new Map<string, number | TimelineAnchor>();
+  tabScroll = new Map<Tab, number | TimelineAnchor>();
   fromTab = $state(false);
   beforeChange: (() => void) | undefined;
 

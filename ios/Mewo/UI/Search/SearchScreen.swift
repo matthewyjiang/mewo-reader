@@ -1,29 +1,26 @@
 import SwiftUI
 
 /// Search state. The query updates at once; each change cancels the last
-/// search, and only the newest search may publish. Hits show before likes
-/// and comment counts load.
+/// scan, and only the newest scan may publish. Hits show before likes and
+/// comment counts load. Each hit book's likes and comments live in a
+/// `BookSocial` that outlives the query, so typing never restarts them.
 @Observable
 @MainActor
 final class SearchViewModel {
     var query = ""
     var result = SearchResult()
-    var likes: [String: Set<String>] = [:]
-    var comments: [String: CommentIndex] = [:]
+    private var socials: [String: BookSocial] = [:]
     private let library: LibraryStore
-    /// The running search and social load. Tests await it.
+    /// The running scan. Tests await it.
     @ObservationIgnored private(set) var searchTask: Task<Void, Never>?
-    /// Bumped per search, so a search started for an older query (even the
-    /// same text typed again) cannot publish.
+    /// Bumped per scan, so a scan started for an older query (even the same
+    /// text typed again) cannot publish.
     @ObservationIgnored private var generation = 0
-    /// Books whose likes and comments loaded since the screen last appeared.
-    @ObservationIgnored private var hydrated: Set<String> = []
-    /// A completed toggle wins over an older likes load for that book.
-    @ObservationIgnored private var likeEdits: [String: Int] = [:]
-    /// Replay edited threads over an incoming index without losing other counts.
-    @ObservationIgnored private var commentEdits: [String: [String: [PostComment]]] = [:]
 
     init(library: LibraryStore) { self.library = library }
+
+    /// Likes and comment counts for a book, once a search has hit it.
+    func social(for bookId: String) -> BookSocial? { socials[bookId] }
 
     func setQuery(_ query: String) {
         if query == self.query { return }
@@ -31,17 +28,17 @@ final class SearchViewModel {
         run()
     }
 
-    /// Searches again and reloads likes and comments, which may have changed
-    /// in the reader. Called when the screen appears.
+    /// Searches again and marks every book's likes and comments due, since
+    /// they may have changed in the reader. Shown values stay until the
+    /// reload lands. Called when the screen appears.
     func refresh() {
-        hydrated.removeAll()
+        for social in socials.values { social.invalidate() }
         run()
     }
 
     private func run() {
         searchTask?.cancel()
         generation += 1
-        commentEdits.removeAll()
         let token = generation
         let query = self.query
         if query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
@@ -52,49 +49,111 @@ final class SearchViewModel {
         searchTask = Task {
             guard let hits = try? await library.search(query: query), token == generation else { return }
             result = hits
-            await hydrate(hits, token: token)
-        }
-    }
-
-    /// Loads likes and comment counts for hit books not loaded yet, one book
-    /// at a time, publishing each as it lands. A response that returns after
-    /// a newer search or refresh started is dropped, even if the store ignored
-    /// cancellation. Newer likes and edited threads keep the user's changes.
-    private func hydrate(_ hits: SearchResult, token: Int) async {
-        var seen = Set<String>()
-        for hit in hits.posts where seen.insert(hit.book.id).inserted && !hydrated.contains(hit.book.id) {
-            let id = hit.book.id
-            let likeEdit = likeEdits[id, default: 0]
-            let liked = try? await library.likes(id: id)
-            guard token == generation else { return }
-            guard let liked else { continue }
-            var index = (try? await library.commentIndex(id: id)) ?? CommentIndex()
-            guard token == generation else { return }
-            let likesFresh = likeEdits[id, default: 0] == likeEdit
-            for (postId, thread) in commentEdits[id] ?? [:] {
-                index = index.afterThread(postId: postId, comments: thread)
-            }
-            if likesFresh { likes[id] = liked }
-            comments[id] = index
-            if likesFresh { hydrated.insert(id) }
+            for hit in hits.posts { social(hit.book.id).load() }
         }
     }
 
     /// Returns the request so tests can await it.
     @discardableResult
     func toggleLike(bookId: String, postId: String) -> Task<Void, Never> {
-        return Task {
-            if let next = try? await library.toggleLike(id: bookId, postId: postId) {
-                likeEdits[bookId, default: 0] += 1
-                likes[bookId] = next
-            }
-        }
+        social(bookId).toggleLike(postId: postId)
     }
 
     func onCommentsChanged(bookId: String, postId: String, comments: [PostComment]) {
-        commentEdits[bookId, default: [:]][postId] = comments
-        let current = self.comments[bookId] ?? CommentIndex()
-        self.comments[bookId] = current.afterThread(postId: postId, comments: comments)
+        social(bookId).threadChanged(postId: postId, comments: comments)
+    }
+
+    private func social(_ bookId: String) -> BookSocial {
+        if let social = socials[bookId] { return social }
+        let social = BookSocial(id: bookId, library: library)
+        socials[bookId] = social
+        return social
+    }
+}
+
+/// Likes and comment counts for one book. Callers that overlap share one
+/// load. Each field caches on success; on failure it keeps its last value
+/// and stays due, so the next `load` retries it. A like toggle or thread
+/// edit that lands during a load wins over that load's older answer.
+@Observable
+@MainActor
+final class BookSocial {
+    /// Nil until the first successful load or toggle.
+    private(set) var likes: Set<String>?
+    /// Nil until the first successful load or thread edit.
+    private(set) var comments: CommentIndex?
+    /// The running load. Tests await it.
+    @ObservationIgnored private(set) var pending: Task<Void, Never>?
+    @ObservationIgnored private var likesDue = true
+    @ObservationIgnored private var commentsDue = true
+    /// Bumped by `invalidate`, so a load started before it cannot publish.
+    @ObservationIgnored private var epoch = 0
+    /// Bumped per completed toggle. A load drops its likes if this moved.
+    @ObservationIgnored private var likeEdits = 0
+    /// Threads edited while `pending` runs, replayed over its index.
+    @ObservationIgnored private var threadEdits: [String: [PostComment]] = [:]
+    private let id: String
+    private let library: LibraryStore
+
+    init(id: String, library: LibraryStore) {
+        self.id = id
+        self.library = library
+    }
+
+    /// Loads the due fields, unless a load is running or nothing is due.
+    func load() {
+        guard pending == nil, likesDue || commentsDue else { return }
+        let epoch = self.epoch
+        let likeEdits = self.likeEdits
+        let wantLikes = likesDue
+        let wantComments = commentsDue
+        pending = Task {
+            var liked: Set<String>?
+            var index: CommentIndex?
+            if wantLikes { liked = try? await library.likes(id: id) }
+            if wantComments { index = try? await library.commentIndex(id: id) }
+            guard epoch == self.epoch else { return }
+            pending = nil
+            if let liked, likeEdits == self.likeEdits {
+                likes = liked
+                likesDue = false
+            }
+            if var index {
+                for (postId, thread) in threadEdits {
+                    index = index.afterThread(postId: postId, comments: thread)
+                }
+                comments = index
+                commentsDue = false
+            }
+            threadEdits.removeAll()
+        }
+    }
+
+    /// Marks both fields due and drops the running load, whose answer may
+    /// predate changes made elsewhere. Shown values stay until a reload lands.
+    func invalidate() {
+        epoch += 1
+        pending = nil
+        threadEdits.removeAll()
+        likesDue = true
+        commentsDue = true
+    }
+
+    /// The store answers a toggle with the whole like set, so it counts as
+    /// a fresh load of likes.
+    func toggleLike(postId: String) -> Task<Void, Never> {
+        Task {
+            guard let next = try? await library.toggleLike(id: id, postId: postId) else { return }
+            likeEdits += 1
+            likes = next
+            likesDue = false
+        }
+    }
+
+    /// Applies an edited thread at once and keeps the other posts' counts.
+    func threadChanged(postId: String, comments thread: [PostComment]) {
+        comments = (comments ?? CommentIndex()).afterThread(postId: postId, comments: thread)
+        if pending != nil { threadEdits[postId] = thread }
     }
 }
 
@@ -205,14 +264,15 @@ struct SearchScreen: View {
                     if !model.result.posts.isEmpty {
                         section("Posts")
                         ForEach(model.result.posts) { hit in
+                            let social = model.social(for: hit.book.id)
                             TimelinePost(
                                 post: hit.post,
                                 author: hit.book.author,
                                 handle: hit.book.handle,
                                 cover: app.library.coverFile(id: hit.book.id),
-                                liked: model.likes[hit.book.id]?.contains(hit.post.id) == true,
-                                commentCount: model.comments[hit.book.id]?.count(hit.post.id) ?? 0,
-                                commented: model.comments[hit.book.id]?.commented(hit.post.id) == true,
+                                liked: social?.likes?.contains(hit.post.id) == true,
+                                commentCount: social?.comments?.count(hit.post.id) ?? 0,
+                                commented: social?.comments?.commented(hit.post.id) == true,
                                 onComment: { commentTarget = CommentTarget(book: hit.book, post: hit.post) },
                                 onLike: { model.toggleLike(bookId: hit.book.id, postId: hit.post.id) },
                                 onRepost: { shareText = quoteLine(author: hit.book.author, title: hit.book.title, text: hit.post.text) },

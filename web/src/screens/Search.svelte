@@ -12,58 +12,54 @@
   import type { SearchResults } from '../lib/search';
   import { store, message } from '../lib/store.svelte';
 
-  type Row = { kind: 'heading'; title: string }
-    | { kind: 'book'; book: BookRecord } | { kind: 'post'; hit: PostHit };
-  const empty: SearchResults = { books: [], posts: [] };
+  type Row = { key: string } & ({ kind: 'heading'; title: string }
+    | { kind: 'book'; book: BookRecord } | { kind: 'post'; hit: PostHit });
+  const empty = { query: '', books: [], posts: [] };
   let { scroller, query, oncomment }: FeedScreenProps & { query: string } = $props();
-  let results = $state.raw<SearchResults>(empty);
+  let results = $state.raw<SearchResults & { query: string }>(empty);
   let pending = $state(false);
-  let firstResults = true;
-  let resultQuery = '';
   let timeline = $state<ReturnType<typeof Timeline>>();
   const entryKey = untrack(() => router.current.key);
-  const savedScroll = router.scroll.get(entryKey);
+  const initialQuery = untrack(() => query);
+  let initialScroll = router.scroll.get(entryKey);
 
   export function capture(): void {
-    const anchor = timeline && query.trim() && query === resultQuery ? timeline.anchor() : 0;
+    const anchor = timeline && query.trim() && query === results.query ? timeline.anchor() : 0;
     router.scroll.set(entryKey, anchor);
     router.tabScroll.set('search', anchor);
   }
   onMount(() => restoreScroll(scroller));
   let rows = $derived<Row[]>([
-    ...(results.books.length ? [{ kind: 'heading' as const, title: 'Books' },
-      ...results.books.map((book) => ({ kind: 'book' as const, book }))] : []),
-    ...(results.posts.length ? [{ kind: 'heading' as const, title: 'Posts' },
-      ...results.posts.map((hit) => ({ kind: 'post' as const, hit }))] : []),
+    ...(results.books.length ? [{ key: 'books', kind: 'heading' as const, title: 'Books' },
+      ...results.books.map((book) => ({ key: JSON.stringify(['book', book.id]), kind: 'book' as const, book }))] : []),
+    ...(results.posts.length ? [{ key: 'posts', kind: 'heading' as const, title: 'Posts' },
+      ...results.posts.map((hit) => ({ key: JSON.stringify(['post', hit.book.id, hit.post.id]), kind: 'post' as const, hit }))] : []),
   ]);
+  let keys = $derived(rows.map((row) => row.key));
 
   $effect(() => {
     const text = query;
-    // Track shelf/feed changes as well as typing, but not social state.
     const books = [...store.books];
     const feeds = store.feeds;
     const controller = new AbortController();
     pending = !!text.trim();
     if (!text.trim()) {
       results = empty;
+      initialScroll = undefined;
       scroller.scrollTop = 0;
       chrome.reset();
     } else {
       void searchLibrary(books, feeds, text, controller.signal).then(async (next) => {
         if (!next || controller.signal.aborted) return;
-        // Pixel offsets change when virtual rows are measured again. Keep the
-        // visible row on return or a shelf refresh; a new query starts at the top.
-        const restore = firstResults ? savedScroll
-          : text === resultQuery ? timeline?.anchor() : 0;
-        results = next;
-        resultQuery = text;
+        const newQuery = text !== results.query;
+        const saved = text === initialQuery ? initialScroll : undefined;
+        results = { query: text, ...next };
         pending = false;
-        firstResults = false;
         await tick();
         if (controller.signal.aborted) return;
-        if (restore && typeof restore !== 'number') {
-          await timeline?.jump(restore.index, restore.offset);
-        } else scroller.scrollTop = restore ?? 0;
+        if (saved && typeof saved !== 'number') await timeline?.restore(saved);
+        else if (newQuery) await timeline?.jump(0);
+        initialScroll = undefined;
         if (!controller.signal.aborted) chrome.reset(scroller.scrollTop);
       });
     }
@@ -89,8 +85,8 @@
       <h2>No matches</h2>
     </div>
   {:else if query.trim() && rows.length}
-    {#key results}
-      <Timeline bind:this={timeline} count={rows.length} {scroller} inset={56} onadjust={(y) => chrome.rebase(y)}>
+    {#key results.query}
+      <Timeline bind:this={timeline} {keys} {scroller} inset={56} onadjust={(y) => chrome.rebase(y)}>
         {#snippet row(index: number)}
           {@const item = rows[index]}
           {#if item.kind === 'heading'}

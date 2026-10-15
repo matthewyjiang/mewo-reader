@@ -1,13 +1,15 @@
 <script module lang="ts">
-  export interface TimelineAnchor { index: number; offset: number }
+  export type { TimelineAnchor } from '../lib/timeline';
 </script>
 
 <script lang="ts">
   import { onMount, tick, untrack } from 'svelte';
   import type { Snippet } from 'svelte';
+  import { TimelineLayout } from '../lib/timeline';
+  import type { TimelineAnchor } from '../lib/timeline';
 
-  let { count, scroller, inset = 0, row, onvisible, onadjust }: {
-    count: number;
+  let { keys, scroller, inset = 0, row, onvisible, onadjust }: {
+    keys: readonly string[];
     scroller: HTMLElement;
     inset?: number;
     row: Snippet<[number]>;
@@ -15,54 +17,25 @@
     onadjust?: (scrollTop: number) => void;
   } = $props();
 
-  // Estimated heights live in a Fenwick tree: offset/jump lookup is logarithmic,
-  // while only the viewport and one viewport of overscan create DOM/components.
-  // 192px is the previous feed's four-line-plus-chrome intrinsic height estimate.
-  const estimate = 192;
-  const heights = new Map<number, number>();
-  // The owning keyed destination remounts when its dataset changes.
-  const size = untrack(() => count);
-  const tree = new Float64Array(size + 1);
-  for (let i = 1; i <= size; i++) tree[i] = (i & -i) * estimate;
+  const layout = new TimelineLayout(untrack(() => keys));
+  let renderKeys = $state.raw(layout.keys);
   let version = $state(0);
   let start = $state(0);
   let end = $state(0);
   let root = $state<HTMLDivElement>();
-  const nodes = new Map<number, HTMLElement>();
+  const nodes = new Map<string, HTMLElement>();
   let observer: ResizeObserver;
   let frame = 0;
   let active = true;
+  let mounted = false;
   let jumping = false;
-  let lastAnchor: TimelineAnchor = { index: 0, offset: 0 };
+  let jumpGeneration = 0;
+  let lastAnchor: TimelineAnchor = { key: layout.keys[0] ?? '', index: 0, offset: 0 };
 
-  function offset(index: number): number {
-    let total = 0;
-    for (let i = index; i > 0; i -= i & -i) total += tree[i];
-    return total;
-  }
-
-  function indexAt(y: number): number {
-    let index = 0;
-    let total = 0;
-    let bit = 1;
-    while (bit * 2 <= count) bit *= 2;
-    for (; bit; bit >>= 1) {
-      const next = index + bit;
-      if (next <= count && total + tree[next] <= y) {
-        index = next;
-        total += tree[next];
-      }
+  function measure(): void {
+    for (const [key, node] of nodes) {
+      if (layout.measure(key, node.getBoundingClientRect().height)) version++;
     }
-    return Math.min(index, Math.max(0, count - 1));
-  }
-
-  function measure(index: number, height: number): void {
-    if (!height) return;
-    const delta = height - (heights.get(index) ?? estimate);
-    if (!delta) return;
-    heights.set(index, height);
-    for (let i = index + 1; i <= count; i += i & -i) tree[i] += delta;
-    version++;
   }
 
   function top(): number {
@@ -73,80 +46,112 @@
   export function anchor(): TimelineAnchor {
     if (!root?.isConnected) return lastAnchor;
     const line = scroller.getBoundingClientRect().top + inset;
-    for (const [index, node] of nodes) {
+    for (const [key, node] of nodes) {
       const box = node.getBoundingClientRect();
-      if (box.top <= line && box.bottom > line) {
-        lastAnchor = { index, offset: line - box.top };
+      const index = layout.indexOf(key);
+      if (index >= 0 && box.top <= line && box.bottom > line) {
+        lastAnchor = { key, index, offset: line - box.top };
         return lastAnchor;
       }
     }
     const y = Math.max(0, scroller.scrollTop + inset - top());
-    const index = indexAt(y);
-    lastAnchor = { index, offset: Math.max(0, y - offset(index)) };
+    const index = layout.indexAt(y);
+    lastAnchor = { key: layout.keys[index] ?? '', index, offset: Math.max(0, y - layout.offset(index)) };
     return lastAnchor;
   }
 
-  function update(report = true): void {
-    const y = Math.max(0, scroller.scrollTop - top());
+  function windowAt(y: number): void {
     // One viewport on either side tolerates fast scrolling without a fixed row cap.
     const overscan = scroller.clientHeight;
-    start = indexAt(Math.max(0, y - overscan));
-    end = count ? Math.min(count, indexAt(y + scroller.clientHeight + overscan) + 1) : 0;
+    start = layout.indexAt(Math.max(0, y - overscan));
+    end = layout.keys.length
+      ? Math.min(layout.keys.length, layout.indexAt(y + scroller.clientHeight + overscan) + 1) : 0;
+  }
+
+  function update(report = true): void {
+    windowAt(Math.max(0, scroller.scrollTop - top()));
     if (report && !jumping) onvisible?.(anchor());
   }
+
+  // Preserve surviving DOM nodes, their focus, and the visible row when a
+  // background load inserts results. Metadata-only updates need no layout work.
+  $effect.pre(() => {
+    const next = keys;
+    untrack(() => {
+      if (layout.matches(next)) return;
+      const saved = anchor();
+      layout.reset(next);
+      renderKeys = layout.keys;
+      version++;
+      if (!mounted) return;
+      const generation = ++jumpGeneration;
+      jumping = true;
+      const index = layout.resolve(saved);
+      windowAt(Math.max(0, layout.offset(index) + saved.offset - inset));
+      void tick().then(() => {
+        if (active && generation === jumpGeneration) void restore(saved);
+      });
+    });
+  });
 
   function schedule(): void {
     if (frame) return;
     frame = requestAnimationFrame(() => { frame = 0; update(); });
   }
 
-  function observe(node: HTMLElement, index: number) {
-    nodes.set(index, node);
+  function observe(node: HTMLElement, key: string) {
+    nodes.set(key, node);
     observer?.observe(node);
-    return { destroy() { observer?.unobserve(node); nodes.delete(index); } };
+    return { destroy() { observer?.unobserve(node); nodes.delete(key); } };
+  }
+
+  export async function restore(saved: TimelineAnchor): Promise<void> {
+    await jump(layout.resolve(saved), layout.indexOf(saved.key) < 0 ? 0 : saved.offset);
   }
 
   export async function jump(index: number, within = 0): Promise<void> {
-    if (!count) return;
+    if (!layout.keys.length) return;
+    const generation = ++jumpGeneration;
     jumping = true;
-    index = Math.min(Math.max(0, index), count - 1);
+    index = Math.min(Math.max(0, index), layout.keys.length - 1);
     // Measuring estimated rows can bring more rows into the render window.
-    // Settle that window before the final alignment, or a late measurement
-    // above the target can move the restored row by an entire paragraph.
-    while (active) {
-      scroller.scrollTop = top() + offset(index) + within - inset;
+    // Settle that window before aligning the target. A newer jump supersedes it.
+    while (active && generation === jumpGeneration) {
+      scroller.scrollTop = top() + layout.offset(index) + within - inset;
       update(false);
       await tick();
-      if (!active) return;
-      for (const [i, node] of nodes) measure(i, node.getBoundingClientRect().height);
+      if (!active || generation !== jumpGeneration) return;
+      measure();
       await tick();
-      if (!active) return;
-      scroller.scrollTop = top() + offset(index) + within - inset;
+      if (!active || generation !== jumpGeneration) return;
+      scroller.scrollTop = top() + layout.offset(index) + within - inset;
       const previousStart = start;
       const previousEnd = end;
       update(false);
       await tick();
       if (start === previousStart && end === previousEnd) break;
     }
-    jumping = false;
+    if (generation === jumpGeneration) jumping = false;
   }
 
-  let above = $derived.by(() => { version; return offset(start); });
-  let below = $derived.by(() => { version; return offset(count) - offset(end); });
+  let above = $derived.by(() => { version; return layout.offset(start); });
+  let below = $derived.by(() => { version; return layout.offset(renderKeys.length) - layout.offset(end); });
   let indices = $derived(Array.from({ length: end - start }, (_, i) => start + i));
 
   onMount(() => {
+    mounted = true;
     observer = new ResizeObserver(() => {
       const saved = anchor();
+      const dataset = renderKeys;
       const scrollTop = scroller.scrollTop;
-      const before = offset(saved.index);
-      for (const [i, node] of nodes) measure(i, node.getBoundingClientRect().height);
-      const delta = offset(saved.index) - before;
+      const before = layout.offset(saved.index);
+      measure();
+      const delta = layout.offset(saved.index) - before;
       void tick().then(() => {
-        if (!active || jumping) return;
+        if (!active || jumping || dataset !== renderKeys) return;
         // Do not undo a reading gesture that arrived while measurements settled.
         if (delta && scroller.scrollTop === scrollTop) {
-          const y = top() + offset(saved.index) + saved.offset - inset;
+          const y = top() + layout.offset(saved.index) + saved.offset - inset;
           onadjust?.(y);
           scroller.scrollTop = y;
         }
@@ -168,8 +173,8 @@
 
 <div bind:this={root} class="virtual-timeline">
   <div style:height={`${above}px`} aria-hidden="true"></div>
-  {#each indices as index (index)}
-    <div use:observe={index} data-post-index={index}>{@render row(index)}</div>
+  {#each indices as index (renderKeys[index])}
+    <div use:observe={renderKeys[index]} data-post-index={index}>{@render row(index)}</div>
   {/each}
   <div style:height={`${below}px`} aria-hidden="true"></div>
 </div>

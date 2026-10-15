@@ -52,7 +52,7 @@ final class SearchViewModelTests: XCTestCase {
     }
 
     /// Waits until the fake store reports `condition`. The store calls back on
-    /// every search or likes call, so there is no polling budget.
+    /// every search, likes, or comment index call, so there is no polling budget.
     private func until(_ store: FakeSearchStore, _ condition: @escaping @MainActor () -> Bool) async -> Bool {
         if condition() { return true }
         let done = expectation(description: "store reached state")
@@ -64,6 +64,26 @@ final class SearchViewModelTests: XCTestCase {
         }
         await fulfillment(of: [done], timeout: 5)
         return condition()
+    }
+
+    /// Types `query`, answers its scan with `result`, and waits for the scan.
+    private func search(_ model: SearchViewModel, _ store: FakeSearchStore, _ query: String, _ result: SearchResult) async -> Bool {
+        let count = store.searches.count
+        model.setQuery(query)
+        guard await until(store, { store.searches.count == count + 1 }) else { return false }
+        store.searches[count].resume(returning: result)
+        await model.searchTask?.value
+        return true
+    }
+
+    /// Reopens the screen, answers its scan with `result`, and waits for the scan.
+    private func refresh(_ model: SearchViewModel, _ store: FakeSearchStore, _ result: SearchResult) async -> Bool {
+        let count = store.searches.count
+        model.refresh()
+        guard await until(store, { store.searches.count == count + 1 }) else { return false }
+        store.searches[count].resume(returning: result)
+        await model.searchTask?.value
+        return true
     }
 
     func testOnlyNewestSearchPublishesEvenForRepeatedQuery() async {
@@ -84,107 +104,153 @@ final class SearchViewModelTests: XCTestCase {
         store.searches[1].resume(returning: hits("middle"))
         await first?.value
         await middle?.value
+        await model.social(for: "new")?.pending?.value
         XCTAssertEqual(model.result, hits("new"))
         XCTAssertEqual(store.likeIds, ["new"])
+        XCTAssertNil(model.social(for: "old"))
     }
 
-    func testHitsPublishBeforeLikesLoad() async {
+    func testHitsPublishBeforeLikesLoadAndStayCachedUntilRefresh() async {
         let store = FakeSearchStore()
         store.holdLikes = true
         let model = SearchViewModel(library: store)
-        model.setQuery("a")
-        guard await until(store, { store.searches.count == 1 }) else { return }
-        store.searches[0].resume(returning: hits("a"))
+        guard await search(model, store, "a", hits("a")) else { return }
         guard await until(store, { store.likeCalls.count == 1 }) else { return }
         XCTAssertEqual(model.result, hits("a"))
-        XCTAssertNil(model.likes["a"])
+        XCTAssertNil(model.social(for: "a")?.likes)
 
         store.likeCalls[0].resume(returning: ["p"])
-        await model.searchTask?.value
-        XCTAssertEqual(model.likes["a"], ["p"])
+        await model.social(for: "a")?.pending?.value
+        XCTAssertEqual(model.social(for: "a")?.likes, ["p"])
 
-        // The same book does not load again until the screen reappears.
-        model.setQuery("ab")
-        guard await until(store, { store.searches.count == 2 }) else { return }
-        store.searches[1].resume(returning: hits("a"))
-        await model.searchTask?.value
-        XCTAssertEqual(store.likeCalls.count, 1)
+        // The same book does not load again while it stays cached.
+        guard await search(model, store, "ab", hits("a")) else { return }
+        XCTAssertNil(model.social(for: "a")?.pending)
+        XCTAssertEqual(store.likeIds, ["a"])
 
-        model.refresh()
-        guard await until(store, { store.searches.count == 3 }) else { return }
-        store.searches[2].resume(returning: hits("a"))
+        // Reappearing reloads it, keeping the old likes on screen meanwhile.
+        guard await refresh(model, store, hits("a")) else { return }
         guard await until(store, { store.likeCalls.count == 2 }) else { return }
+        XCTAssertEqual(model.social(for: "a")?.likes, ["p"])
         store.likeCalls[1].resume(returning: [])
-        await model.searchTask?.value
-        XCTAssertEqual(model.likes["a"], [])
+        await model.social(for: "a")?.pending?.value
+        XCTAssertEqual(model.social(for: "a")?.likes, [])
     }
 
-    /// The fake ignores cancellation, like a slow request that still answers.
-    func testStaleLikesDoNotPublish() async {
+    /// Typing while a book's likes load joins that load instead of starting
+    /// another. The fake ignores cancellation, like a slow request.
+    func testTypingReusesPendingBookLoad() async {
         let store = FakeSearchStore()
         store.holdLikes = true
         let model = SearchViewModel(library: store)
-        model.setQuery("a")
-        guard await until(store, { store.searches.count == 1 }) else { return }
-        let old = model.searchTask
-        store.searches[0].resume(returning: hits("a"))
+        guard await search(model, store, "a", hits("a")) else { return }
         guard await until(store, { store.likeCalls.count == 1 }) else { return }
+        let load = model.social(for: "a")?.pending
 
-        // A new query lands while likes for "a" are in flight.
-        model.setQuery("b")
-        store.likeCalls[0].resume(returning: ["stale"])
-        await old?.value
-        XCTAssertNil(model.likes["a"])
+        guard await search(model, store, "ab", hits("a")) else { return }
+        XCTAssertEqual(model.social(for: "a")?.pending, load)
+        model.setQuery("")
+        XCTAssertEqual(model.social(for: "a")?.pending, load)
 
-        // The new search finds the same book, so it loads again.
-        guard await until(store, { store.searches.count == 2 }) else { return }
-        let second = model.searchTask
-        store.searches[1].resume(returning: hits("a"))
-        guard await until(store, { store.likeCalls.count == 2 }) else { return }
-
-        // A refresh lands while that load is in flight.
-        model.refresh()
-        store.likeCalls[1].resume(returning: ["stale"])
-        await second?.value
-        XCTAssertNil(model.likes["a"])
-
-        guard await until(store, { store.searches.count == 3 }) else { return }
-        store.searches[2].resume(returning: hits("a"))
-        guard await until(store, { store.likeCalls.count == 3 }) else { return }
-        store.likeCalls[2].resume(returning: ["fresh"])
-        await model.searchTask?.value
-        XCTAssertEqual(model.likes["a"], ["fresh"])
+        store.likeCalls[0].resume(returning: ["p"])
+        await load?.value
+        XCTAssertEqual(store.likeIds, ["a"])
+        XCTAssertEqual(store.commentReads, 1)
+        XCTAssertEqual(model.social(for: "a")?.likes, ["p"])
     }
 
-    /// A like or comment made while the first load is in flight wins over
-    /// that load's older answer.
+    /// A failed field keeps its last value and loads again on the next hit;
+    /// a field that loaded does not.
+    func testFailedFieldRetriesAndKeepsLastValue() async {
+        let store = FakeSearchStore()
+        let model = SearchViewModel(library: store)
+        store.commentFailures = 1
+        guard await search(model, store, "a", hits("a")) else { return }
+        await model.social(for: "a")?.pending?.value
+        XCTAssertNil(model.social(for: "a")?.comments)
+
+        store.index = CommentIndex(counts: ["p": 4])
+        guard await search(model, store, "ab", hits("a")) else { return }
+        await model.social(for: "a")?.pending?.value
+        XCTAssertEqual(store.commentReads, 2)
+        XCTAssertEqual(store.likeIds, ["a"])
+        XCTAssertEqual(model.social(for: "a")?.comments?.count("p"), 4)
+
+        // A failed reload keeps the counts already shown, then retries.
+        store.commentFailures = 1
+        store.index = CommentIndex(counts: ["p": 5])
+        guard await refresh(model, store, hits("a")) else { return }
+        await model.social(for: "a")?.pending?.value
+        XCTAssertEqual(model.social(for: "a")?.comments?.count("p"), 4)
+        guard await search(model, store, "a", hits("a")) else { return }
+        await model.social(for: "a")?.pending?.value
+        XCTAssertEqual(store.commentReads, 4)
+        XCTAssertEqual(store.likeIds, ["a", "a"])
+        XCTAssertEqual(model.social(for: "a")?.comments?.count("p"), 5)
+    }
+
+    /// A like or comment made while a load is in flight wins over that load's
+    /// older answer, and the edited thread keeps the other posts' counts.
     func testUserEditsWinOverInFlightSocialLoad() async {
         let store = FakeSearchStore()
         store.holdLikes = true
         let model = SearchViewModel(library: store)
-        model.setQuery("a")
-        guard await until(store, { store.searches.count == 1 }) else { return }
-        store.searches[0].resume(returning: hits("a"))
+        guard await search(model, store, "a", hits("a")) else { return }
         guard await until(store, { store.likeCalls.count == 1 }) else { return }
 
         store.toggled = ["p"]
         await model.toggleLike(bookId: "a", postId: "p").value
-        XCTAssertEqual(model.likes["a"], ["p"])
+        XCTAssertEqual(model.social(for: "a")?.likes, ["p"])
         store.index = CommentIndex(counts: ["other": 3])
         let reply = PostComment(id: "c", username: "me", text: "hi", createdAt: 0, mine: true)
         model.onCommentsChanged(bookId: "a", postId: "p", comments: [reply])
+        XCTAssertEqual(model.social(for: "a")?.comments?.count("p"), 1)
 
         store.likeCalls[0].resume(returning: [])
-        await model.searchTask?.value
-        XCTAssertEqual(model.likes["a"], ["p"])
-        XCTAssertEqual(model.comments["a"]?.count("p"), 1)
-        XCTAssertEqual(model.comments["a"]?.commented("p"), true)
-        XCTAssertEqual(model.comments["a"]?.count("other"), 3)
+        await model.social(for: "a")?.pending?.value
+        let social = model.social(for: "a")
+        XCTAssertEqual(social?.likes, ["p"])
+        XCTAssertEqual(social?.comments?.count("p"), 1)
+        XCTAssertEqual(social?.comments?.commented("p"), true)
+        XCTAssertEqual(social?.comments?.count("other"), 3)
+
+        // An edit after the load lands merges into the loaded counts.
+        model.onCommentsChanged(bookId: "a", postId: "q", comments: [reply, reply])
+        XCTAssertEqual(social?.comments?.count("q"), 2)
+        XCTAssertEqual(social?.comments?.count("other"), 3)
+
+        // The toggle counts as fresh likes, so a new query loads nothing.
+        guard await search(model, store, "ab", hits("a")) else { return }
+        XCTAssertNil(model.social(for: "a")?.pending)
+        XCTAssertEqual(store.likeIds, ["a"])
+    }
+
+    /// A load in flight when the screen reappears may predate changes made in
+    /// the reader, so its answer is dropped and a new load replaces it.
+    func testRefreshDropsInFlightLoad() async {
+        let store = FakeSearchStore()
+        store.holdLikes = true
+        let model = SearchViewModel(library: store)
+        guard await search(model, store, "a", hits("a")) else { return }
+        guard await until(store, { store.likeCalls.count == 1 }) else { return }
+        let old = model.social(for: "a")?.pending
+
+        guard await refresh(model, store, hits("a")) else { return }
+        guard await until(store, { store.likeCalls.count == 2 }) else { return }
+        XCTAssertNotEqual(model.social(for: "a")?.pending, old)
+        store.likeCalls[0].resume(returning: ["stale"])
+        await old?.value
+        XCTAssertNil(model.social(for: "a")?.likes)
+
+        store.likeCalls[1].resume(returning: ["fresh"])
+        await model.social(for: "a")?.pending?.value
+        XCTAssertEqual(model.social(for: "a")?.likes, ["fresh"])
     }
 }
 
 /// Library whose searches wait until the test resumes them. Likes answer at
-/// once unless `holdLikes` is set. Neither honors cancellation.
+/// once unless `holdLikes` is set. Comment index reads fail while
+/// `commentFailures` is above zero. Nothing honors cancellation.
 @MainActor
 private final class FakeSearchStore: LibraryStore {
     var books: [BookRecord] = []
@@ -194,7 +260,9 @@ private final class FakeSearchStore: LibraryStore {
     var likeIds: [String] = []
     var toggled: Set<String> = []
     var index = CommentIndex()
-    /// Runs after each search or likes call is recorded.
+    var commentFailures = 0
+    var commentReads = 0
+    /// Runs after each search, likes, or comment index call is recorded.
     var onCall: (() -> Void)?
 
     func search(query: String) async throws -> SearchResult {
@@ -214,7 +282,15 @@ private final class FakeSearchStore: LibraryStore {
             onCall?()
         }
     }
-    func commentIndex(id: String) async throws -> CommentIndex { index }
+    func commentIndex(id: String) async throws -> CommentIndex {
+        commentReads += 1
+        onCall?()
+        if commentFailures > 0 {
+            commentFailures -= 1
+            throw URLError(.notConnectedToInternet)
+        }
+        return index
+    }
 
     func load() async throws {}
     func importFromFile(_ file: URL) async throws -> BookRecord { throw CancellationError() }

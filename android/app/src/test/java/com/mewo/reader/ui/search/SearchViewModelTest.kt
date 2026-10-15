@@ -89,6 +89,31 @@ class SearchViewModelTest {
     }
 
     @Test
+    fun aPendingSocialLoadIsReusedByTheNextQuery() = runTest(main) {
+        // Like the hosted client: cancel cannot stop a request already sent.
+        val store = FakeStore(ignoreCancel = true)
+        val vm = SearchViewModel(store)
+
+        vm.setQuery("a")
+        runCurrent()
+        store.finishSearch("a", resultFor("a"))
+        runCurrent()
+        vm.setQuery("ab")
+        runCurrent()
+        store.finishSearch("ab", resultFor("ab"))
+        runCurrent()
+        assertEquals(listOf("likes b1"), store.requests)
+
+        store.likes.getValue(BOOK).complete(setOf("p1"))
+        runCurrent()
+        store.comments.getValue(BOOK).complete(CommentIndex(counts = mapOf("p1" to 2)))
+        advanceUntilIdle()
+        assertEquals(listOf("likes b1", "comments b1"), store.requests)
+        assertEquals(setOf("p1"), vm.state.value.likes[BOOK])
+        assertEquals(2, vm.state.value.comments.getValue(BOOK).count("p1"))
+    }
+
+    @Test
     fun hitsShowBeforeLikesAndCommentsLoad() = runTest(main) {
         val store = FakeStore()
         val vm = SearchViewModel(store)
@@ -108,7 +133,7 @@ class SearchViewModelTest {
     }
 
     @Test
-    fun socialFromAnOldQueryIsDropped() = runTest(main) {
+    fun loadedSocialIsReusedAndFailedFieldsRetry() = runTest(main) {
         val store = FakeStore()
         val vm = SearchViewModel(store)
 
@@ -116,12 +141,99 @@ class SearchViewModelTest {
         runCurrent()
         store.finishSearch("a", resultFor("a"))
         runCurrent()
+        store.likes.getValue(BOOK).complete(setOf("p1"))
+        runCurrent()
+        store.comments.getValue(BOOK).completeExceptionally(RuntimeException("offline"))
+        advanceUntilIdle()
+
+        // Likes stay cached; only the failed comments load again.
         vm.setQuery("ab")
         runCurrent()
-
-        store.likes.getValue(BOOK).complete(setOf("p1"))
+        store.finishSearch("ab", resultFor("ab"))
+        runCurrent()
+        assertEquals(listOf("likes b1", "comments b1", "comments b1"), store.requests)
+        store.comments.getValue(BOOK).complete(CommentIndex(counts = mapOf("p1" to 2)))
         advanceUntilIdle()
-        assertEquals(emptyMap<String, Set<String>>(), vm.state.value.likes)
+        assertEquals(2, vm.state.value.comments.getValue(BOOK).count("p1"))
+
+        // Coming back reloads both, and a failure keeps what was shown.
+        vm.refreshSocial()
+        runCurrent()
+        store.likes.getValue(BOOK).completeExceptionally(RuntimeException("offline"))
+        runCurrent()
+        store.comments.getValue(BOOK).completeExceptionally(RuntimeException("offline"))
+        advanceUntilIdle()
+        assertEquals(setOf("p1"), vm.state.value.likes[BOOK])
+        assertEquals(2, vm.state.value.comments.getValue(BOOK).count("p1"))
+    }
+
+    @Test
+    fun aQueuedLoadIsDroppedWhenItsBookLeavesTheResults() = runTest(main) {
+        val store = FakeStore(ignoreCancel = true)
+        val vm = SearchViewModel(store)
+
+        vm.setQuery("a")
+        runCurrent()
+        store.finishSearch("a", resultForBooks("b1", "b2"))
+        runCurrent()
+        vm.setQuery("x")
+        runCurrent()
+        store.finishSearch("x", resultForBooks("b1", "b3"))
+        runCurrent()
+
+        // b1 is already running, so it finishes; b2 never asks the store.
+        store.likes.getValue("b1").complete(emptySet())
+        runCurrent()
+        store.comments.getValue("b1").complete(CommentIndex())
+        runCurrent()
+        assertEquals(listOf("likes b1", "comments b1", "likes b3"), store.requests)
+    }
+
+    @Test
+    fun anOlderToggleAnswerCannotReplaceANewerOne() = runTest(main) {
+        val store = FakeStore()
+        val vm = SearchViewModel(store)
+
+        vm.toggleLike(BOOK, "p1")
+        runCurrent()
+        val first = store.toggles.getValue(BOOK)
+        store.toggles.remove(BOOK)
+        vm.toggleLike(BOOK, "p1")
+        runCurrent()
+
+        store.toggles.getValue(BOOK).complete(emptySet())
+        runCurrent()
+        first.complete(setOf("p1"))
+        advanceUntilIdle()
+        assertEquals(emptySet<String>(), vm.state.value.likes[BOOK])
+    }
+
+    @Test
+    fun aCommentEditSurvivesALoadThatSpansAQueryChange() = runTest(main) {
+        val store = FakeStore(ignoreCancel = true)
+        val vm = SearchViewModel(store)
+
+        vm.setQuery("a")
+        runCurrent()
+        store.finishSearch("a", resultFor("a"))
+        runCurrent()
+        store.likes.getValue(BOOK).complete(emptySet())
+        runCurrent()
+
+        val mine = PostComment("c1", "me", "hi", createdAt = 1, mine = true)
+        vm.onCommentsChanged(BOOK, "p1", listOf(mine))
+        vm.setQuery("ab")
+        runCurrent()
+        store.finishSearch("ab", resultFor("ab"))
+        runCurrent()
+        store.comments.getValue(BOOK).complete(CommentIndex(counts = mapOf("p2" to 3)))
+        advanceUntilIdle()
+
+        val index = vm.state.value.comments.getValue(BOOK)
+        assertEquals(1, index.count("p1"))
+        assertTrue(index.commented("p1"))
+        assertEquals(3, index.count("p2"))
+        assertEquals(listOf("likes b1", "comments b1"), store.requests)
     }
 
     @Test
@@ -171,9 +283,7 @@ class SearchViewModelTest {
     fun socialLoadsOneRequestAtATime() = runTest(main) {
         val store = FakeStore()
         val vm = SearchViewModel(store)
-        val two = SearchResult(
-            posts = listOf("b1", "b2").map { PostHit(book(it), FeedPost("p1", PostKind.Body, "a", "One")) },
-        )
+        val two = resultForBooks("b1", "b2")
 
         vm.setQuery("a")
         runCurrent()
@@ -217,16 +327,28 @@ class SearchViewModelTest {
 
         override suspend fun likes(id: String): Set<String> {
             requests += "likes $id"
-            return likes.getOrPut(id) { CompletableDeferred() }.await()
+            return answer(likes, id)
         }
 
         override suspend fun commentIndex(id: String): CommentIndex {
             requests += "comments $id"
-            return comments.getOrPut(id) { CompletableDeferred() }.await()
+            return answer(comments, id)
         }
 
-        override suspend fun toggleLike(id: String, postId: String): Set<String> =
-            toggles.getOrPut(id) { CompletableDeferred() }.await()
+        override suspend fun toggleLike(id: String, postId: String): Set<String> {
+            requests += "toggle $id $postId"
+            return answer(toggles, id)
+        }
+
+        /** Waits on the deferred for [id], then clears it so the next call gets a fresh one. */
+        private suspend fun <T> answer(pending: MutableMap<String, CompletableDeferred<T>>, id: String): T {
+            val deferred = pending.getOrPut(id) { CompletableDeferred() }
+            try {
+                return if (ignoreCancel) withContext(NonCancellable) { deferred.await() } else deferred.await()
+            } finally {
+                pending.remove(id, deferred)
+            }
+        }
 
         override val library: StateFlow<LibrarySnapshot> = MutableStateFlow(LibrarySnapshot())
         override suspend fun load() = Unit
@@ -254,6 +376,10 @@ class SearchViewModelTest {
 
         fun resultFor(query: String) = SearchResult(
             posts = listOf(PostHit(book(BOOK), FeedPost("p1", PostKind.Body, "text $query", "One"))),
+        )
+
+        fun resultForBooks(vararg ids: String) = SearchResult(
+            posts = ids.map { PostHit(book(it), FeedPost("p1", PostKind.Body, "a", "One")) },
         )
     }
 }
