@@ -17,6 +17,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListScope
 import androidx.compose.foundation.lazy.items
@@ -35,7 +36,8 @@ import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.Snackbar
+import androidx.compose.material3.SnackbarDefaults
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -158,18 +160,13 @@ fun LibraryScreen(
         }
 
         state.error?.let { message ->
-            Snackbar(
+            LibraryNotice(
+                message = message,
+                onDismiss = viewModel::dismissError,
                 modifier = Modifier
                     .align(Alignment.BottomCenter)
                     .padding(16.dp),
-                action = {
-                    TextButton(onClick = viewModel::dismissError) {
-                        Text("OK")
-                    }
-                },
-            ) {
-                Text(message)
-            }
+            )
         }
 
         pendingDelete?.let { book ->
@@ -182,6 +179,40 @@ fun LibraryScreen(
                 },
                 onDismiss = { pendingDelete = null },
             )
+        }
+    }
+}
+
+@Composable
+internal fun LibraryNotice(
+    message: String,
+    onDismiss: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    // App typography pins page ink; this inverse surface needs its own foreground.
+    val foreground = SnackbarDefaults.contentColor
+    // Keep Material's snackbar surface, but center arbitrary-length messages instead
+    // of using its one-/two-line baseline offsets.
+    Surface(
+        modifier = modifier.widthIn(max = 600.dp),
+        shape = SnackbarDefaults.shape,
+        color = SnackbarDefaults.color,
+        contentColor = foreground,
+        shadowElevation = 6.dp,
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth().padding(start = 16.dp, end = 8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text(
+                text = message,
+                color = foreground,
+                style = MaterialTheme.typography.bodyMedium,
+                modifier = Modifier.weight(1f).padding(top = 14.dp, bottom = 14.dp, end = 8.dp),
+            )
+            TextButton(onClick = onDismiss) {
+                Text("OK", color = foreground)
+            }
         }
     }
 }

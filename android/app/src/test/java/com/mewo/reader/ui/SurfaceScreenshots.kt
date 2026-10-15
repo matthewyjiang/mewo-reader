@@ -5,12 +5,14 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import app.cash.paparazzi.DeviceConfig
@@ -20,11 +22,14 @@ import com.mewo.reader.data.BookRecord
 import com.mewo.reader.data.HostedSession
 import com.mewo.reader.data.LocalProfile
 import com.mewo.reader.ui.components.AccountDrawerContent
+import com.mewo.reader.ui.components.AppTab
 import com.mewo.reader.ui.components.BrandMark
+import com.mewo.reader.ui.components.HomeTabBar
 import com.mewo.reader.ui.components.MewoAppBar
 import com.mewo.reader.ui.components.ProfileButton
 import com.mewo.reader.ui.library.BookPost
 import com.mewo.reader.ui.library.EmptyTimeline
+import com.mewo.reader.ui.library.LibraryNotice
 import com.mewo.reader.ui.library.RemoveBookDialog
 import com.mewo.reader.ui.library.SectionLabel
 import com.mewo.reader.ui.likes.EmptyLikes
@@ -65,6 +70,21 @@ class SurfaceScreenshots {
 
     @Test
     fun hostedLibrary() = shoot("library") { HostedLibrary() }
+
+    @Test
+    fun libraryNotice() = shoot("library-notice", displayThemes = DisplayTheme.entries.map { it.id to it }) {
+        Column(Modifier.fillMaxSize()) {
+            Box(Modifier.weight(1f)) {
+                HostedLibrary()
+                LibraryNotice(
+                    message = "Slouching Towards Bethlehem is private. Use Share on Home when you want others to read it.",
+                    onDismiss = {},
+                    modifier = Modifier.align(Alignment.BottomCenter).padding(16.dp),
+                )
+            }
+            HomeTabBar(selected = AppTab.Home, onSelect = {})
+        }
+    }
 
     @Test
     fun settings() = shoot("settings") {
@@ -150,6 +170,7 @@ class SurfaceScreenshots {
     private fun shoot(
         name: String,
         signedIn: Boolean = true,
+        displayThemes: List<Pair<String, DisplayTheme>> = themes,
         content: @Composable () -> Unit,
     ) {
         val profile = if (name == "onboarding") {
@@ -159,7 +180,7 @@ class SurfaceScreenshots {
         }
         for ((deviceName, device) in devices) {
             paparazzi.unsafeUpdateConfig(deviceConfig = device)
-            for ((themeName, theme) in themes) {
+            for ((themeName, theme) in displayThemes) {
                 paparazzi.snapshot(name = "${name}_${deviceName}_$themeName") {
                     Frame(
                         theme = theme,
