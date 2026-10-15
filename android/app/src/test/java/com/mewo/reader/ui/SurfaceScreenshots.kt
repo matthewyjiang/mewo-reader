@@ -22,7 +22,9 @@ import com.mewo.reader.data.BookRecord
 import com.mewo.reader.data.HostedSession
 import com.mewo.reader.data.LocalProfile
 import com.mewo.reader.ui.components.AccountDrawerContent
+import com.mewo.reader.ui.components.AppTab
 import com.mewo.reader.ui.components.BrandMark
+import com.mewo.reader.ui.components.HomeTabBar
 import com.mewo.reader.ui.components.MewoAppBar
 import com.mewo.reader.ui.components.ProfileButton
 import com.mewo.reader.ui.library.BookPost
@@ -71,13 +73,16 @@ class SurfaceScreenshots {
 
     @Test
     fun libraryNotice() = shoot("library-notice", displayThemes = DisplayTheme.entries.map { it.id to it }) {
-        Box(Modifier.fillMaxSize()) {
-            HostedLibrary()
-            LibraryNotice(
-                message = "Slouching Towards Bethlehem is private. Use Share on Home when you want others to read it.",
-                onDismiss = {},
-                modifier = Modifier.align(Alignment.BottomCenter).padding(16.dp),
-            )
+        Column(Modifier.fillMaxSize()) {
+            Box(Modifier.weight(1f)) {
+                HostedLibrary()
+                LibraryNotice(
+                    message = "Slouching Towards Bethlehem is private. Use Share on Home when you want others to read it.",
+                    onDismiss = {},
+                    modifier = Modifier.align(Alignment.BottomCenter).padding(16.dp),
+                )
+            }
+            HomeTabBar(selected = AppTab.Home, onSelect = {})
         }
     }
 
