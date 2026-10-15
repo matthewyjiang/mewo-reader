@@ -36,6 +36,7 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Snackbar
+import androidx.compose.material3.SnackbarDefaults
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -158,18 +159,13 @@ fun LibraryScreen(
         }
 
         state.error?.let { message ->
-            Snackbar(
+            LibraryNotice(
+                message = message,
+                onDismiss = viewModel::dismissError,
                 modifier = Modifier
                     .align(Alignment.BottomCenter)
                     .padding(16.dp),
-                action = {
-                    TextButton(onClick = viewModel::dismissError) {
-                        Text("OK")
-                    }
-                },
-            ) {
-                Text(message)
-            }
+            )
         }
 
         pendingDelete?.let { book ->
@@ -183,6 +179,26 @@ fun LibraryScreen(
                 onDismiss = { pendingDelete = null },
             )
         }
+    }
+}
+
+@Composable
+internal fun LibraryNotice(
+    message: String,
+    onDismiss: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    // App typography pins page ink; this inverse surface needs its own foreground.
+    val foreground = SnackbarDefaults.contentColor
+    Snackbar(
+        modifier = modifier,
+        action = {
+            TextButton(onClick = onDismiss) {
+                Text("OK", color = foreground)
+            }
+        },
+    ) {
+        Text(message, color = foreground)
     }
 }
 
