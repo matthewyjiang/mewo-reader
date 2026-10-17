@@ -19,7 +19,13 @@ import java.io.File
 interface LibraryStore {
     val library: StateFlow<LibrarySnapshot>
 
+    /** Loading, loaded (optionally refreshing), or failed with an optional saved shelf. */
+    val loadState: StateFlow<LibraryLoad>
+
     suspend fun load()
+
+    /** Drop a failed-with-cache banner once the reader has dismissed it. */
+    fun dismissLoadError() {}
 
     suspend fun importFromUri(uri: Uri): BookRecord
 
@@ -75,6 +81,10 @@ class SwitchingLibraryStore(
     override val library: StateFlow<LibrarySnapshot> = kind
         .flatMapLatest { which -> active(which).library }
         .stateIn(scope, SharingStarted.Eagerly, LibrarySnapshot())
+
+    override val loadState: StateFlow<LibraryLoad> = kind
+        .flatMapLatest { which -> active(which).loadState }
+        .stateIn(scope, SharingStarted.Eagerly, LibraryLoading)
 
     init {
         scope.launch {

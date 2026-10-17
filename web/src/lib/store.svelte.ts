@@ -2,7 +2,14 @@ import { HostedClient } from './api';
 import type {
   AuthResponse, BookRecord, CommentIndex, FeedPost, PostComment, PostHit, ProfileReply,
 } from './models';
+import {
+  indexedPosts, loadCachedPosts, postKey, postPrefix, type PostCache,
+} from './posts';
 import { PendingProgress } from './progress';
+import {
+  phaseFromCache, readShelf, shelfBooks, ShelfCancelled, ShelfRefresh, writeShelf, clearShelf,
+  type LibraryPhase,
+} from './shelf';
 import { readStored, writeStored } from './storage';
 
 export const message = (error: unknown): string => error instanceof Error
@@ -13,10 +20,28 @@ const initialSession = savedSession
   && typeof savedSession.token === 'string' && typeof savedSession.username === 'string'
   ? savedSession : null;
 
+function origin(): string {
+  try {
+    return globalThis.location?.origin ?? '';
+  } catch {
+    return '';
+  }
+}
+
+const initialShelf: LibraryPhase = initialSession
+  ? phaseFromCache(readShelf(origin(), initialSession.username))
+  : { status: 'loading' };
+
 /** Hosted library. Logout and book removal invalidate pending responses. */
 class HostedStore {
   session = $state<AuthResponse | null>(initialSession);
-  books = $state<BookRecord[]>([]);
+  shelf = $state<LibraryPhase>(initialShelf);
+  books = $state<BookRecord[]>(shelfBooks(initialShelf));
+  private readonly refresh = new ShelfRefresh(initialShelf, (phase) => {
+    this.shelf = phase;
+    this.books = shelfBooks(phase);
+  });
+  private readonly posts: PostCache;
   // Parsed text is immutable. Avoid deep proxies for thousands of paragraphs.
   feeds = $state.raw<Record<string, FeedPost[]>>({});
   likes = $state<Record<string, string[]>>({});
@@ -28,7 +53,13 @@ class HostedStore {
     () => this.clear('Your session expired. Sign in again.'),
   );
 
+  constructor(posts: PostCache = indexedPosts) {
+    this.posts = posts;
+    if (this.books.length) void this.hydratePosts(origin(), this.session?.username ?? '');
+  }
+
   private epoch = 0;
+  private shelfNotice = '';
   private removed = new Set<string>();
   private pendingFeeds = new Map<string, Promise<FeedPost[]>>();
   private pendingCovers = new Map<string, Promise<void>>();
@@ -55,10 +86,16 @@ class HostedStore {
   }
 
   clear(notice = ''): void {
+    const server = origin();
+    const username = this.session?.username;
     this.epoch++;
     this.session = null;
     writeStored('mewo.session', null);
-    this.books = [];
+    this.refresh.reset();
+    if (username) {
+      clearShelf(server, username);
+      void this.posts.clearPrefix(postPrefix(server, username));
+    }
     this.feeds = {};
     this.likes = {};
     this.indexes = {};
@@ -92,24 +129,49 @@ class HostedStore {
 
   async load(): Promise<void> {
     const epoch = this.epoch;
-    const books = await this.api.library();
-    if (epoch !== this.epoch) return;
-    this.books = books.filter((book) => !this.removed.has(book.id))
-      .sort((a, b) => b.importedAt - a.importedAt);
-    if (this.session) this.progress.start(this.session.username);
+    const session = this.session;
+    if (!session) return;
+    const server = origin();
+    if (this.shelf.status === 'loading') {
+      const cached = readShelf(server, session.username);
+      if (cached) this.refresh.prime(cached);
+    }
+    await this.refresh.refresh(async () => {
+      if (epoch !== this.epoch) throw new ShelfCancelled();
+      const remote = await this.api.library();
+      if (epoch !== this.epoch || this.session?.username !== session.username) {
+        throw new ShelfCancelled();
+      }
+      return remote.filter((book) => !this.removed.has(book.id));
+    });
+    if (epoch !== this.epoch || this.session?.username !== session.username) return;
+    if (this.shelf.status === 'failed') {
+      if (this.shelf.books) {
+        this.shelfNotice = this.shelf.error;
+        this.notice = this.shelf.error;
+      }
+      return;
+    }
+    if (this.shelf.status !== 'loaded') return;
+    if (this.notice === this.shelfNotice) this.notice = '';
+    this.shelfNotice = '';
+    writeShelf(server, session.username, this.books);
+    this.progress.start(session.username);
     for (const [id, index] of this.progress.entries()) {
       const book = this.books.find((row) => row.id === id);
       if (book) this.replaceBook({ ...book, progressIndex: index });
       else this.progress.remove(id);
     }
     this.flushProgress();
+    void this.hydratePosts(server, session.username);
     for (const book of this.books) void this.loadCover(book.id).catch(() => {});
   }
 
   replaceBook(book: BookRecord): void {
     if (this.removed.has(book.id)) return;
-    this.books = [...this.books.filter((row) => row.id !== book.id), book]
-      .sort((a, b) => b.importedAt - a.importedAt);
+    this.refresh.replace([...this.books.filter((row) => row.id !== book.id), book]);
+    const username = this.session?.username;
+    if (username && this.shelf.status === 'loaded') writeShelf(origin(), username, this.books);
   }
 
   async book(id: string): Promise<BookRecord> {
@@ -126,12 +188,19 @@ class HostedStore {
     const pending = this.pendingFeeds.get(id);
     if (pending) return pending;
     const epoch = this.epoch;
-    const promise = this.api.posts(id).then((posts) => {
+    const server = origin();
+    const username = this.session?.username ?? '';
+    const promise = loadCachedPosts(
+      postKey(server, username, id),
+      this.posts,
+      () => this.api.posts(id),
+    ).then((posts) => {
       if (this.valid(id, epoch)) {
-        this.feeds = { ...this.feeds, [id]: posts };
-        this.postMaps.set(id, new Map(posts.map((post) => [post.id, post])));
+        this.rememberPosts(id, posts);
         const book = this.books.find((row) => row.id === id);
-        if (book) this.replaceBook({ ...book, postCount: posts.length });
+        if (book && book.postCount !== posts.length) {
+          this.replaceBook({ ...book, postCount: posts.length });
+        }
       }
       return posts;
     }).finally(() => {
@@ -139,6 +208,21 @@ class HostedStore {
     });
     this.pendingFeeds.set(id, promise);
     return promise;
+  }
+
+  private rememberPosts(id: string, posts: FeedPost[]): void {
+    this.feeds = { ...this.feeds, [id]: posts };
+    this.postMaps.set(id, new Map(posts.map((post) => [post.id, post])));
+  }
+
+  private async hydratePosts(server: string, username: string): Promise<void> {
+    await Promise.all(this.books.map(async (book) => {
+      if (this.feeds[book.id] || !this.valid(book.id, this.epoch)) return;
+      const posts = await this.posts.read(postKey(server, username, book.id));
+      if (posts && this.valid(book.id, this.epoch) && this.session?.username === username) {
+        this.rememberPosts(book.id, posts);
+      }
+    }));
   }
 
   async loadCover(id: string): Promise<void> {
@@ -363,7 +447,12 @@ class HostedStore {
     this.pendingCovers.delete(book.id);
     this.postMaps.delete(book.id);
     this.bumpSocial(book.id);
-    this.books = this.books.filter((row) => row.id !== book.id);
+    this.refresh.replace(this.books.filter((row) => row.id !== book.id));
+    const username = this.session?.username;
+    if (username) {
+      writeShelf(origin(), username, this.books);
+      void this.posts.delete(postKey(origin(), username, book.id));
+    }
     const feeds = { ...this.feeds };
     delete feeds[book.id];
     this.feeds = feeds;

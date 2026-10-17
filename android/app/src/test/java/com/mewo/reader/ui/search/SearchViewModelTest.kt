@@ -4,6 +4,8 @@ import android.net.Uri
 import com.mewo.reader.data.BookRecord
 import com.mewo.reader.data.CommentIndex
 import com.mewo.reader.data.FeedPost
+import com.mewo.reader.data.LibraryLoad
+import com.mewo.reader.data.LibraryLoading
 import com.mewo.reader.data.LibrarySnapshot
 import com.mewo.reader.data.LibraryStore
 import com.mewo.reader.data.PostComment
@@ -351,6 +353,7 @@ class SearchViewModelTest {
         }
 
         override val library: StateFlow<LibrarySnapshot> = MutableStateFlow(LibrarySnapshot())
+        override val loadState: StateFlow<LibraryLoad> = MutableStateFlow(LibraryLoading)
         override suspend fun load() = Unit
         override suspend fun importFromUri(uri: Uri): BookRecord = error("unused")
         override suspend fun importSample(): BookRecord = error("unused")

@@ -20,6 +20,7 @@
     display, bodySizes, bodyLines, headingSizes, headingLines,
   } from './lib/preferences.svelte';
   import { router, readerUrl, profileUrl } from './lib/router.svelte';
+  import { pullOffset, PULL_THRESHOLD, shouldRefresh } from './lib/pull';
   import { store, message } from './lib/store.svelte';
 
   let main = $state<HTMLElement>();
@@ -32,8 +33,6 @@
   let removeTarget = $state<BookRecord | null>(null);
   let uploading = $state(false);
   let uploadPercent = $state(0);
-  let loading = $state(false);
-  let pageError = $state('');
   let readerTitle = $state('Post');
   let readerBusy = $state(true);
   let profileCount = $state(0);
@@ -41,6 +40,9 @@
   let shelfToken = '';
   let shelfPromise: Promise<void> | undefined;
   let touchStart: { x: number; y: number } | null = null;
+  let pullStart: { x: number; y: number; active: boolean } | null = null;
+  let pull = $state(0);
+  let refreshing = $derived(store.shelf.status === 'loaded' && store.shelf.refreshing);
 
   let path = $derived(router.url.pathname);
   let readerId = $derived(path.startsWith('/books/') ? decode(path.slice(7)) : null);
@@ -73,44 +75,39 @@
   }
 
   async function ensureShelf(token: string): Promise<void> {
-    if (shelfToken !== token || !shelfPromise) {
-      shelfToken = token;
-      shelfPromise = store.load().catch((error: unknown) => {
-        shelfPromise = undefined;
-        throw error;
-      });
+    if (shelfToken === token && shelfPromise) {
+      await shelfPromise;
+      return;
     }
+    shelfToken = token;
+    shelfPromise = store.load();
     await shelfPromise;
+  }
+
+  function refreshShelf(): void {
+    shelfPromise = undefined;
+    void store.load();
   }
 
   // Only navigation/session changes mount destinations, never progress or social updates.
   $effect(() => {
     const token = store.session?.token;
     router.current.key;
-    let active = true;
     untrack(() => {
       drawer = false;
       commentTarget = null;
       removeTarget = null;
-      pageError = '';
       readerTitle = 'Post';
       readerBusy = true;
       profileCount = 0;
       chrome.reset();
       if (!token) {
-        loading = false;
         shelfToken = '';
         shelfPromise = undefined;
         return;
       }
-      loading = true;
-      ensureShelf(token).then(() => {
-        if (active && token === store.session?.token) loading = false;
-      }).catch((error: unknown) => {
-        if (active) { pageError = message(error); loading = false; }
-      });
+      void ensureShelf(token);
     });
-    return () => { active = false; };
   });
 
   $effect(() => {
@@ -159,6 +156,18 @@
       window.removeEventListener('pagehide', save);
       window.removeEventListener('keydown', keydown);
     };
+  });
+
+  $effect(() => {
+    const scroller = main;
+    if (!scroller) return;
+    const move = (event: TouchEvent): void => onTouchMove(event);
+    scroller.addEventListener('touchmove', move, { passive: false });
+    return () => scroller.removeEventListener('touchmove', move);
+  });
+
+  $effect(() => {
+    if (!refreshing) pull = 0;
   });
 
   function pickFile(): void { fileInput?.click(); }
@@ -217,17 +226,43 @@
   }
 
   function retry(): void {
-    shelfPromise = undefined;
-    router.go(router.url.pathname + router.url.search, true);
+    refreshShelf();
   }
 
   function refreshProfile(): void {
     void profile?.refresh().catch((error: unknown) => store.notice = message(error));
   }
 
+  function reducedMotion(): boolean {
+    return window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  }
+
+  function pullTransform(): string | undefined {
+    if (pull <= 0 || reducedMotion()) return undefined;
+    return `translateY(${pull}px)`;
+  }
+
   function onTouchStart(event: TouchEvent): void {
     const touch = event.touches[0];
     touchStart = root && touch ? { x: touch.clientX, y: touch.clientY } : null;
+    pullStart = path === '/' && touch && main && main.scrollTop <= 0
+      ? { x: touch.clientX, y: touch.clientY, active: false }
+      : null;
+  }
+
+  function onTouchMove(event: TouchEvent): void {
+    const touch = event.touches[0];
+    if (!pullStart || !touch || !main || path !== '/') return;
+    const dy = touch.clientY - pullStart.y;
+    const dx = touch.clientX - pullStart.x;
+    if (!pullStart.active) {
+      if (dy < 8 || main.scrollTop > 0) return;
+      if (Math.abs(dx) > dy) { pullStart = null; return; }
+      pullStart.active = true;
+    }
+    if (main.scrollTop > 0) { pull = 0; return; }
+    pull = pullOffset(dy, reducedMotion());
+    if (pull > 0) event.preventDefault();
   }
 
   function onTouchEnd(event: TouchEvent): void {
@@ -239,6 +274,13 @@
       if (touchStart.x <= 40 && dx >= 56 && Math.abs(dy) < dx) drawer = true;
     }
     touchStart = null;
+    if (pullStart?.active && shouldRefresh(pull)) {
+      pull = reducedMotion() ? 0 : PULL_THRESHOLD;
+      refreshShelf();
+    } else if (!refreshing) {
+      pull = 0;
+    }
+    pullStart = null;
   }
 </script>
 
@@ -253,7 +295,8 @@
         {root}
         reader={readerId !== null}
         profile={profileName !== null}
-        busy={loading || (readerId !== null && readerBusy)}
+        busy={refreshing || (readerId !== null && readerBusy)}
+        onrefresh={path === '/' ? refreshShelf : undefined}
         count={profileCount}
         bind:query
         onaccount={() => drawer = true}
@@ -271,8 +314,10 @@
         ontouchstart={onTouchStart}
         ontouchend={onTouchEnd}
       >
-        {#if loading || pageError}
-          <FeedStatus loading={loading} error={pageError} label="your shelf" onretry={retry} />
+        {#if store.shelf.status === 'loading'}
+          <FeedStatus loading={true} error="" label="your shelf" onretry={retry} />
+        {:else if store.shelf.status === 'failed' && !store.shelf.books}
+          <FeedStatus loading={false} error={store.shelf.error} label="your shelf" onretry={retry} />
         {:else if main}
           {#key router.current.key}
             {#if path === '/'}
@@ -325,7 +370,13 @@
           {/key}
         {/if}
       </main>
-      {#if path === '/' && store.books.length && !loading}
+      {#if (pull > 0 || refreshing) && path === '/'}
+        <div class="refresh-indicator" style:transform={pullTransform()} role="status">
+          <span class="spinner"></span>
+          <span class="sr-only">{refreshing ? 'Refreshing' : 'Pull to refresh'}</span>
+        </div>
+      {/if}
+      {#if path === '/' && store.books.length}
         <button class="fab" aria-label="Add an EPUB" disabled={uploading} onclick={pickFile}>
           <Icon name="plus" size={28} />
         </button>
@@ -407,6 +458,17 @@
   min-height: 0;
   border-inline: 1px solid var(--line);
   overflow: hidden;
+}
+
+.refresh-indicator {
+  position: absolute;
+  z-index: 6;
+  top: 64px;
+  left: 0;
+  right: 0;
+  display: flex;
+  justify-content: center;
+  pointer-events: none;
 }
 
 .timeline {

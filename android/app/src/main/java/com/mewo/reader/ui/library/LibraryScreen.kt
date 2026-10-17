@@ -3,10 +3,16 @@ package com.mewo.reader.ui.library
 import android.net.Uri
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
@@ -22,6 +28,8 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListScope
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -31,6 +39,7 @@ import androidx.compose.material.icons.outlined.Delete
 import androidx.compose.material.icons.outlined.Lock
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
@@ -40,6 +49,7 @@ import androidx.compose.material3.SnackbarDefaults
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -56,7 +66,12 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.mewo.reader.data.BackendKind
 import com.mewo.reader.data.BookRecord
+import com.mewo.reader.data.LibraryFailed
+import com.mewo.reader.data.LibraryLoading
 import com.mewo.reader.data.LibraryStore
+import com.mewo.reader.data.cachedBooks
+import com.mewo.reader.data.isRefreshing
+import com.mewo.reader.data.showEmpty
 import com.mewo.reader.ui.LocalBackend
 import com.mewo.reader.ui.LocalLibraryStore
 import com.mewo.reader.ui.components.Avatar
@@ -68,6 +83,7 @@ import com.mewo.reader.ui.components.ProfileButton
 import com.mewo.reader.ui.components.ShowWhenIdle
 import java.io.File
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun LibraryScreen(
     viewModel: LibraryViewModel,
@@ -76,6 +92,8 @@ fun LibraryScreen(
     hideOnScroll: HideOnScrollState,
 ) {
     val state by viewModel.state.collectAsStateWithLifecycle()
+    val load = state.load
+    val books = load.cachedBooks().orEmpty()
     val library = LocalLibraryStore.current
     val hosted = LocalBackend.current.kind == BackendKind.Hosted
     var pendingDelete by remember { mutableStateOf<BookRecord?>(null) }
@@ -92,43 +110,55 @@ fun LibraryScreen(
     ) {
         Column(Modifier.fillMaxSize()) {
             HomeBar(onOpenAccount = onOpenAccount, visible = hideOnScroll.visible)
-            hideOnScroll.ShowWhenIdle(state.books.isEmpty())
-            if (state.books.isEmpty() && !state.busy) {
-                EmptyTimeline(
-                    onAdd = { picker.launch(arrayOf("application/epub+zip", "application/octet-stream")) },
-                    onSample = viewModel::importSample,
-                )
-            } else {
-                val listState = rememberLazyListState()
-                hideOnScroll.BindListTop(listState)
-                LazyColumn(
-                    state = listState,
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .nestedScroll(hideOnScroll.connection),
-                    contentPadding = PaddingValues(bottom = 96.dp),
-                ) {
-                    if (hosted) {
-                        val groups = shelfGroups(state.books)
-                        if (groups.mine.isNotEmpty()) {
-                            item(key = "section-mine") { SectionLabel("My books") }
-                            bookRows(groups.mine, library, hosted, onOpenBook, { pendingDelete = it }, viewModel::setShared)
-                        }
-                        if (groups.sharedWithMe.isNotEmpty()) {
-                            item(key = "section-shared") { SectionLabel("Shared with me") }
-                            bookRows(groups.sharedWithMe, library, hosted, onOpenBook, { pendingDelete = it }, viewModel::setShared)
-                        }
-                        if (groups.finished.isNotEmpty()) {
-                            item(key = "section-finished") { SectionLabel("Finished") }
-                            bookRows(groups.finished, library, hosted, onOpenBook, { pendingDelete = it }, viewModel::setShared)
-                        }
-                    } else {
-                        val reading = state.books.filterNot { it.isFinished }
-                        val finished = state.books.filter { it.isFinished }
-                        bookRows(reading, library, hosted = false, onOpenBook, { pendingDelete = it }, viewModel::setShared)
-                        if (finished.isNotEmpty()) {
-                            item(key = "section-finished") { SectionLabel("Finished") }
-                            bookRows(finished, library, hosted = false, onOpenBook, { pendingDelete = it }, viewModel::setShared)
+            hideOnScroll.ShowWhenIdle(books.isEmpty())
+            PullToRefreshBox(
+                isRefreshing = load.isRefreshing(),
+                onRefresh = viewModel::refresh,
+                modifier = Modifier.weight(1f).fillMaxWidth(),
+            ) {
+                when {
+                    load is LibraryLoading -> LibraryLoading()
+                    load is LibraryFailed && load.books == null -> LibraryUnavailable(
+                        message = load.message,
+                        onRetry = viewModel::refresh,
+                    )
+                    load.showEmpty() -> EmptyTimeline(
+                        onAdd = { picker.launch(arrayOf("application/epub+zip", "application/octet-stream")) },
+                        onSample = viewModel::importSample,
+                    )
+                    else -> {
+                        val listState = rememberLazyListState()
+                        hideOnScroll.BindListTop(listState)
+                        LazyColumn(
+                            state = listState,
+                            modifier = Modifier
+                                .fillMaxSize()
+                                .nestedScroll(hideOnScroll.connection),
+                            contentPadding = PaddingValues(bottom = 96.dp),
+                        ) {
+                            if (hosted) {
+                                val groups = shelfGroups(books)
+                                if (groups.mine.isNotEmpty()) {
+                                    item(key = "section-mine") { SectionLabel("My books") }
+                                    bookRows(groups.mine, library, hosted, onOpenBook, { pendingDelete = it }, viewModel::setShared)
+                                }
+                                if (groups.sharedWithMe.isNotEmpty()) {
+                                    item(key = "section-shared") { SectionLabel("Shared with me") }
+                                    bookRows(groups.sharedWithMe, library, hosted, onOpenBook, { pendingDelete = it }, viewModel::setShared)
+                                }
+                                if (groups.finished.isNotEmpty()) {
+                                    item(key = "section-finished") { SectionLabel("Finished") }
+                                    bookRows(groups.finished, library, hosted, onOpenBook, { pendingDelete = it }, viewModel::setShared)
+                                }
+                            } else {
+                                val reading = books.filterNot { it.isFinished }
+                                val finished = books.filter { it.isFinished }
+                                bookRows(reading, library, hosted = false, onOpenBook, { pendingDelete = it }, viewModel::setShared)
+                                if (finished.isNotEmpty()) {
+                                    item(key = "section-finished") { SectionLabel("Finished") }
+                                    bookRows(finished, library, hosted = false, onOpenBook, { pendingDelete = it }, viewModel::setShared)
+                                }
+                            }
                         }
                     }
                 }
@@ -159,10 +189,12 @@ fun LibraryScreen(
             )
         }
 
-        state.error?.let { message ->
+        val loadError = (load as? LibraryFailed)?.takeIf { it.books != null }?.message
+        val notice = state.error ?: loadError
+        notice?.let { message ->
             LibraryNotice(
                 message = message,
-                onDismiss = viewModel::dismissError,
+                onDismiss = if (state.error != null) viewModel::dismissError else viewModel::dismissLoadError,
                 modifier = Modifier
                     .align(Alignment.BottomCenter)
                     .padding(16.dp),
@@ -289,17 +321,74 @@ private fun shelfGroups(books: List<BookRecord>): ShelfGroups {
 }
 
 @Composable
+internal fun LibraryLoading() {
+    // Start mid-arc so the first frame (and layout snapshots) show the ring, not an empty gap.
+    val sweep = rememberInfiniteTransition(label = "shelf-loading").animateFloat(
+        initialValue = 0.2f,
+        targetValue = 0.8f,
+        animationSpec = infiniteRepeatable(tween(durationMillis = 900), RepeatMode.Reverse),
+        label = "shelf-loading-sweep",
+    )
+    QuietColumn {
+        CircularProgressIndicator(
+            progress = { sweep.value },
+            modifier = Modifier.size(22.dp),
+            color = MaterialTheme.colorScheme.primary,
+            strokeWidth = 2.dp,
+            trackColor = MaterialTheme.colorScheme.outline,
+        )
+    }
+}
+
+@Composable
+internal fun LibraryUnavailable(
+    message: String,
+    onRetry: () -> Unit,
+) {
+    QuietColumn {
+        Text(
+            text = "Couldn't load",
+            style = MaterialTheme.typography.headlineLarge,
+        )
+        Spacer(Modifier.height(12.dp))
+        Text(
+            text = message,
+            style = MaterialTheme.typography.bodyLarge,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        TextButton(
+            onClick = onRetry,
+            contentPadding = PaddingValues(0.dp),
+        ) {
+            Text("Try again", color = MaterialTheme.colorScheme.primary)
+        }
+    }
+}
+
+/** Same start inset and vertical center as [EmptyTimeline], tall enough to pull. */
+@Composable
+private fun QuietColumn(content: @Composable () -> Unit) {
+    BoxWithConstraints(Modifier.fillMaxSize()) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(maxHeight)
+                .verticalScroll(rememberScrollState())
+                .padding(horizontal = 28.dp),
+            verticalArrangement = Arrangement.Center,
+            horizontalAlignment = Alignment.Start,
+        ) {
+            content()
+        }
+    }
+}
+
+@Composable
 internal fun EmptyTimeline(
     onAdd: () -> Unit,
     onSample: () -> Unit,
 ) {
-    Column(
-        modifier = Modifier
-            .fillMaxSize()
-            .padding(horizontal = 28.dp),
-        verticalArrangement = Arrangement.Center,
-        horizontalAlignment = Alignment.Start,
-    ) {
+    QuietColumn {
         Text(
             text = "No books",
             style = MaterialTheme.typography.headlineLarge,

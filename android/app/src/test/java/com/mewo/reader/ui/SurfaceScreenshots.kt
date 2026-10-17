@@ -29,6 +29,7 @@ import com.mewo.reader.ui.components.MewoAppBar
 import com.mewo.reader.ui.components.ProfileButton
 import com.mewo.reader.ui.library.BookPost
 import com.mewo.reader.ui.library.EmptyTimeline
+import com.mewo.reader.ui.library.LibraryLoading
 import com.mewo.reader.ui.library.LibraryNotice
 import com.mewo.reader.ui.library.RemoveBookDialog
 import com.mewo.reader.ui.library.SectionLabel
@@ -139,6 +140,11 @@ class SurfaceScreenshots {
         Surface {
             AccountDrawerContent(onOpenSettings = {}, onOpenProfile = { _, _ -> })
         }
+    }
+
+    @Test
+    fun libraryLoading() = shoot("library-loading") {
+        Surface { LibraryLoading() }
     }
 
     @Test

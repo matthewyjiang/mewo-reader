@@ -51,7 +51,9 @@ Client routes are `/`, `/books/:id` (optional `?post=`), `/profiles/:username`, 
 ## Behavior
 
 - Settings → About shows this bundle, `GET /v1/version`, and the page origin.
-- Posts are cached for the browser session. Search of a book's text needs that book loaded again after a restart. Likes and profiles load the feeds they need, including lines liked on a phone.
+- The shelf (title, author, handle, progress, mine, shared, owner) is saved in localStorage per page origin and username. Home paints that list immediately and refreshes it in the background. "No books" is shown only after a refresh that returned zero books. A failed refresh keeps the saved list and shows a notice. With no saved list yet, Home shows a spinner instead.
+- Posts are saved in IndexedDB for that same origin and username and reused until sign-out, including after a restart. Likes and profiles load the feeds they need, including lines liked on a phone.
+- Pull down from the top of Home on a touch screen to refresh. A mouse gets a refresh button in the top bar. The spinner stays until the request finishes.
 - Quote shares the passage plus `— author, title`. Share sends the passage alone. Both use Web Share, then the clipboard.
 - Keyboard use keeps the chrome visible. Settings → Display → Always show navigation keeps it visible. Reduced motion and safe-area insets are respected.
-- Account settings show the signed-in username and a link to that profile. There is no local name/handle editor, offline shelf, or persistent post cache.
+- Account settings show the signed-in username and a link to that profile. There is no local name/handle editor. Sign-out clears the saved shelf and posts for that account.

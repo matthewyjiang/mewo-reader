@@ -33,11 +33,18 @@ class LocalLibraryStore(
 
     private val _library = MutableStateFlow(LibrarySnapshot())
     override val library: StateFlow<LibrarySnapshot> = _library.asStateFlow()
+    private val _load = MutableStateFlow<LibraryLoad>(LibraryLoading)
+    override val loadState: StateFlow<LibraryLoad> = _load.asStateFlow()
 
     override suspend fun load() {
-        mutex.withLock {
-            _library.value = readLibrary()
-        }
+        _load.value = reduceLibraryLoad(_load.value, LibraryEvent.RefreshStarted)
+        val snap = mutex.withLock { readLibrary() }
+        _library.value = snap
+        _load.value = reduceLibraryLoad(_load.value, LibraryEvent.RefreshSucceeded(snap.books))
+    }
+
+    override fun dismissLoadError() {
+        _load.value = reduceLibraryLoad(_load.value, LibraryEvent.Dismissed)
     }
 
     override suspend fun importFromUri(uri: Uri): BookRecord = withContext(Dispatchers.IO) {
@@ -308,7 +315,8 @@ class LocalLibraryStore(
 
     private fun writeLibrary(snapshot: LibrarySnapshot) {
         libraryFile.writeText(json.encodeToString(snapshot))
-        _library.update { snapshot }
+        _library.value = snapshot
+        _load.value = reduceLibraryLoad(_load.value, LibraryEvent.BooksReplaced(snapshot.books))
     }
 }
 

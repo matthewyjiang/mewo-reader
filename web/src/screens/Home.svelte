@@ -2,6 +2,7 @@
   import { onMount } from 'svelte';
   import BookRow from '../components/BookRow.svelte';
   import { shelfGroups } from '../lib/models';
+  import { showEmpty } from '../lib/shelf';
   import type { BookRecord } from '../lib/models';
   import { restoreScroll } from '../lib/screen';
   import { store } from '../lib/store.svelte';
@@ -24,7 +25,7 @@
   {/each}
 {/snippet}
 
-{#if !store.books.length}
+{#if showEmpty(store.shelf)}
   <div class="empty-state shelf-empty">
     <h2>No books</h2>
     <button class="pill" disabled={uploading} onclick={onadd}>Add a book</button>

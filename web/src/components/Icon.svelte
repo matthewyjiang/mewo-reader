@@ -2,7 +2,7 @@
   export type IconName =
     | 'home' | 'search' | 'heart' | 'comment' | 'quote' | 'share'
     | 'back' | 'close' | 'plus' | 'trash' | 'settings' | 'chevron'
-    | 'more' | 'book' | 'lock' | 'people';
+    | 'more' | 'book' | 'lock' | 'people' | 'refresh';
   const paths: Record<IconName, string> = {
     home: 'M3 10 12 3l9 7v10a1 1 0 0 1-1 1h-5v-7H9v7H4a1 1 0 0 1-1-1Z',
     search: 'M21 21l-5-5M18 10a8 8 0 1 1-16 0 8 8 0 0 1 16 0',
@@ -26,6 +26,7 @@
       + 'c1.1 0 2-.9 2-2V10c0-1.1-.9-2-2-2zM9 6c0-1.66 1.34-3 3-3s3 1.34 3 3v2H9V6z'
       + 'm9 14H6V10h12v10zm-6-3c1.1 0 2-.9 2-2s-.9-2-2-2-2 .9-2 2 .9 2 2 2z',
     // Material Icons Filled people.
+    refresh: 'M21 12a9 9 0 0 1-15.5 6.2M3 12A9 9 0 0 1 18.5 5.8M21 4v5h-5M3 20v-5h5',
     people: 'M16 11c1.66 0 2.99-1.34 2.99-3S17.66 5 16 5c-1.66 0-3 1.34-3 3s1.34 3 3 3z'
       + 'm-8 0c1.66 0 2.99-1.34 2.99-3S9.66 5 8 5C6.34 5 5 6.34 5 8s1.34 3 3 3zm0 2c-2.33 0-7'
       + ' 1.17-7 3.5V19h14v-2.5c0-2.33-4.67-3.5-7-3.5zm8 0c-.29 0-.62.02-.97.05'
