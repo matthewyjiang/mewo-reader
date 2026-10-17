@@ -20,7 +20,7 @@
     display, bodySizes, bodyLines, headingSizes, headingLines,
   } from './lib/preferences.svelte';
   import { router, readerUrl, profileUrl } from './lib/router.svelte';
-  import { pullOffset, PULL_THRESHOLD, shouldRefresh } from './lib/pull';
+  import { pullOffset, refreshGap, shouldRefresh } from './lib/pull';
   import { store, message } from './lib/store.svelte';
 
   let main = $state<HTMLElement>();
@@ -42,6 +42,7 @@
   let touchStart: { x: number; y: number } | null = null;
   let pullStart: { x: number; y: number; active: boolean } | null = null;
   let pull = $state(0);
+  let pulling = $state(false);
   let refreshing = $derived(store.shelf.status === 'loaded' && store.shelf.refreshing);
 
   let path = $derived(router.url.pathname);
@@ -50,6 +51,7 @@
   let settings = $derived(path.startsWith('/settings'));
   let root = $derived(path === '/' || path === '/search' || path === '/likes');
   let pageTitle = $derived(readerId ? readerTitle : profileName ?? titleFor(path));
+  let pullGap = $derived(path === '/' ? refreshGap(pull, refreshing, reducedMotion()) : 0);
 
   function decode(value: string): string {
     try { return decodeURIComponent(value); } catch { return value; }
@@ -167,7 +169,7 @@
   });
 
   $effect(() => {
-    if (!refreshing) pull = 0;
+    if (!refreshing && !pulling) pull = 0;
   });
 
   function pickFile(): void { fileInput?.click(); }
@@ -238,8 +240,8 @@
   }
 
   function pullTransform(): string | undefined {
-    if (pull <= 0 || reducedMotion()) return undefined;
-    return `translateY(${pull}px)`;
+    if (pullGap <= 0) return undefined;
+    return `translateY(${pullGap}px)`;
   }
 
   function onTouchStart(event: TouchEvent): void {
@@ -259,8 +261,9 @@
       if (dy < 8 || main.scrollTop > 0) return;
       if (Math.abs(dx) > dy) { pullStart = null; return; }
       pullStart.active = true;
+      pulling = true;
     }
-    if (main.scrollTop > 0) { pull = 0; return; }
+    if (main.scrollTop > 0) { pull = 0; pulling = false; return; }
     pull = pullOffset(dy, reducedMotion());
     if (pull > 0) event.preventDefault();
   }
@@ -274,12 +277,12 @@
       if (touchStart.x <= 40 && dx >= 56 && Math.abs(dy) < dx) drawer = true;
     }
     touchStart = null;
-    if (pullStart?.active && shouldRefresh(pull)) {
-      pull = reducedMotion() ? 0 : PULL_THRESHOLD;
-      refreshShelf();
-    } else if (!refreshing) {
-      pull = 0;
-    }
+    const armed = pullStart?.active && shouldRefresh(pull);
+    pulling = false;
+    if (armed) refreshShelf();
+    // Drop the finger offset. A running refresh keeps its gap, and the
+    // sheet eases from wherever the finger was.
+    pull = 0;
     pullStart = null;
   }
 </script>
@@ -314,6 +317,11 @@
         ontouchstart={onTouchStart}
         ontouchend={onTouchEnd}
       >
+        <div
+          class="pull-sheet"
+          class:pull-dragging={pulling}
+          style:transform={pullTransform()}
+        >
         {#if store.shelf.status === 'loading'}
           <FeedStatus loading={true} error="" label="your shelf" onretry={retry} />
         {:else if store.shelf.status === 'failed' && !store.shelf.books}
@@ -369,10 +377,17 @@
             {/if}
           {/key}
         {/if}
+        </div>
       </main>
-      {#if (pull > 0 || refreshing) && path === '/'}
-        <div class="refresh-indicator" style:transform={pullTransform()} role="status">
-          <span class="spinner"></span>
+      {#if path === '/'}
+        <div
+          class="refresh-indicator"
+          class:pull-dragging={pulling}
+          style:height="{pullGap}px"
+          role="status"
+          aria-hidden={pullGap === 0}
+        >
+          {#if pullGap > 0}<span class="spinner"></span>{/if}
           <span class="sr-only">{refreshing ? 'Refreshing' : 'Pull to refresh'}</span>
         </div>
       {/if}
@@ -460,18 +475,34 @@
   overflow: hidden;
 }
 
+.pull-sheet {
+  transition: transform 200ms ease-out;
+}
+
+.pull-sheet.pull-dragging {
+  transition: none;
+}
+
 .refresh-indicator {
   position: absolute;
-  z-index: 6;
-  top: 64px;
+  z-index: 4;
+  top: 56px;
   left: 0;
   right: 0;
   display: flex;
+  align-items: center;
   justify-content: center;
+  overflow: hidden;
   pointer-events: none;
+  transition: height 200ms ease-out;
+}
+
+.refresh-indicator.pull-dragging {
+  transition: none;
 }
 
 .timeline {
+  background: var(--ground);
   height: 100%;
   overflow-y: auto;
   overscroll-behavior-y: contain;
@@ -557,6 +588,10 @@ progress::-webkit-progress-value {
 
 progress::-moz-progress-bar {
   background: var(--accent);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .pull-sheet, .refresh-indicator { transition: none; }
 }
 
 @media (min-width: 1000px) {

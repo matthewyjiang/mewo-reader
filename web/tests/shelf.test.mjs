@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { MemoryPosts, loadCachedPosts, postKey, postPrefix } from '../src/lib/posts.ts';
-import { pullOffset, PULL_THRESHOLD, shouldRefresh } from '../src/lib/pull.ts';
+import { pullOffset, PULL_THRESHOLD, REFRESH_GAP, refreshGap, shouldRefresh } from '../src/lib/pull.ts';
 import {
   ShelfRefresh, beginRefresh, clearShelf, failRefresh, finishRefresh, phaseFromCache,
   readShelf, shelfBooks, shelfKey, showEmpty, writeShelf,
@@ -166,4 +166,11 @@ test('pull arms a refresh at the threshold and skips the drag when motion is red
   assert.equal(pullOffset(PULL_THRESHOLD, true), PULL_THRESHOLD);
   assert.equal(shouldRefresh(pullOffset(PULL_THRESHOLD, true)), true);
   assert.ok(pullOffset(400, false) <= 80);
+
+  assert.equal(refreshGap(0, false, false), 0);
+  assert.equal(refreshGap(0, true, false), REFRESH_GAP);
+  assert.equal(refreshGap(72, false, false), 72);
+  assert.equal(refreshGap(72, true, false), 72);
+  assert.equal(refreshGap(72, false, true), 0);
+  assert.equal(refreshGap(0, true, true), REFRESH_GAP);
 });
