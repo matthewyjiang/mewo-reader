@@ -32,6 +32,23 @@ export function showEmpty(phase: LibraryPhase): boolean {
   return phase.books !== null && phase.books.length === 0;
 }
 
+/** Ids a successful refresh dropped. Their saved text should go with them. */
+export function droppedBookIds(before: string[], after: string[]): string[] {
+  const kept = new Set(after);
+  return before.filter((id) => !kept.has(id));
+}
+
+/**
+ * Saved text may open a book only while the shelf is still catching up, or
+ * when a finished shelf still lists it. A completed refresh is the list.
+ */
+export function savedTextAllowed(phase: LibraryPhase, bookId: string): boolean {
+  if (phase.status === 'loading') return true;
+  if (phase.status === 'loaded' && phase.refreshing) return true;
+  if (phase.status === 'failed' && phase.books == null) return true;
+  return shelfBooks(phase).some((book) => book.id === bookId);
+}
+
 export function sortShelf(books: BookRecord[]): BookRecord[] {
   return [...books].sort((a, b) => b.importedAt - a.importedAt);
 }

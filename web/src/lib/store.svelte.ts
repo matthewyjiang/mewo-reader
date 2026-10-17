@@ -7,7 +7,8 @@ import {
 } from './posts';
 import { PendingProgress } from './progress';
 import {
-  phaseFromCache, readShelf, shelfBooks, ShelfCancelled, ShelfRefresh, writeShelf, clearShelf,
+  droppedBookIds, phaseFromCache, readShelf, savedTextAllowed, shelfBooks, ShelfCancelled,
+  ShelfRefresh, writeShelf, clearShelf,
   type LibraryPhase,
 } from './shelf';
 import { readStored, writeStored } from './storage';
@@ -136,6 +137,7 @@ class HostedStore {
       const cached = readShelf(server, session.username);
       if (cached) this.refresh.prime(cached);
     }
+    const beforeIds = this.books.map((book) => book.id);
     await this.refresh.refresh(async () => {
       if (epoch !== this.epoch) throw new ShelfCancelled();
       const remote = await this.api.library();
@@ -155,6 +157,16 @@ class HostedStore {
     if (this.shelf.status !== 'loaded') return;
     if (this.notice === this.shelfNotice) this.notice = '';
     this.shelfNotice = '';
+    const dropped = droppedBookIds(beforeIds, this.books.map((book) => book.id));
+    if (dropped.length) {
+      const feeds = { ...this.feeds };
+      for (const id of dropped) {
+        delete feeds[id];
+        this.postMaps.delete(id);
+        void this.posts.delete(postKey(server, session.username, id));
+      }
+      this.feeds = feeds;
+    }
     writeShelf(server, session.username, this.books);
     this.progress.start(session.username);
     for (const [id, index] of this.progress.entries()) {
@@ -177,6 +189,9 @@ class HostedStore {
   async book(id: string): Promise<BookRecord> {
     const existing = this.books.find((book) => book.id === id);
     if (existing) return existing;
+    if (!savedTextAllowed(this.shelf, id)) {
+      throw new Error('That book is not on your shelf.');
+    }
     const epoch = this.epoch;
     const book = await this.api.book(id);
     if (this.valid(id, epoch)) this.replaceBook(book);
@@ -184,6 +199,9 @@ class HostedStore {
   }
 
   async feed(id: string): Promise<FeedPost[]> {
+    if (!savedTextAllowed(this.shelf, id)) {
+      throw new Error('That book is not on your shelf.');
+    }
     if (this.feeds[id]) return this.feeds[id];
     const pending = this.pendingFeeds.get(id);
     if (pending) return pending;

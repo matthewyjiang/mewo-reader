@@ -3,8 +3,8 @@ import { test } from 'node:test';
 import { MemoryPosts, loadCachedPosts, postKey, postPrefix } from '../src/lib/posts.ts';
 import { pullOffset, PULL_THRESHOLD, REFRESH_GAP, refreshGap, shouldRefresh } from '../src/lib/pull.ts';
 import {
-  ShelfRefresh, beginRefresh, clearShelf, failRefresh, finishRefresh, phaseFromCache,
-  readShelf, shelfBooks, shelfKey, showEmpty, writeShelf,
+  ShelfRefresh, beginRefresh, clearShelf, droppedBookIds, failRefresh, finishRefresh,
+  phaseFromCache, readShelf, savedTextAllowed, shelfBooks, shelfKey, showEmpty, writeShelf,
 } from '../src/lib/shelf.ts';
 
 const server = 'https://mewo.example';
@@ -127,6 +127,28 @@ test('shelf cache is per server and username', () => {
   assert.equal(readShelf(server, 'matt', store)[0].id, 'b');
   store.setItem(shelfKey(server, 'ada'), '{');
   assert.equal(readShelf(server, 'ada', store), null);
+});
+
+test('a finished refresh drops saved text for books the server removed', async () => {
+  const cache = new MemoryPosts();
+  const kept = postKey(server, 'ada', 'kept');
+  const gone = postKey(server, 'ada', 'gone');
+  await cache.write(kept, [{ id: 'k', kind: 'Body', text: 'stays', chapter: '1' }]);
+  await cache.write(gone, [{ id: 'g', kind: 'Body', text: 'secret', chapter: '1' }]);
+  assert.deepEqual(droppedBookIds(['kept', 'gone'], ['kept']), ['gone']);
+  for (const id of droppedBookIds(['kept', 'gone'], ['kept'])) {
+    await cache.delete(postKey(server, 'ada', id));
+  }
+  assert.equal(await cache.read(gone), null);
+  assert.equal((await cache.read(kept))[0].text, 'stays');
+  assert.equal((await cache.read(postKey(server, 'bea', 'gone'))), null);
+
+  const settled = { status: 'loaded', books: [book('kept')], refreshing: false };
+  assert.equal(savedTextAllowed(settled, 'kept'), true);
+  assert.equal(savedTextAllowed(settled, 'gone'), false);
+  const refreshing = { status: 'loaded', books: [book('kept'), book('gone')], refreshing: true };
+  assert.equal(savedTextAllowed(refreshing, 'gone'), true);
+  assert.equal(savedTextAllowed({ status: 'loading' }, 'gone'), true);
 });
 
 test('posts are reused per account and not downloaded again', async () => {
