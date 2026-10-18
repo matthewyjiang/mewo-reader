@@ -17,13 +17,21 @@ final class HostedLibraryStore: LibraryStore {
     private var flight: RefreshFlight?
     /// Rows added by an import while a refresh is in flight. A refresh keeps only these, not every local row the server dropped.
     private var importedWhileRefreshing: Set<String> = []
+    /// Ids deleted while a refresh is in flight. The reply already on the way must not put them back.
+    private var removedWhileRefreshing: Set<String> = []
     private var shareConfirmed: [String: Bool] = [:]
     private var shareTails: [String: Task<Void, Never>] = [:]
     private var shareTokens: [String: UUID] = [:]
     private(set) var books: [BookRecord] = []
     private(set) var loadState: LibraryLoad = .loading
 
-    init(opener: EpubOpener, sessions: HostedSessionStore, client: HostedClient, files: URL) {
+    init(
+        opener: EpubOpener,
+        sessions: HostedSessionStore,
+        client: HostedClient,
+        files: URL,
+        refreshesOnInit: Bool = true
+    ) {
         self.opener = opener
         self.sessions = sessions
         self.client = client
@@ -34,31 +42,38 @@ final class HostedLibraryStore: LibraryStore {
             self?.sessionChanged(from: previous, to: next)
         }
         restoreCachedShelf()
-        Task { try? await self.load() }
+        // A local backend still builds this store. It must not hit the network until a hosted load.
+        if refreshesOnInit {
+            Task { try? await self.load() }
+        } else if case .loaded(let cached, true) = loadState {
+            loadState = .loaded(books: cached, refreshing: false)
+        }
     }
 
     /// A pull during launch waits on the refresh already running for this token.
+    /// Callers only wait. SwiftUI cancels a pull and a reader task when those views go away;
+    /// that must not cancel the shared refresh. A session change is what cancels it.
     func load() async throws {
         let token = sessions.session.token
         if let flight, flight.token == token {
-            try await flight.task.value
+            try await wait(flight.task)
             return
         }
-        let task = Task { try await self.loadBody(startedWith: token) }
-        let mine = RefreshFlight(id: UUID(), task: task, token: token)
+        let id = UUID()
+        let task = Task { @MainActor in
+            defer {
+                if self.flight?.id == id {
+                    self.flight = nil
+                }
+            }
+            try await self.loadBody(startedWith: token)
+        }
+        let mine = RefreshFlight(id: id, task: task, token: token)
         let previous = flight
         flight = mine
         previous?.task.cancel()
-        defer {
-            if flight?.id == mine.id {
-                flight = nil
-            }
-        }
-        try await withTaskCancellationHandler {
-            try await task.value
-        } onCancel: {
-            task.cancel()
-        }
+        // `task.value` cancels the task when the waiter is cancelled. A pull must not do that.
+        try await wait(task)
     }
 
     func dismissLoadError() {
@@ -86,17 +101,20 @@ final class HostedLibraryStore: LibraryStore {
         }
         loadState = reduceLibraryLoad(loadState, .refreshStarted)
         importedWhileRefreshing.removeAll()
+        removedWhileRefreshing.removeAll()
         let start = epoch
         do {
             let remote = try await fetchLibrary(session)
             guard sessions.session.token == session.token else { return }
-            let serverBooks = remote.books
+            let serverBooks = remote.books.filter { removedWhileRefreshing.contains($0.id) == false }
             let merged: [BookRecord]
             if epoch == start {
                 merged = serverBooks
             } else {
                 let extras = books.filter { local in
-                    importedWhileRefreshing.contains(local.id) && serverBooks.contains { $0.id == local.id } == false
+                    importedWhileRefreshing.contains(local.id)
+                        && removedWhileRefreshing.contains(local.id) == false
+                        && serverBooks.contains { $0.id == local.id } == false
                 }
                 merged = (serverBooks + extras).sorted { $0.importedAt > $1.importedAt }
             }
@@ -137,19 +155,27 @@ final class HostedLibraryStore: LibraryStore {
         }
     }
 
-    /// Sign-out, a server change, or an account switch drops the shelf that was on screen before the next load paints.
+    /// Any token change drops the shelf that was on screen before the next load paints.
+    /// Signing in with nothing saved stays `.loading`, so the empty copy does not flash first.
     private func sessionChanged(from previous: HostedSession, to next: HostedSession) {
         let urlChanged = previous.normalizedUrl() != next.normalizedUrl()
         let userChanged = previous.username != next.username
         let signedOut = previous.signedIn && !next.signedIn
-        if previous.signedIn && (signedOut || urlChanged || userChanged) {
+        let tokenChanged = previous.token != next.token
+        if tokenChanged || (previous.signedIn && (urlChanged || userChanged)) {
             flight?.task.cancel()
-            clearShelf(previous)
-            if signedOut || urlChanged {
+            if previous.signedIn && (signedOut || urlChanged || userChanged) {
+                clearShelf(previous)
+            }
+            if signedOut || (previous.signedIn && urlChanged) {
                 wipeHostedFiles()
             }
             books = []
-            loadState = next.signedIn ? .loading : .loaded(books: [], refreshing: false)
+            if next.signedIn {
+                restoreCachedShelf()
+            } else {
+                loadState = .loaded(books: [], refreshing: false)
+            }
         }
         Task { try? await self.load() }
     }
@@ -163,6 +189,9 @@ final class HostedLibraryStore: LibraryStore {
         if let cached = shelfCache.read(serverUrl: url, username: user) {
             books = cached
             loadState = .loaded(books: cached, refreshing: true)
+        } else {
+            books = []
+            loadState = .loading
         }
     }
 
@@ -208,6 +237,7 @@ final class HostedLibraryStore: LibraryStore {
         try await expireOn401(session) { try await client.delete(session, id: safe) }
         try? FileManager.default.removeItem(at: bookDir(safe))
         epoch += 1
+        removedWhileRefreshing.insert(safe)
         let next = books.filter { $0.id != safe }
         publish(next, .booksReplaced(next), owner: session)
     }
@@ -234,11 +264,12 @@ final class HostedLibraryStore: LibraryStore {
         let posts = try await expireOn401(session) { try await client.posts(session, id: safe) }
         guard sessions.session.token == session.token else { return posts }
         let dir = bookDir(safe)
-        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        // The posts already came back. A full disk, or a file where this directory should be, stays a cache miss.
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         // Builds before server parsing kept the EPUB and a Readium feed here.
         try? FileManager.default.removeItem(at: dir.appendingPathComponent("book.epub"))
         try? FileManager.default.removeItem(at: dir.appendingPathComponent("feed.json"))
-        try JSONFiles.write(FeedCache(version: hostedPostsCacheVersion, posts: posts), to: dir.appendingPathComponent(hostedPostsCache))
+        try? JSONFiles.write(FeedCache(version: hostedPostsCacheVersion, posts: posts), to: dir.appendingPathComponent(hostedPostsCache))
         // The server set postCount when it parsed; mirror it so Finished works before the next load.
         if var record = books.first(where: { $0.id == safe }), record.postCount != posts.count {
             record.postCount = posts.count
@@ -419,7 +450,8 @@ final class HostedLibraryStore: LibraryStore {
         }
         let safe = try requireBookId(record.id)
         let dest = bookDir(safe)
-        try FileManager.default.createDirectory(at: dest, withIntermediateDirectories: true)
+        // The upload already succeeded. A cache directory that cannot be created must not fail it.
+        try? FileManager.default.createDirectory(at: dest, withIntermediateDirectories: true)
         if FileManager.default.fileExists(atPath: cover.path) {
             try? FileManager.default.copyItem(at: cover, to: dest.appendingPathComponent("cover.jpg"))
         }
@@ -600,4 +632,13 @@ private struct RefreshFlight {
     let id: UUID
     let task: Task<Void, Error>
     let token: String?
+}
+
+/// Waits for a refresh without cancelling it when the caller is cancelled.
+private func wait(_ task: Task<Void, Error>) async throws {
+    try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
+        Task {
+            cont.resume(with: await task.result)
+        }
+    }
 }

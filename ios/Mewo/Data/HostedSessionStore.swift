@@ -36,16 +36,17 @@ final class HostedSessionStore {
 
     init(
         defaults: UserDefaults = UserDefaults(suiteName: "mewo_hosted") ?? .standard,
-        persistToken: Bool = true
+        persistToken: Bool = true,
+        uitesting: Bool = ProcessInfo.processInfo.arguments.contains("--uitesting")
     ) {
         self.defaults = defaults
         self.persistToken = persistToken
-        let seeded = defaults.string(forKey: "token").flatMap { $0.isEmpty ? nil : $0 }
+        // The keychain is the real token. UI tests also leave a copy in defaults
+        // because a write during app launch does not stick in an unsigned simulator.
+        let seeded = uitesting ? defaults.string(forKey: "token").flatMap { $0.isEmpty ? nil : $0 } : nil
         session = HostedSession(
             baseUrl: defaults.string(forKey: "base_url") ?? "",
             username: defaults.string(forKey: "username"),
-            // The keychain is the real token. UI tests also leave a copy in defaults
-            // because a write during app launch does not stick in an unsigned simulator.
             token: (persistToken ? Keychain.readToken() : nil) ?? seeded
         )
     }

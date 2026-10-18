@@ -108,13 +108,114 @@ final class HostedLibraryRefreshTests: XCTestCase {
         XCTAssertFalse(store.books.contains { $0.id == privateId })
     }
 
+    func testCancellingOnePullDoesNotCancelTheRefresh() async throws {
+        sessions.setSignedIn(username: "ada", token: "token-a")
+        try await client.waitForCalls(1)
+        client.respond("token-a", books: [book(keptId, title: "Kept")])
+        try await waitUntil("first shelf did not settle") {
+            if case .loaded(let books, false) = store.loadState { return books.map(\.id) == [keptId] }
+            return false
+        }
+        // A URLSession request fails when its task is cancelled. A starts this refresh; B only waits.
+        client.cancelInFlightLibrary = true
+        let first = Task { try await store.load() }
+        let second = Task { try await store.load() }
+        try await waitUntil("second refresh did not start") { client.libraryCalls >= 2 }
+        try await Task.sleep(nanoseconds: 50_000_000)
+        XCTAssertEqual(client.libraryCalls, 2)
+        first.cancel()
+        try await Task.sleep(nanoseconds: 50_000_000)
+        XCTAssertEqual(client.libraryCalls, 2)
+        client.respond("token-a", books: [book(keptId, title: "Kept")])
+        try await waitUntil("joiner did not finish") {
+            !store.loadState.isRefreshing && store.books.map(\.id) == [keptId]
+        }
+        _ = await second.result
+        XCTAssertFalse(store.loadState.isRefreshing)
+        XCTAssertEqual(store.books.map(\.id), [keptId])
+        XCTAssertFalse(savedTextAllowed(store.loadState, bookId: privateId))
+    }
+
+    func testSignInDoesNotShowAnEmptyShelfWhileTheFetchIsHeld() async throws {
+        sessions.setSignedIn(username: "ada", token: "token-a")
+        try await client.waitForCalls(1)
+        XCTAssertFalse(store.loadState.showEmpty)
+        guard case .loading = store.loadState else {
+            return XCTFail("load state \(store.loadState)")
+        }
+    }
+
+    func testAFullDiskDoesNotFailASuccessfulPostsFetch() async throws {
+        sessions.setSignedIn(username: "ada", token: "token-a")
+        try await client.waitForCalls(1)
+        client.respond("token-a", books: [book(keptId, title: "Kept")])
+        try await waitUntil("shelf did not settle") { !store.loadState.isRefreshing }
+        let dir = root.appendingPathComponent("hosted/\(keptId)")
+        try? FileManager.default.removeItem(at: dir)
+        try Data("not a directory".utf8).write(to: dir)
+        let posts = try await store.feed(id: keptId)
+        XCTAssertEqual(posts.map(\.id), ["p"])
+    }
+
+    func testADeleteDuringRefreshDoesNotRestoreTheBook() async throws {
+        client.client.hooks.delete = { _, _ in }
+        let gone = book(staleId, title: "Gone")
+        let kept = book(keptId, title: "Kept")
+        try shelfCache().write(serverUrl: server, username: "ada", books: [gone, kept])
+        sessions.setSignedIn(username: "ada", token: "token-a")
+        try await client.waitForCalls(1)
+        try await store.delete(id: staleId)
+        client.respond("token-a", books: [gone, kept])
+        try await waitUntil("refresh did not finish") { !store.loadState.isRefreshing }
+        XCTAssertEqual(store.books.map(\.id), [keptId])
+        XCTAssertEqual(shelfCache().read(serverUrl: server, username: "ada")?.map(\.id), [keptId])
+    }
+
+    func testALocalBackendDoesNotFetchOnInit() async throws {
+        let name = "mewo-shelf-\(UUID().uuidString)"
+        let localDefaults = UserDefaults(suiteName: name)!
+        defer { localDefaults.removePersistentDomain(forName: name) }
+        localDefaults.set(server, forKey: "base_url")
+        let localSessions = HostedSessionStore(defaults: localDefaults, persistToken: false)
+        localSessions.setSignedIn(username: "ada", token: "token-a")
+        let localClient = GateClient()
+        let files = root.appendingPathComponent("local-backend", isDirectory: true)
+        try FileManager.default.createDirectory(at: files, withIntermediateDirectories: true)
+        try ShelfCache(directory: files.appendingPathComponent("hosted-shelves", isDirectory: true))
+            .write(serverUrl: server, username: "ada", books: [book(keptId, title: "Kept")])
+        let quiet = HostedLibraryStore(
+            opener: EpubOpener(),
+            sessions: localSessions,
+            client: localClient.client,
+            files: files,
+            refreshesOnInit: false
+        )
+        try await Task.sleep(nanoseconds: 200_000_000)
+        XCTAssertEqual(localClient.libraryCalls, 0)
+        XCTAssertFalse(quiet.loadState.isRefreshing)
+        XCTAssertEqual(quiet.books.map(\.id), [keptId])
+        let pull = Task { try await quiet.load() }
+        try await localClient.waitForCalls(1)
+        localClient.respond("token-a", books: [book(keptId, title: "Kept")])
+        try await pull.value
+        XCTAssertEqual(quiet.books.map(\.id), [keptId])
+        localClient.failAll()
+    }
+
+    func testADefaultsTokenIsIgnoredOutsideUITests() async throws {
+        defaults.set("token-a", forKey: "token")
+        let signed = HostedSessionStore(defaults: defaults, persistToken: false)
+        XCTAssertNil(signed.session.token)
+        XCTAssertFalse(signed.session.signedIn)
+    }
+
     func testADefaultsTokenSignsInWhenTheKeychainIsSkipped() async throws {
         let name = "mewo-shelf-\(UUID().uuidString)"
         let seeded = UserDefaults(suiteName: name)!
         seeded.set(server, forKey: "base_url")
         seeded.set("ada", forKey: "username")
         seeded.set("token-a", forKey: "token")
-        let signed = HostedSessionStore(defaults: seeded, persistToken: false)
+        let signed = HostedSessionStore(defaults: seeded, persistToken: false, uitesting: true)
         XCTAssertEqual(signed.session.token, "token-a")
         XCTAssertTrue(signed.session.signedIn)
         signed.signOut()
@@ -177,6 +278,8 @@ final class HostedLibraryRefreshTests: XCTestCase {
 private final class GateClient: @unchecked Sendable {
     let client = HostedClient()
     var expireToken: String?
+    /// Mirrors URLSession: cancelling the refresh task fails the held library request.
+    var cancelInFlightLibrary = false
     private(set) var libraryCalls = 0
     private let lock = NSLock()
     private var gates: [String: UnsafeContinuation<LibrarySnapshot, Error>] = [:]
@@ -185,6 +288,14 @@ private final class GateClient: @unchecked Sendable {
     init() {
         client.hooks.library = { [weak self] session in
             guard let self else { throw CancellationError() }
+            if self.cancelInFlightLibrary {
+                let token = session.token ?? ""
+                return try await withTaskCancellationHandler {
+                    try await self.library(session)
+                } onCancel: {
+                    self.failLibrary(token)
+                }
+            }
             return try await self.library(session)
         }
         client.hooks.posts = { _, _ in
@@ -216,6 +327,13 @@ private final class GateClient: @unchecked Sendable {
         let cont = gates.removeValue(forKey: token)
         lock.unlock()
         cont?.resume(returning: LibrarySnapshot(books: books))
+    }
+
+    func failLibrary(_ token: String) {
+        lock.lock()
+        let cont = gates.removeValue(forKey: token)
+        lock.unlock()
+        cont?.resume(throwing: CancellationError())
     }
 
     func failAll() {

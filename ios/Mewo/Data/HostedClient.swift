@@ -11,6 +11,7 @@ final class HostedClientHooks: @unchecked Sendable {
     var library: (@Sendable (HostedSession) async throws -> LibrarySnapshot)?
     var posts: (@Sendable (HostedSession, String) async throws -> [FeedPost])?
     var downloadCover: (@Sendable (HostedSession, String, URL) async throws -> Bool)?
+    var delete: (@Sendable (HostedSession, String) async throws -> Void)?
 }
 
 final class HostedClient: Sendable {
@@ -94,6 +95,7 @@ final class HostedClient: Sendable {
     }
 
     func delete(_ hosted: HostedSession, id: String) async throws {
+        if let delete = hooks.delete { return try await delete(hosted, id) }
         var request = try authorized(hosted, path: "/v1/books/\(id)")
         request.httpMethod = "DELETE"
         _ = try await expectOk(request)

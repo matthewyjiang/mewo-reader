@@ -33,7 +33,13 @@ final class AppEnvironment {
         let opener = EpubOpener()
         let files = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
         localLibrary = LocalLibraryStore(opener: opener, profile: localProfile, files: files)
-        hostedLibrary = HostedLibraryStore(opener: opener, sessions: hostedSession, client: client, files: files)
+        hostedLibrary = HostedLibraryStore(
+            opener: opener,
+            sessions: hostedSession,
+            client: client,
+            files: files,
+            refreshesOnInit: backend.kind == .hosted
+        )
         library = SwitchingLibraryStore(local: localLibrary, hosted: hostedLibrary, backend: backend)
     }
 
