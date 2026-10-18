@@ -80,7 +80,6 @@ struct MewoNav: View {
         switch tab {
         case .home:
             HomeScreen(
-                env: app,
                 chrome: chrome,
                 onOpenBook: { push(.reader(bookId: $0, postId: nil)) },
                 onOpenPost: { book, post in push(.reader(bookId: book, postId: post)) },
