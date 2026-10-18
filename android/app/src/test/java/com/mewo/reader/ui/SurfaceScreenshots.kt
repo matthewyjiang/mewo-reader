@@ -21,7 +21,10 @@ import app.cash.paparazzi.Paparazzi
 import com.mewo.reader.data.AccountHit
 import com.mewo.reader.data.BackendKind
 import com.mewo.reader.data.BookRecord
+import com.mewo.reader.data.CommentIndex
 import com.mewo.reader.data.FeedPost
+import com.mewo.reader.data.hasReposted
+import com.mewo.reader.data.repostCount
 import com.mewo.reader.data.HostedSession
 import com.mewo.reader.data.LocalProfile
 import com.mewo.reader.data.PostKind
@@ -34,6 +37,7 @@ import com.mewo.reader.ui.components.MewoAppBar
 import com.mewo.reader.ui.components.ProfileButton
 import com.mewo.reader.ui.components.UnderlineTabs
 import com.mewo.reader.ui.feed.ActivityLine
+import com.mewo.reader.ui.profile.ProfileBar
 import com.mewo.reader.ui.profile.ProfileHeader
 import com.mewo.reader.ui.reader.CommentItem
 import com.mewo.reader.ui.reader.TimelinePost
@@ -230,10 +234,18 @@ class SurfaceScreenshots {
 
     @Test
     fun homeFeed() = shoot("home-feed") {
+        val line = FeedPost("0", PostKind.Body, "Emma Woodhouse, handsome, clever, and rich.", "One")
+        // One index for the book, the same object both rows read.
+        val index = CommentIndex(
+            counts = mapOf(line.id to 1),
+            mine = setOf(line.id),
+            reposts = mapOf(line.id to 1),
+            reposted = emptySet(),
+        )
         HomeChrome("feed") {
             ActivityLine(username = "byron") {}
-            passage(reposted = true, count = 2)
-            commentItem(reposted = false, repostCount = 1)
+            passage(line, index)
+            commentItem(line, index)
         }
     }
 
@@ -399,26 +411,28 @@ private fun ProfileChrome(tab: String, content: @Composable () -> Unit) {
     Column(
         Modifier
             .fillMaxSize()
-            .background(MaterialTheme.colorScheme.background)
-            .verticalScroll(rememberScrollState()),
+            .background(MaterialTheme.colorScheme.background),
     ) {
-        ProfileHeader(
-            name = "ada",
-            handle = "ada",
-            record = ProfileRecord(
-                username = "ada",
-                joinedAt = 1609459200000,
-                postCount = 2,
-                repostCount = 1,
-                mine = true,
-            ),
-        )
-        UnderlineTabs(
-            tabs = listOf("posts" to "Posts", "reposts" to "Reposts", "books" to "Books"),
-            selected = tab,
-            onSelect = {},
-        )
-        content()
+        ProfileBar(name = "ada", posts = 2, visible = true, onBack = {})
+        Column(Modifier.verticalScroll(rememberScrollState())) {
+            ProfileHeader(
+                name = "ada",
+                handle = "ada",
+                record = ProfileRecord(
+                    username = "ada",
+                    joinedAt = 1609459200000,
+                    postCount = 2,
+                    repostCount = 1,
+                    mine = true,
+                ),
+            )
+            UnderlineTabs(
+                tabs = listOf("posts" to "Posts", "reposts" to "Reposts", "books" to "Books"),
+                selected = tab,
+                onSelect = {},
+            )
+            content()
+        }
     }
 }
 
@@ -435,6 +449,33 @@ private fun HomeChrome(tab: String, content: @Composable () -> Unit) {
             content()
         }
     }
+}
+
+@Composable
+private fun commentItem(post: FeedPost, index: CommentIndex) {
+    CommentItem(
+        author = "Austen",
+        handle = "austen",
+        post = post,
+        cover = null,
+        replyName = "ada",
+        replyHandle = "ada",
+        replyMeta = relativeTime(COMMENT_AT, SHOT_NOW),
+        replyText = "This opening still lands.",
+        liked = false,
+        commentCount = index.count(post.id),
+        commented = index.commented(post.id),
+        reposted = index.hasReposted(post.id),
+        repostCount = index.repostCount(post.id),
+        onOpen = {},
+        onOpenReply = {},
+        onOpenReplyProfile = { _, _ -> },
+        onComment = {},
+        onLike = {},
+        onRepost = {},
+        onQuote = {},
+        onShare = {},
+    )
 }
 
 @Composable
@@ -456,6 +497,26 @@ private fun commentItem(reposted: Boolean, repostCount: Int) {
         onOpen = {},
         onOpenReply = {},
         onOpenReplyProfile = { _, _ -> },
+        onComment = {},
+        onLike = {},
+        onRepost = {},
+        onQuote = {},
+        onShare = {},
+    )
+}
+
+@Composable
+private fun passage(post: FeedPost, index: CommentIndex) {
+    TimelinePost(
+        post = post,
+        author = "Austen",
+        handle = "austen",
+        cover = null,
+        liked = false,
+        commentCount = index.count(post.id),
+        commented = index.commented(post.id),
+        reposted = index.hasReposted(post.id),
+        repostCount = index.repostCount(post.id),
         onComment = {},
         onLike = {},
         onRepost = {},

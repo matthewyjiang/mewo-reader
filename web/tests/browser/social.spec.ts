@@ -206,8 +206,10 @@ test('home opens on Feed and Books keeps the shelf', async ({ page }) => {
   await expect(page.getByText('This opening still lands.')).toBeVisible();
   const counts = page.getByRole('button', { name: 'Reposts, 1' });
   await expect(counts).toHaveCount(2);
-  await expect(counts.first()).toBeEnabled();
-  await expect(counts.first()).toHaveAttribute('aria-pressed', 'false');
+  for (const button of await counts.all()) {
+    await expect(button).toBeEnabled();
+    await expect(button).toHaveAttribute('aria-pressed', 'false');
+  }
   await page.getByRole('tab', { name: 'Books' }).click();
   await expect(page).toHaveURL(/tab=books/);
   await expect(page.getByText('Emma', { exact: true })).toBeVisible();

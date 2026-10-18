@@ -20,6 +20,7 @@ import com.mewo.reader.data.ProfileReply
 import com.mewo.reader.data.RepostState
 import com.mewo.reader.data.SearchResult
 import com.mewo.reader.data.hasReposted
+import com.mewo.reader.data.repostCount
 import com.mewo.reader.data.showFeedEmpty
 import java.io.File
 import kotlinx.coroutines.CompletableDeferred
@@ -164,6 +165,33 @@ class FeedViewModelTest {
         store.reposts.complete(RepostState(1, true))
         advanceUntilIdle()
         assertTrue(vm.state.value.comments.getValue("b1").hasReposted("0"))
+    }
+
+    @Test
+    fun aRepostAndACommentOnTheSamePostShareOneIndex() = runTest(main) {
+        val store = FakeStore()
+        val vm = FeedViewModel(store, MemoryFeedCache())
+        vm.bindSession("ada")
+        runCurrent()
+        val comment = HomeFeedItem.Comment(
+            actor = ActorRecord("ada"),
+            book = BookRecord(id = "b1", title = "Emma", author = "Austen", handle = "austen", importedAt = 1),
+            post = FeedPost("0", PostKind.Body, "A line.", "One"),
+            comment = PostComment("c1", "ada", "Nice", createdAt = 5, mine = true),
+            at = 9,
+        )
+        store.finish(HomeFeedPage(listOf(repost("byron"), comment)))
+        store.comments.complete(CommentIndex(
+            counts = mapOf("0" to 1),
+            mine = setOf("0"),
+            reposts = mapOf("0" to 1),
+        ))
+        store.likes.complete(emptySet())
+        advanceUntilIdle()
+        assertEquals(setOf("b1"), vm.state.value.comments.keys)
+        val index = vm.state.value.comments.getValue("b1")
+        assertEquals(1, index.repostCount("0"))
+        assertFalse(index.hasReposted("0"))
     }
 
     @Test

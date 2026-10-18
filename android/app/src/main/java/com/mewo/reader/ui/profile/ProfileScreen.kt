@@ -240,7 +240,7 @@ private val profileTabs = listOf(
 )
 
 @Composable
-private fun ProfileBar(
+internal fun ProfileBar(
     name: String,
     posts: Int?,
     visible: Boolean,
