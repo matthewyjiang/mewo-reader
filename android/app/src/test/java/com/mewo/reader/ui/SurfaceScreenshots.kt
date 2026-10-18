@@ -8,9 +8,12 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.DrawerValue
+import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
+import androidx.compose.material3.rememberDrawerState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.ui.Alignment
@@ -29,7 +32,7 @@ import com.mewo.reader.data.HostedSession
 import com.mewo.reader.data.LocalProfile
 import com.mewo.reader.data.PostKind
 import com.mewo.reader.data.ProfileRecord
-import com.mewo.reader.ui.components.AccountDrawerContent
+import com.mewo.reader.ui.components.AccountDrawer
 import com.mewo.reader.ui.components.AppTab
 import com.mewo.reader.ui.components.BrandMark
 import com.mewo.reader.ui.components.HomeTabBar
@@ -78,6 +81,7 @@ import org.junit.Test
  * Layout goldens for the surfaces an agent can check without an emulator.
  * Phone is a Pixel 5. Narrow is the same height at 320dp wide.
  */
+@OptIn(ExperimentalMaterial3Api::class)
 class SurfaceScreenshots {
     @get:Rule
     val paparazzi = Paparazzi(
@@ -153,8 +157,14 @@ class SurfaceScreenshots {
 
     @Test
     fun drawer() = shoot("drawer") {
-        Surface {
-            AccountDrawerContent(onOpenSettings = {}, onOpenProfile = { _, _ -> })
+        AccountDrawer(
+            drawerState = rememberDrawerState(DrawerValue.Open),
+            gesturesEnabled = false,
+            onOpenSettings = {},
+            onOpenProfile = { _, _ -> },
+            onSignOut = {},
+        ) {
+            HomeBooks()
         }
     }
 
@@ -250,17 +260,13 @@ class SurfaceScreenshots {
     }
 
     @Test
-    fun homeBooks() = shoot("home-books") {
-        HomeChrome("books") {
-            SectionLabel("My books")
-            shelfBook(privateBook)
-            shelfBook(sharedBook)
-        }
-    }
+    fun homeBooks() = shoot("home-books") { HomeBooks() }
 
     @Test
     fun repostActive() = shoot("repost-active") {
-        Surface { passage(reposted = true, count = 2) }
+        SearchChrome("posts") {
+            passage(reposted = true, count = 2)
+        }
     }
 
     private fun shoot(
@@ -402,7 +408,10 @@ private fun SearchChrome(tab: String, content: @Composable () -> Unit) {
             selected = tab,
             onSelect = {},
         )
-        content()
+        Column(Modifier.weight(1f).verticalScroll(rememberScrollState())) {
+            content()
+        }
+        HomeTabBar(selected = AppTab.Search, onSelect = {})
     }
 }
 
@@ -414,7 +423,7 @@ private fun ProfileChrome(tab: String, content: @Composable () -> Unit) {
             .background(MaterialTheme.colorScheme.background),
     ) {
         ProfileBar(name = "ada", posts = 2, visible = true, onBack = {})
-        Column(Modifier.verticalScroll(rememberScrollState())) {
+        Column(Modifier.weight(1f).verticalScroll(rememberScrollState())) {
             ProfileHeader(
                 name = "ada",
                 handle = "ada",
@@ -433,6 +442,7 @@ private fun ProfileChrome(tab: String, content: @Composable () -> Unit) {
             )
             content()
         }
+        HomeTabBar(selected = AppTab.Home, onSelect = {})
     }
 }
 
@@ -445,9 +455,19 @@ private fun HomeChrome(tab: String, content: @Composable () -> Unit) {
             selected = tab,
             onSelect = {},
         )
-        Column(Modifier.verticalScroll(rememberScrollState())) {
+        Column(Modifier.weight(1f).verticalScroll(rememberScrollState())) {
             content()
         }
+        HomeTabBar(selected = AppTab.Home, onSelect = {})
+    }
+}
+
+@Composable
+private fun HomeBooks() {
+    HomeChrome("books") {
+        SectionLabel("My books")
+        shelfBook(privateBook)
+        shelfBook(sharedBook)
     }
 }
 
