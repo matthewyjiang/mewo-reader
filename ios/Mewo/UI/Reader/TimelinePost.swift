@@ -97,7 +97,7 @@ struct PostActions: View {
             action(
                 icon: "arrow.2.squarepath",
                 tint: reposted ? mewo.repost : mewo.mute,
-                label: repostCount > 0 ? "Reposts, \(repostCount)" : (reposted ? "Undo repost" : "Repost"),
+                label: repostLabel,
                 count: repostCount,
                 action: onRepost
             )
@@ -115,6 +115,14 @@ struct PostActions: View {
             action(icon: "square.and.arrow.up", tint: mewo.mute, label: "Share", action: onShare)
         }
         .frame(maxWidth: .infinity)
+    }
+
+    /// VoiceOver hears whether this account reposted, including when a count is showing.
+    private var repostLabel: String {
+        if reposted {
+            return repostCount > 0 ? "Reposted, \(repostCount)" : "Undo repost"
+        }
+        return repostCount > 0 ? "Reposts, \(repostCount)" : "Repost"
     }
 
     private func action(icon: String, tint: Color, label: String, count: Int = 0, scale: CGFloat = 1, action: @escaping () -> Void) -> some View {

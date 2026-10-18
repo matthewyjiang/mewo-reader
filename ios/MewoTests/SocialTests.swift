@@ -251,6 +251,36 @@ final class HostedSearchModelTests: XCTestCase {
         XCTAssertTrue(model.visibleAccounts().isEmpty)
         XCTAssertFalse(model.showNoMatches())
     }
+
+    func testLoadMoreDropsAnAccountAlreadyShown() async {
+        let remote = FakeRemoteSearch()
+        remote.token = "token-a"
+        let model = SearchViewModel(library: StubLibrary(), remote: remote, debounceNanos: 0)
+        model.setQuery("a")
+        guard await until(remote, { remote.calls.count == 1 }) else {
+            return XCTFail("search did not start")
+        }
+        remote.calls[0].continuation.resume(returning: SearchPage(
+            type: .accounts,
+            accounts: [AccountRecord(username: "ada", mine: false)],
+            nextCursor: "next"
+        ))
+        await model.searchTask?.value
+        model.loadMore()
+        guard await until(remote, { remote.calls.count == 2 }) else {
+            return XCTFail("load more did not start")
+        }
+        remote.calls[1].continuation.resume(returning: SearchPage(
+            type: .accounts,
+            accounts: [
+                AccountRecord(username: "ada", mine: false),
+                AccountRecord(username: "bea", mine: false),
+            ],
+            nextCursor: nil
+        ))
+        await model.searchTask?.value
+        XCTAssertEqual(model.visibleAccounts().map(\.username), ["ada", "bea"])
+    }
 }
 
 @MainActor
@@ -366,6 +396,68 @@ final class ProfileTabTests: XCTestCase {
         XCTAssertTrue(model.posts.isEmpty)
         XCTAssertFalse(model.postsLoaded)
     }
+
+    func testRefreshDuringALoadReplacesThePageAndClearsTheSpinner() async {
+        let loader = FakeProfileLoader()
+        let model = ProfileViewModel(loader: loader, library: StubLibrary(), handle: "ada")
+        let profile = ProfileRecord(username: "ada", joinedAt: 1, postCount: 1, repostCount: 0, mine: true)
+        model.refresh()
+        guard await until(loader, { loader.profiles.count == 1 }) else {
+            return XCTFail("profile did not start")
+        }
+        loader.profiles[0].resume(returning: profile)
+        guard await until(loader, { loader.postPages.count == 1 }) else {
+            return XCTFail("posts did not start")
+        }
+        XCTAssertTrue(model.postsLoading)
+
+        model.refresh()
+        guard await until(loader, { loader.profiles.count == 2 }) else {
+            return XCTFail("refresh did not start")
+        }
+        loader.profiles[1].resume(returning: profile)
+        guard await until(loader, { loader.postPages.count == 2 }) else {
+            return XCTFail("refresh did not load posts")
+        }
+        loader.postPages[1].resume(returning: ProfilePostsPage(items: [profilePost("fresh")], nextCursor: "more"))
+        guard await waitUntil({ model.postsLoaded && !model.postsLoading }) else {
+            return XCTFail("refresh stayed on the spinner")
+        }
+        XCTAssertEqual(model.posts.map(\.comment.text), ["fresh"])
+
+        loader.postPages[0].resume(returning: ProfilePostsPage(items: [profilePost("stale")], nextCursor: nil))
+        try? await Task.sleep(nanoseconds: 100_000_000)
+        XCTAssertEqual(model.posts.map(\.comment.text), ["fresh"])
+        XCTAssertFalse(model.postsLoading)
+
+        model.loadMore()
+        guard await until(loader, { loader.postPages.count == 3 }) else {
+            return XCTFail("load more did not start")
+        }
+        model.refresh()
+        guard await until(loader, { loader.profiles.count == 3 }) else {
+            return XCTFail("second refresh did not start")
+        }
+        loader.profiles[2].resume(returning: profile)
+        guard await until(loader, { loader.postPages.count == 4 }) else {
+            return XCTFail("second refresh did not load posts")
+        }
+        loader.postPages[3].resume(returning: ProfilePostsPage(items: [profilePost("fresh")], nextCursor: nil))
+        guard await waitUntil({ !model.postsLoading && model.posts.map(\.comment.text) == ["fresh"] }) else {
+            return XCTFail("refresh did not replace the page")
+        }
+        loader.postPages[2].resume(returning: ProfilePostsPage(items: [profilePost("page-two")], nextCursor: nil))
+        try? await Task.sleep(nanoseconds: 100_000_000)
+        XCTAssertEqual(model.posts.map(\.comment.text), ["fresh"])
+    }
+}
+
+private func profilePost(_ text: String) -> ProfilePostItem {
+    ProfilePostItem(
+        book: BookRecord(id: "b", title: "Emma", author: "A", handle: "a", importedAt: 0),
+        post: FeedPost(id: "0", kind: .body, text: "line", chapter: "One"),
+        comment: PostComment(id: text, username: "ada", text: text, createdAt: 0)
+    )
 }
 
 final class FeedLoadTests: XCTestCase {
@@ -387,6 +479,23 @@ final class FeedLoadTests: XCTestCase {
         let first = reduceFeedLoad(.loading, .refreshFailed("offline"))
         XCTAssertTrue(first.isFailedEmpty)
         XCTAssertFalse(first.showEmpty)
+        let appended = reduceFeedLoad(
+            .loaded(items: [feedItem("a", at: 1), feedItem("b", at: 2)], refreshing: false, nextCursor: "c"),
+            .pageAppended([feedItem("b", at: 2), feedItem("c", at: 3)], nil)
+        )
+        XCTAssertEqual(appended.items.map(\.post.text), ["a", "b", "c"])
+    }
+
+    func testRelativeTimeUsesADateAfterADay() {
+        let morning = Int64(1_710_003_600_000)
+        XCTAssertEqual(relativeTime(createdAt: morning - 23 * 3_600_000, now: morning), "23h")
+        XCTAssertEqual(relativeTime(createdAt: 1_710_000_000_000, now: 1_710_086_400_000), "Mar 9")
+        XCTAssertEqual(relativeTime(createdAt: 1_710_000_000_000, now: 1_735_776_000_000), "Mar 9, 2024")
+    }
+
+    func testLocalHomeHasNoFeedTab() {
+        XCTAssertEqual(homeTabs(hosted: true).map(\.rawValue), ["feed", "books"])
+        XCTAssertEqual(homeTabs(hosted: false).map(\.rawValue), ["books"])
     }
 }
 
@@ -447,6 +556,31 @@ final class HomeFeedStoreTests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: feedFile(user: "bea").path))
     }
 
+    func testARefreshDropsTheLoadMoreThatStartedBeforeIt() async throws {
+        sessions.setSignedIn(username: "ada", token: "token-a")
+        try await gate.waitForCalls(1)
+        gate.respond("token-a", page: HomeFeedPage(
+            items: [feedItem("a", at: 1), feedItem("b", at: 2)],
+            nextCursor: "next"
+        ))
+        try await waitUntil { !store.loadState.isRefreshing && store.loadState.items.count == 2 }
+
+        Task { await store.loadMore() }
+        try await gate.waitForCalls(2)
+        Task { await store.load() }
+        try await gate.waitForCalls(3)
+
+        gate.respond("token-a", page: HomeFeedPage(
+            items: [feedItem("b", at: 2), feedItem("c", at: 3)],
+            nextCursor: nil
+        ))
+        try await Task.sleep(nanoseconds: 150_000_000)
+        XCTAssertEqual(store.loadState.items.map(\.post.text), ["a", "b"])
+
+        gate.respond("token-a", page: HomeFeedPage(items: [feedItem("fresh", at: 9)], nextCursor: nil))
+        try await waitUntil { store.loadState.items.map(\.post.text) == ["fresh"] && !store.loadState.isRefreshing }
+    }
+
     private func feedFile(user: String) -> URL {
         let key = shelfCacheKey(serverUrl: "https://mewo.example", username: user)
         return root.appendingPathComponent("hosted-feeds").appendingPathComponent(key + ".json")
@@ -464,14 +598,14 @@ final class HomeFeedStoreTests: XCTestCase {
     }
 }
 
-private func feedItem(_ text: String) -> HomeFeedItem {
+private func feedItem(_ text: String, at: Int64 = 1) -> HomeFeedItem {
     HomeFeedItem(
         type: "repost",
         actor: "ada",
         book: BookRecord(id: "b1", title: "Emma", author: "Austen", handle: "austen", importedAt: 0),
         post: FeedPost(id: "1", kind: .body, text: text, chapter: "One"),
         comment: nil,
-        at: 1
+        at: at
     )
 }
 
@@ -603,7 +737,7 @@ private final class FeedGate: @unchecked Sendable {
     let client = HostedClient()
     private let lock = NSLock()
     private var calls = 0
-    private var gates: [String: CheckedContinuation<HomeFeedPage, Error>] = [:]
+    private var gates: [String: [CheckedContinuation<HomeFeedPage, Error>]] = [:]
     private var waiters: [Waiter] = []
 
     init() {
@@ -628,7 +762,9 @@ private final class FeedGate: @unchecked Sendable {
 
     func respond(_ token: String, page: HomeFeedPage) {
         lock.lock()
-        let cont = gates.removeValue(forKey: token)
+        var queue = gates[token] ?? []
+        let cont = queue.isEmpty ? nil : queue.removeFirst()
+        gates[token] = queue
         lock.unlock()
         cont?.resume(returning: page)
     }
@@ -640,7 +776,9 @@ private final class FeedGate: @unchecked Sendable {
         let starts = waiters
         waiters.removeAll()
         lock.unlock()
-        for cont in pending.values { cont.resume(throwing: CancellationError()) }
+        for queue in pending.values {
+            for cont in queue { cont.resume(throwing: CancellationError()) }
+        }
         for start in starts { start.cont.resume(throwing: CancellationError()) }
     }
 
@@ -648,7 +786,7 @@ private final class FeedGate: @unchecked Sendable {
         try await withCheckedThrowingContinuation { (cont: CheckedContinuation<HomeFeedPage, Error>) in
             lock.lock()
             calls += 1
-            gates[token] = cont
+            gates[token, default: []].append(cont)
             let ready = waiters.filter { calls >= $0.count }
             waiters.removeAll { calls >= $0.count }
             lock.unlock()

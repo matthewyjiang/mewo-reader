@@ -67,10 +67,11 @@ struct ProfilePostsPage: Codable, Equatable, Sendable {
     var nextCursor: String?
 }
 
-struct ProfileRepostItem: Codable, Equatable, Sendable {
+struct ProfileRepostItem: Codable, Equatable, Identifiable, Sendable {
     var book: BookRecord
     var post: FeedPost
     var repostedAt: Int64
+    var id: String { "\(book.id):\(post.id):\(repostedAt)" }
 }
 
 struct ProfileRepostsPage: Codable, Equatable, Sendable {

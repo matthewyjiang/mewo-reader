@@ -50,7 +50,7 @@ class Handler(BaseHTTPRequestHandler):
         elif path == "/v1/feed":
             self.feed()
         elif path == "/v1/search":
-            self.search(query.get("type", ["accounts"])[0])
+            self.search(query.get("type", ["accounts"])[0], query.get("q", [""])[0])
         elif path == "/v1/users/ada":
             self.json_ok({
                 "username": "ada",
@@ -152,13 +152,19 @@ class Handler(BaseHTTPRequestHandler):
             "nextCursor": None,
         })
 
-    def search(self, kind):
+    def search(self, kind, query):
+        needle = query.lower()
         if kind == "books":
-            items = [BOOK]
+            haystack = " ".join([
+                BOOK["title"], BOOK["author"], BOOK["handle"], BOOK["ownerUsername"],
+            ]).lower()
+            items = [BOOK] if needle in haystack else []
         elif kind == "posts":
-            items = [{"book": BOOK, "post": POST}]
+            haystack = f"{POST['text']} {BOOK['ownerUsername']}".lower()
+            items = [{"book": BOOK, "post": POST}] if needle in haystack else []
         else:
-            items = [{"username": "ada", "mine": True}, {"username": "bea", "mine": False}]
+            accounts = [{"username": "ada", "mine": True}, {"username": "bea", "mine": False}]
+            items = [account for account in accounts if needle in account["username"].lower()]
         self.json_ok({"type": kind, "items": items, "nextCursor": None})
 
     def json_ok(self, payload):

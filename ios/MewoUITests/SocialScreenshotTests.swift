@@ -12,7 +12,10 @@ final class SocialScreenshotTests: XCTestCase {
     }
 
     private func walk(theme: String) throws {
-        try XCTSkipUnless(fixtureReady(), "social fixture is not reachable on 127.0.0.1:8766")
+        guard fixtureReady() else {
+            XCTFail("social fixture is not reachable on 127.0.0.1:8766")
+            return
+        }
         let app = XCUIApplication()
         app.launchArguments = [
             "--uitesting",
@@ -77,7 +80,7 @@ final class SocialScreenshotTests: XCTestCase {
         app.buttons["tab-home"].tap()
         app.buttons["home-books"].coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
         app.staticTexts["A Timeline of My Own"].tap()
-        let reposts = app.buttons["Reposts, 3"]
+        let reposts = app.buttons["Reposted, 3"]
         XCTAssertTrue(reposts.waitForExistence(timeout: 12), "reposted post did not paint")
         shot(app, theme, "repost-active")
 

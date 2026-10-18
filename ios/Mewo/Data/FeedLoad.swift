@@ -53,6 +53,16 @@ enum FeedLoad: Equatable, Sendable {
     }
 }
 
+/// Keeps the first copy of each id. A repeated last-row fetch must not paint the same row twice.
+func appendingNew<T: Identifiable>(_ current: [T], _ incoming: [T]) -> [T] where T.ID: Hashable {
+    var seen = Set(current.map(\.id))
+    var next = current
+    for item in incoming where seen.insert(item.id).inserted {
+        next.append(item)
+    }
+    return next
+}
+
 enum FeedEvent: Equatable, Sendable {
     case cached([HomeFeedItem], String?)
     case refreshStarted
@@ -102,11 +112,11 @@ func reduceFeedLoad(_ state: FeedLoad, _ event: FeedEvent) -> FeedLoad {
     case .pageAppended(let more, let cursor):
         switch state {
         case .loaded(let items, let refreshing, _):
-            return .loaded(items: items + more, refreshing: refreshing, nextCursor: cursor)
+            return .loaded(items: appendingNew(items, more), refreshing: refreshing, nextCursor: cursor)
         case .failed(let message, let items, _):
-            return .failed(message: message, items: (items ?? []) + more, nextCursor: cursor)
+            return .failed(message: message, items: appendingNew(items ?? [], more), nextCursor: cursor)
         case .loading, .signedOut:
-            return .loaded(items: more, refreshing: false, nextCursor: cursor)
+            return .loaded(items: appendingNew([], more), refreshing: false, nextCursor: cursor)
         }
     case .signedOut:
         return .signedOut

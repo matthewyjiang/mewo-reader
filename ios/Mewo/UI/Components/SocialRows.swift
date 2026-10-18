@@ -51,7 +51,7 @@ struct PassageReply: View {
     var onShare: () -> Void
 
     var body: some View {
-        VStack(spacing: 0) {
+        VStack(alignment: .leading, spacing: 0) {
             ThreadPost(
                 name: passageName,
                 handle: passageHandle,
@@ -89,5 +89,6 @@ struct PassageReply: View {
             .padding(.trailing, 12)
             Hairline()
         }
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 }

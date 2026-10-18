@@ -207,6 +207,7 @@ struct ThreadPost: View {
         .padding(.leading, 16)
         .padding(.trailing, 4)
         .padding(.top, 12)
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 }
 

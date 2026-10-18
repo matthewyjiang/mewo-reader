@@ -115,7 +115,7 @@ final class FeatureTests: XCTestCase {
         openSample()
         openSampleBook()
         tapPostAction("Repost")
-        XCTAssertTrue(app.buttons["Reposts, 1"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.buttons["Reposted, 1"].waitForExistence(timeout: 5))
         tapPostAction("Quote this line")
         XCTAssertTrue(shareVisible)
         dismissShare()
@@ -292,9 +292,8 @@ final class FeatureTests: XCTestCase {
         XCTAssertTrue(next.waitForExistence(timeout: 3))
         XCTAssertTrue(next.isEnabled)
         next.tap()
-        XCTAssertTrue(app.staticTexts["Nothing here yet"].waitForExistence(timeout: 10), "home did not open on Feed")
-        showBooks()
-        XCTAssertTrue(app.buttons["open-sample"].waitForExistence(timeout: 10) || app.staticTexts["A Timeline of My Own"].waitForExistence(timeout: 3))
+        XCTAssertTrue(app.buttons["open-sample"].waitForExistence(timeout: 10) || app.staticTexts["No books"].waitForExistence(timeout: 3))
+        XCTAssertFalse(app.buttons["home-feed"].exists)
     }
 
     /// Settings sits on top of home. Pop until the home tabs are back.

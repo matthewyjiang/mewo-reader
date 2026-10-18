@@ -10,7 +10,10 @@ final class HomeFeedStore {
     private let client: HostedClient
     private let directory: URL
     private var epoch = 0
+    /// Bumped when a refresh starts. A load-more that started earlier is dropped.
+    private var refreshGeneration = 0
     private var flight: FeedFlight?
+    private var more: FeedFlight?
     private(set) var loadState: FeedLoad = .signedOut
 
     init(sessions: HostedSessionStore, client: HostedClient, files: URL, refreshesOnInit: Bool) {
@@ -33,6 +36,9 @@ final class HomeFeedStore {
             await flight.task.value
             return
         }
+        more?.task.cancel()
+        more = nil
+        refreshGeneration += 1
         let id = UUID()
         let generation = epoch
         let task = Task { @MainActor in
@@ -48,29 +54,41 @@ final class HomeFeedStore {
     }
 
     func loadMore() async {
+        guard more == nil, flight == nil else { return }
         guard case .loaded(let items, let refreshing, let cursor) = loadState,
               !refreshing, let cursor, !cursor.isEmpty else { return }
         let token = sessions.session.token
         let session = sessions.session
         let generation = epoch
+        let refresh = refreshGeneration
         guard session.signedIn else { return }
-        do {
-            let page = try await fetch(session, cursor: cursor)
-            guard generation == epoch, sessions.session.token == token else { return }
-            loadState = reduceFeedLoad(loadState, .pageAppended(page.items, page.nextCursor))
-        } catch is CancellationError {
-            return
-        } catch {
-            guard generation == epoch, sessions.session.token == token else { return }
-            let message = error.localizedDescription
-            if case .loaded = loadState {
-                loadState = .failed(
-                    message: message.isEmpty ? "Could not load the feed." : message,
-                    items: items,
-                    nextCursor: cursor
-                )
+        let id = UUID()
+        let task = Task { @MainActor in
+            defer {
+                if self.more?.id == id { self.more = nil }
+            }
+            do {
+                let page = try await self.fetch(session, cursor: cursor)
+                guard !Task.isCancelled, generation == self.epoch, refresh == self.refreshGeneration else { return }
+                guard self.sessions.session.token == token else { return }
+                self.loadState = reduceFeedLoad(self.loadState, .pageAppended(page.items, page.nextCursor))
+            } catch is CancellationError {
+                return
+            } catch {
+                guard !Task.isCancelled, generation == self.epoch, refresh == self.refreshGeneration else { return }
+                guard self.sessions.session.token == token else { return }
+                let message = error.localizedDescription
+                if case .loaded = self.loadState {
+                    self.loadState = .failed(
+                        message: message.isEmpty ? "Could not load the feed." : message,
+                        items: items,
+                        nextCursor: cursor
+                    )
+                }
             }
         }
+        more = FeedFlight(id: id, task: task, token: token)
+        await task.value
     }
 
     private func loadBody(startedWith token: String?, generation: Int) async {
@@ -120,8 +138,11 @@ final class HomeFeedStore {
         let tokenChanged = previous.token != next.token
         guard tokenChanged || (previous.signedIn && (urlChanged || userChanged)) else { return }
         epoch += 1
+        refreshGeneration += 1
         flight?.task.cancel()
         flight = nil
+        more?.task.cancel()
+        more = nil
         if previous.signedIn && (signedOut || urlChanged || userChanged) {
             clear(previous)
         }

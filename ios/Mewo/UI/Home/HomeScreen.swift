@@ -10,6 +10,11 @@ enum HomeSection: String, CaseIterable, Identifiable {
     }
 }
 
+/// The feed is server-only. Local mode opens on the shelf.
+func homeTabs(hosted: Bool) -> [HomeSection] {
+    hosted ? [.feed, .books] : [.books]
+}
+
 struct HomeScreen: View {
     @Environment(\.mewo) private var mewo
     @Environment(\.app) private var app
@@ -21,20 +26,22 @@ struct HomeScreen: View {
     @State private var section: HomeSection = .feed
 
     var body: some View {
+        let hosted = app.backend.kind == .hosted
+        let sections = homeTabs(hosted: hosted)
+        let selected = hosted ? section : HomeSection.books
         VStack(spacing: 0) {
             MewoAppBar(visible: chrome.visible, leading: { ProfileButton(onClick: onOpenAccount) }, center: { BrandMark() })
             UnderlineTabs(
-                items: HomeSection.allCases.map { UnderlineTabItem(id: $0.rawValue, title: $0.title) },
-                selected: section.rawValue,
+                items: sections.map { UnderlineTabItem(id: $0.rawValue, title: $0.title) },
+                selected: selected.rawValue,
                 idPrefix: "home",
                 onSelect: { id in
-                    if let next = HomeSection(rawValue: id) {
-                        chrome.show()
-                        section = next
-                    }
+                    guard hosted, let next = HomeSection(rawValue: id) else { return }
+                    chrome.show()
+                    section = next
                 }
             )
-            switch section {
+            switch selected {
             case .feed:
                 FeedScreen(
                     env: app,
@@ -104,7 +111,17 @@ struct FeedScreen: View {
         let hosted = app.backend.kind == .hosted
         let load = hosted ? app.homeFeed.loadState : FeedLoad.loaded(items: [], refreshing: false, nextCursor: nil)
         Group {
-            if !hosted || load.showEmpty {
+            if !hosted {
+                EmptyView()
+            } else if case .signedOut = load {
+                Text(hostedNotSignedIn)
+                    .font(MewoFont.bold(22))
+                    .foregroundStyle(mewo.ink)
+                    .padding(.horizontal, 28)
+                    .padding(.vertical, 48)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                    .accessibilityIdentifier("feed-signed-out")
+            } else if load.showEmpty {
                 Text(emptyFeedCopy)
                     .font(MewoFont.bold(22))
                     .foregroundStyle(mewo.ink)
@@ -144,6 +161,9 @@ struct FeedScreen: View {
         .onAppear {
             social.refresh()
             if hosted { Task { await app.homeFeed.load() } }
+        }
+        .onChange(of: app.hostedSession.session.token) { _, _ in
+            social = FeedRowSocial(library: app.library)
         }
         .sheet(item: $commentTarget) { target in
             CommentSheet(

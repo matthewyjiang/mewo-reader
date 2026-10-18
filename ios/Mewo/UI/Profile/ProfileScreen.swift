@@ -89,6 +89,9 @@ final class ProfileViewModel {
     private var loader: ProfileLoading?
     private var sessionSeen: String?
     private var generation = 0
+    private var postsTicket = 0
+    private var repostsTicket = 0
+    private var booksTicket = 0
     private let hosted: Bool
 
     var postCount: Int? {
@@ -224,6 +227,14 @@ final class ProfileViewModel {
         }
     }
 
+    /// A fresh tab load takes a new ticket. An append keeps the current one, so a
+    /// refresh that started later can drop it. The superseded load does not clear
+    /// the flag the newer load is using.
+    private func tabTicket(append: Bool, counter: inout Int) -> Int {
+        if !append { counter += 1 }
+        return counter
+    }
+
     private func still(_ token: Int, _ session: String?) -> Bool {
         guard token == generation, loader?.token == session else {
             if token == generation {
@@ -263,14 +274,15 @@ final class ProfileViewModel {
         case .posts:
             if append {
                 guard let cursor = postsCursor, !cursor.isEmpty, !postsLoading else { return }
-            } else if postsLoading { return }
+            }
+            let ticket = tabTicket(append: append, counter: &postsTicket)
             postsLoading = true
             postsFailure = nil
             do {
                 let page = try await loader.loadPosts(username: handle, cursor: append ? postsCursor : nil)
-                guard still(token, session) else { return }
+                guard still(token, session), ticket == postsTicket else { return }
                 let rows = page.items.map { ProfileReply(book: $0.book, post: $0.post, comment: $0.comment) }
-                posts = append ? posts + rows : rows
+                posts = append ? appendingNew(posts, rows) : rows
                 postsCursor = page.nextCursor
                 postsLoaded = true
                 postsLoading = false
@@ -278,20 +290,21 @@ final class ProfileViewModel {
             } catch is CancellationError {
                 return
             } catch {
-                guard still(token, session) else { return }
+                guard still(token, session), ticket == postsTicket else { return }
                 postsLoading = false
                 postsFailure = error.localizedDescription
             }
         case .reposts:
             if append {
                 guard let cursor = repostsCursor, !cursor.isEmpty, !repostsLoading else { return }
-            } else if repostsLoading { return }
+            }
+            let ticket = tabTicket(append: append, counter: &repostsTicket)
             repostsLoading = true
             repostsFailure = nil
             do {
                 let page = try await loader.loadReposts(username: handle, cursor: append ? repostsCursor : nil)
-                guard still(token, session) else { return }
-                reposts = append ? reposts + page.items : page.items
+                guard still(token, session), ticket == repostsTicket else { return }
+                reposts = append ? appendingNew(reposts, page.items) : page.items
                 repostsCursor = page.nextCursor
                 repostsLoaded = true
                 repostsLoading = false
@@ -299,24 +312,24 @@ final class ProfileViewModel {
             } catch is CancellationError {
                 return
             } catch {
-                guard still(token, session) else { return }
+                guard still(token, session), ticket == repostsTicket else { return }
                 repostsLoading = false
                 repostsFailure = error.localizedDescription
             }
         case .books:
-            if booksLoading { return }
+            let ticket = tabTicket(append: false, counter: &booksTicket)
             booksLoading = true
             booksFailure = nil
             do {
                 let page = try await loader.loadBooks(username: handle)
-                guard still(token, session) else { return }
+                guard still(token, session), ticket == booksTicket else { return }
                 books = page.items
                 booksLoaded = true
                 booksLoading = false
             } catch is CancellationError {
                 return
             } catch {
-                guard still(token, session) else { return }
+                guard still(token, session), ticket == booksTicket else { return }
                 booksLoading = false
                 booksFailure = error.localizedDescription
             }
@@ -526,10 +539,10 @@ struct ProfileScreen: View {
                 failure: model.repostsFailure,
                 title: ProfileTab.reposts.emptyTitle
             ) {
-                ForEach(Array(model.reposts.enumerated()), id: \.offset) { index, hit in
+                ForEach(model.reposts) { hit in
                     repostRow(hit)
                         .onAppear {
-                            if index == model.reposts.count - 1 { model.loadMore() }
+                            if hit.id == model.reposts.last?.id { model.loadMore() }
                         }
                 }
             }

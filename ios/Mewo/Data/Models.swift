@@ -217,10 +217,11 @@ struct ProfileReplies: Codable, Equatable, Sendable {
     var replies: [ProfileReplyRecord] = []
 }
 
-struct ProfileReply: Equatable, Hashable, Sendable {
+struct ProfileReply: Equatable, Hashable, Identifiable, Sendable {
     var book: BookRecord
     var post: FeedPost
     var comment: PostComment
+    var id: String { comment.id }
 }
 
 struct AuthRequest: Codable, Sendable {
@@ -369,7 +370,16 @@ func relativeTime(createdAt: Int64, now: Int64 = nowMillis()) -> String {
     if minutes < 60 { return "\(minutes)m" }
     let hours = minutes / 60
     if hours < 24 { return "\(hours)h" }
-    return "\(hours / 24)d"
+    var calendar = Calendar(identifier: .gregorian)
+    calendar.timeZone = TimeZone(secondsFromGMT: 0)!
+    let date = Date(timeIntervalSince1970: TimeInterval(createdAt) / 1000)
+    let today = Date(timeIntervalSince1970: TimeInterval(now) / 1000)
+    let formatter = DateFormatter()
+    formatter.locale = Locale(identifier: "en_US_POSIX")
+    formatter.timeZone = TimeZone(secondsFromGMT: 0)
+    let sameYear = calendar.component(.year, from: date) == calendar.component(.year, from: today)
+    formatter.dateFormat = sameYear ? "MMM d" : "MMM d, yyyy"
+    return formatter.string(from: date)
 }
 
 func quoteLine(author: String?, title: String?, text: String) -> String {

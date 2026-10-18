@@ -112,6 +112,7 @@ final class SearchViewModel {
         searchTask?.cancel()
         generation += 1
         slices = [:]
+        socials = [:]
         searching = false
         loadingMore = false
         failure = nil
@@ -251,12 +252,12 @@ final class SearchViewModel {
         var slice = append ? (slices[tab] ?? SearchSlice()) : SearchSlice()
         switch tab {
         case .accounts:
-            slice.accounts = append ? slice.accounts + page.accounts : page.accounts
+            slice.accounts = append ? appendingNew(slice.accounts, page.accounts) : page.accounts
         case .books:
-            slice.books = append ? slice.books + page.books : page.books
+            slice.books = append ? appendingNew(slice.books, page.books) : page.books
         case .posts:
             let rows = page.posts
-            slice.posts = append ? slice.posts + rows : rows
+            slice.posts = append ? appendingNew(slice.posts, rows) : rows
             for hit in rows { social(hit.book.id).load() }
         }
         slice.nextCursor = page.nextCursor
@@ -454,17 +455,39 @@ struct SearchScreen: View {
     var body: some View {
         VStack(spacing: 0) {
             MewoAppBar(leading: { ProfileButton(onClick: onOpenAccount) }, content: {
-                TextField("Search", text: Binding(
-                    get: { model.query },
-                    set: { model.setQuery($0) }
-                ))
-                .textFieldStyle(.plain)
-                .font(MewoFont.regular(17))
-                .foregroundStyle(mewo.ink)
-                .focused($focused)
-                .padding(.trailing, 16)
-                .accessibilityLabel("Search books and posts")
-                .accessibilityIdentifier("search-field")
+                HStack(spacing: 8) {
+                    Image(systemName: "magnifyingglass")
+                        .font(.system(size: 18))
+                        .foregroundStyle(mewo.mute)
+                    TextField("Search", text: Binding(
+                        get: { model.query },
+                        set: { model.setQuery($0) }
+                    ))
+                    .textFieldStyle(.plain)
+                    .font(MewoFont.regular(15))
+                    .foregroundStyle(mewo.ink)
+                    .focused($focused)
+                    .accessibilityLabel("Search books and posts")
+                    .accessibilityIdentifier("search-field")
+                    if !model.query.isEmpty {
+                        Button {
+                            model.setQuery("")
+                        } label: {
+                            Image(systemName: "xmark")
+                                .font(.system(size: 16, weight: .semibold))
+                                .foregroundStyle(mewo.mute)
+                                .frame(width: 28, height: 32)
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel("Clear search")
+                        .accessibilityIdentifier("search-clear")
+                    }
+                }
+                .padding(.horizontal, 12)
+                .frame(height: 38)
+                .background(mewo.hover, in: Capsule())
+                .overlay(Capsule().strokeBorder(focused ? mewo.accent : mewo.line, lineWidth: 1))
+                .padding(.trailing, 8)
             })
             UnderlineTabs(
                 items: tabItems,
