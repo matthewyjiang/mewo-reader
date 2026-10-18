@@ -9,7 +9,8 @@
     heart: 'M20.8 4.6a5.5 5.5 0 0 0-7.8 0L12 5.7l-1.1-1.1'
       + 'a5.5 5.5 0 0 0-7.8 7.8L12 21l8.8-8.6a5.5 5.5 0 0 0 0-7.8Z',
     comment: 'M21 11.5a8.5 8.5 0 0 1-8.5 8.5H4l-2 2V11.5a9.5 9.5 0 0 1 19 0Z',
-    quote: 'M4 8h14l-3-3m3 3-3 3M20 16H6l3 3m-3-3 3-3M4 8v6m16 2v-6',
+    // Material Icons Outlined format_quote. A fill glyph, same as Android.
+    quote: 'M6 17h3l2-4V7H5v6h3zm8 0h3l2-4V7h-6v6h3z',
     share: 'M12 16V2m0 0-5 5m5-5 5 5M5 12H3v9h18v-9h-2',
     back: 'M20 12H4m0 0 7-7m-7 7 7 7',
     close: 'm6 6 12 12M6 18 18 6',
@@ -43,6 +44,7 @@
   const origin: Partial<Record<IconName, string>> = {
     lock: 'translate(0 0.5)',
   };
+  const filledGlyphs = new Set<IconName>(['quote']);
 </script>
 
 <script lang="ts">
@@ -52,7 +54,7 @@
     size?: number;
   } = $props();
   let glyph = $derived(filled && filledPaths[name] ? filledPaths[name] : paths[name]);
-  let solid = $derived(filled && !!filledPaths[name]);
+  let solid = $derived(filledGlyphs.has(name) || (filled && !!filledPaths[name]));
 </script>
 
 <svg
@@ -71,6 +73,10 @@
       <path d={glyph} fill={solid ? 'currentColor' : undefined} stroke={solid ? 'none' : undefined} />
     </g>
   {:else}
-    <path d={glyph} />
+    <path
+      d={glyph}
+      fill={solid && !filled ? 'currentColor' : undefined}
+      stroke={solid && !filled ? 'none' : undefined}
+    />
   {/if}
 </svg>

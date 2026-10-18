@@ -45,7 +45,7 @@
     {#if router.url.pathname === '/search'}
       <label class="search-field">
         <Icon name="search" size={18} />
-        <span class="sr-only">Search books and opened posts</span>
+        <span class="sr-only">Search accounts, books, and posts</span>
         <input bind:this={searchInput} type="search" placeholder="Search" bind:value={query} />
         {#if query}
           <button

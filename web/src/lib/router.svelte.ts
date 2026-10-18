@@ -54,8 +54,15 @@ class Router {
     const tab: Tab = url.pathname === '/search' ? 'search'
       : url.pathname === '/likes' ? 'likes'
         : url.pathname === '/' ? 'home' : this.current.tab;
+    // A profile tab is the same screen. A new key would remount it and flash the header.
+    const sameProfile = replace
+      && url.pathname === this.url.pathname
+      && url.pathname.startsWith('/profiles/');
     const next: Entry = {
-      mewo: true, key: newKey(), tab, previous: !replace || this.current.previous,
+      mewo: true,
+      key: sameProfile ? this.current.key : newKey(),
+      tab,
+      previous: !replace || this.current.previous,
     };
     if (fromTab) this.scroll.set(next.key, this.tabScroll.get(tab) ?? 0);
     if (replace) history.replaceState(next, '', url);

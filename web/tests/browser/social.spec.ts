@@ -191,47 +191,73 @@ test('the drawer Profile row opens your profile', async ({ page }) => {
   await expect(page.getByText('Joined Jan 2021')).toBeVisible();
 });
 
-test('shots of the social surfaces', async ({ page }) => {
-  await mkdir('/opt/cursor/artifacts', { recursive: true });
-  const shots: { name: string; theme: 'x_light' | 'x_lights_out'; width: number }[] = [];
-  for (const theme of ['x_light', 'x_lights_out'] as const) {
-    for (const width of [390, 1280]) shots.push({ name: '', theme, width });
-  }
-  for (const { theme, width } of shots) {
-    const label = `${width}-${theme === 'x_light' ? 'light' : 'dark'}`;
-    await page.setViewportSize({ width, height: width === 390 ? 844 : 900 });
-    await install(page, theme);
-    await page.goto('/');
-    await expect(page.getByText('byron reposted')).toBeVisible();
-    await page.screenshot({ path: `/opt/cursor/artifacts/web-home-feed-${label}.png` });
-    await page.getByRole('tab', { name: 'Books' }).click();
-    await expect(page.getByText('Emma', { exact: true })).toBeVisible();
-    await page.screenshot({ path: `/opt/cursor/artifacts/web-home-books-${label}.png` });
-    await page.getByRole('button', { name: 'Open account drawer' }).click();
-    await expect(page.getByRole('button', { name: 'Profile', exact: true })).toBeVisible();
-    await page.screenshot({ path: `/opt/cursor/artifacts/web-drawer-${label}.png` });
-    await page.keyboard.press('Escape');
+test('a fresh search context opens on Accounts after Posts was saved', async ({ browser }) => {
+  const visit = async () => {
+    const context = await browser.newContext();
+    const page = await context.newPage();
+    await page.setViewportSize({ width: 390, height: 844 });
+    await install(page);
     await page.goto('/search');
     await page.getByRole('searchbox').fill('ada');
     await expect(page.getByRole('button', { name: '@ada' })).toBeVisible();
-    await page.screenshot({ path: `/opt/cursor/artifacts/web-search-accounts-${label}.png` });
-    await page.getByRole('tab', { name: 'Books' }).click();
-    await expect(page.getByText('Emma', { exact: true })).toBeVisible();
-    await page.screenshot({ path: `/opt/cursor/artifacts/web-search-books-${label}.png` });
     await page.getByRole('tab', { name: 'Posts' }).click();
-    await expect(page.getByRole('button', { name: 'Repost', exact: true })).toBeVisible();
-    await page.getByRole('button', { name: 'Repost', exact: true }).click();
-    await expect(page.getByRole('button', { name: 'Reposts, 1' })).toBeVisible();
-    await page.screenshot({ path: `/opt/cursor/artifacts/web-search-posts-${label}.png` });
-    await page.screenshot({ path: `/opt/cursor/artifacts/web-repost-active-${label}.png` });
-    await page.goto('/profiles/ada');
-    await expect(page.getByText('Joined Jan 2021')).toBeVisible();
-    await page.screenshot({ path: `/opt/cursor/artifacts/web-profile-posts-${label}.png` });
-    await page.getByRole('tab', { name: 'Reposts' }).click();
-    await expect(page.getByText('Emma Woodhouse, handsome, clever, and rich.')).toBeVisible();
-    await page.screenshot({ path: `/opt/cursor/artifacts/web-profile-reposts-${label}.png` });
-    await page.getByRole('tab', { name: 'Books' }).click();
-    await expect(page.getByText('Emma', { exact: true })).toBeVisible();
-    await page.screenshot({ path: `/opt/cursor/artifacts/web-profile-books-${label}.png` });
+    await expect(page.getByRole('tab', { name: 'Posts' })).toHaveAttribute('aria-selected', 'true');
+    await context.close();
+  };
+  await visit();
+  await visit();
+});
+
+test('shots of the social surfaces', async ({ browser }) => {
+  test.skip(!process.env.MEWO_SHOTS, 'set MEWO_SHOTS=1 to write social screenshots');
+  const dir = process.env.MEWO_SHOTS_DIR ?? 'test-results/social-shots';
+  await mkdir(dir, { recursive: true });
+  const shots: { theme: 'x_light' | 'x_lights_out'; width: number }[] = [];
+  for (const theme of ['x_light', 'x_lights_out'] as const) {
+    for (const width of [390, 1280]) shots.push({ theme, width });
+  }
+  for (const { theme, width } of shots) {
+    const label = `${width}-${theme === 'x_light' ? 'light' : 'dark'}`;
+    const context = await browser.newContext({
+      viewport: { width, height: width === 390 ? 844 : 900 },
+    });
+    const page = await context.newPage();
+    try {
+      await install(page, theme);
+      await page.goto('/');
+      await expect(page.getByText('byron reposted')).toBeVisible();
+      await page.screenshot({ path: `${dir}/web-home-feed-${label}.png` });
+      await page.getByRole('tab', { name: 'Books' }).click();
+      await expect(page.getByText('Emma', { exact: true })).toBeVisible();
+      await page.screenshot({ path: `${dir}/web-home-books-${label}.png` });
+      await page.getByRole('button', { name: 'Open account drawer' }).click();
+      await expect(page.getByRole('button', { name: 'Profile', exact: true })).toBeVisible();
+      await page.screenshot({ path: `${dir}/web-drawer-${label}.png` });
+      await page.keyboard.press('Escape');
+      await page.goto('/search');
+      await page.getByRole('searchbox').fill('ada');
+      await expect(page.getByRole('button', { name: '@ada' })).toBeVisible();
+      await page.screenshot({ path: `${dir}/web-search-accounts-${label}.png` });
+      await page.getByRole('tab', { name: 'Books' }).click();
+      await expect(page.getByText('Emma', { exact: true })).toBeVisible();
+      await page.screenshot({ path: `${dir}/web-search-books-${label}.png` });
+      await page.getByRole('tab', { name: 'Posts' }).click();
+      await expect(page.getByRole('button', { name: 'Repost', exact: true })).toBeVisible();
+      await page.getByRole('button', { name: 'Repost', exact: true }).click();
+      await expect(page.getByRole('button', { name: 'Reposts, 1' })).toBeVisible();
+      await page.screenshot({ path: `${dir}/web-search-posts-${label}.png` });
+      await page.screenshot({ path: `${dir}/web-repost-active-${label}.png` });
+      await page.goto('/profiles/ada');
+      await expect(page.getByText('Joined Jan 2021')).toBeVisible();
+      await page.screenshot({ path: `${dir}/web-profile-posts-${label}.png` });
+      await page.getByRole('tab', { name: 'Reposts' }).click();
+      await expect(page.getByText('Emma Woodhouse, handsome, clever, and rich.')).toBeVisible();
+      await page.screenshot({ path: `${dir}/web-profile-reposts-${label}.png` });
+      await page.getByRole('tab', { name: 'Books' }).click();
+      await expect(page.getByText('Emma', { exact: true })).toBeVisible();
+      await page.screenshot({ path: `${dir}/web-profile-books-${label}.png` });
+    } finally {
+      await context.close();
+    }
   }
 });

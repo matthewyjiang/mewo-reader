@@ -120,8 +120,12 @@ fun LibraryScreen(
     val hosted = LocalBackend.current.kind == BackendKind.Hosted
     val context = LocalContext.current
     val auth = LocalHostedAuth.current
-    var home by rememberSaveable { mutableStateOf("feed") }
-    val onBooks = home == "books"
+    var home by rememberSaveable { mutableStateOf(if (hosted) "feed" else "books") }
+    // The feed is server-only. A saved "feed" tab from a hosted session opens on Books.
+    LaunchedEffect(hosted) {
+        if (!hosted) home = "books"
+    }
+    val onBooks = !hosted || home == "books"
     val feedCache = remember { FileHomeFeedCache(File(context.filesDir, "home-feeds")) }
     val feedViewModel: FeedViewModel = composeViewModel(
         factory = FeedViewModel.factory(library, feedCache),
@@ -145,8 +149,8 @@ fun LibraryScreen(
         Column(Modifier.fillMaxSize()) {
             HomeBar(onOpenAccount = onOpenAccount, visible = hideOnScroll.visible)
             UnderlineTabs(
-                tabs = listOf("feed" to "Feed", "books" to "Books"),
-                selected = home,
+                tabs = if (hosted) listOf("feed" to "Feed", "books" to "Books") else listOf("books" to "Books"),
+                selected = if (hosted) home else "books",
                 onSelect = { home = it },
             )
             val feedItems = when (val phase = feedState.phase) {

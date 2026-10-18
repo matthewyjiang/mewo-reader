@@ -34,11 +34,14 @@
   let postsCursor = $state<string | null>(null);
   let repostsCursor = $state<string | null>(null);
   let loading = $state(true);
+  let listLoading = $state(false);
   let more = $state(false);
   let error = $state('');
   let tab = $derived(profileTab(router.url));
+  let loadedTab = $state<ProfileTab | null>(null);
   let active = true;
-  let request = 0;
+  let recordRequest = 0;
+  let listRequest = 0;
   let abort: AbortController | undefined;
 
   function select(id: string): void {
@@ -65,28 +68,55 @@
     }
   }
 
-  export async function refresh(): Promise<void> {
-    const latest = ++request;
+  async function switchTab(kind: ProfileTab): Promise<void> {
+    const latest = ++listRequest;
     const token = store.session?.token;
     abort?.abort();
     const signal = new AbortController();
     abort = signal;
-    const kind = untrack(() => tab);
+    more = false;
+    listLoading = true;
+    error = '';
     try {
-      const next = await store.profileRecord(username, signal.signal);
-      if (!active || latest !== request || token !== store.session?.token || signal.signal.aborted) return;
-      record = next;
-      missing = false;
-      oncount(next.postCount);
       await loadTab(kind, null, signal.signal);
-      if (!active || latest !== request || token !== store.session?.token) return;
+      if (!active || latest !== listRequest || token !== store.session?.token || signal.signal.aborted) return;
+      loadedTab = kind;
       const ids = [...new Set([
         ...posts.map((row) => row.book.id),
         ...reposts.map((row) => row.book.id),
       ])];
-      void Promise.all(ids.map((id) => store.social(id)));
+      for (const id of ids) void store.social(id).catch(() => {});
+    } finally {
+      if (active && latest === listRequest) listLoading = false;
+    }
+  }
+
+  // The header stays. A tab change, or a pull to refresh, only reloads the list.
+  $effect(() => {
+    const kind = tab;
+    if (!record) return;
+    untrack(() => {
+      if (kind === loadedTab) return;
+      void switchTab(kind).catch((err: unknown) => {
+        if (active) error = message(err);
+      });
+    });
+  });
+
+  export async function refresh(): Promise<void> {
+    const latest = ++recordRequest;
+    const token = store.session?.token;
+    abort?.abort();
+    listRequest += 1;
+    try {
+      const next = await store.profileRecord(username);
+      if (!active || latest !== recordRequest || token !== store.session?.token) return;
+      loadedTab = null;
+      record = next;
+      missing = false;
+      oncount(next.postCount);
     } catch (err) {
-      if (!active || latest !== request || token !== store.session?.token || signal.signal.aborted) return;
+      if (!active || latest !== recordRequest || token !== store.session?.token) return;
       if (err instanceof ApiError && err.status === 404) {
         missing = true;
         record = null;
@@ -114,17 +144,21 @@
   async function loadMore(): Promise<void> {
     const kind = tab;
     const cursor = kind === 'posts' ? postsCursor : kind === 'reposts' ? repostsCursor : null;
-    if (!cursor || more || loading) return;
-    const latest = request;
+    if (!cursor || more || loading || listLoading) return;
+    const latest = listRequest;
     const token = store.session?.token;
     more = true;
+    abort?.abort();
     const signal = new AbortController();
+    abort = signal;
     try {
       await loadTab(kind, cursor, signal.signal);
     } catch (err) {
-      if (active && latest === request && token === store.session?.token) error = message(err);
+      if (active && latest === listRequest && token === store.session?.token && !signal.signal.aborted) {
+        error = message(err);
+      }
     } finally {
-      if (active) more = false;
+      if (active && latest === listRequest) more = false;
     }
   }
 
@@ -142,7 +176,7 @@
   });
 
   let cursor = $derived(tab === 'posts' ? postsCursor : tab === 'reposts' ? repostsCursor : null);
-  let empty = $derived(!loading && !error && !missing && (
+  let empty = $derived(!loading && !listLoading && !error && !missing && (
     (tab === 'posts' && !posts.length) || (tab === 'reposts' && !reposts.length) || (tab === 'books' && !books.length)
   ));
 </script>
@@ -176,48 +210,55 @@
       <button class="text-button" onclick={load}>Try again</button>
     </div>
   {/if}
-  {#if tab === 'posts'}
-    {#each posts as reply (reply.comment.id)}
-      <div class="profile-reply">
-        <Post
-          book={reply.book}
-          post={reply.post}
-          connected
-          onopen={() => router.go(readerUrl(reply.book.id, reply.post.id))}
-          oncomment={() => oncomment(reply.book, reply.post)}
-        />
-        <ThreadRow
-          name={reply.comment.username}
-          handle={reply.comment.username}
-          meta={relativeTime(reply.comment.createdAt)}
-          text={reply.comment.text}
-          {onprofile}
-          onopen={() => oncomment(reply.book, reply.post)}
-        />
-      </div>
-    {/each}
-  {:else if tab === 'reposts'}
-    {#each reposts as hit (`${hit.book.id}:${hit.post.id}`)}
-      <Post
-        book={hit.book}
-        post={hit.post}
-        onopen={() => router.go(readerUrl(hit.book.id, hit.post.id))}
-        oncomment={() => oncomment(hit.book, hit.post)}
-      />
-    {/each}
+  {#if listLoading}
+    <div class="status-row" role="status">
+      <span class="spinner"></span>
+      <span class="sr-only">Loading profile…</span>
+    </div>
   {:else}
-    {#each books as book (book.id)}
-      <BookRow {book} />
-    {/each}
-  {/if}
-  {#if more}
-    <div class="status-row" role="status"><span class="spinner"></span></div>
-  {/if}
-  {#if cursor && !more}
-    <div use:sentinel></div>
-  {/if}
-  {#if empty}
-    <p class="inline-status">{tab === 'books' ? 'No books' : 'No posts'}</p>
+    {#if tab === 'posts'}
+      {#each posts as reply (reply.comment.id)}
+        <div class="profile-reply">
+          <Post
+            book={reply.book}
+            post={reply.post}
+            connected
+            onopen={() => router.go(readerUrl(reply.book.id, reply.post.id))}
+            oncomment={() => oncomment(reply.book, reply.post)}
+          />
+          <ThreadRow
+            name={reply.comment.username}
+            handle={reply.comment.username}
+            meta={relativeTime(reply.comment.createdAt)}
+            text={reply.comment.text}
+            {onprofile}
+            onopen={() => oncomment(reply.book, reply.post)}
+          />
+        </div>
+      {/each}
+    {:else if tab === 'reposts'}
+      {#each reposts as hit (`${hit.book.id}:${hit.post.id}`)}
+        <Post
+          book={hit.book}
+          post={hit.post}
+          onopen={() => router.go(readerUrl(hit.book.id, hit.post.id))}
+          oncomment={() => oncomment(hit.book, hit.post)}
+        />
+      {/each}
+    {:else}
+      {#each books as book (book.id)}
+        <BookRow {book} />
+      {/each}
+    {/if}
+    {#if more}
+      <div class="status-row" role="status"><span class="spinner"></span></div>
+    {/if}
+    {#if cursor && !more}
+      <div use:sentinel></div>
+    {/if}
+    {#if empty}
+      <p class="inline-status">{tab === 'books' ? 'No books' : 'No posts'}</p>
+    {/if}
   {/if}
 {/if}
 
