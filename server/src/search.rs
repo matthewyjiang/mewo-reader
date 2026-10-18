@@ -13,7 +13,7 @@ use crate::visibility::{BOOK_SELECT, BOOK_VISIBLE_TO};
 use crate::AppState;
 use base64::engine::general_purpose::STANDARD;
 use base64::Engine;
-use sqlx::{FromRow, SqlitePool};
+use sqlx::{Connection, FromRow, SqlitePool};
 use std::ops::DerefMut;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -390,29 +390,107 @@ pub(crate) async fn store_feed(
         tracing::error!(error = %err, "could not encode posts.json");
         ApiError::Internal
     })?;
-    let mut tx = pool.begin().await?;
+    // A startup backfill and a comment can want the write lock together.
+    // One long wait loses: the writer times out, or backfill gives up and
+    // leaves the book unindexed. Wait briefly, let the other statement
+    // finish, and try the same book again.
+    let mut attempt = 0;
+    loop {
+        match write_indexed(pool, dir, book_id, posts, &bytes).await {
+            Ok(()) => return Ok(bytes),
+            Err(WriteFailure::Locked) if attempt + 1 < FEED_WRITE_ATTEMPTS => {
+                attempt += 1;
+                tokio::time::sleep(BACKFILL_PAUSE).await;
+            }
+            Err(WriteFailure::Locked) => {
+                tracing::error!(book_id, "posts index stayed busy");
+                return Err(ApiError::Internal);
+            }
+            Err(WriteFailure::Other(err)) => return Err(err),
+        }
+    }
+}
+
+const POST_INSERT_BATCH: usize = 500;
+const BACKFILL_PAUSE: Duration = Duration::from_millis(75);
+const FEED_WRITE_ATTEMPTS: usize = 40;
+const FEED_BUSY_MS: u64 = 250;
+
+enum WriteFailure {
+    Locked,
+    Other(ApiError),
+}
+
+impl WriteFailure {
+    fn sqlx(err: sqlx::Error) -> Self {
+        if err.to_string().contains("database is locked") {
+            WriteFailure::Locked
+        } else {
+            WriteFailure::Other(err.into())
+        }
+    }
+}
+
+async fn write_indexed(
+    pool: &SqlitePool,
+    dir: &Path,
+    book_id: &str,
+    posts: &Posts,
+    bytes: &[u8],
+) -> Result<(), WriteFailure> {
+    let mut conn = pool.acquire().await.map_err(WriteFailure::sqlx)?;
+    // The pooled connection keeps this pragma. Put the normal timeout back
+    // before the connection is reused, including when the write fails.
+    if let Err(err) = sqlx::query(&format!("PRAGMA busy_timeout = {FEED_BUSY_MS}"))
+        .execute(&mut *conn)
+        .await
+    {
+        // The pragma did not change. Nothing to put back.
+        return Err(WriteFailure::sqlx(err));
+    }
+    let outcome = write_tx(&mut conn, dir, book_id, posts, bytes).await;
+    let restore = format!(
+        "PRAGMA busy_timeout = {}",
+        crate::db::BUSY_TIMEOUT.as_millis()
+    );
+    if let Err(err) = sqlx::query(&restore).execute(&mut *conn).await {
+        tracing::error!(error = %err, "could not restore busy_timeout");
+    }
+    outcome
+}
+
+async fn write_tx(
+    conn: &mut sqlx::SqliteConnection,
+    dir: &Path,
+    book_id: &str,
+    posts: &Posts,
+    bytes: &[u8],
+) -> Result<(), WriteFailure> {
+    let mut tx = conn.begin().await.map_err(WriteFailure::sqlx)?;
     sqlx::query("DELETE FROM posts WHERE book_id = ?")
         .bind(book_id)
         .execute(&mut *tx)
-        .await?;
+        .await
+        .map_err(WriteFailure::sqlx)?;
     insert_posts(&mut tx, book_id, &posts.posts).await?;
     sqlx::query("UPDATE books SET posts_indexed = 1, post_count = ? WHERE id = ?")
         .bind(posts.posts.len() as i64)
         .bind(book_id)
         .execute(&mut *tx)
-        .await?;
-    write_posts_file(dir, &bytes).await?;
-    tx.commit().await?;
-    Ok(bytes)
+        .await
+        .map_err(WriteFailure::sqlx)?;
+    write_posts_file(dir, bytes)
+        .await
+        .map_err(WriteFailure::Other)?;
+    tx.commit().await.map_err(WriteFailure::sqlx)?;
+    Ok(())
 }
-
-const POST_INSERT_BATCH: usize = 500;
 
 async fn insert_posts(
     tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
     book_id: &str,
     posts: &[Post],
-) -> Result<(), ApiError> {
+) -> Result<(), WriteFailure> {
     for chunk in posts.chunks(POST_INSERT_BATCH) {
         let mut sql = String::from("INSERT INTO posts (book_id, idx, kind, chapter, text) VALUES ");
         for (offset, _) in chunk.iter().enumerate() {
@@ -425,7 +503,7 @@ async fn insert_posts(
         for post in chunk {
             let idx: i64 = post.id.parse().map_err(|_| {
                 tracing::error!(id = %post.id, book_id, "post id is not an index");
-                ApiError::Internal
+                WriteFailure::Other(ApiError::Internal)
             })?;
             query = query
                 .bind(book_id)
@@ -434,7 +512,10 @@ async fn insert_posts(
                 .bind(&post.chapter)
                 .bind(&post.text);
         }
-        query.execute(tx.deref_mut()).await?;
+        query
+            .execute(tx.deref_mut())
+            .await
+            .map_err(WriteFailure::sqlx)?;
     }
     Ok(())
 }
@@ -463,8 +544,6 @@ pub(crate) async fn read_posts(dir: &Path) -> Result<Option<Vec<u8>>, ApiError> 
         Err(err) => Err(err.into()),
     }
 }
-
-const BACKFILL_PAUSE: Duration = Duration::from_millis(75);
 
 /// Indexes every book still at `posts_indexed = 0`. Safe to run again: a book
 /// is marked only after its file and rows commit, and a second pass skips it.

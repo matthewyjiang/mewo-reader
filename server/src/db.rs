@@ -4,6 +4,10 @@ use std::path::Path;
 use std::str::FromStr;
 use std::time::Duration;
 
+/// How long one statement waits for the write lock. Backfill retries a busy
+/// book instead of holding this for the whole startup pass.
+pub(crate) const BUSY_TIMEOUT: Duration = Duration::from_secs(10);
+
 pub async fn connect(database_url: &str, data_dir: &Path) -> Result<SqlitePool, sqlx::Error> {
     tokio::fs::create_dir_all(data_dir)
         .await
@@ -16,7 +20,7 @@ pub async fn connect(database_url: &str, data_dir: &Path) -> Result<SqlitePool, 
         .foreign_keys(true)
         .journal_mode(SqliteJournalMode::Wal)
         // Backfill yields between books. This only covers one book's write.
-        .busy_timeout(Duration::from_secs(10));
+        .busy_timeout(BUSY_TIMEOUT);
 
     let pool = SqlitePoolOptions::new()
         .max_connections(8)
