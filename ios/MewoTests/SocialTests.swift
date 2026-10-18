@@ -493,6 +493,15 @@ final class FeedLoadTests: XCTestCase {
         XCTAssertEqual(relativeTime(createdAt: 1_710_000_000_000, now: 1_735_776_000_000), "Mar 9, 2024")
     }
 
+    func testAvatarColorFollowsTheSharedUsernameHash() {
+        XCTAssertEqual(avatarIndex(for: "ada"), 0)
+        XCTAssertEqual(avatarIndex(for: "Mewo"), 0)
+        XCTAssertEqual(avatarIndex(for: "mewo"), 2)
+        XCTAssertEqual(avatarIndex(for: "bea"), 2)
+        XCTAssertEqual(avatarIndex(for: "Ada"), 4)
+        XCTAssertEqual(avatarIndex(for: "ada"), avatarIndex(for: "ada"))
+    }
+
     func testLocalHomeHasNoFeedTab() {
         XCTAssertEqual(homeTabs(hosted: true).map(\.rawValue), ["feed", "books"])
         XCTAssertEqual(homeTabs(hosted: false).map(\.rawValue), ["books"])

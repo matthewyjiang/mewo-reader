@@ -498,7 +498,7 @@ struct ProfileScreen: View {
                 Circle()
                     .fill(mewo.ground)
                     .frame(width: 76, height: 76)
-                    .overlay(Avatar(name: name, size: 68))
+                    .overlay(Avatar(name: handle.ifBlank { name }, size: 68))
                     .padding(.leading, 12)
                     .padding(.top, 87)
             }

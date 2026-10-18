@@ -56,7 +56,7 @@ struct AccountDrawer<Content: View>: View {
                 onOpenProfile(me.handle, me.name)
             } label: {
                 VStack(alignment: .leading, spacing: 0) {
-                    Avatar(name: me.name, size: 64)
+                    Avatar(name: me.handle.ifBlank { me.name }, size: 64)
                     Text(me.name)
                         .font(MewoFont.bold(20))
                         .foregroundStyle(mewo.ink)
