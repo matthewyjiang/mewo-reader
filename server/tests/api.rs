@@ -1913,6 +1913,27 @@ async fn migration_adds_search_on_an_existing_database() {
         .await,
         1
     );
+    assert_eq!(
+        count(
+            &pool,
+            "SELECT COUNT(*) FROM sqlite_master WHERE name = 'reposts'",
+            None
+        )
+        .await,
+        1
+    );
+    let repost_indexes: Vec<String> = sqlx::query_scalar(
+        "SELECT name FROM sqlite_master
+         WHERE type = 'index' AND tbl_name = 'reposts' AND sql IS NOT NULL
+         ORDER BY name",
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        repost_indexes,
+        vec!["reposts_created".to_string(), "reposts_user".to_string()]
+    );
 
     sqlx::query(
         "INSERT INTO posts (book_id, idx, kind, chapter, text)
@@ -1930,6 +1951,13 @@ async fn migration_adds_search_on_an_existing_database() {
         .await,
         1
     );
+    sqlx::query(
+        "INSERT INTO reposts (user_id, book_id, post_id, created_at)
+         VALUES ('user', 'book', '0', 1), ('user', 'new', '0', 2)",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
     sqlx::query("DELETE FROM books WHERE id = 'book'")
         .execute(&pool)
         .await
@@ -1942,6 +1970,24 @@ async fn migration_adds_search_on_an_existing_database() {
         )
         .await,
         0
+    );
+    assert_eq!(
+        count(
+            &pool,
+            "SELECT COUNT(*) FROM reposts WHERE book_id = 'book'",
+            None
+        )
+        .await,
+        0
+    );
+    assert_eq!(
+        count(
+            &pool,
+            "SELECT COUNT(*) FROM reposts WHERE book_id = 'new'",
+            None
+        )
+        .await,
+        1
     );
     assert_eq!(
         count(
@@ -2146,4 +2192,678 @@ async fn backfill_indexes_unindexed_books_once() {
             .unwrap(),
         legacy_mtime
     );
+}
+
+fn repost_path(id: &str, post: &str) -> String {
+    format!("/v1/books/{id}/posts/{post}/repost")
+}
+
+async fn unshare(app: &axum::Router, token: &str, id: &str) {
+    let (status, body) = json_req(
+        app,
+        "PATCH",
+        &format!("/v1/books/{id}"),
+        Some(token),
+        json!({ "shared": false }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["shared"], false);
+}
+
+async fn pause() {
+    tokio::time::sleep(Duration::from_millis(8)).await;
+}
+
+async fn feed_all(app: &axum::Router, token: &str) -> Vec<Value> {
+    let mut cursor: Option<String> = None;
+    let mut items = Vec::new();
+    for _ in 0..20 {
+        let path = match &cursor {
+            Some(cursor) => format!("/v1/feed?cursor={}", percent_encode(cursor)),
+            None => "/v1/feed".to_string(),
+        };
+        let (status, page) = empty_req(app, "GET", &path, Some(token)).await;
+        assert_eq!(status, StatusCode::OK, "{page}");
+        assert!(page.get("nextCursor").is_some(), "{page}");
+        assert!(page.get("next_cursor").is_none(), "{page}");
+        let batch = page["items"].as_array().expect("items");
+        if page["nextCursor"].is_null() {
+            assert!(batch.len() <= 20, "{page}");
+            items.extend(batch.clone());
+            return items;
+        }
+        assert_eq!(batch.len(), 20, "{page}");
+        items.extend(batch.clone());
+        let next = page["nextCursor"].as_str().unwrap().to_string();
+        assert_ne!(cursor.as_deref(), Some(next.as_str()));
+        cursor = Some(next);
+    }
+    panic!("feed cursor did not end");
+}
+
+fn feed_identity(item: &Value) -> String {
+    let kind = item["type"].as_str().unwrap();
+    let actor = item["actor"]["username"].as_str().unwrap();
+    let book = item["book"]["id"].as_str().unwrap();
+    let post = item["post"]["id"].as_str().unwrap();
+    match kind {
+        "comment" => format!(
+            "comment:{actor}:{book}:{post}:{}",
+            item["comment"]["text"].as_str().unwrap()
+        ),
+        "repost" => format!("repost:{actor}:{book}:{post}"),
+        other => panic!("unexpected feed type {other}"),
+    }
+}
+
+fn assert_feed_order(items: &[Value]) {
+    for pair in items.windows(2) {
+        let a_at = pair[0]["at"].as_i64().unwrap();
+        let b_at = pair[1]["at"].as_i64().unwrap();
+        assert!(a_at >= b_at, "{pair:?}");
+        if a_at != b_at {
+            continue;
+        }
+        let rank = |item: &Value| if item["type"] == "repost" { 1 } else { 0 };
+        assert!(rank(&pair[0]) >= rank(&pair[1]), "{pair:?}");
+        if pair[0]["type"] == "comment" && pair[1]["type"] == "comment" {
+            assert!(
+                pair[0]["comment"]["id"].as_str().unwrap()
+                    >= pair[1]["comment"]["id"].as_str().unwrap()
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn repost_put_and_delete_are_idempotent() {
+    let (app, _tmp) = app().await;
+    let matt = register(&app, "matt", "password1").await;
+    let ted = register(&app, "ted", "password1").await;
+    let epub = common::epub();
+    let (status, book) = upload(&app, &matt, "Shared", "Author", &epub, None, false).await;
+    assert_eq!(status, StatusCode::OK, "{book}");
+    let id = book["id"].as_str().unwrap();
+    share(&app, &matt, id).await;
+    let path = repost_path(id, "0");
+
+    let (status, _) = empty_req(&app, "PUT", &path, None).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+    let (status, body) = empty_req(&app, "PUT", &path, Some(&matt)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["reposts"], 1);
+    assert_eq!(body["reposted"], true);
+    let (status, again) = empty_req(&app, "PUT", &path, Some(&matt)).await;
+    assert_eq!(status, StatusCode::OK, "{again}");
+    assert_eq!(again, body);
+
+    let (status, index) = empty_req(
+        &app,
+        "GET",
+        &format!("/v1/books/{id}/comments"),
+        Some(&matt),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{index}");
+    assert_eq!(index["reposts"]["0"], 1);
+    assert_eq!(index["reposted"], json!(["0"]));
+    assert!(index["counts"].as_object().unwrap().is_empty());
+    assert_eq!(index["mine"], json!([]));
+
+    let (status, ted_index) =
+        empty_req(&app, "GET", &format!("/v1/books/{id}/comments"), Some(&ted)).await;
+    assert_eq!(status, StatusCode::OK, "{ted_index}");
+    assert_eq!(ted_index["reposts"]["0"], 1);
+    assert_eq!(ted_index["reposted"], json!([]));
+
+    let (status, ted_put) = empty_req(&app, "PUT", &path, Some(&ted)).await;
+    assert_eq!(status, StatusCode::OK, "{ted_put}");
+    assert_eq!(ted_put["reposts"], 2);
+    assert_eq!(ted_put["reposted"], true);
+    let (status, matt_index) = empty_req(
+        &app,
+        "GET",
+        &format!("/v1/books/{id}/comments"),
+        Some(&matt),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{matt_index}");
+    assert_eq!(matt_index["reposts"]["0"], 2);
+    assert_eq!(matt_index["reposted"], json!(["0"]));
+
+    let (status, other) = empty_req(&app, "PUT", &repost_path(id, "1"), Some(&matt)).await;
+    assert_eq!(status, StatusCode::OK, "{other}");
+    assert_eq!(other["reposts"], 1);
+    let (status, gone) = empty_req(&app, "DELETE", &repost_path(id, "1"), Some(&matt)).await;
+    assert_eq!(status, StatusCode::OK, "{gone}");
+    assert_eq!(gone["reposts"], 0);
+    assert_eq!(gone["reposted"], false);
+
+    let (status, deleted) = empty_req(&app, "DELETE", &path, Some(&matt)).await;
+    assert_eq!(status, StatusCode::OK, "{deleted}");
+    assert_eq!(deleted["reposts"], 1);
+    assert_eq!(deleted["reposted"], false);
+    let (status, deleted_again) = empty_req(&app, "DELETE", &path, Some(&matt)).await;
+    assert_eq!(status, StatusCode::OK, "{deleted_again}");
+    assert_eq!(deleted_again, deleted);
+
+    let (status, clear) = empty_req(&app, "DELETE", &path, Some(&ted)).await;
+    assert_eq!(status, StatusCode::OK, "{clear}");
+    assert_eq!(clear["reposts"], 0);
+    assert_eq!(clear["reposted"], false);
+    let (status, empty) =
+        empty_req(&app, "GET", &format!("/v1/books/{id}/comments"), Some(&ted)).await;
+    assert_eq!(status, StatusCode::OK, "{empty}");
+    assert_eq!(empty["reposts"], json!({}));
+    assert_eq!(empty["reposted"], json!([]));
+}
+
+#[tokio::test]
+async fn repost_on_another_users_private_book_is_404() {
+    let (app, tmp) = app().await;
+    let matt = register(&app, "matt", "password1").await;
+    let ted = register(&app, "ted", "password1").await;
+    let epub = common::epub();
+    let (status, book) = upload(&app, &matt, "Private", "Author", &epub, None, false).await;
+    assert_eq!(status, StatusCode::OK, "{book}");
+    let id = book["id"].as_str().unwrap().to_string();
+    let path = repost_path(&id, "0");
+
+    let (status, body) = empty_req(&app, "PUT", &path, Some(&ted)).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    let (status, body) = empty_req(&app, "DELETE", &path, Some(&ted)).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+
+    let (status, mine) = empty_req(&app, "PUT", &path, Some(&matt)).await;
+    assert_eq!(status, StatusCode::OK, "{mine}");
+    assert_eq!(mine["reposts"], 1);
+    assert_eq!(mine["reposted"], true);
+    let (status, body) = empty_req(&app, "DELETE", &path, Some(&ted)).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+
+    let pool = open_db(tmp.path()).await;
+    assert_eq!(
+        count(
+            &pool,
+            "SELECT COUNT(*) FROM reposts WHERE book_id = ?",
+            Some(&id)
+        )
+        .await,
+        1
+    );
+}
+
+#[tokio::test]
+async fn private_reposts_leave_other_feeds_and_counts() {
+    let (app, _tmp) = app().await;
+    let matt = register(&app, "matt", "password1").await;
+    let ted = register(&app, "ted", "password1").await;
+    let epub = common::epub();
+    let (status, private_book) = upload(&app, &matt, "Private", "Author", &epub, None, false).await;
+    assert_eq!(status, StatusCode::OK, "{private_book}");
+    let private_id = private_book["id"].as_str().unwrap().to_string();
+    let (status, body) = json_req(
+        &app,
+        "POST",
+        &format!("/v1/books/{private_id}/comments/0"),
+        Some(&matt),
+        json!({ "text": "own-private" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    pause().await;
+    let (status, body) = empty_req(&app, "PUT", &repost_path(&private_id, "1"), Some(&matt)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    let (status, shared_book) = upload(&app, &matt, "Shared", "Author", &epub, None, false).await;
+    assert_eq!(status, StatusCode::OK, "{shared_book}");
+    let shared_id = shared_book["id"].as_str().unwrap().to_string();
+    share(&app, &matt, &shared_id).await;
+    pause().await;
+    let (status, body) = json_req(
+        &app,
+        "POST",
+        &format!("/v1/books/{shared_id}/comments/0"),
+        Some(&matt),
+        json!({ "text": "matt-shared" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    pause().await;
+    let (status, body) = empty_req(&app, "PUT", &repost_path(&shared_id, "0"), Some(&matt)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    pause().await;
+    let (status, body) = json_req(
+        &app,
+        "POST",
+        &format!("/v1/books/{shared_id}/comments/1"),
+        Some(&ted),
+        json!({ "text": "ted-shared" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    pause().await;
+    let (status, body) = empty_req(&app, "PUT", &repost_path(&shared_id, "1"), Some(&ted)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    let ted_feed = feed_all(&app, &ted).await;
+    assert!(
+        ted_feed.iter().all(|row| row["book"]["id"] == shared_id),
+        "{ted_feed:?}"
+    );
+    assert_eq!(ted_feed.len(), 4, "{ted_feed:?}");
+
+    let matt_feed = feed_all(&app, &matt).await;
+    assert_eq!(matt_feed.len(), 6, "{matt_feed:?}");
+    assert!(matt_feed
+        .iter()
+        .any(|row| { row["book"]["id"] == private_id && row["actor"]["username"] == "matt" }));
+    assert!(matt_feed
+        .iter()
+        .any(|row| { row["book"]["id"] == shared_id && row["actor"]["username"] == "ted" }));
+    assert!(matt_feed
+        .iter()
+        .any(|row| row["type"] == "comment" && row["comment"]["mine"] == true));
+
+    let (status, ted_profile) = empty_req(&app, "GET", "/v1/users/ted", Some(&ted)).await;
+    assert_eq!(status, StatusCode::OK, "{ted_profile}");
+    assert_eq!(ted_profile["repostCount"], 1);
+    let (status, matt_as_ted) = empty_req(&app, "GET", "/v1/users/matt", Some(&ted)).await;
+    assert_eq!(status, StatusCode::OK, "{matt_as_ted}");
+    assert_eq!(matt_as_ted["repostCount"], 1);
+    let (status, matt_as_matt) = empty_req(&app, "GET", "/v1/users/matt", Some(&matt)).await;
+    assert_eq!(status, StatusCode::OK, "{matt_as_matt}");
+    assert_eq!(matt_as_matt["repostCount"], 2);
+
+    unshare(&app, &matt, &shared_id).await;
+
+    let ted_after = feed_all(&app, &ted).await;
+    assert!(ted_after.is_empty(), "{ted_after:?}");
+    let matt_after = feed_all(&app, &matt).await;
+    assert_eq!(matt_after.len(), 6, "{matt_after:?}");
+    assert!(matt_after.iter().any(|row| {
+        row["actor"]["username"] == "matt"
+            && row["book"]["id"] == shared_id
+            && row["type"] == "repost"
+    }));
+    assert!(matt_after
+        .iter()
+        .any(|row| row["actor"]["username"] == "ted" && row["type"] == "repost"));
+    assert!(matt_after.iter().any(|row| row["book"]["id"] == private_id));
+
+    let (status, ted_reposts) = empty_req(&app, "GET", "/v1/users/ted/reposts", Some(&ted)).await;
+    assert_eq!(status, StatusCode::OK, "{ted_reposts}");
+    assert_eq!(ted_reposts["items"], json!([]));
+    assert!(ted_reposts["nextCursor"].is_null());
+    let (status, ted_self) = empty_req(&app, "GET", "/v1/users/ted", Some(&ted)).await;
+    assert_eq!(status, StatusCode::OK, "{ted_self}");
+    assert_eq!(ted_self["repostCount"], 0);
+    let (status, matt_hidden) = empty_req(&app, "GET", "/v1/users/matt", Some(&ted)).await;
+    assert_eq!(status, StatusCode::OK, "{matt_hidden}");
+    assert_eq!(matt_hidden["repostCount"], 0);
+    let (status, matt_reposts_hidden) =
+        empty_req(&app, "GET", "/v1/users/matt/reposts", Some(&ted)).await;
+    assert_eq!(status, StatusCode::OK, "{matt_reposts_hidden}");
+    assert_eq!(matt_reposts_hidden["items"], json!([]));
+
+    let (status, owner_count) = empty_req(&app, "GET", "/v1/users/matt", Some(&matt)).await;
+    assert_eq!(status, StatusCode::OK, "{owner_count}");
+    assert_eq!(owner_count["repostCount"], 2);
+    let (status, owner_reposts) =
+        empty_req(&app, "GET", "/v1/users/matt/reposts", Some(&matt)).await;
+    assert_eq!(status, StatusCode::OK, "{owner_reposts}");
+    let rows = owner_reposts["items"].as_array().unwrap();
+    assert_eq!(rows.len(), 2);
+    assert!(rows[0]["repostedAt"].as_i64().unwrap() >= rows[1]["repostedAt"].as_i64().unwrap());
+    assert!(rows[0].get("reposted_at").is_none());
+    let mut pairs: Vec<(String, String)> = rows
+        .iter()
+        .map(|row| {
+            (
+                row["book"]["id"].as_str().unwrap().to_string(),
+                row["post"]["id"].as_str().unwrap().to_string(),
+            )
+        })
+        .collect();
+    pairs.sort();
+    assert_eq!(
+        pairs,
+        vec![(private_id, "1".to_string()), (shared_id, "0".to_string())]
+    );
+}
+
+enum Made {
+    Comment {
+        text: String,
+    },
+    Repost {
+        actor: &'static str,
+        post: &'static str,
+    },
+}
+
+#[tokio::test]
+async fn feed_orders_and_pages_a_comment_repost_mix() {
+    let (app, tmp) = app().await;
+    let matt = register(&app, "matt", "password1").await;
+    let ted = register(&app, "ted", "password1").await;
+    let epub = common::epub();
+    let (status, book) = upload(&app, &matt, "Feed", "Author", &epub, None, false).await;
+    assert_eq!(status, StatusCode::OK, "{book}");
+    let id = book["id"].as_str().unwrap().to_string();
+    share(&app, &matt, &id).await;
+    let (status, quiet) = upload(&app, &matt, "Quiet", "Author", &epub, None, false).await;
+    assert_eq!(status, StatusCode::OK, "{quiet}");
+    let quiet_id = quiet["id"].as_str().unwrap();
+    share(&app, &matt, quiet_id).await;
+
+    let (status, _) = empty_req(&app, "GET", "/v1/feed", None).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+    let mut made = Vec::new();
+    let mut reposts = vec![
+        ("ted", "0"),
+        ("ted", "1"),
+        ("ted", "2"),
+        ("matt", "0"),
+        ("matt", "1"),
+        ("matt", "2"),
+    ];
+    let mut comments = 0;
+    while made.len() < 22 {
+        let text = format!("c{comments}");
+        let (status, body) = json_req(
+            &app,
+            "POST",
+            &format!("/v1/books/{id}/comments/0"),
+            Some(&matt),
+            json!({ "text": text }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        made.push(Made::Comment { text });
+        comments += 1;
+        if made.len() < 22 && !reposts.is_empty() {
+            let (actor, post) = reposts.remove(0);
+            let token = if actor == "matt" { &matt } else { &ted };
+            let (status, body) = empty_req(&app, "PUT", &repost_path(&id, post), Some(token)).await;
+            assert_eq!(status, StatusCode::OK, "{body}");
+            made.push(Made::Repost { actor, post });
+        }
+    }
+
+    let pool = open_db(tmp.path()).await;
+    let matt_id: String = sqlx::query_scalar("SELECT id FROM users WHERE username_norm = 'matt'")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    let ted_id: String = sqlx::query_scalar("SELECT id FROM users WHERE username_norm = 'ted'")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    for (index, event) in made.iter().enumerate() {
+        let at = index as i64 + 1;
+        match event {
+            Made::Comment { text } => {
+                sqlx::query("UPDATE comments SET created_at = ? WHERE book_id = ? AND text = ?")
+                    .bind(at)
+                    .bind(&id)
+                    .bind(text)
+                    .execute(&pool)
+                    .await
+                    .unwrap();
+            }
+            Made::Repost { actor, post } => {
+                let user = if *actor == "ted" { &ted_id } else { &matt_id };
+                sqlx::query(
+                    "UPDATE reposts SET created_at = ? WHERE user_id = ? AND book_id = ? AND post_id = ?",
+                )
+                .bind(at)
+                .bind(user)
+                .bind(&id)
+                .bind(post)
+                .execute(&pool)
+                .await
+                .unwrap();
+            }
+        }
+    }
+    let mut expected = Vec::new();
+    for event in made.iter().rev() {
+        expected.push(match event {
+            Made::Comment { text } => format!("comment:matt:{id}:0:{text}"),
+            Made::Repost { actor, post } => format!("repost:{actor}:{id}:{post}"),
+        });
+    }
+
+    let first = feed_all(&app, &ted).await;
+    let second = feed_all(&app, &matt).await;
+    let third = feed_all(&app, &ted).await;
+    let keys = |items: &[Value]| items.iter().map(feed_identity).collect::<Vec<_>>();
+    assert_eq!(keys(&first), expected, "{first:?}");
+    assert_eq!(first, third);
+    assert_eq!(keys(&second), keys(&first));
+    assert_feed_order(&first);
+    assert!(first.iter().any(|row| row["type"] == "comment"));
+    assert!(first.iter().any(|row| row["type"] == "repost"));
+    assert!(first.iter().all(|row| row["book"]["id"] != quiet_id));
+    assert!(first.iter().all(|row| row["post"]["text"].is_string()));
+    assert!(second
+        .iter()
+        .any(|row| { row["actor"]["username"] == "matt" && row["comment"]["mine"] == true }));
+    let (status, bad) = empty_req(&app, "GET", "/v1/feed?cursor=%%%", Some(&ted)).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{bad}");
+
+    sqlx::query("UPDATE comments SET created_at = 100000 WHERE book_id = ? AND text = 'c0'")
+        .bind(&id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query(
+        "UPDATE reposts SET created_at = 100000 WHERE user_id = ? AND book_id = ? AND post_id = '0'",
+    )
+    .bind(&ted_id)
+    .bind(&id)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let tied = feed_all(&app, &ted).await;
+    assert_eq!(tied, feed_all(&app, &ted).await);
+    assert_eq!(tied[0]["at"], 100000);
+    assert_eq!(tied[0]["type"], "repost");
+    assert_eq!(tied[0]["actor"]["username"], "ted");
+    assert_eq!(tied[0]["post"]["id"], "0");
+    assert_eq!(tied[1]["at"], 100000);
+    assert_eq!(tied[1]["type"], "comment");
+    assert_eq!(tied[1]["comment"]["text"], "c0");
+    assert_feed_order(&tied);
+}
+
+#[tokio::test]
+async fn profile_reposts_page_newest_first() {
+    let (app, tmp) = app().await;
+    let matt = register(&app, "matt", "password1").await;
+    let epub = common::epub();
+    let (status, book) = upload(&app, &matt, "Pages", "Author", &epub, None, false).await;
+    assert_eq!(status, StatusCode::OK, "{book}");
+    let id = book["id"].as_str().unwrap().to_string();
+    share(&app, &matt, &id).await;
+    let pool = open_db(tmp.path()).await;
+    for idx in 3..31 {
+        sqlx::query(
+            "INSERT INTO posts (book_id, idx, kind, chapter, text) VALUES (?, ?, 'Body', 'Ch', ?)",
+        )
+        .bind(&id)
+        .bind(idx)
+        .bind(format!("fill {idx}"))
+        .execute(&pool)
+        .await
+        .unwrap();
+    }
+    for idx in 0..31 {
+        let (status, body) = empty_req(
+            &app,
+            "PUT",
+            &repost_path(&id, &idx.to_string()),
+            Some(&matt),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+    }
+    sqlx::query("UPDATE reposts SET created_at = CAST(post_id AS INTEGER) WHERE book_id = ?")
+        .bind(&id)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let (status, profile) = empty_req(&app, "GET", "/v1/users/matt", Some(&matt)).await;
+    assert_eq!(status, StatusCode::OK, "{profile}");
+    assert_eq!(profile["repostCount"], 31);
+
+    let mut cursor: Option<String> = None;
+    let mut posts = Vec::new();
+    for _ in 0..4 {
+        let path = match &cursor {
+            Some(cursor) => format!("/v1/users/matt/reposts?cursor={}", percent_encode(cursor)),
+            None => "/v1/users/matt/reposts".to_string(),
+        };
+        let (status, page) = empty_req(&app, "GET", &path, Some(&matt)).await;
+        assert_eq!(status, StatusCode::OK, "{page}");
+        let items = page["items"].as_array().unwrap();
+        if page["nextCursor"].is_null() {
+            posts.extend(
+                items
+                    .iter()
+                    .map(|row| row["post"]["id"].as_str().unwrap().to_string()),
+            );
+            break;
+        }
+        assert_eq!(items.len(), 30, "{page}");
+        posts.extend(
+            items
+                .iter()
+                .map(|row| row["post"]["id"].as_str().unwrap().to_string()),
+        );
+        cursor = Some(page["nextCursor"].as_str().unwrap().to_string());
+    }
+    let expected: Vec<String> = (0..31).rev().map(|idx| idx.to_string()).collect();
+    assert_eq!(posts, expected);
+    let (status, bad) = empty_req(
+        &app,
+        "GET",
+        "/v1/users/matt/reposts?cursor=%%%",
+        Some(&matt),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{bad}");
+}
+
+#[tokio::test]
+async fn profile_books_are_shared_and_not_samples() {
+    let (app, _tmp) = app().await;
+    let matt = register(&app, "matt", "password1").await;
+    let ted = register(&app, "ted", "password1").await;
+    let epub = common::epub();
+    let (status, private_book) = upload(&app, &matt, "Private", "Author", &epub, None, false).await;
+    assert_eq!(status, StatusCode::OK, "{private_book}");
+    let private_id = private_book["id"].as_str().unwrap();
+    let (status, sample) = upload(&app, &matt, "Sample", "Author", &epub, None, true).await;
+    assert_eq!(status, StatusCode::OK, "{sample}");
+    let sample_id = sample["id"].as_str().unwrap();
+    assert_eq!(sample["isSample"], true);
+    share(&app, &matt, sample_id).await;
+    let (status, shared_book) = upload(&app, &matt, "Shared", "Author", &epub, None, false).await;
+    assert_eq!(status, StatusCode::OK, "{shared_book}");
+    let shared_id = shared_book["id"].as_str().unwrap();
+    share(&app, &matt, shared_id).await;
+
+    for token in [&matt, &ted] {
+        let (status, page) = empty_req(&app, "GET", "/v1/users/matt/books", Some(token)).await;
+        assert_eq!(status, StatusCode::OK, "{page}");
+        let ids: Vec<&str> = page["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|row| row["id"].as_str().unwrap())
+            .collect();
+        assert_eq!(ids, vec![shared_id], "{page}");
+        assert_eq!(page["items"][0]["shared"], true);
+        assert_eq!(page["items"][0]["isSample"], false);
+        assert_eq!(page["items"][0]["ownerUsername"], "matt");
+    }
+    let (status, owner) = empty_req(&app, "GET", "/v1/users/matt/books", Some(&matt)).await;
+    assert_eq!(status, StatusCode::OK, "{owner}");
+    assert_eq!(owner["items"][0]["mine"], true);
+    let (status, other) = empty_req(&app, "GET", "/v1/users/matt/books", Some(&ted)).await;
+    assert_eq!(status, StatusCode::OK, "{other}");
+    assert_eq!(other["items"][0]["mine"], false);
+
+    let (status, library) = empty_req(&app, "GET", "/v1/library", Some(&ted)).await;
+    assert_eq!(status, StatusCode::OK, "{library}");
+    let shelf: Vec<&str> = library["books"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|row| row["id"].as_str().unwrap())
+        .collect();
+    assert!(shelf.contains(&sample_id), "{library}");
+    assert!(!shelf.contains(&private_id));
+
+    let (status, missing) = empty_req(&app, "GET", "/v1/users/nobody/books", Some(&ted)).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{missing}");
+    let (status, missing_reposts) =
+        empty_req(&app, "GET", "/v1/users/nobody/reposts", Some(&ted)).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{missing_reposts}");
+}
+
+#[tokio::test]
+async fn deleting_a_book_cascades_reposts() {
+    let (app, tmp) = app().await;
+    let matt = register(&app, "matt", "password1").await;
+    let ted = register(&app, "ted", "password1").await;
+    let epub = common::epub();
+    let (status, book) = upload(&app, &matt, "Gone", "Author", &epub, None, false).await;
+    assert_eq!(status, StatusCode::OK, "{book}");
+    let id = book["id"].as_str().unwrap().to_string();
+    share(&app, &matt, &id).await;
+    let (status, body) = empty_req(&app, "PUT", &repost_path(&id, "0"), Some(&matt)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (status, body) = empty_req(&app, "PUT", &repost_path(&id, "1"), Some(&ted)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (status, body) = json_req(
+        &app,
+        "POST",
+        &format!("/v1/books/{id}/comments/0"),
+        Some(&ted),
+        json!({ "text": "bye" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    let pool = open_db(tmp.path()).await;
+    assert_eq!(
+        count(
+            &pool,
+            "SELECT COUNT(*) FROM reposts WHERE book_id = ?",
+            Some(&id)
+        )
+        .await,
+        2
+    );
+    let (status, _) = empty_req(&app, "DELETE", &format!("/v1/books/{id}"), Some(&matt)).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    assert_eq!(
+        count(
+            &pool,
+            "SELECT COUNT(*) FROM reposts WHERE book_id = ?",
+            Some(&id)
+        )
+        .await,
+        0
+    );
+    let feed = feed_all(&app, &matt).await;
+    assert!(feed.iter().all(|row| row["book"]["id"] != id), "{feed:?}");
+    assert!(feed_all(&app, &ted).await.is_empty());
 }

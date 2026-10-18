@@ -1,8 +1,8 @@
 //! One predicate for "can this account see this book?".
 //!
-//! The shelf, search, and both profile feeds use these fragments. Do not copy
-//! the predicate into a query. The book alias is `b`. `BOOK_SELECT` binds the
-//! viewer first (that account's reading place). `BOOK_VISIBLE_TO` binds the
+//! The shelf, search, profiles, and the home feed use these fragments. Do not
+//! copy the predicate into a query. The book alias is `b`. `BOOK_SELECT` binds
+//! the viewer first (that account's reading place). `BOOK_VISIBLE_TO` binds the
 //! viewer next.
 
 /// Owned, shared by its owner, or the built-in sample.

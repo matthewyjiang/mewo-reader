@@ -16,7 +16,7 @@ mod test_epub;
 
 use crate::config::{request_body_limit, Config};
 use axum::extract::DefaultBodyLimit;
-use axum::routing::{any, get, post};
+use axum::routing::{any, get, post, put};
 use axum::Router;
 use sqlx::SqlitePool;
 use std::path::PathBuf;
@@ -69,9 +69,16 @@ pub fn router(state: AppState) -> Router {
             "/v1/books/{id}/comments/{post_id}/{comment_id}",
             axum::routing::delete(routes::delete_comment),
         )
+        .route(
+            "/v1/books/{id}/posts/{post_id}/repost",
+            put(routes::put_repost).delete(routes::delete_repost),
+        )
         .route("/v1/search", get(routes::search))
+        .route("/v1/feed", get(routes::feed))
         .route("/v1/users/{username}", get(routes::profile))
         .route("/v1/users/{username}/posts", get(routes::profile_posts))
+        .route("/v1/users/{username}/reposts", get(routes::profile_reposts))
+        .route("/v1/users/{username}/books", get(routes::profile_books))
         .route(
             "/v1/profiles/{username}/replies",
             get(routes::profile_replies),

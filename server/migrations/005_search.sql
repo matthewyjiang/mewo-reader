@@ -35,3 +35,15 @@ END;
 -- 0 until store_feed has written posts.json and the posts rows together.
 -- Startup backfill selects this.
 ALTER TABLE books ADD COLUMN posts_indexed INTEGER NOT NULL DEFAULT 0;
+
+-- One row per account per post. Deleting the account or the book drops it.
+CREATE TABLE reposts (
+    user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    book_id TEXT NOT NULL REFERENCES books(id) ON DELETE CASCADE,
+    post_id TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    PRIMARY KEY (user_id, book_id, post_id)
+);
+
+CREATE INDEX reposts_user ON reposts (user_id, created_at DESC);
+CREATE INDEX reposts_created ON reposts (created_at DESC);

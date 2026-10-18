@@ -80,6 +80,9 @@ Prefix `/v1`.
 - `GET /search?q=&type=accounts|books|posts&cursor=` → a page of 20. `q` is trimmed; empty is 400 `Enter a search.` More than 100 characters is 400 and names the limit and the asked length. `cursor` is the previous `nextCursor`. A bad cursor is 400
 - `GET /users/{username}` → `ProfileRecord`. Unknown username is 404. A username that fails the register rules is 400
 - `GET /users/{username}/posts?cursor=` → `ProfilePostsPage`, 30 replies, newest first. Unknown username is 404
+- `GET /users/{username}/reposts?cursor=` → `ProfileRepostsPage`, 30 reposts, newest first. Unknown username is 404
+- `GET /users/{username}/books` → `{ "items": [ BookRecord ] }`. Books that account added with `shared` true, excluding the sample. A private book is omitted on your own profile too. Unknown username is 404
+- `GET /feed?cursor=` → `FeedPage`, 20 rows, newest first. Comments and reposts on books you can see, including your own
 - `GET /library` → `{ "books": [ BookRecord ] }`
 - `POST /books` multipart. Required `epub`. Optional `cover`, `title`, `author`, `handle`, `isSample`
 - `GET /books/{id}`
@@ -90,7 +93,9 @@ Prefix `/v1`.
 - `GET /books/{id}/cover`
 - `GET /books/{id}/likes` → `{ "ids" }`
 - `POST /books/{id}/likes/{postId}` toggles
-- `GET /books/{id}/comments` → `{ "counts": { "0": 2 }, "mine": ["0"] }`
+- `PUT /books/{id}/posts/{postId}/repost` → `{ "reposts": 1, "reposted": true }`. A second PUT keeps the count and the original time
+- `DELETE /books/{id}/posts/{postId}/repost` → the same shape. A second DELETE keeps `{ "reposts": 0, "reposted": false }` once yours is gone
+- `GET /books/{id}/comments` → `{ "counts": { "0": 2 }, "mine": ["0"], "reposts": { "0": 1 }, "reposted": ["0"] }`
 - `GET /books/{id}/comments/{postId}` → `{ "comments": [ { "id", "username", "text", "createdAt", "mine" } ] }`
 - `POST /books/{id}/comments/{postId}` `{ "text" }`
 - `DELETE /books/{id}/comments/{postId}/{commentId}`
@@ -106,13 +111,23 @@ Search JSON is one object. `type` is `accounts`, `books`, or `posts`. `nextCurso
 
 `{ "type": "posts", "items": [{ "book": BookRecord, "post": { "id": "1", "kind": "Body", "text": "...", "chapter": "..." } }], "nextCursor": null }`
 
-Accounts match `username` with a case-insensitive substring. A prefix ranks before an infix, then shorter names. Books match title, author, handle, or the owner's username. A title prefix ranks first, then newer `importedAt`. Posts match the line or its chapter. Rank is FTS5 bm25, then newer books, then the post index. Private books are missing from book and post hits, and from both profile feeds, unless you own them. Sharing or the sample makes them visible without a reindex. `postCount` on a profile is how many of that account's replies sit on books you can see.
+Accounts match `username` with a case-insensitive substring. A prefix ranks before an infix, then shorter names. Books match title, author, handle, or the owner's username. A title prefix ranks first, then newer `importedAt`. Posts match the line or its chapter. Rank is FTS5 bm25, then newer books, then the post index. Private books are missing from book and post hits, profile replies, profile reposts, and the home feed, unless you own them. Sharing or the sample makes them visible without a reindex. `postCount` is how many of that account's replies sit on books you can see. `repostCount` is the same for reposts.
 
-`ProfileRecord` is `{ "username", "joinedAt", "postCount", "mine" }`. `joinedAt` is the account's `created_at` in milliseconds.
+`ProfileRecord` is `{ "username", "joinedAt", "postCount", "repostCount", "mine" }`. `joinedAt` is the account's `created_at` in milliseconds.
 
 `ProfilePostsPage` is `{ "items": [{ "book": BookRecord, "post": Post, "comment": CommentRecord }], "nextCursor" }`. `comment` is `{ "id", "username", "text", "createdAt", "mine" }`. `nextCursor` is opaque. Pass it back as `cursor`.
 
-Migration `005_search.sql` adds the `posts` table, the FTS5 index, and `books.posts_indexed`. Snapshot `/data` before deploying a build that includes it. Books already on disk are indexed in the background at startup.
+`ProfileRepostsPage` is `{ "items": [{ "book": BookRecord, "post": Post, "repostedAt": 1710000000000 }], "nextCursor" }`. `repostedAt` is milliseconds.
+
+`FeedPage` is `{ "items": [ FeedItem ], "nextCursor" }`. A `FeedItem` is one of:
+
+`{ "type": "comment", "actor": { "username": "ada" }, "book": BookRecord, "post": Post, "comment": CommentRecord, "at": 1710000000000 }`
+
+`{ "type": "repost", "actor": { "username": "ada" }, "book": BookRecord, "post": Post, "at": 1710000000000 }`
+
+`at` is milliseconds. Newest `at` first, then `repost` before `comment` at the same time, then the activity id. A line of a book shows up here when someone comments on it or reposts it. `reposts` on `GET /books/{id}/comments` is the per-post count (posts with zero are left out, same as `counts`). `reposted` is the post ids you reposted, same shape as `mine`. A book you cannot see is 404 for repost, same as likes and comments. Deleting a book deletes its reposts.
+
+Migration `005_search.sql` adds the `posts` table, the FTS5 index, `books.posts_indexed`, and the `reposts` table. Snapshot `/data` before deploying a build that includes it. Books already on disk are indexed in the background at startup.
 
 A new upload is private (`shared` false). Books already on the shelf when sharing shipped stay shared. Opening, downloading, or commenting on a book you cannot see is 404. Anyone who can see a book can move their own reading place, like a post, and comment.
 

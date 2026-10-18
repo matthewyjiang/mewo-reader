@@ -331,6 +331,41 @@ pub(crate) fn decode_keyset(cursor: &str) -> Result<(i64, String), ApiError> {
     Ok((created_at, id.to_string()))
 }
 
+/// Opaque cursor for a descending triple `(at, second, third)`.
+/// Profile reposts use `(created_at, book_id, post_id)`. The feed uses
+/// `(at, kind, id)`. JSON keeps a post id that contains `:` or a newline intact.
+pub(crate) fn encode_keyset3(at: i64, second: &str, third: &str) -> String {
+    let payload = serde_json::to_vec(&serde_json::json!([at, second, third])).unwrap_or_default();
+    STANDARD.encode(payload)
+}
+
+pub(crate) fn decode_keyset3(cursor: &str) -> Result<(i64, String, String), ApiError> {
+    let text = decode_text(cursor)?;
+    let value: serde_json::Value = serde_json::from_str(&text).map_err(|_| bad_cursor())?;
+    let items = value.as_array().ok_or_else(bad_cursor)?;
+    if items.len() != 3 {
+        return Err(bad_cursor());
+    }
+    let at = items[0].as_i64().ok_or_else(bad_cursor)?;
+    let second = items[1]
+        .as_str()
+        .filter(|part| !part.is_empty())
+        .ok_or_else(bad_cursor)?;
+    let third = items[2]
+        .as_str()
+        .filter(|part| !part.is_empty())
+        .ok_or_else(bad_cursor)?;
+    Ok((at, second.to_string(), third.to_string()))
+}
+
+pub(crate) fn decode_feed_cursor(cursor: &str) -> Result<(i64, String, String), ApiError> {
+    let (at, kind, id) = decode_keyset3(cursor)?;
+    if kind != "comment" && kind != "repost" {
+        return Err(bad_cursor());
+    }
+    Ok((at, kind, id))
+}
+
 fn decode_text(cursor: &str) -> Result<String, ApiError> {
     let bytes = STANDARD.decode(cursor).map_err(|_| bad_cursor())?;
     String::from_utf8(bytes).map_err(|_| bad_cursor())
@@ -499,5 +534,17 @@ mod tests {
         assert_eq!(fts_match("***").as_deref(), None);
         assert_eq!(fts_match("   ").as_deref(), None);
         assert_eq!(like_pattern(r"100%_a\b"), r"100\%\_a\\b");
+    }
+
+    #[test]
+    fn keyset3_roundtrips_and_feed_kind_is_checked() {
+        let cursor = encode_keyset3(12, "book:1", "post\nid");
+        assert_eq!(
+            decode_keyset3(&cursor).unwrap(),
+            (12, "book:1".into(), "post\nid".into())
+        );
+        assert!(decode_keyset3("%%%").is_err());
+        assert!(decode_feed_cursor(&encode_keyset3(1, "comment", "abc")).is_ok());
+        assert!(decode_feed_cursor(&encode_keyset3(1, "nope", "abc")).is_err());
     }
 }
