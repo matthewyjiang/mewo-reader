@@ -2195,7 +2195,7 @@ async fn backfill_indexes_unindexed_books_once() {
 }
 
 fn repost_path(id: &str, post: &str) -> String {
-    format!("/v1/books/{id}/posts/{post}/repost")
+    format!("/v1/books/{id}/posts/{}/repost", percent_encode(post))
 }
 
 async fn unshare(app: &axum::Router, token: &str, id: &str) {
@@ -2528,10 +2528,9 @@ async fn private_reposts_leave_other_feeds_and_counts() {
         })
         .collect();
     pairs.sort();
-    assert_eq!(
-        pairs,
-        vec![(private_id, "1".to_string()), (shared_id, "0".to_string())]
-    );
+    let mut expected = vec![(private_id, "1".to_string()), (shared_id, "0".to_string())];
+    expected.sort();
+    assert_eq!(pairs, expected);
 }
 
 enum Made {
@@ -2866,4 +2865,484 @@ async fn deleting_a_book_cascades_reposts() {
     let feed = feed_all(&app, &matt).await;
     assert!(feed.iter().all(|row| row["book"]["id"] != id), "{feed:?}");
     assert!(feed_all(&app, &ted).await.is_empty());
+}
+
+fn posts_json(n: usize) -> String {
+    let mut body = String::from("{\"posts\":[");
+    for i in 0..n {
+        if i > 0 {
+            body.push(',');
+        }
+        body.push_str(&format!(
+            "{{\"id\":\"{i}\",\"kind\":\"Body\",\"text\":\"t{i}\",\"chapter\":\"c\"}}"
+        ));
+    }
+    body.push_str("]}");
+    body
+}
+
+#[tokio::test]
+async fn backfill_lets_writers_through() {
+    let tmp = TempDir::new().unwrap();
+    let pool = open_db(tmp.path()).await;
+    sqlx::migrate!("./migrations").run(&pool).await.unwrap();
+    sqlx::query(
+        "INSERT INTO users (id, username, username_norm, password_hash, created_at)
+         VALUES ('owner', 'owner', 'owner', 'x', 1)",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO sessions (token, user_id, created_at) VALUES ('writer-token', 'owner', 1)",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO books
+         (id, user_id, title, author, handle, imported_at, post_count, progress_index, is_sample, shared, posts_indexed)
+         VALUES ('11111111-1111-4111-8111-111111111111', 'owner', 'Ready', 'Author', 'author', 1, 1, 0, 0, 1, 1),
+                ('bulk-a', 'owner', 'A', 'Author', 'author', 2, 0, 0, 0, 0, 0),
+                ('bulk-b', 'owner', 'B', 'Author', 'author', 3, 0, 0, 0, 0, 0)",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO posts (book_id, idx, kind, chapter, text) VALUES ('11111111-1111-4111-8111-111111111111', 0, 'Body', 'c', 'ready')",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    pool.close().await;
+
+    for id in ["bulk-a", "bulk-b"] {
+        let dir = tmp.path().join("books").join("owner").join(id);
+        tokio::fs::create_dir_all(&dir).await.unwrap();
+        tokio::fs::write(dir.join("posts.json"), posts_json(24_000))
+            .await
+            .unwrap();
+    }
+
+    let config = Config {
+        listen: "127.0.0.1:0".into(),
+        data_dir: tmp.path().to_path_buf(),
+        web_dir: None,
+        allow_signup: true,
+        max_epub_bytes: 1024 * 1024,
+    };
+    let app = build(config).await.unwrap();
+    let pool = open_db(tmp.path()).await;
+    let token = "writer-token";
+    let bound = Duration::from_millis(1000);
+    let started = std::time::Instant::now();
+    let mut saw_pending = false;
+    let mut samples = 0u32;
+    loop {
+        let pending = count(
+            &pool,
+            "SELECT COUNT(*) FROM books WHERE id IN ('bulk-a', 'bulk-b') AND posts_indexed = 0",
+            None,
+        )
+        .await;
+        if pending > 0 {
+            saw_pending = true;
+        }
+        let call_started = std::time::Instant::now();
+        let (status, body) = if samples % 2 == 0 {
+            json_req(
+                &app,
+                "POST",
+                "/v1/books/11111111-1111-4111-8111-111111111111/comments/0",
+                Some(token),
+                json!({ "text": format!("n{samples}") }),
+            )
+            .await
+        } else {
+            json_req(
+                &app,
+                "PATCH",
+                "/v1/books/11111111-1111-4111-8111-111111111111",
+                Some(token),
+                json!({ "progressIndex": samples }),
+            )
+            .await
+        };
+        let elapsed = call_started.elapsed();
+        assert_ne!(status, StatusCode::INTERNAL_SERVER_ERROR, "{body}");
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert!(
+            elapsed < bound,
+            "write waited {elapsed:?} during backfill (pending {pending})"
+        );
+        samples += 1;
+        if pending == 0 && saw_pending {
+            break;
+        }
+        // A gap so backfill can take the write lock. Much shorter than the
+        // stall this test is watching for.
+        tokio::time::sleep(Duration::from_millis(5)).await;
+        assert!(
+            started.elapsed() < Duration::from_secs(30),
+            "backfill did not finish"
+        );
+    }
+    assert!(saw_pending);
+    assert!(samples > 1, "no writes overlapped backfill");
+}
+
+#[tokio::test]
+async fn post_ids_must_be_canonical_and_counts_match_lists() {
+    let (app, tmp) = app().await;
+    let matt = register(&app, "matt", "password1").await;
+    let epub = common::epub();
+    let (status, book) = upload(&app, &matt, "Ids", "Author", &epub, None, false).await;
+    assert_eq!(status, StatusCode::OK, "{book}");
+    let id = book["id"].as_str().unwrap().to_string();
+    share(&app, &matt, &id).await;
+
+    for post_id in ["00", "000", "+0", "abc", "0 ", "01"] {
+        let (status, body) = empty_req(&app, "PUT", &repost_path(&id, post_id), Some(&matt)).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{post_id} {body}");
+        let (status, body) = json_req(
+            &app,
+            "POST",
+            &format!("/v1/books/{id}/comments/{}", percent_encode(post_id)),
+            Some(&matt),
+            json!({ "text": "nope" }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{post_id} {body}");
+    }
+    for post_id in ["3", "999"] {
+        let (status, body) = empty_req(&app, "PUT", &repost_path(&id, post_id), Some(&matt)).await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{post_id} {body}");
+        let (status, body) = json_req(
+            &app,
+            "POST",
+            &format!("/v1/books/{id}/comments/{}", percent_encode(post_id)),
+            Some(&matt),
+            json!({ "text": "missing" }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{post_id} {body}");
+    }
+
+    let (status, body) = empty_req(&app, "PUT", &repost_path(&id, "0"), Some(&matt)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (status, body) = json_req(
+        &app,
+        "POST",
+        &format!("/v1/books/{id}/comments/0"),
+        Some(&matt),
+        json!({ "text": "real-comment" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    let pool = open_db(tmp.path()).await;
+    let user_id: String = sqlx::query_scalar("SELECT id FROM users WHERE username_norm = 'matt'")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    for post_id in ["00", "000", "+0", "abc", "999"] {
+        sqlx::query(
+            "INSERT INTO reposts (user_id, book_id, post_id, created_at) VALUES (?, ?, ?, 1)",
+        )
+        .bind(&user_id)
+        .bind(&id)
+        .bind(post_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    }
+    sqlx::query(
+        "INSERT INTO comments (id, user_id, book_id, post_id, text, created_at)
+         VALUES ('legacy-abc', ?, ?, 'abc', 'alias-comment', 2),
+                ('legacy-00', ?, ?, '00', 'zero-alias', 3)",
+    )
+    .bind(&user_id)
+    .bind(&id)
+    .bind(&user_id)
+    .bind(&id)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let (status, profile) = empty_req(&app, "GET", "/v1/users/matt", Some(&matt)).await;
+    assert_eq!(status, StatusCode::OK, "{profile}");
+    let posts = profile_page_all(&app, &matt, "/v1/users/matt/posts").await;
+    let reposts = profile_page_all(&app, &matt, "/v1/users/matt/reposts").await;
+    assert_eq!(profile["postCount"], posts.len() as i64, "{posts:?}");
+    assert_eq!(profile["repostCount"], reposts.len() as i64, "{reposts:?}");
+    let comment_texts: Vec<&str> = posts
+        .iter()
+        .map(|row| row["comment"]["text"].as_str().unwrap())
+        .collect();
+    assert_eq!(comment_texts, vec!["real-comment"]);
+    assert_eq!(reposts.len(), 1, "{reposts:?}");
+    assert_eq!(reposts[0]["post"]["id"], "0");
+
+    let feed = feed_all(&app, &matt).await;
+    let identities: Vec<String> = feed.iter().map(feed_identity).collect();
+    let mut unique = identities.clone();
+    unique.sort();
+    unique.dedup();
+    assert_eq!(unique.len(), identities.len(), "{identities:?}");
+    assert!(identities.iter().all(|row| !row.contains("alias-comment")));
+    assert!(identities.iter().all(|row| !row.contains("zero-alias")));
+    assert_eq!(
+        identities
+            .iter()
+            .filter(|row| row.starts_with("repost:"))
+            .count(),
+        1,
+        "{identities:?}"
+    );
+}
+
+async fn profile_page_all(app: &axum::Router, token: &str, path: &str) -> Vec<Value> {
+    let mut cursor: Option<String> = None;
+    let mut items = Vec::new();
+    for _ in 0..10 {
+        let page_path = match &cursor {
+            Some(cursor) => format!("{path}?cursor={}", percent_encode(cursor)),
+            None => path.to_string(),
+        };
+        let (status, page) = empty_req(app, "GET", &page_path, Some(token)).await;
+        assert_eq!(status, StatusCode::OK, "{page}");
+        let batch = page["items"].as_array().unwrap();
+        items.extend(batch.clone());
+        match page["nextCursor"].as_str() {
+            Some(next) => cursor = Some(next.to_string()),
+            None => return items,
+        }
+    }
+    panic!("profile cursor did not end");
+}
+
+#[tokio::test]
+async fn delete_own_repost_works_after_unshare() {
+    let (app, tmp) = app().await;
+    let matt = register(&app, "matt", "password1").await;
+    let ted = register(&app, "ted", "password1").await;
+    let epub = common::epub();
+    let (status, book) = upload(&app, &matt, "Undo", "Author", &epub, None, false).await;
+    assert_eq!(status, StatusCode::OK, "{book}");
+    let id = book["id"].as_str().unwrap().to_string();
+    share(&app, &matt, &id).await;
+    let (status, body) = empty_req(&app, "PUT", &repost_path(&id, "0"), Some(&ted)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    unshare(&app, &matt, &id).await;
+
+    let (status, body) = empty_req(&app, "DELETE", &repost_path(&id, "0"), Some(&ted)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["reposted"], false);
+    assert_eq!(body["reposts"], 0);
+    let (status, again) = empty_req(&app, "DELETE", &repost_path(&id, "0"), Some(&ted)).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{again}");
+
+    let pool = open_db(tmp.path()).await;
+    assert_eq!(
+        count(
+            &pool,
+            "SELECT COUNT(*) FROM reposts WHERE book_id = ?",
+            Some(&id)
+        )
+        .await,
+        0
+    );
+    share(&app, &matt, &id).await;
+    let (status, profile) = empty_req(&app, "GET", "/v1/users/ted", Some(&ted)).await;
+    assert_eq!(status, StatusCode::OK, "{profile}");
+    assert_eq!(profile["repostCount"], 0);
+    let reposts = profile_page_all(&app, &ted, "/v1/users/ted/reposts").await;
+    assert!(reposts.is_empty(), "{reposts:?}");
+    let feed = feed_all(&app, &matt).await;
+    assert!(
+        feed.iter()
+            .all(|row| row["type"] != "repost" || row["actor"]["username"] != "ted"),
+        "{feed:?}"
+    );
+}
+
+#[tokio::test]
+async fn backfill_skips_an_unreadable_epub_after_recording_it() {
+    let tmp = TempDir::new().unwrap();
+    let pool = open_db(tmp.path()).await;
+    sqlx::migrate!("./migrations").run(&pool).await.unwrap();
+    sqlx::query(
+        "INSERT INTO users (id, username, username_norm, password_hash, created_at)
+         VALUES ('owner', 'owner', 'owner', 'x', 1)",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO books
+         (id, user_id, title, author, handle, imported_at, post_count, progress_index, is_sample, shared, posts_indexed)
+         VALUES ('bad-book', 'owner', 'Bad', 'Author', 'author', 1, 0, 0, 0, 0, 0)",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    pool.close().await;
+    let dir = tmp.path().join("books").join("owner").join("bad-book");
+    tokio::fs::create_dir_all(&dir).await.unwrap();
+    tokio::fs::write(dir.join("book.epub"), b"not an epub")
+        .await
+        .unwrap();
+
+    let config = Config {
+        listen: "127.0.0.1:0".into(),
+        data_dir: tmp.path().to_path_buf(),
+        web_dir: None,
+        allow_signup: true,
+        max_epub_bytes: 1024 * 1024,
+    };
+    let _app = build(config.clone()).await.unwrap();
+    let pool = open_db(tmp.path()).await;
+    let started = std::time::Instant::now();
+    loop {
+        let flag = count(
+            &pool,
+            "SELECT posts_indexed FROM books WHERE id = 'bad-book'",
+            None,
+        )
+        .await;
+        if flag == -1 {
+            break;
+        }
+        assert!(
+            started.elapsed() < Duration::from_secs(15),
+            "backfill left posts_indexed at {flag}"
+        );
+        tokio::time::sleep(Duration::from_millis(30)).await;
+    }
+    drop(_app);
+
+    tokio::fs::write(dir.join("book.epub"), common::epub())
+        .await
+        .unwrap();
+    let pool = open_db(tmp.path()).await;
+    sqlx::query(
+        "INSERT INTO books
+         (id, user_id, title, author, handle, imported_at, post_count, progress_index, is_sample, shared, posts_indexed)
+         VALUES ('sentinel', 'owner', 'Sentinel', 'Author', 'author', 2, 1, 0, 0, 0, 0)",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    tokio::fs::create_dir_all(tmp.path().join("books").join("owner").join("sentinel"))
+        .await
+        .unwrap();
+    tokio::fs::write(
+        tmp.path()
+            .join("books")
+            .join("owner")
+            .join("sentinel")
+            .join("posts.json"),
+        posts_json(1),
+    )
+    .await
+    .unwrap();
+    pool.close().await;
+
+    let _app = build(config).await.unwrap();
+    let pool = open_db(tmp.path()).await;
+    let started = std::time::Instant::now();
+    loop {
+        let flag = count(
+            &pool,
+            "SELECT posts_indexed FROM books WHERE id = 'sentinel'",
+            None,
+        )
+        .await;
+        if flag == 1 {
+            break;
+        }
+        assert!(
+            started.elapsed() < Duration::from_secs(15),
+            "second backfill did not finish"
+        );
+        tokio::time::sleep(Duration::from_millis(30)).await;
+    }
+    assert_eq!(
+        count(
+            &pool,
+            "SELECT posts_indexed FROM books WHERE id = 'bad-book'",
+            None
+        )
+        .await,
+        -1
+    );
+    assert!(!dir.join("posts.json").exists());
+}
+
+#[tokio::test]
+async fn vacuum_keeps_fts_aligned_with_post_ids() {
+    let tmp = TempDir::new().unwrap();
+    let pool = open_db(tmp.path()).await;
+    sqlx::migrate!("./migrations").run(&pool).await.unwrap();
+    sqlx::query(
+        "INSERT INTO users (id, username, username_norm, password_hash, created_at)
+         VALUES ('user', 'matt', 'matt', 'x', 1)",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO books (id, user_id, title, author, handle, imported_at, post_count, progress_index, is_sample, shared, posts_indexed)
+         VALUES ('book', 'user', 'B', 'A', 'a', 1, 2, 0, 0, 1, 1)",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO posts (book_id, idx, kind, chapter, text)
+         VALUES ('book', 0, 'Body', 'c', 'secretword'), ('book', 1, 'Body', 'c', 'otherword')",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query("DELETE FROM posts WHERE idx = 0")
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query(
+        "INSERT INTO posts (book_id, idx, kind, chapter, text) VALUES ('book', 0, 'Body', 'c', 'secretword')",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query("VACUUM").execute(&pool).await.unwrap();
+    assert_eq!(
+        count(
+            &pool,
+            "SELECT COUNT(*) FROM post_fts WHERE post_fts MATCH 'secretword'",
+            None
+        )
+        .await,
+        1
+    );
+    let posts_sql: String =
+        sqlx::query_scalar("SELECT sql FROM sqlite_master WHERE name = 'posts'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert!(posts_sql.contains("id INTEGER PRIMARY KEY"), "{posts_sql}");
+    let fts_sql: String =
+        sqlx::query_scalar("SELECT sql FROM sqlite_master WHERE name = 'post_fts'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert!(fts_sql.contains("content_rowid='id'"), "{fts_sql}");
+    let comments_index: i64 = count(
+        &pool,
+        "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = 'comments_created'",
+        None,
+    )
+    .await;
+    assert_eq!(comments_index, 1);
 }

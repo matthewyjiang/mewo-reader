@@ -3,38 +3,46 @@
 -- that table. Deleting a book cascades to posts, and the delete trigger
 -- drops the FTS row. The cascade only fires that trigger when foreign keys
 -- are on (they are, on every pooled connection).
+--
+-- `id` is the rowid. VACUUM does not renumber an INTEGER PRIMARY KEY, so the
+-- FTS content_rowid stays pointed at the same post after a dump or restore.
 
 CREATE TABLE posts (
+    id INTEGER PRIMARY KEY,
     book_id TEXT NOT NULL REFERENCES books(id) ON DELETE CASCADE,
     idx INTEGER NOT NULL,
     kind TEXT NOT NULL,
     chapter TEXT NOT NULL,
     text TEXT NOT NULL,
-    PRIMARY KEY (book_id, idx)
+    UNIQUE (book_id, idx)
 );
 
 CREATE VIRTUAL TABLE post_fts USING fts5(
     text,
     chapter,
     content='posts',
-    content_rowid='rowid',
+    content_rowid='id',
     tokenize='unicode61 remove_diacritics 2'
 );
 
 -- Rows are replaced by deleting and inserting, so there is no update trigger.
 CREATE TRIGGER posts_ai AFTER INSERT ON posts BEGIN
     INSERT INTO post_fts(rowid, text, chapter)
-    VALUES (new.rowid, new.text, new.chapter);
+    VALUES (new.id, new.text, new.chapter);
 END;
 
 CREATE TRIGGER posts_ad AFTER DELETE ON posts BEGIN
     INSERT INTO post_fts(post_fts, rowid, text, chapter)
-    VALUES ('delete', old.rowid, old.text, old.chapter);
+    VALUES ('delete', old.id, old.text, old.chapter);
 END;
 
 -- 0 until store_feed has written posts.json and the posts rows together.
--- Startup backfill selects this.
+-- -1 when the EPUB could not be read and there is no posts.json.
+-- Startup backfill selects 0.
 ALTER TABLE books ADD COLUMN posts_indexed INTEGER NOT NULL DEFAULT 0;
+
+-- Home feed walks comments newest first. The per-user index does not cover that.
+CREATE INDEX comments_created ON comments (created_at DESC);
 
 -- One row per account per post. Deleting the account or the book drops it.
 CREATE TABLE reposts (
