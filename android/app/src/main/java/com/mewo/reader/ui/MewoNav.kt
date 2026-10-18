@@ -48,7 +48,6 @@ import com.mewo.reader.ui.profile.ProfileScreen
 import com.mewo.reader.ui.profile.ProfileViewModel
 import com.mewo.reader.ui.reader.ReaderScreen
 import com.mewo.reader.ui.reader.ReaderViewModel
-import com.mewo.reader.data.BackendKind
 import com.mewo.reader.ui.search.PrefSearchKind
 import com.mewo.reader.ui.search.SearchScreen
 import com.mewo.reader.ui.search.SearchViewModel
@@ -65,8 +64,6 @@ import kotlinx.coroutines.launch
 @Composable
 fun MewoNav() {
     val store = LocalLibraryStore.current
-    val auth = LocalHostedAuth.current
-    val hosted = LocalBackend.current.kind == BackendKind.Hosted
     val context = LocalContext.current
     val searchKinds = remember { PrefSearchKind(context) }
     val nav = rememberNavController()
@@ -183,16 +180,6 @@ fun MewoNav() {
         gesturesEnabled = !coverFeed,
         onOpenSettings = ::openSettings,
         onOpenProfile = ::openProfile,
-        onSignOut = if (hosted && auth.session.signedIn) {
-            {
-                scope.launch {
-                    drawerState.close()
-                    auth.signOut()
-                }
-            }
-        } else {
-            null
-        },
     ) {
         Column(
             modifier = Modifier

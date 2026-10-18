@@ -17,7 +17,6 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.systemGestureExclusion
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.outlined.Logout
 import androidx.compose.material.icons.outlined.Person
 import androidx.compose.material.icons.outlined.Settings
 import androidx.compose.material3.DrawerState
@@ -46,7 +45,6 @@ fun AccountDrawer(
     gesturesEnabled: Boolean,
     onOpenSettings: () -> Unit,
     onOpenProfile: (handle: String, name: String) -> Unit,
-    onSignOut: (() -> Unit)? = null,
     content: @Composable () -> Unit,
 ) {
     ModalNavigationDrawer(
@@ -66,7 +64,6 @@ fun AccountDrawer(
                 AccountDrawerContent(
                     onOpenSettings = onOpenSettings,
                     onOpenProfile = onOpenProfile,
-                    onSignOut = onSignOut,
                 )
             }
         },
@@ -91,7 +88,6 @@ fun AccountDrawer(
 internal fun AccountDrawerContent(
     onOpenSettings: () -> Unit,
     onOpenProfile: (handle: String, name: String) -> Unit,
-    onSignOut: (() -> Unit)? = null,
 ) {
     val me = currentReaderIdentity()
     Column(
@@ -131,13 +127,6 @@ internal fun AccountDrawerContent(
             label = "Settings",
             onClick = onOpenSettings,
         )
-        if (onSignOut != null) {
-            DrawerRow(
-                icon = Icons.AutoMirrored.Outlined.Logout,
-                label = "Sign out",
-                onClick = onSignOut,
-            )
-        }
     }
 }
 

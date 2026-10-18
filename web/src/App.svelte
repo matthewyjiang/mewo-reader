@@ -465,7 +465,6 @@
   <AccountDrawer
     onclose={() => drawer = false}
     onprofile={openProfile}
-    onsignout={signOut}
   />
 {/if}
 {#if commentTarget && store.session}

@@ -2,19 +2,31 @@ package com.mewo.reader.ui.search
 
 import android.content.Intent
 import android.view.inputmethod.InputMethodManager
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.collectIsFocusedAsState
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.outlined.Close
+import androidx.compose.material.icons.outlined.Search
 import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -113,29 +125,14 @@ fun SearchScreen(
         MewoAppBar(
             leading = { ProfileButton(onClick = onOpenAccount) },
             content = {
-                BasicTextField(
-                    value = state.query,
-                    onValueChange = viewModel::setQuery,
-                    singleLine = true,
-                    textStyle = MaterialTheme.typography.bodyLarge.merge(
-                        TextStyle(color = MaterialTheme.colorScheme.onBackground),
-                    ),
-                    cursorBrush = SolidColor(MaterialTheme.colorScheme.primary),
+                SearchField(
+                    query = state.query,
+                    onQueryChange = viewModel::setQuery,
+                    hosted = hosted,
+                    focusRequester = focus,
                     modifier = Modifier
                         .weight(1f)
-                        .padding(end = 16.dp)
-                        .focusRequester(focus)
-                        .semantics { contentDescription = "Search books and posts" },
-                    decorationBox = { inner ->
-                        if (state.query.isEmpty()) {
-                            Text(
-                                "Search",
-                                style = MaterialTheme.typography.bodyLarge,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            )
-                        }
-                        inner()
-                    },
+                        .padding(end = 8.dp),
                 )
             },
         )
@@ -244,6 +241,84 @@ private fun SearchPage.isBlank(): Boolean = when (this) {
     is SearchPage.Accounts -> items.isEmpty()
     is SearchPage.Books -> items.isEmpty()
     is SearchPage.Posts -> items.isEmpty()
+}
+
+@Composable
+internal fun SearchField(
+    query: String,
+    onQueryChange: (String) -> Unit,
+    hosted: Boolean,
+    modifier: Modifier = Modifier,
+    focusRequester: FocusRequester? = null,
+) {
+    val shape = RoundedCornerShape(999.dp)
+    val interaction = remember { MutableInteractionSource() }
+    val focused by interaction.collectIsFocusedAsState()
+    val mute = MaterialTheme.colorScheme.onSurfaceVariant
+    val label = if (hosted) "Search accounts, books, and posts" else "Search books and posts"
+    BasicTextField(
+        value = query,
+        onValueChange = onQueryChange,
+        singleLine = true,
+        textStyle = MaterialTheme.typography.bodyMedium.merge(
+            TextStyle(color = MaterialTheme.colorScheme.onBackground),
+        ),
+        cursorBrush = SolidColor(MaterialTheme.colorScheme.primary),
+        interactionSource = interaction,
+        modifier = modifier
+            .height(38.dp)
+            .border(
+                width = 1.dp,
+                color = if (focused) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outline,
+                shape = shape,
+            )
+            .background(MaterialTheme.colorScheme.surfaceVariant, shape)
+            .then(if (focusRequester == null) Modifier else Modifier.focusRequester(focusRequester))
+            .semantics { contentDescription = label },
+        decorationBox = { inner ->
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(38.dp)
+                    .padding(start = 12.dp, end = if (query.isEmpty()) 12.dp else 4.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Icon(
+                    imageVector = Icons.Outlined.Search,
+                    contentDescription = null,
+                    tint = mute,
+                    modifier = Modifier.size(18.dp),
+                )
+                Spacer(Modifier.width(8.dp))
+                Box(Modifier.weight(1f)) {
+                    if (query.isEmpty()) {
+                        Text(
+                            text = "Search",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = mute,
+                        )
+                    }
+                    inner()
+                }
+                if (query.isNotEmpty()) {
+                    Box(
+                        modifier = Modifier
+                            .size(28.dp)
+                            .clickable(role = Role.Button, onClick = { onQueryChange("") })
+                            .semantics { contentDescription = "Clear search" },
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Icon(
+                            imageVector = Icons.Outlined.Close,
+                            contentDescription = null,
+                            tint = mute,
+                            modifier = Modifier.size(16.dp),
+                        )
+                    }
+                }
+            }
+        },
+    )
 }
 
 @Composable

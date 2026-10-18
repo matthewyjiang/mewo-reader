@@ -12,12 +12,14 @@ import androidx.compose.material3.DrawerValue
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.Text
 import androidx.compose.material3.rememberDrawerState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.SideEffect
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.unit.dp
 import app.cash.paparazzi.DeviceConfig
 import app.cash.paparazzi.Paparazzi
@@ -46,6 +48,7 @@ import com.mewo.reader.ui.reader.CommentItem
 import com.mewo.reader.ui.reader.TimelinePost
 import com.mewo.reader.ui.reader.relativeTime
 import com.mewo.reader.ui.search.AccountHitRow
+import com.mewo.reader.ui.search.SearchField
 import com.mewo.reader.ui.library.BookPost
 import com.mewo.reader.ui.library.EmptyTimeline
 import com.mewo.reader.ui.library.LibraryLoading
@@ -74,6 +77,7 @@ import com.mewo.reader.ui.theme.ReaderTypeScale
 import com.mewo.reader.ui.theme.ThemeController
 import com.mewo.reader.ui.theme.mewoTypography
 import com.mewo.reader.ui.theme.toColorScheme
+import org.junit.Assert.assertEquals
 import org.junit.Rule
 import org.junit.Test
 
@@ -162,7 +166,6 @@ class SurfaceScreenshots {
             gesturesEnabled = false,
             onOpenSettings = {},
             onOpenProfile = { _, _ -> },
-            onSignOut = {},
         ) {
             HomeBooks()
         }
@@ -202,8 +205,9 @@ class SurfaceScreenshots {
     @Test
     fun searchAccounts() = shoot("search-accounts") {
         SearchChrome("accounts") {
-            AccountHitRow(AccountHit("ada", mine = true)) {}
-            AccountHitRow(AccountHit("byron")) {}
+            accountsMatching(SearchQuery, accountDirectory).forEach { account ->
+                AccountHitRow(account) {}
+            }
         }
     }
 
@@ -392,14 +396,21 @@ private fun HostedLibrary() {
 
 @Composable
 private fun SearchChrome(tab: String, content: @Composable () -> Unit) {
+    val focus = remember { FocusRequester() }
+    // The shot is a typed query, so the field is focused the way the web shot is.
+    SideEffect { focus.requestFocus() }
     Column(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)) {
         MewoAppBar(
             leading = { ProfileButton(onClick = {}) },
             content = {
-                Text(
-                    text = "ada",
-                    style = MaterialTheme.typography.bodyLarge,
-                    modifier = Modifier.weight(1f),
+                SearchField(
+                    query = SearchQuery,
+                    onQueryChange = {},
+                    hosted = true,
+                    focusRequester = focus,
+                    modifier = Modifier
+                        .weight(1f)
+                        .padding(end = 8.dp),
                 )
             },
         )
@@ -613,6 +624,31 @@ private val sharedWithMe = book(
     shared = true,
     ownerUsername = "ada",
 )
+
+/** The query typed in the search goldens. Account rows are whatever this would return. */
+private const val SearchQuery = "ada"
+
+private val accountDirectory = listOf(
+    AccountHit("ada", mine = true),
+    AccountHit("byron"),
+)
+
+/** Username contains [query], folded the way the server folds `q`. */
+private fun accountsMatching(query: String, accounts: List<AccountHit>): List<AccountHit> {
+    val q = query.trim().lowercase()
+    if (q.isEmpty()) return emptyList()
+    return accounts.filter { it.username.lowercase().contains(q) }
+}
+
+class SearchAccountFixtureTest {
+    @Test
+    fun aQueryKeepsOnlyUsernamesThatContainIt() {
+        assertEquals(listOf("ada"), accountsMatching("ada", accountDirectory).map { it.username })
+        assertEquals(listOf("byron"), accountsMatching("BYR", accountDirectory).map { it.username })
+        assertEquals(emptyList<String>(), accountsMatching("zzz", accountDirectory).map { it.username })
+        assertEquals(emptyList<String>(), accountsMatching("  ", accountDirectory).map { it.username })
+    }
+}
 
 private fun book(
     id: String,

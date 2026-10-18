@@ -89,11 +89,12 @@ async function answer(route: Route) {
     const type = url.searchParams.get('type');
     if (type === 'books') return json({ type: 'books', items: [book], nextCursor: null });
     if (type === 'posts') return json({ type: 'posts', items: [{ book, post }], nextCursor: null });
-    return json({
-      type: 'accounts',
-      items: [{ username: 'ada', mine: true }, { username: 'byron', mine: false }],
-      nextCursor: null,
-    });
+    const q = (url.searchParams.get('q') ?? '').toLowerCase();
+    const accounts = [
+      { username: 'ada', mine: true },
+      { username: 'byron', mine: false },
+    ].filter((account) => account.username.includes(q));
+    return json({ type: 'accounts', items: accounts, nextCursor: null });
   }
   if (path === '/v1/users/ada') {
     return json({
@@ -133,6 +134,11 @@ test('search tabs keep each kind of hit', async ({ page }) => {
   await page.goto('/search');
   await page.getByRole('searchbox').fill('ada');
   await expect(page.getByRole('button', { name: '@ada' })).toBeVisible();
+  await expect(page.getByRole('button', { name: '@byron' })).toHaveCount(0);
+  await page.getByRole('searchbox').fill('byr');
+  await expect(page.getByRole('button', { name: '@byron' })).toBeVisible();
+  await expect(page.getByRole('button', { name: '@ada' })).toHaveCount(0);
+  await page.getByRole('searchbox').fill('ada');
   await expect(page.getByText('No matches')).toHaveCount(0);
   await page.getByRole('tab', { name: 'Books' }).click();
   await expect(page.getByText('Emma', { exact: true })).toBeVisible();
@@ -221,9 +227,13 @@ test('the drawer Profile row opens your profile', async ({ page }) => {
   await install(page);
   await page.goto('/');
   await page.getByRole('button', { name: 'Open account drawer' }).click();
+  await expect(page.getByRole('button', { name: 'Settings' })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Sign out' })).toHaveCount(0);
   await page.getByRole('button', { name: 'Profile', exact: true }).click();
   await expect(page).toHaveURL(/\/profiles\/ada$/);
   await expect(page.getByText('Joined Jan 2021')).toBeVisible();
+  await page.goto('/settings/account');
+  await expect(page.getByRole('button', { name: 'Sign out' })).toBeVisible();
 });
 
 test('a fresh search context opens on Accounts after Posts was saved', async ({ browser }) => {

@@ -5,10 +5,9 @@
   import { router } from '../lib/router.svelte';
   import { store } from '../lib/store.svelte';
 
-  let { onclose, onprofile, onsignout }: {
+  let { onclose, onprofile }: {
     onclose: () => void;
     onprofile: (username: string) => void;
-    onsignout: () => void;
   } = $props();
 </script>
 
@@ -28,10 +27,6 @@
   <button class="drawer-row" onclick={() => { onclose(); router.go('/settings'); }}>
     <Icon name="settings" size={26} />
     Settings
-  </button>
-  <button class="drawer-row" onclick={onsignout}>
-    <Icon name="logout" size={26} />
-    Sign out
   </button>
 </Sheet>
 
