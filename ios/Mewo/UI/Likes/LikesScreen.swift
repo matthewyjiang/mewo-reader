@@ -6,6 +6,7 @@ final class LikesViewModel {
     var hits: [PostHit] = []
     var comments: [String: CommentIndex] = [:]
     var loading = true
+    private var reposts: [String: RepostOverlay] = [:]
     private let env: AppEnvironment
 
     init(env: AppEnvironment) { self.env = env }
@@ -17,7 +18,8 @@ final class LikesViewModel {
                 let hits = try await env.library.likedPosts()
                 var comments: [String: CommentIndex] = [:]
                 for id in Set(hits.map(\.book.id)) {
-                    comments[id] = (try? await env.library.commentIndex(id: id)) ?? CommentIndex()
+                    let loaded = (try? await env.library.commentIndex(id: id)) ?? self.comments[id] ?? CommentIndex()
+                    comments[id] = overlay(id).replay(over: loaded)
                 }
                 self.hits = hits
                 self.comments = comments
@@ -35,8 +37,16 @@ final class LikesViewModel {
             postId: postId,
             read: { self.comments[bookId] ?? CommentIndex() },
             library: env.library,
-            publish: { self.comments[bookId] = $0 }
+            publish: { self.comments[bookId] = $0 },
+            overlay: overlay(bookId)
         )
+    }
+
+    private func overlay(_ id: String) -> RepostOverlay {
+        if let overlay = reposts[id] { return overlay }
+        let overlay = RepostOverlay()
+        reposts[id] = overlay
+        return overlay
     }
 
     func unlike(bookId: String, postId: String) {

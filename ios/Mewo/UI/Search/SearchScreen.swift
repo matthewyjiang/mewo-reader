@@ -340,8 +340,8 @@ final class BookSocial {
     @ObservationIgnored private var epoch = 0
     /// Bumped per completed toggle. A load drops its likes if this moved.
     @ObservationIgnored private var likeEdits = 0
-    /// Bumped per repost toggle so a load cannot paint over the optimistic mark.
-    @ObservationIgnored private var repostEdits = 0
+    /// Reposts still waiting on the server. Replayed onto a loaded index.
+    @ObservationIgnored private let reposts = RepostOverlay()
     /// Threads edited while `pending` runs, replayed over its index.
     @ObservationIgnored private var threadEdits: [String: [PostComment]] = [:]
     private let id: String
@@ -357,7 +357,6 @@ final class BookSocial {
         guard pending == nil, likesDue || commentsDue else { return }
         let epoch = self.epoch
         let likeEdits = self.likeEdits
-        let repostEdits = self.repostEdits
         let wantLikes = likesDue
         let wantComments = commentsDue
         pending = Task {
@@ -375,14 +374,7 @@ final class BookSocial {
                 for (postId, thread) in threadEdits {
                     index = index.afterThread(postId: postId, comments: thread)
                 }
-                if repostEdits != self.repostEdits, let current = comments {
-                    index = CommentIndex(
-                        counts: index.counts,
-                        mine: index.mine,
-                        reposts: current.reposts,
-                        reposted: current.reposted
-                    )
-                }
+                index = reposts.replay(over: index)
                 comments = index
                 commentsDue = false
             }
@@ -412,13 +404,13 @@ final class BookSocial {
     }
 
     func toggleRepost(postId: String) -> Task<Void, Never> {
-        repostEdits += 1
-        return commitRepostToggle(
+        commitRepostToggle(
             bookId: id,
             postId: postId,
             read: { [weak self] in self?.comments ?? CommentIndex() },
             library: library,
-            publish: { [weak self] next in self?.comments = next }
+            publish: { [weak self] next in self?.comments = next },
+            overlay: reposts
         )
     }
 

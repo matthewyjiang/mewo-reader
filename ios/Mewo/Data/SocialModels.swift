@@ -164,20 +164,41 @@ func optimisticRepost(_ mark: RepostMark) -> RepostMark {
     return RepostMark(count: mark.count + 1, on: true)
 }
 
-/// Applies a repost response only while the screen still shows the mark that request sent.
-func endRepost(
-    current: CommentIndex,
-    postId: String,
-    sent: RepostMark,
-    previous: RepostMark,
-    result: Result<RepostState, Error>
-) -> CommentIndex {
-    guard current.repostMark(postId) == sent else { return current }
-    switch result {
-    case .success(let state):
-        return current.applyingRepost(postId, RepostMark(count: state.reposts, on: state.reposted))
-    case .failure:
-        return current.applyingRepost(postId, previous)
+/// In-flight reposts for one book. A load paints the server index, then these
+/// marks are written back onto their own posts. Other posts keep the counts
+/// the load just fetched. The server answer applies while this toggle still
+/// owns the post, even if a load put the old count back on screen.
+@MainActor
+final class RepostOverlay {
+    private var marks: [String: RepostMark] = [:]
+
+    func begin(postId: String, mark: RepostMark) {
+        marks[postId] = mark
+    }
+
+    func replay(over index: CommentIndex) -> CommentIndex {
+        var next = index
+        for (postId, mark) in marks {
+            next = next.applyingRepost(postId, mark)
+        }
+        return next
+    }
+
+    func finish(
+        current: CommentIndex,
+        postId: String,
+        sent: RepostMark,
+        previous: RepostMark,
+        result: Result<RepostState, Error>
+    ) -> CommentIndex {
+        guard marks[postId] == sent else { return current }
+        marks.removeValue(forKey: postId)
+        switch result {
+        case .success(let state):
+            return current.applyingRepost(postId, RepostMark(count: state.reposts, on: state.reposted))
+        case .failure:
+            return current.applyingRepost(postId, previous)
+        }
     }
 }
 
@@ -188,11 +209,13 @@ func commitRepostToggle(
     postId: String,
     read: @escaping @MainActor () -> CommentIndex,
     library: LibraryStore,
-    publish: @escaping @MainActor (CommentIndex) -> Void
+    publish: @escaping @MainActor (CommentIndex) -> Void,
+    overlay: RepostOverlay
 ) -> Task<Void, Never> {
     let previous = read().repostMark(postId)
     let sent = optimisticRepost(previous)
-    publish(read().applyingRepost(postId, sent))
+    overlay.begin(postId: postId, mark: sent)
+    publish(overlay.replay(over: read()))
     return Task {
         let result: Result<RepostState, Error>
         do {
@@ -200,7 +223,13 @@ func commitRepostToggle(
         } catch {
             result = .failure(error)
         }
-        publish(endRepost(current: read(), postId: postId, sent: sent, previous: previous, result: result))
+        publish(overlay.finish(
+            current: read(),
+            postId: postId,
+            sent: sent,
+            previous: previous,
+            result: result
+        ))
     }
 }
 

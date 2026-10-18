@@ -89,15 +89,43 @@ final class SocialDecodeTests: XCTestCase {
     }
 }
 
+@MainActor
 final class RepostTests: XCTestCase {
-    func testOptimisticToggleRollsBackOnlyTheRequestThatFailed() {
+    func testALoadReplaysThePendingPostAndKeepsTheOtherCounts() {
+        let overlay = RepostOverlay()
+        let start = CommentIndex(reposts: ["0": 3, "1": 7], reposted: [])
+        let sent = optimisticRepost(start.repostMark("0"))
+        XCTAssertEqual(sent, RepostMark(count: 4, on: true))
+        overlay.begin(postId: "0", mark: sent)
+        var shown = overlay.replay(over: start)
+        XCTAssertEqual(shown.repostMark("0"), sent)
+
+        let loaded = CommentIndex(reposts: ["0": 3, "1": 8], reposted: [])
+        shown = overlay.replay(over: loaded)
+        XCTAssertEqual(shown.repostMark("0"), sent)
+        XCTAssertEqual(shown.repostCount("1"), 8)
+
+        shown = overlay.finish(
+            current: shown,
+            postId: "0",
+            sent: sent,
+            previous: start.repostMark("0"),
+            result: .success(RepostState(reposts: 4, reposted: true))
+        )
+        XCTAssertEqual(shown.repostMark("0"), RepostMark(count: 4, on: true))
+        XCTAssertEqual(shown.repostCount("1"), 8)
+    }
+
+    func testANewerToggleWinsAndAFailedOneRollsBackOnlyItsPost() {
+        let overlay = RepostOverlay()
         let start = CommentIndex(reposts: ["0": 2], reposted: [])
         let on = optimisticRepost(start.repostMark("0"))
-        XCTAssertEqual(on, RepostMark(count: 3, on: true))
-        var shown = start.applyingRepost("0", on)
+        overlay.begin(postId: "0", mark: on)
+        var shown = overlay.replay(over: start)
         let off = optimisticRepost(shown.repostMark("0"))
-        shown = shown.applyingRepost("0", off)
-        let stale = endRepost(
+        overlay.begin(postId: "0", mark: off)
+        shown = overlay.replay(over: shown)
+        let stale = overlay.finish(
             current: shown,
             postId: "0",
             sent: on,
@@ -105,22 +133,48 @@ final class RepostTests: XCTestCase {
             result: .success(RepostState(reposts: 9, reposted: true))
         )
         XCTAssertEqual(stale.repostMark("0"), off)
-        let failed = endRepost(
-            current: shown,
+        let failed = overlay.finish(
+            current: stale,
             postId: "0",
             sent: off,
             previous: on,
             result: .failure(URLError(.notConnectedToInternet))
         )
         XCTAssertEqual(failed.repostMark("0"), on)
-        let landed = endRepost(
+        let late = overlay.finish(
             current: failed,
             postId: "0",
             sent: on,
             previous: start.repostMark("0"),
             result: .success(RepostState(reposts: 4, reposted: true))
         )
-        XCTAssertEqual(landed.repostMark("0"), RepostMark(count: 4, on: true))
+        XCTAssertEqual(late.repostMark("0"), on)
+    }
+
+    func testAStaleIndexCannotDropTheServerAnswer() async {
+        let library = HoldingLibrary()
+        library.index = CommentIndex(reposts: ["0": 3, "1": 7], reposted: [])
+        let social = BookSocial(id: "b", library: library)
+        social.load()
+        await social.pending?.value
+        XCTAssertEqual(social.comments?.repostCount("0"), 3)
+        XCTAssertEqual(social.comments?.didRepost("0"), false)
+
+        library.holdRepost = true
+        let toggle = social.toggleRepost(postId: "0")
+        XCTAssertEqual(social.comments?.repostMark("0"), RepostMark(count: 4, on: true))
+
+        library.index = CommentIndex(reposts: ["0": 3, "1": 8], reposted: [])
+        social.invalidate()
+        social.load()
+        await social.pending?.value
+        XCTAssertEqual(social.comments?.repostMark("0"), RepostMark(count: 4, on: true))
+        XCTAssertEqual(social.comments?.repostCount("1"), 8)
+
+        library.releaseRepost(RepostState(reposts: 4, reposted: true))
+        await toggle.value
+        XCTAssertEqual(social.comments?.repostMark("0"), RepostMark(count: 4, on: true))
+        XCTAssertEqual(social.comments?.repostCount("1"), 8)
     }
 }
 
@@ -478,6 +532,44 @@ private final class FakeProfileLoader: ProfileLoading {
             onCall?()
         }
     }
+}
+
+@MainActor
+private final class HoldingLibrary: LibraryStore {
+    var books: [BookRecord] = []
+    var loadState: LibraryLoad = .loaded(books: [], refreshing: false)
+    var index = CommentIndex()
+    var holdRepost = false
+    private var repostWait: CheckedContinuation<RepostState, Error>?
+
+    func releaseRepost(_ state: RepostState) {
+        holdRepost = false
+        repostWait?.resume(returning: state)
+        repostWait = nil
+    }
+
+    func commentIndex(id: String) async throws -> CommentIndex { index }
+    func setRepost(id: String, postId: String, on: Bool) async throws -> RepostState {
+        if !holdRepost { return RepostState(reposts: on ? 1 : 0, reposted: on) }
+        return try await withCheckedThrowingContinuation { repostWait = $0 }
+    }
+    func load() async throws {}
+    func dismissLoadError() {}
+    func importFromFile(_ file: URL) async throws -> BookRecord { throw CancellationError() }
+    func importSample() async throws -> BookRecord { throw CancellationError() }
+    func delete(id: String) async throws {}
+    func book(id: String) -> BookRecord? { nil }
+    func feed(id: String) async throws -> [FeedPost] { [] }
+    func saveProgress(id: String, index: Int) async throws {}
+    func likes(id: String) async throws -> Set<String> { [] }
+    func toggleLike(id: String, postId: String) async throws -> Set<String> { [] }
+    func comments(id: String, postId: String) async throws -> [PostComment] { [] }
+    func addComment(id: String, postId: String, text: String) async throws -> [PostComment] { [] }
+    func deleteComment(id: String, postId: String, commentId: String) async throws -> [PostComment] { [] }
+    func search(query: String) async throws -> SearchResult { SearchResult() }
+    func likedPosts() async throws -> [PostHit] { [] }
+    func profileReplies(handle: String) async throws -> [ProfileReply] { [] }
+    func coverFile(id: String) -> URL? { nil }
 }
 
 @MainActor

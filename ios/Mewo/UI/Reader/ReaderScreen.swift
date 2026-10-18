@@ -13,6 +13,7 @@ final class ReaderViewModel {
     private let env: AppEnvironment
     private let bookId: String
     private let focusPostId: String?
+    private let reposts = RepostOverlay()
 
     init(env: AppEnvironment, bookId: String, focusPostId: String?) {
         self.env = env
@@ -39,7 +40,7 @@ final class ReaderViewModel {
             self.book = book
             self.posts = posts
             self.likes = likes
-            self.comments = comments
+            self.comments = reposts.replay(over: comments)
             self.startIndex = start
             self.loading = false
         } catch {
@@ -58,7 +59,8 @@ final class ReaderViewModel {
             postId: postId,
             read: { self.comments },
             library: env.library,
-            publish: { self.comments = $0 }
+            publish: { self.comments = $0 },
+            overlay: reposts
         )
     }
 

@@ -84,6 +84,7 @@ final class ProfileViewModel {
     var booksFailure: String?
     var likes: [String: Set<String>] = [:]
     var comments: [String: CommentIndex] = [:]
+    private var repostOverlays: [String: RepostOverlay] = [:]
     private let library: LibraryStore
     private var loader: ProfileLoading?
     private var sessionSeen: String?
@@ -132,6 +133,9 @@ final class ProfileViewModel {
         repostsLoading = false
         booksLoading = false
         headerFailure = nil
+        likes = [:]
+        comments = [:]
+        repostOverlays = [:]
         if token != nil { refresh() }
     }
 
@@ -183,7 +187,8 @@ final class ProfileViewModel {
             postId: postId,
             read: { self.comments[bookId] ?? CommentIndex() },
             library: library,
-            publish: { self.comments[bookId] = $0 }
+            publish: { self.comments[bookId] = $0 },
+            overlay: overlay(bookId)
         )
     }
 
@@ -321,8 +326,17 @@ final class ProfileViewModel {
     private func loadSocial(for ids: Set<String>) async {
         for id in ids {
             likes[id] = (try? await library.likes(id: id)) ?? likes[id] ?? []
-            comments[id] = (try? await library.commentIndex(id: id)) ?? comments[id] ?? CommentIndex()
+            if let loaded = try? await library.commentIndex(id: id) {
+                comments[id] = overlay(id).replay(over: loaded)
+            }
         }
+    }
+
+    private func overlay(_ id: String) -> RepostOverlay {
+        if let overlay = repostOverlays[id] { return overlay }
+        let overlay = RepostOverlay()
+        repostOverlays[id] = overlay
+        return overlay
     }
 }
 
