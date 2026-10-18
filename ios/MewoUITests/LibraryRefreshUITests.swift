@@ -1,6 +1,8 @@
 import XCTest
 
 /// Pulls the hosted shelf while a request is held, so the system spinner stays up.
+/// The hold server is `Fixtures/shelf-delay.py` on 127.0.0.1:8765. Skip when it is down
+/// so `xcodebuild test -scheme Mewo` still passes.
 final class LibraryRefreshUITests: XCTestCase {
     func testPullKeepsTheShelfAndTheSpinner() throws {
         try pull(theme: "x_light", shot: "/tmp/mewo-pull-held-light.png")
@@ -11,6 +13,7 @@ final class LibraryRefreshUITests: XCTestCase {
     }
 
     private func pull(theme: String, shot: String) throws {
+        try XCTSkipUnless(holdServerReady(), "shelf hold server is not reachable on 127.0.0.1:8765")
         let app = XCUIApplication()
         app.launchArguments = [
             "--uitesting",
@@ -48,5 +51,28 @@ final class LibraryRefreshUITests: XCTestCase {
         URLSession.shared.dataTask(with: hold) { _, _, _ in held.fulfill() }.resume()
         wait(for: [held], timeout: 5)
         XCTAssertTrue(title.waitForExistence(timeout: 8))
+    }
+
+    /// True when Fixtures/shelf-delay.py (or anything speaking its control routes) is listening.
+    private func holdServerReady() -> Bool {
+        let status = URL(string: "http://127.0.0.1:8765/control/status")!
+        let probe = DispatchSemaphore(value: 0)
+        var listening = false
+        URLSession.shared.dataTask(with: status) { data, response, _ in
+            if let http = response as? HTTPURLResponse, http.statusCode == 200,
+               let data, let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+               json["waiting"] != nil {
+                listening = true
+            }
+            probe.signal()
+        }.resume()
+        _ = probe.wait(timeout: .now() + 2)
+        guard listening else { return false }
+        var hold = URLRequest(url: URL(string: "http://127.0.0.1:8765/control/hold")!)
+        hold.httpMethod = "POST"
+        let held = DispatchSemaphore(value: 0)
+        URLSession.shared.dataTask(with: hold) { _, _, _ in held.signal() }.resume()
+        _ = held.wait(timeout: .now() + 2)
+        return true
     }
 }

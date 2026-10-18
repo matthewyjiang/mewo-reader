@@ -81,7 +81,9 @@ targets:
     type: bundle.ui-testing
     platform: iOS
     sources:
-      - MewoUITests
+      - path: MewoUITests
+        excludes:
+          - Fixtures/**
     dependencies:
       - target: Mewo
         embed: false
