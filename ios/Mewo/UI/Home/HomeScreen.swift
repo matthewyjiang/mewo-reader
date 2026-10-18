@@ -254,6 +254,7 @@ struct FeedScreen: View {
                 reposted: bookSocial.comments?.didRepost(item.post.id) == true,
                 repostCount: bookSocial.comments?.repostCount(item.post.id) ?? 0,
                 onOpenPassage: { onOpenPost(item.book.id, item.post.id) },
+                onOpenReply: { commentTarget = CommentTarget(book: item.book, post: item.post) },
                 onOpenActor: { onOpenProfile(comment.username, comment.username) },
                 onComment: { commentTarget = CommentTarget(book: item.book, post: item.post) },
                 onLike: { bookSocial.toggleLike(postId: item.post.id) },

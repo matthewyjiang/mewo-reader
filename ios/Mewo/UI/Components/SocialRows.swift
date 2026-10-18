@@ -26,7 +26,11 @@ struct RepostContext: View {
     }
 }
 
+/// A comment on Home and Profile: the passage keeps its actions and an
+/// "Open line in book" link, and the thread line runs down to the reply.
 struct PassageReply: View {
+    @Environment(\.mewo) private var mewo
+    @Environment(\.readerScale) private var scale
     var passageName: String
     var passageHandle: String
     var passageMeta: String
@@ -43,6 +47,7 @@ struct PassageReply: View {
     var reposted: Bool
     var repostCount: Int
     var onOpenPassage: () -> Void
+    var onOpenReply: () -> Void
     var onOpenActor: () -> Void
     var onComment: () -> Void
     var onLike: () -> Void
@@ -52,17 +57,7 @@ struct PassageReply: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            ThreadPost(
-                name: passageName,
-                handle: passageHandle,
-                meta: passageMeta,
-                text: passageText,
-                heading: passageHeading,
-                cover: passageCover,
-                connectDown: true
-            )
-            .contentShape(Rectangle())
-            .onTapGesture(perform: onOpenPassage)
+            passage
             ThreadPost(
                 name: actorName,
                 handle: actorHandle,
@@ -71,24 +66,76 @@ struct PassageReply: View {
                 heading: false,
                 cover: nil,
                 connectDown: false,
-                onOpenProfile: { _, _ in onOpenActor() }
+                onOpenProfile: { _, _ in onOpenActor() },
+                onOpen: onOpenReply,
+                trailing: 12
             )
-            PostActions(
-                liked: liked,
-                commentCount: commentCount,
-                commented: commented,
-                reposted: reposted,
-                repostCount: repostCount,
-                onComment: onComment,
-                onLike: onLike,
-                onRepost: onRepost,
-                onQuote: onQuote,
-                onShare: onShare
-            )
-            .padding(.leading, 68)
-            .padding(.trailing, 12)
             Hairline()
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    /// Same insets as a normal post: 12 top, 12 trailing, 16 leading, 4 under the link.
+    private var passage: some View {
+        HStack(alignment: .top, spacing: 12) {
+            Color.clear.frame(width: 40, height: 40)
+            VStack(alignment: .leading, spacing: 0) {
+                HStack(spacing: 6) {
+                    Text(passageName)
+                        .font(MewoFont.bold(15))
+                        .lineLimit(1)
+                    Text("@\(passageHandle) · \(passageMeta)")
+                        .font(MewoFont.regular(13))
+                        .foregroundStyle(mewo.mute)
+                        .lineLimit(1)
+                }
+                Text(passageText)
+                    .font(passageHeading ? MewoFont.bold(scale.headingSize) : MewoFont.regular(scale.bodySize))
+                    .lineSpacing(max(0, (passageHeading ? scale.headingLine : scale.bodyLine) - (passageHeading ? scale.headingSize : scale.bodySize)))
+                    .foregroundStyle(mewo.ink)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.top, 4)
+                    .contentShape(Rectangle())
+                    .onTapGesture(perform: onOpenPassage)
+                PostActions(
+                    liked: liked,
+                    commentCount: commentCount,
+                    commented: commented,
+                    reposted: reposted,
+                    repostCount: repostCount,
+                    onComment: onComment,
+                    onLike: onLike,
+                    onRepost: onRepost,
+                    onQuote: onQuote,
+                    onShare: onShare
+                )
+                .padding(.top, 4)
+                Button(action: onOpenPassage) {
+                    Text("Open line in book")
+                        .font(MewoFont.regular(13))
+                        .foregroundStyle(mewo.accent)
+                        .frame(maxWidth: .infinity, minHeight: 40, alignment: .leading)
+                        .padding(.horizontal, 8)
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .padding(.leading, 16)
+        .padding(.trailing, 12)
+        .padding(.top, 12)
+        .padding(.bottom, 4)
+        .background(alignment: .topLeading) {
+            VStack(spacing: 0) {
+                Avatar(name: passageName, cover: passageCover, size: 40)
+                mewo.line
+                    .frame(width: 2)
+                    .frame(maxHeight: .infinity)
+                    .padding(.top, 4)
+            }
+            .padding(.leading, 16)
+            .padding(.top, 12)
+            .padding(.bottom, 4)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        }
     }
 }

@@ -32,6 +32,8 @@ final class SocialScreenshotTests: XCTestCase {
 
         let reposted = app.staticTexts["bea reposted"]
         XCTAssertTrue(reposted.waitForExistence(timeout: 12), "cached feed did not paint")
+        XCTAssertTrue(app.buttons["Open line in book"].waitForExistence(timeout: 8))
+        XCTAssertTrue(app.staticTexts["Still true."].exists)
         shot(app, theme, "home-feed")
 
         app.buttons["account-button"].tap()
@@ -66,6 +68,7 @@ final class SocialScreenshotTests: XCTestCase {
         app.buttons["account-ada"].tap()
         XCTAssertTrue(app.staticTexts["Joined Mar 2024"].waitForExistence(timeout: 8))
         XCTAssertTrue(app.staticTexts["Still true."].waitForExistence(timeout: 8))
+        XCTAssertTrue(app.buttons["Open line in book"].exists)
         shot(app, theme, "profile-posts")
 
         app.buttons["profile-tab-reposts"].tap()

@@ -633,6 +633,7 @@ struct ProfileScreen: View {
             reposted: index?.didRepost(hit.post.id) == true,
             repostCount: index?.repostCount(hit.post.id) ?? 0,
             onOpenPassage: { onOpenPost(hit.book.id, hit.post.id) },
+            onOpenReply: { commentTarget = CommentTarget(book: hit.book, post: hit.post) },
             onOpenActor: { onOpenProfile(identity.handle, identity.name) },
             onComment: { commentTarget = CommentTarget(book: hit.book, post: hit.post) },
             onLike: { model.toggleLike(bookId: hit.book.id, postId: hit.post.id) },
