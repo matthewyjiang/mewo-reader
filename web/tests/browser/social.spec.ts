@@ -29,11 +29,14 @@ const post = {
   chapter: 'One',
 };
 
+/** Milliseconds, same as `comments.created_at`. 2024-10-03T15:00:00Z. */
+const commentAt = Date.UTC(2024, 9, 3, 15, 0, 0);
+
 const comment = {
   id: 'c1',
   username: 'ada',
   text: 'This opening still lands.',
-  createdAt: 5,
+  createdAt: commentAt,
   mine: true,
 };
 
@@ -68,7 +71,7 @@ async function answer(route: Route) {
           actor: { username: 'byron' },
           book,
           post,
-          at: 10,
+          at: commentAt + 1000,
         },
         {
           type: 'comment',
@@ -76,7 +79,7 @@ async function answer(route: Route) {
           book,
           post,
           comment,
-          at: 9,
+          at: commentAt,
         },
       ],
       nextCursor: null,
@@ -101,7 +104,7 @@ async function answer(route: Route) {
     return json({ items: [{ book, post, comment }], nextCursor: null });
   }
   if (path === '/v1/users/ada/reposts') {
-    return json({ items: [{ book, post, repostedAt: 6 }], nextCursor: null });
+    return json({ items: [{ book, post, repostedAt: commentAt }], nextCursor: null });
   }
   if (path === '/v1/users/ada/books') return json({ items: [book] });
   if (path === '/v1/users/nobody') return json({ error: 'Not found.' }, 404);
@@ -109,7 +112,8 @@ async function answer(route: Route) {
     return json({
       counts: { '0': 1 },
       mine: ['0'],
-      reposts: reposted ? { '0': 1 } : {},
+      // Byron already reposted this line. The viewer's own repost adds one.
+      reposts: { '0': reposted ? 2 : 1 },
       reposted: reposted ? ['0'] : [],
     });
   }
@@ -117,7 +121,7 @@ async function answer(route: Route) {
   if (path === '/v1/books/b1/posts') return json({ posts: [post] });
   if (path === '/v1/books/b1/posts/0/repost') {
     reposted = method === 'PUT';
-    return json({ reposts: reposted ? 1 : 0, reposted });
+    return json({ reposts: reposted ? 2 : 1, reposted });
   }
   if (path.endsWith('/cover')) return route.fulfill({ status: 404, body: '' });
   return json({});
@@ -159,13 +163,37 @@ test('a repost stays on after reload', async ({ page }) => {
   await page.goto('/search');
   await page.getByRole('tab', { name: 'Posts' }).click();
   await page.getByRole('searchbox').fill('line');
-  const repost = page.getByRole('button', { name: 'Repost', exact: true });
-  await expect(repost).toBeVisible();
+  const repost = page.getByRole('button', { name: 'Reposts, 1' });
+  await expect(repost).toBeEnabled();
+  await expect(repost).toHaveAttribute('aria-pressed', 'false');
   await repost.click();
-  await expect(page.getByRole('button', { name: 'Reposts, 1' })).toHaveAttribute('aria-pressed', 'true');
+  const mine = page.getByRole('button', { name: 'Reposts, 2' });
+  await expect(mine).toBeEnabled();
+  await expect(mine).toHaveAttribute('aria-pressed', 'true');
   await page.reload();
   await page.getByRole('searchbox').fill('line');
-  await expect(page.getByRole('button', { name: 'Reposts, 1' })).toHaveAttribute('aria-pressed', 'true');
+  await expect(page.getByRole('button', { name: 'Reposts, 2' })).toBeEnabled();
+  await expect(page.getByRole('button', { name: 'Reposts, 2' })).toHaveAttribute('aria-pressed', 'true');
+});
+
+test('a repost stays faded only while the request is open', async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await install(page);
+  let release: () => void = () => {};
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  await page.route('**/v1/**/repost', async (route) => {
+    if (route.request().method() === 'PUT') await gate;
+    await route.fallback();
+  });
+  await page.goto('/search');
+  await page.getByRole('tab', { name: 'Posts' }).click();
+  await page.getByRole('searchbox').fill('line');
+  await page.getByRole('button', { name: 'Reposts, 1' }).click();
+  const pending = page.getByRole('button', { name: 'Reposts, 2' });
+  await expect(pending).toBeDisabled();
+  release();
+  await expect(pending).toBeEnabled();
+  await expect(pending).toHaveAttribute('aria-pressed', 'true');
 });
 
 test('home opens on Feed and Books keeps the shelf', async ({ page }) => {
@@ -174,7 +202,12 @@ test('home opens on Feed and Books keeps the shelf', async ({ page }) => {
   await page.goto('/');
   await expect(page.getByRole('tab', { name: 'Feed' })).toHaveAttribute('aria-selected', 'true');
   await expect(page.getByText('byron reposted')).toBeVisible();
+  await expect(page.getByText('Oct 3, 2024')).toBeVisible();
   await expect(page.getByText('This opening still lands.')).toBeVisible();
+  const counts = page.getByRole('button', { name: 'Reposts, 1' });
+  await expect(counts).toHaveCount(2);
+  await expect(counts.first()).toBeEnabled();
+  await expect(counts.first()).toHaveAttribute('aria-pressed', 'false');
   await page.getByRole('tab', { name: 'Books' }).click();
   await expect(page).toHaveURL(/tab=books/);
   await expect(page.getByText('Emma', { exact: true })).toBeVisible();
@@ -226,6 +259,8 @@ test('shots of the social surfaces', async ({ browser }) => {
       await install(page, theme);
       await page.goto('/');
       await expect(page.getByText('byron reposted')).toBeVisible();
+      await expect(page.getByText('Oct 3, 2024')).toBeVisible();
+      await expect(page.getByRole('button', { name: 'Reposts, 1' }).first()).toBeEnabled();
       await page.screenshot({ path: `${dir}/web-home-feed-${label}.png` });
       await page.getByRole('tab', { name: 'Books' }).click();
       await expect(page.getByText('Emma', { exact: true })).toBeVisible();
@@ -242,13 +277,19 @@ test('shots of the social surfaces', async ({ browser }) => {
       await expect(page.getByText('Emma', { exact: true })).toBeVisible();
       await page.screenshot({ path: `${dir}/web-search-books-${label}.png` });
       await page.getByRole('tab', { name: 'Posts' }).click();
-      await expect(page.getByRole('button', { name: 'Repost', exact: true })).toBeVisible();
-      await page.getByRole('button', { name: 'Repost', exact: true }).click();
-      await expect(page.getByRole('button', { name: 'Reposts, 1' })).toBeVisible();
+      const repost = page.getByRole('button', { name: 'Reposts, 1' });
+      await expect(repost).toBeEnabled();
+      await repost.click();
+      const mine = page.getByRole('button', { name: 'Reposts, 2' });
+      await expect(mine).toBeEnabled();
+      await expect(mine).toHaveAttribute('aria-pressed', 'true');
+      await page.mouse.move(0, 0);
       await page.screenshot({ path: `${dir}/web-search-posts-${label}.png` });
       await page.screenshot({ path: `${dir}/web-repost-active-${label}.png` });
       await page.goto('/profiles/ada');
       await expect(page.getByText('Joined Jan 2021')).toBeVisible();
+      await expect(page.getByText('Oct 3, 2024')).toBeVisible();
+      await expect(page.getByRole('button', { name: 'Reposts, 2' })).toBeEnabled();
       await page.screenshot({ path: `${dir}/web-profile-posts-${label}.png` });
       await page.getByRole('tab', { name: 'Reposts' }).click();
       await expect(page.getByText('Emma Woodhouse, handsome, clever, and rich.')).toBeVisible();

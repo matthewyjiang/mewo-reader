@@ -498,6 +498,7 @@ private fun ComposePost(
     }
 }
 
+/** `now`, `5m`, `3h`, then a UTC date: `Oct 3` this year, `Oct 3, 2024` otherwise. */
 fun relativeTime(createdAt: Long, now: Long = System.currentTimeMillis()): String {
     val delta = (now - createdAt).coerceAtLeast(0)
     val minutes = delta / 60_000
@@ -505,6 +506,9 @@ fun relativeTime(createdAt: Long, now: Long = System.currentTimeMillis()): Strin
     if (minutes < 60) return "${minutes}m"
     val hours = minutes / 60
     if (hours < 24) return "${hours}h"
-    val days = hours / 24
-    return "${days}d"
+    val date = java.time.Instant.ofEpochMilli(createdAt).atZone(java.time.ZoneOffset.UTC)
+    val month = date.month.getDisplayName(java.time.format.TextStyle.SHORT, java.util.Locale.US)
+    val label = "$month ${date.dayOfMonth}"
+    val yearNow = java.time.Instant.ofEpochMilli(now).atZone(java.time.ZoneOffset.UTC).year
+    return if (date.year == yearNow) label else "$label, ${date.year}"
 }

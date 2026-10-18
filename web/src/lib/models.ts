@@ -176,10 +176,15 @@ export function joinedLabel(joinedAt: number): string {
   return `Joined ${months[date.getUTCMonth()]} ${date.getUTCFullYear()}`;
 }
 
-export function relativeTime(createdAt: number): string {
-  const minutes = Math.max(0, Math.floor((Date.now() - createdAt) / 60000));
+/** `now`, `5m`, `3h`, then a UTC date: `Oct 3` this year, `Oct 3, 2024` otherwise. */
+export function relativeTime(createdAt: number, now = Date.now()): string {
+  const minutes = Math.max(0, Math.floor((now - createdAt) / 60000));
   if (minutes < 1) return 'now';
   if (minutes < 60) return `${minutes}m`;
   const hours = Math.floor(minutes / 60);
-  return hours < 24 ? `${hours}h` : `${Math.floor(hours / 24)}d`;
+  if (hours < 24) return `${hours}h`;
+  const date = new Date(createdAt);
+  const label = `${months[date.getUTCMonth()]} ${date.getUTCDate()}`;
+  const year = date.getUTCFullYear();
+  return year === new Date(now).getUTCFullYear() ? label : `${label}, ${year}`;
 }

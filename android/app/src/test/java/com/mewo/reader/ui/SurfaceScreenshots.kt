@@ -37,6 +37,7 @@ import com.mewo.reader.ui.feed.ActivityLine
 import com.mewo.reader.ui.profile.ProfileHeader
 import com.mewo.reader.ui.reader.ThreadPost
 import com.mewo.reader.ui.reader.TimelinePost
+import com.mewo.reader.ui.reader.relativeTime
 import com.mewo.reader.ui.search.AccountHitRow
 import com.mewo.reader.ui.library.BookPost
 import com.mewo.reader.ui.library.EmptyTimeline
@@ -221,7 +222,7 @@ class SurfaceScreenshots {
             ThreadPost(
                 name = "ada",
                 handle = "ada",
-                meta = "2m",
+                meta = relativeTime(COMMENT_AT, SHOT_NOW),
                 text = "This opening still lands.",
                 heading = false,
                 cover = null,
@@ -261,7 +262,7 @@ class SurfaceScreenshots {
             ThreadPost(
                 name = "ada",
                 handle = "ada",
-                meta = "2m",
+                meta = relativeTime(COMMENT_AT, SHOT_NOW),
                 text = "This opening still lands.",
                 heading = false,
                 cover = null,
@@ -512,6 +513,10 @@ private val privateBook = book(
     title = "Pride and Prejudice",
     shared = false,
 )
+
+/** 2024-10-03T15:00:00Z, read at 2026-10-18T00:00:00Z → "Oct 3, 2024". */
+private const val COMMENT_AT = 1_727_967_600_000L
+private const val SHOT_NOW = 1_792_281_600_000L
 
 private val sharedBook = book(
     id = "shared",
