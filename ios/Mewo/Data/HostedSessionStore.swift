@@ -40,10 +40,13 @@ final class HostedSessionStore {
     ) {
         self.defaults = defaults
         self.persistToken = persistToken
+        let seeded = defaults.string(forKey: "token").flatMap { $0.isEmpty ? nil : $0 }
         session = HostedSession(
             baseUrl: defaults.string(forKey: "base_url") ?? "",
             username: defaults.string(forKey: "username"),
-            token: persistToken ? Keychain.readToken() : nil
+            // The keychain is the real token. UI tests also leave a copy in defaults
+            // because a write during app launch does not stick in an unsigned simulator.
+            token: (persistToken ? Keychain.readToken() : nil) ?? seeded
         )
     }
 
@@ -66,6 +69,7 @@ final class HostedSessionStore {
     func signOut() {
         let previous = session
         defaults.removeObject(forKey: "username")
+        defaults.removeObject(forKey: "token")
         if persistToken { Keychain.deleteToken() }
         session.username = nil
         session.token = nil

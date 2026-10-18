@@ -108,6 +108,21 @@ final class HostedLibraryRefreshTests: XCTestCase {
         XCTAssertFalse(store.books.contains { $0.id == privateId })
     }
 
+    func testADefaultsTokenSignsInWhenTheKeychainIsSkipped() async throws {
+        let name = "mewo-shelf-\(UUID().uuidString)"
+        let seeded = UserDefaults(suiteName: name)!
+        seeded.set(server, forKey: "base_url")
+        seeded.set("ada", forKey: "username")
+        seeded.set("token-a", forKey: "token")
+        let signed = HostedSessionStore(defaults: seeded, persistToken: false)
+        XCTAssertEqual(signed.session.token, "token-a")
+        XCTAssertTrue(signed.session.signedIn)
+        signed.signOut()
+        XCTAssertNil(signed.session.token)
+        XCTAssertNil(seeded.string(forKey: "token"))
+        seeded.removePersistentDomain(forName: name)
+    }
+
     func testASecondPullJoinsTheInFlightRefresh() async throws {
         sessions.setSignedIn(username: "ada", token: "token-a")
         try await client.waitForCalls(1)

@@ -29,6 +29,9 @@ enum UITestReset {
         if let hosted = UserDefaults(suiteName: "mewo_hosted") {
             hosted.set(url, forKey: "base_url")
             hosted.set(user, forKey: "username")
+            // App init runs before the simulator keychain will take a write, so the
+            // session also reads this copy. Sign-out removes it.
+            hosted.set(token, forKey: "token")
         }
         Keychain.saveToken(token)
         if let profile = UserDefaults(suiteName: "mewo_profile") {
