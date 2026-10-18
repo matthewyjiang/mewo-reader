@@ -18,6 +18,7 @@ enum UITestReset {
             try? FileManager.default.removeItem(at: docs.appendingPathComponent(name, isDirectory: true))
         }
         seedHostedShelf(docs: docs)
+        seedHostedFeed(docs: docs)
     }
 
     /// Screenshot and UI-test launches pass `--hosted-url=` after `--uitesting`.
@@ -58,6 +59,41 @@ enum UITestReset {
         )
         let cache = ShelfCache(directory: docs.appendingPathComponent("hosted-shelves", isDirectory: true))
         try? cache.write(serverUrl: url, username: user, books: [book])
+    }
+
+    /// Cached feed page for screenshot launches. The file matches HomeFeedStore.
+    private static func seedHostedFeed(docs: URL) {
+        guard ProcessInfo.processInfo.arguments.contains("--seed-feed") else { return }
+        guard let url = argument("hosted-url"), !url.isEmpty else { return }
+        let user = argument("hosted-user") ?? "ada"
+        let book = BookRecord(
+            id: "44444444-4444-4444-4444-444444444444",
+            title: "A Timeline of My Own",
+            author: "Mewo",
+            handle: "mewo",
+            importedAt: 1,
+            postCount: 2,
+            mine: true,
+            shared: false,
+            ownerUsername: user
+        )
+        let passage = FeedPost(id: "1", kind: .body, text: "The first sentence is the one you remember.", chapter: "One")
+        let heading = FeedPost(id: "0", kind: .heading, text: "Chapter One", chapter: "One")
+        let page = HomeFeedPage(items: [
+            HomeFeedItem(type: "repost", actor: "bea", book: book, post: passage, comment: nil, at: 2),
+            HomeFeedItem(
+                type: "comment",
+                actor: "ada",
+                book: book,
+                post: heading,
+                comment: PostComment(id: "k", username: "ada", text: "Still true.", createdAt: 1_710_000_000_000),
+                at: 1
+            ),
+        ])
+        let dir = docs.appendingPathComponent("hosted-feeds", isDirectory: true)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let file = dir.appendingPathComponent(shelfCacheKey(serverUrl: url, username: user) + ".json")
+        try? JSONFiles.write(page, to: file)
     }
 
     private static func argument(_ name: String) -> String? {
