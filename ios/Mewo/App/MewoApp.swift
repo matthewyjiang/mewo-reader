@@ -37,9 +37,5 @@ struct RootView: View {
         .onChange(of: app.backend.kind) { _, _ in
             Task { try? await app.library.load() }
         }
-        .onChange(of: app.hostedSession.session.signedIn) { old, now in
-            app.hostedLibrary.wipeIfSignedOut(wasSignedIn: old, nowSignedIn: now)
-            Task { try? await app.library.load() }
-        }
     }
 }

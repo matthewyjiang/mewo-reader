@@ -28,33 +28,57 @@ func normalizeBaseUrl(_ raw: String) -> String {
 
 @Observable
 final class HostedSessionStore {
-    private let defaults = UserDefaults(suiteName: "mewo_hosted") ?? .standard
+    private let defaults: UserDefaults
+    private let persistToken: Bool
     private(set) var session: HostedSession
+    /// Fires after the URL, account, or sign-in changes. The library drops the previous shelf before the next refresh.
+    var onSessionChange: ((HostedSession, HostedSession) -> Void)?
 
-    init() {
+    init(
+        defaults: UserDefaults = UserDefaults(suiteName: "mewo_hosted") ?? .standard,
+        persistToken: Bool = true,
+        uitesting: Bool = ProcessInfo.processInfo.arguments.contains("--uitesting")
+    ) {
+        self.defaults = defaults
+        self.persistToken = persistToken
+        // The keychain is the real token. UI tests also leave a copy in defaults
+        // because a write during app launch does not stick in an unsigned simulator.
+        let seeded = uitesting ? defaults.string(forKey: "token").flatMap { $0.isEmpty ? nil : $0 } : nil
         session = HostedSession(
             baseUrl: defaults.string(forKey: "base_url") ?? "",
             username: defaults.string(forKey: "username"),
-            token: Keychain.readToken()
+            token: (persistToken ? Keychain.readToken() : nil) ?? seeded
         )
     }
 
     func setBaseUrl(_ url: String) {
+        let previous = session
         defaults.set(url, forKey: "base_url")
         session.baseUrl = url
+        notify(previous)
     }
 
     func setSignedIn(username: String, token: String) {
+        let previous = session
         defaults.set(username, forKey: "username")
-        Keychain.saveToken(token)
+        if persistToken { Keychain.saveToken(token) }
         session.username = username
         session.token = token
+        notify(previous)
     }
 
     func signOut() {
+        let previous = session
         defaults.removeObject(forKey: "username")
-        Keychain.deleteToken()
+        defaults.removeObject(forKey: "token")
+        if persistToken { Keychain.deleteToken() }
         session.username = nil
         session.token = nil
+        notify(previous)
+    }
+
+    private func notify(_ previous: HostedSession) {
+        guard previous != session else { return }
+        onSessionChange?(previous, session)
     }
 }

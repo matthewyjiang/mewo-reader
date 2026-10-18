@@ -13,6 +13,7 @@ final class LocalLibraryStore: LibraryStore {
     private let libraryFile: URL
     private let lock = NSLock()
     private(set) var books: [BookRecord] = []
+    private(set) var loadState: LibraryLoad = .loading
 
     init(opener: EpubOpener, profile: LocalProfileStore, files: URL) {
         self.opener = opener
@@ -20,10 +21,20 @@ final class LocalLibraryStore: LibraryStore {
         self.root = files.appendingPathComponent("books", isDirectory: true)
         self.libraryFile = root.appendingPathComponent("library.json")
         try? FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let snapshot = JSONFiles.read(LibrarySnapshot.self, from: libraryFile) ?? LibrarySnapshot()
+        books = snapshot.books
+        loadState = .loaded(books: snapshot.books, refreshing: false)
     }
 
     func load() async throws {
-        books = readLibrary().books
+        loadState = reduceLibraryLoad(loadState, .refreshStarted)
+        let snapshot = readLibrary()
+        books = snapshot.books
+        loadState = reduceLibraryLoad(loadState, .refreshSucceeded(snapshot.books))
+    }
+
+    func dismissLoadError() {
+        loadState = reduceLibraryLoad(loadState, .dismissed)
     }
 
     func importFromFile(_ file: URL) async throws -> BookRecord {
@@ -257,5 +268,6 @@ final class LocalLibraryStore: LibraryStore {
     private func writeLibrary(_ snapshot: LibrarySnapshot) {
         try? JSONFiles.write(snapshot, to: libraryFile)
         books = snapshot.books
+        loadState = reduceLibraryLoad(loadState, .booksReplaced(snapshot.books))
     }
 }

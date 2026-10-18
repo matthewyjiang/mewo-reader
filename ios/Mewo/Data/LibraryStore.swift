@@ -3,8 +3,12 @@ import Foundation
 @MainActor
 protocol LibraryStore: AnyObject {
     var books: [BookRecord] { get }
+    /// Loading, loaded (optionally refreshing), or failed with an optional saved shelf.
+    var loadState: LibraryLoad { get }
 
     func load() async throws
+    /// Drop a failed-with-cache banner once the reader has dismissed it.
+    func dismissLoadError()
     func importFromFile(_ file: URL) async throws -> BookRecord
     func importSample() async throws -> BookRecord
     func delete(id: String) async throws
@@ -40,8 +44,10 @@ final class SwitchingLibraryStore: LibraryStore {
     }
 
     var books: [BookRecord] { active.books }
+    var loadState: LibraryLoad { active.loadState }
 
     func load() async throws { try await active.load() }
+    func dismissLoadError() { active.dismissLoadError() }
     func importFromFile(_ file: URL) async throws -> BookRecord { try await active.importFromFile(file) }
     func importSample() async throws -> BookRecord { try await active.importSample() }
     func delete(id: String) async throws { try await active.delete(id: id) }
