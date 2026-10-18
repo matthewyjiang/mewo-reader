@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <Scheme
-   LastUpgradeVersion = "1600"
+   LastUpgradeVersion = "2600"
    version = "1.7">
    <BuildAction
       parallelizeBuildables = "YES"
@@ -35,6 +35,20 @@
                ReferencedContainer = "container:Mewo.xcodeproj">
             </BuildableReference>
          </BuildActionEntry>
+         <BuildActionEntry
+            buildForTesting = "YES"
+            buildForRunning = "NO"
+            buildForProfiling = "NO"
+            buildForArchiving = "NO"
+            buildForAnalyzing = "NO">
+            <BuildableReference
+               BuildableIdentifier = "primary"
+               BlueprintIdentifier = "ABB46218EFC3C8D25B47156D"
+               BuildableName = "MewoUITests.xctest"
+               BlueprintName = "MewoUITests"
+               ReferencedContainer = "container:Mewo.xcodeproj">
+            </BuildableReference>
+         </BuildActionEntry>
       </BuildActionEntries>
    </BuildAction>
    <TestAction
@@ -61,6 +75,17 @@
                BlueprintIdentifier = "D52436ED1190D06C8BDD0D1D"
                BuildableName = "MewoTests.xctest"
                BlueprintName = "MewoTests"
+               ReferencedContainer = "container:Mewo.xcodeproj">
+            </BuildableReference>
+         </TestableReference>
+         <TestableReference
+            skipped = "NO"
+            parallelizable = "NO">
+            <BuildableReference
+               BuildableIdentifier = "primary"
+               BlueprintIdentifier = "ABB46218EFC3C8D25B47156D"
+               BuildableName = "MewoUITests.xctest"
+               BlueprintName = "MewoUITests"
                ReferencedContainer = "container:Mewo.xcodeproj">
             </BuildableReference>
          </TestableReference>
