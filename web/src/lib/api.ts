@@ -1,5 +1,7 @@
 import type {
-  AuthResponse, BookRecord, CommentIndex, FeedPost, PostComment, ProfileReplies,
+  AuthResponse, BookRecord, CommentIndex, FeedPost, HomeFeedPage, PostComment,
+  ProfileBooks, ProfilePostsPage, ProfileRecord, ProfileRepostsPage, RepostState,
+  SearchKind, SearchPage,
 } from './models';
 
 export class ApiError extends Error {
@@ -36,15 +38,16 @@ export class HostedClient {
     let response: Response;
     try {
       response = await fetch(`/v1${path}`, { ...init, headers });
-    } catch {
+    } catch (error) {
+      if (error instanceof DOMException && error.name === 'AbortError') throw error;
       throw new ApiError(0, 'Could not reach the server. Check your connection and try again.');
     }
     if (!response.ok) this.fail(response.status, await response.text(), token);
     return response;
   }
 
-  private async json<T>(path: string, method = 'GET', body?: unknown): Promise<T> {
-    const init: RequestInit = { method };
+  private async json<T>(path: string, method = 'GET', body?: unknown, signal?: AbortSignal): Promise<T> {
+    const init: RequestInit = { method, signal };
     if (body !== undefined) {
       init.headers = { 'Content-Type': 'application/json' };
       init.body = JSON.stringify(body);
@@ -139,8 +142,49 @@ export class HostedClient {
     return (await this.json<{ comments: PostComment[] }>(path, 'DELETE')).comments;
   }
 
-  profile(username: string): Promise<ProfileReplies> {
-    return this.json(`/profiles/${encodeURIComponent(username)}/replies`);
+  search(q: string, type: SearchKind, cursor?: string | null, signal?: AbortSignal): Promise<SearchPage> {
+    const params = new URLSearchParams({ q, type });
+    if (cursor) params.set('cursor', cursor);
+    return this.json(`/search?${params}`, 'GET', undefined, signal);
+  }
+
+  user(username: string, signal?: AbortSignal): Promise<ProfileRecord> {
+    return this.json(`/users/${encodeURIComponent(username)}`, 'GET', undefined, signal);
+  }
+
+  userPosts(username: string, cursor?: string | null, signal?: AbortSignal): Promise<ProfilePostsPage> {
+    return this.json(this.userPath(username, '/posts', cursor), 'GET', undefined, signal);
+  }
+
+  userReposts(
+    username: string,
+    cursor?: string | null,
+    signal?: AbortSignal,
+  ): Promise<ProfileRepostsPage> {
+    return this.json(this.userPath(username, '/reposts', cursor), 'GET', undefined, signal);
+  }
+
+  userBooks(username: string, signal?: AbortSignal): Promise<ProfileBooks> {
+    return this.json(this.userPath(username, '/books'), 'GET', undefined, signal);
+  }
+
+  homeFeed(cursor?: string | null, signal?: AbortSignal): Promise<HomeFeedPage> {
+    const params = new URLSearchParams();
+    if (cursor) params.set('cursor', cursor);
+    const query = params.toString();
+    return this.json(`/feed${query ? `?${query}` : ''}`, 'GET', undefined, signal);
+  }
+
+  setRepost(id: string, postId: string, reposted: boolean): Promise<RepostState> {
+    const path = this.bookPath(id, `/posts/${encodeURIComponent(postId)}/repost`);
+    return this.json(path, reposted ? 'PUT' : 'DELETE');
+  }
+
+  private userPath(username: string, suffix: string, cursor?: string | null): string {
+    const params = new URLSearchParams();
+    if (cursor) params.set('cursor', cursor);
+    const query = params.toString();
+    return `/users/${encodeURIComponent(username)}${suffix}${query ? `?${query}` : ''}`;
   }
 
   private bookPath(id: string, suffix = ''): string {

@@ -1,11 +1,15 @@
 package com.mewo.reader.ui.reader
 
 import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.IntrinsicSize
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
@@ -15,6 +19,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.ChatBubbleOutline
 import androidx.compose.material.icons.outlined.Favorite
 import androidx.compose.material.icons.outlined.FavoriteBorder
+import androidx.compose.material.icons.outlined.FormatQuote
 import androidx.compose.material.icons.outlined.IosShare
 import androidx.compose.material.icons.outlined.Repeat
 import androidx.compose.material3.HorizontalDivider
@@ -51,9 +56,12 @@ fun TimelinePost(
     liked: Boolean,
     commentCount: Int = 0,
     commented: Boolean = false,
+    reposted: Boolean = false,
+    repostCount: Int = 0,
     onComment: () -> Unit,
     onLike: () -> Unit,
     onRepost: () -> Unit,
+    onQuote: () -> Unit = {},
     onShare: () -> Unit,
     onOpen: (() -> Unit)? = null,
     onChapterClick: (() -> Unit)? = null,
@@ -117,9 +125,12 @@ fun TimelinePost(
                 liked = liked,
                 commentCount = commentCount,
                 commented = commented,
+                reposted = reposted,
+                repostCount = repostCount,
                 onComment = onComment,
                 onLike = onLike,
                 onRepost = onRepost,
+                onQuote = onQuote,
                 onShare = onShare,
             )
             Spacer(Modifier.height(4.dp))
@@ -133,13 +144,17 @@ fun PostActions(
     liked: Boolean,
     commentCount: Int,
     commented: Boolean,
+    reposted: Boolean = false,
+    repostCount: Int = 0,
     onComment: () -> Unit,
     onLike: () -> Unit,
     onRepost: () -> Unit,
+    onQuote: () -> Unit,
     onShare: () -> Unit,
 ) {
     val mute = MaterialTheme.colorScheme.onSurfaceVariant
     val likeColor = LocalMewoColors.current.like
+    val repostColor = LocalMewoColors.current.repost
     val accent = MaterialTheme.colorScheme.primary
     val likeScale by animateFloatAsState(if (liked) 1.18f else 1f, label = "like")
     Row(
@@ -160,9 +175,20 @@ fun PostActions(
         )
         ActionIcon(
             icon = Icons.Outlined.Repeat,
+            tint = if (reposted) repostColor else mute,
+            label = when {
+                repostCount > 0 -> "Reposts, $repostCount"
+                reposted -> "Undo repost"
+                else -> "Repost"
+            },
+            count = repostCount,
+            onClick = onRepost,
+        )
+        ActionIcon(
+            icon = Icons.Outlined.FormatQuote,
             tint = mute,
             label = "Quote this line",
-            onClick = onRepost,
+            onClick = onQuote,
         )
         ActionIcon(
             icon = if (liked) Icons.Outlined.Favorite else Icons.Outlined.FavoriteBorder,
@@ -209,5 +235,127 @@ private fun ActionIcon(
                 )
             }
         }
+    }
+}
+
+/**
+ * A comment on Home and Profile: the passage keeps its actions and an
+ * "Open line in book" link, and the thread line runs down to the reply.
+ */
+@Composable
+fun CommentItem(
+    author: String,
+    handle: String,
+    post: FeedPost,
+    cover: File?,
+    replyName: String,
+    replyHandle: String,
+    replyMeta: String,
+    replyText: String,
+    liked: Boolean,
+    commentCount: Int,
+    commented: Boolean,
+    reposted: Boolean,
+    repostCount: Int,
+    onOpen: () -> Unit,
+    onOpenReply: () -> Unit,
+    onOpenReplyProfile: (handle: String, name: String) -> Unit,
+    onComment: () -> Unit,
+    onLike: () -> Unit,
+    onRepost: () -> Unit,
+    onQuote: () -> Unit,
+    onShare: () -> Unit,
+) {
+    val isHeading = post.kind == PostKind.Heading
+    val readerType = LocalReaderFont.current.scale
+    Column(Modifier.fillMaxWidth()) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(IntrinsicSize.Min)
+                .padding(start = 16.dp, end = 12.dp, top = 12.dp),
+        ) {
+            Column(
+                modifier = Modifier
+                    .width(40.dp)
+                    .fillMaxHeight(),
+                horizontalAlignment = Alignment.CenterHorizontally,
+            ) {
+                Avatar(name = author, coverFile = cover, size = 40.dp)
+                Box(
+                    modifier = Modifier
+                        .padding(top = 4.dp)
+                        .width(2.dp)
+                        .weight(1f)
+                        .background(MaterialTheme.colorScheme.outline),
+                )
+            }
+            Spacer(Modifier.width(12.dp))
+            Column(Modifier.weight(1f)) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        text = author,
+                        style = MaterialTheme.typography.titleSmall,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f, fill = false),
+                    )
+                    Spacer(Modifier.width(6.dp))
+                    Text(
+                        text = "@$handle · ${post.chapter}",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f),
+                    )
+                }
+                Spacer(Modifier.height(4.dp))
+                Text(
+                    text = post.text,
+                    style = if (isHeading) {
+                        readerType.headingStyle(MaterialTheme.typography.titleMedium)
+                    } else {
+                        readerType.bodyStyle(MaterialTheme.typography.bodyLarge)
+                    },
+                    modifier = Modifier.clickable(role = Role.Button, onClick = onOpen),
+                )
+                Spacer(Modifier.height(4.dp))
+                PostActions(
+                    liked = liked,
+                    commentCount = commentCount,
+                    commented = commented,
+                    reposted = reposted,
+                    repostCount = repostCount,
+                    onComment = onComment,
+                    onLike = onLike,
+                    onRepost = onRepost,
+                    onQuote = onQuote,
+                    onShare = onShare,
+                )
+                Text(
+                    text = "Open line in book",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier
+                        .clickable(role = Role.Button, onClick = onOpen)
+                        .padding(vertical = 10.dp)
+                        .semantics { contentDescription = "Open line in book" },
+                )
+            }
+        }
+        ThreadPost(
+            name = replyName,
+            handle = replyHandle,
+            meta = replyMeta,
+            text = replyText,
+            heading = false,
+            cover = null,
+            connectDown = false,
+            onOpenProfile = onOpenReplyProfile,
+            onOpen = onOpenReply,
+            endPadding = 12.dp,
+        )
+        HorizontalDivider(color = MaterialTheme.colorScheme.outline, thickness = 0.6.dp)
     }
 }

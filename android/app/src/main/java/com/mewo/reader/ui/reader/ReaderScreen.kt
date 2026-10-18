@@ -43,6 +43,8 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.mewo.reader.data.BackendKind
 import com.mewo.reader.data.FeedPost
+import com.mewo.reader.data.hasReposted
+import com.mewo.reader.data.repostCount
 import com.mewo.reader.ui.LocalBackend
 import com.mewo.reader.ui.LocalLibraryStore
 import com.mewo.reader.data.currentHeadingIndex
@@ -137,11 +139,14 @@ fun ReaderScreen(
                             liked = post.id in state.likes,
                             commentCount = state.comments.count(post.id),
                             commented = state.comments.commented(post.id),
+                            reposted = state.comments.hasReposted(post.id),
+                            repostCount = state.comments.repostCount(post.id),
                             onComment = {
                                 book?.let { commentTarget = CommentTarget(it, post) }
                             },
                             onLike = { viewModel.toggleLike(post.id) },
-                            onRepost = {
+                            onRepost = { viewModel.toggleRepost(post.id) },
+                            onQuote = {
                                 shareText(context, quote(book?.author, book?.title, post))
                             },
                             onShare = {

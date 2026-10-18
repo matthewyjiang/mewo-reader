@@ -34,6 +34,7 @@ class HostedLibraryStore(
     private val client: HostedClient,
     scope: CoroutineScope,
 ) : LibraryStore {
+    override val hostedSocial: Boolean = true
     private val json = Json {
         ignoreUnknownKeys = true
         prettyPrint = true
@@ -198,6 +199,7 @@ class HostedLibraryStore(
         val url = session.normalizedUrl() ?: return
         val user = session.username ?: return
         shelfCache.clear(url, user)
+        FileHomeFeedCache(File(context.filesDir, "home-feeds")).clear("$url\n$user")
     }
 
     override suspend fun importFromUri(uri: Uri): BookRecord = withContext(Dispatchers.IO) {
@@ -331,6 +333,46 @@ class HostedLibraryStore(
         val safe = requireBookId(id)
         expireOn401(session) { client.deleteComment(session, safe, postId, commentId) }
     }
+
+    override suspend fun searchPage(query: String, kind: SearchKind, cursor: String?): SearchPage =
+        withContext(Dispatchers.IO) {
+            val session = requireSession()
+            expireOn401(session) { client.search(session, query, kind, cursor) }
+        }
+
+    override suspend fun homeFeed(cursor: String?): HomeFeedPage = withContext(Dispatchers.IO) {
+        val session = requireSession()
+        expireOn401(session) { client.homeFeed(session, cursor) }
+    }
+
+    override suspend fun profile(username: String): ProfileRecord = withContext(Dispatchers.IO) {
+        val session = requireSession()
+        expireOn401(session) { client.user(session, username) }
+    }
+
+    override suspend fun profilePosts(username: String, cursor: String?): ProfilePostsPage =
+        withContext(Dispatchers.IO) {
+            val session = requireSession()
+            expireOn401(session) { client.userPosts(session, username, cursor) }
+        }
+
+    override suspend fun profileReposts(username: String, cursor: String?): ProfileRepostsPage =
+        withContext(Dispatchers.IO) {
+            val session = requireSession()
+            expireOn401(session) { client.userReposts(session, username, cursor) }
+        }
+
+    override suspend fun profileBooks(username: String): ProfileBooks = withContext(Dispatchers.IO) {
+        val session = requireSession()
+        expireOn401(session) { client.userBooks(session, username) }
+    }
+
+    override suspend fun setRepost(id: String, postId: String, reposted: Boolean): RepostState =
+        withContext(Dispatchers.IO) {
+            val session = requireSession()
+            val safe = requireBookId(id)
+            expireOn401(session) { client.setRepost(session, safe, postId, reposted) }
+        }
 
     override suspend fun search(query: String): SearchResult = withContext(Dispatchers.IO) {
         val q = query.trim()

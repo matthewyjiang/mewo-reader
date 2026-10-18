@@ -8,25 +8,47 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.DrawerValue
+import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.rememberDrawerState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.SideEffect
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.unit.dp
 import app.cash.paparazzi.DeviceConfig
 import app.cash.paparazzi.Paparazzi
+import com.mewo.reader.data.AccountHit
 import com.mewo.reader.data.BackendKind
 import com.mewo.reader.data.BookRecord
+import com.mewo.reader.data.CommentIndex
+import com.mewo.reader.data.FeedPost
+import com.mewo.reader.data.hasReposted
+import com.mewo.reader.data.repostCount
 import com.mewo.reader.data.HostedSession
 import com.mewo.reader.data.LocalProfile
-import com.mewo.reader.ui.components.AccountDrawerContent
+import com.mewo.reader.data.PostKind
+import com.mewo.reader.data.ProfileRecord
+import com.mewo.reader.ui.components.AccountDrawer
 import com.mewo.reader.ui.components.AppTab
 import com.mewo.reader.ui.components.BrandMark
 import com.mewo.reader.ui.components.HomeTabBar
 import com.mewo.reader.ui.components.MewoAppBar
 import com.mewo.reader.ui.components.ProfileButton
+import com.mewo.reader.ui.components.UnderlineTabs
+import com.mewo.reader.ui.feed.ActivityLine
+import com.mewo.reader.ui.profile.ProfileBar
+import com.mewo.reader.ui.profile.ProfileHeader
+import com.mewo.reader.ui.reader.CommentItem
+import com.mewo.reader.ui.reader.TimelinePost
+import com.mewo.reader.ui.reader.relativeTime
+import com.mewo.reader.ui.search.AccountHitRow
+import com.mewo.reader.ui.search.SearchField
 import com.mewo.reader.ui.library.BookPost
 import com.mewo.reader.ui.library.EmptyTimeline
 import com.mewo.reader.ui.library.LibraryLoading
@@ -55,6 +77,7 @@ import com.mewo.reader.ui.theme.ReaderTypeScale
 import com.mewo.reader.ui.theme.ThemeController
 import com.mewo.reader.ui.theme.mewoTypography
 import com.mewo.reader.ui.theme.toColorScheme
+import org.junit.Assert.assertEquals
 import org.junit.Rule
 import org.junit.Test
 
@@ -62,6 +85,7 @@ import org.junit.Test
  * Layout goldens for the surfaces an agent can check without an emulator.
  * Phone is a Pixel 5. Narrow is the same height at 320dp wide.
  */
+@OptIn(ExperimentalMaterial3Api::class)
 class SurfaceScreenshots {
     @get:Rule
     val paparazzi = Paparazzi(
@@ -137,8 +161,13 @@ class SurfaceScreenshots {
 
     @Test
     fun drawer() = shoot("drawer") {
-        Surface {
-            AccountDrawerContent(onOpenSettings = {}, onOpenProfile = { _, _ -> })
+        AccountDrawer(
+            drawerState = rememberDrawerState(DrawerValue.Open),
+            gesturesEnabled = false,
+            onOpenSettings = {},
+            onOpenProfile = { _, _ -> },
+        ) {
+            HomeBooks()
         }
     }
 
@@ -172,6 +201,77 @@ class SurfaceScreenshots {
 
     @Test
     fun postsEmpty() = shoot("posts-empty") { Surface { EmptyPosts() } }
+
+    @Test
+    fun searchAccounts() = shoot("search-accounts") {
+        SearchChrome("accounts") {
+            accountsMatching(SearchQuery, accountDirectory).forEach { account ->
+                AccountHitRow(account) {}
+            }
+        }
+    }
+
+    @Test
+    fun searchBooks() = shoot("search-books") {
+        SearchChrome("books") {
+            shelfBook(sharedBook)
+        }
+    }
+
+    @Test
+    fun searchPosts() = shoot("search-posts") {
+        SearchChrome("posts") {
+            passage(reposted = false, count = 0)
+        }
+    }
+
+    @Test
+    fun profilePosts() = shoot("profile-posts") {
+        ProfileChrome("posts") {
+            commentItem(reposted = true, repostCount = 2)
+        }
+    }
+
+    @Test
+    fun profileReposts() = shoot("profile-reposts") {
+        ProfileChrome("reposts") {
+            passage(reposted = true, count = 1)
+        }
+    }
+
+    @Test
+    fun profileBooks() = shoot("profile-books") {
+        ProfileChrome("books") {
+            shelfBook(sharedBook)
+        }
+    }
+
+    @Test
+    fun homeFeed() = shoot("home-feed") {
+        val line = FeedPost("0", PostKind.Body, "Emma Woodhouse, handsome, clever, and rich.", "One")
+        // One index for the book, the same object both rows read.
+        val index = CommentIndex(
+            counts = mapOf(line.id to 1),
+            mine = setOf(line.id),
+            reposts = mapOf(line.id to 1),
+            reposted = emptySet(),
+        )
+        HomeChrome("feed") {
+            ActivityLine(username = "byron") {}
+            passage(line, index)
+            commentItem(line, index)
+        }
+    }
+
+    @Test
+    fun homeBooks() = shoot("home-books") { HomeBooks() }
+
+    @Test
+    fun repostActive() = shoot("repost-active") {
+        SearchChrome("posts") {
+            passage(reposted = true, count = 2)
+        }
+    }
 
     private fun shoot(
         name: String,
@@ -295,6 +395,188 @@ private fun HostedLibrary() {
 }
 
 @Composable
+private fun SearchChrome(tab: String, content: @Composable () -> Unit) {
+    val focus = remember { FocusRequester() }
+    // The shot is a typed query, so the field is focused the way the web shot is.
+    SideEffect { focus.requestFocus() }
+    Column(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)) {
+        MewoAppBar(
+            leading = { ProfileButton(onClick = {}) },
+            content = {
+                SearchField(
+                    query = SearchQuery,
+                    onQueryChange = {},
+                    hosted = true,
+                    focusRequester = focus,
+                    modifier = Modifier
+                        .weight(1f)
+                        .padding(end = 8.dp),
+                )
+            },
+        )
+        UnderlineTabs(
+            tabs = listOf("accounts" to "Accounts", "books" to "Books", "posts" to "Posts"),
+            selected = tab,
+            onSelect = {},
+        )
+        Column(Modifier.weight(1f).verticalScroll(rememberScrollState())) {
+            content()
+        }
+        HomeTabBar(selected = AppTab.Search, onSelect = {})
+    }
+}
+
+@Composable
+private fun ProfileChrome(tab: String, content: @Composable () -> Unit) {
+    Column(
+        Modifier
+            .fillMaxSize()
+            .background(MaterialTheme.colorScheme.background),
+    ) {
+        ProfileBar(name = "ada", posts = 2, visible = true, onBack = {})
+        Column(Modifier.weight(1f).verticalScroll(rememberScrollState())) {
+            ProfileHeader(
+                name = "ada",
+                handle = "ada",
+                record = ProfileRecord(
+                    username = "ada",
+                    joinedAt = 1609459200000,
+                    postCount = 2,
+                    repostCount = 1,
+                    mine = true,
+                ),
+            )
+            UnderlineTabs(
+                tabs = listOf("posts" to "Posts", "reposts" to "Reposts", "books" to "Books"),
+                selected = tab,
+                onSelect = {},
+            )
+            content()
+        }
+        HomeTabBar(selected = AppTab.Home, onSelect = {})
+    }
+}
+
+@Composable
+private fun HomeChrome(tab: String, content: @Composable () -> Unit) {
+    Column(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)) {
+        MewoAppBar(leading = { ProfileButton(onClick = {}) }, center = { BrandMark() })
+        UnderlineTabs(
+            tabs = listOf("feed" to "Feed", "books" to "Books"),
+            selected = tab,
+            onSelect = {},
+        )
+        Column(Modifier.weight(1f).verticalScroll(rememberScrollState())) {
+            content()
+        }
+        HomeTabBar(selected = AppTab.Home, onSelect = {})
+    }
+}
+
+@Composable
+private fun HomeBooks() {
+    HomeChrome("books") {
+        SectionLabel("My books")
+        shelfBook(privateBook)
+        shelfBook(sharedBook)
+    }
+}
+
+@Composable
+private fun commentItem(post: FeedPost, index: CommentIndex) {
+    CommentItem(
+        author = "Austen",
+        handle = "austen",
+        post = post,
+        cover = null,
+        replyName = "ada",
+        replyHandle = "ada",
+        replyMeta = relativeTime(COMMENT_AT, SHOT_NOW),
+        replyText = "This opening still lands.",
+        liked = false,
+        commentCount = index.count(post.id),
+        commented = index.commented(post.id),
+        reposted = index.hasReposted(post.id),
+        repostCount = index.repostCount(post.id),
+        onOpen = {},
+        onOpenReply = {},
+        onOpenReplyProfile = { _, _ -> },
+        onComment = {},
+        onLike = {},
+        onRepost = {},
+        onQuote = {},
+        onShare = {},
+    )
+}
+
+@Composable
+private fun commentItem(reposted: Boolean, repostCount: Int) {
+    CommentItem(
+        author = "Austen",
+        handle = "austen",
+        post = FeedPost("0", PostKind.Body, "Emma Woodhouse, handsome, clever, and rich.", "One"),
+        cover = null,
+        replyName = "ada",
+        replyHandle = "ada",
+        replyMeta = relativeTime(COMMENT_AT, SHOT_NOW),
+        replyText = "This opening still lands.",
+        liked = false,
+        commentCount = 1,
+        commented = true,
+        reposted = reposted,
+        repostCount = repostCount,
+        onOpen = {},
+        onOpenReply = {},
+        onOpenReplyProfile = { _, _ -> },
+        onComment = {},
+        onLike = {},
+        onRepost = {},
+        onQuote = {},
+        onShare = {},
+    )
+}
+
+@Composable
+private fun passage(post: FeedPost, index: CommentIndex) {
+    TimelinePost(
+        post = post,
+        author = "Austen",
+        handle = "austen",
+        cover = null,
+        liked = false,
+        commentCount = index.count(post.id),
+        commented = index.commented(post.id),
+        reposted = index.hasReposted(post.id),
+        repostCount = index.repostCount(post.id),
+        onComment = {},
+        onLike = {},
+        onRepost = {},
+        onQuote = {},
+        onShare = {},
+    )
+}
+
+@Composable
+private fun passage(reposted: Boolean, count: Int) {
+    TimelinePost(
+        post = FeedPost("0", PostKind.Body, "Emma Woodhouse, handsome, clever, and rich.", "One"),
+        author = "Austen",
+        handle = "austen",
+        cover = null,
+        liked = false,
+        commentCount = 1,
+        commented = true,
+        reposted = reposted,
+        repostCount = count,
+        onComment = {},
+        onLike = {},
+        onRepost = {},
+        onQuote = {},
+        onShare = {},
+    )
+}
+
+@Composable
 private fun shelfBook(book: BookRecord) {
     val mine = book.mine
     BookPost(
@@ -317,6 +599,10 @@ private val privateBook = book(
     shared = false,
 )
 
+/** 2024-10-03T15:00:00Z, read at 2026-10-18T00:00:00Z → "Oct 3, 2024". */
+private const val COMMENT_AT = 1_727_967_600_000L
+private const val SHOT_NOW = 1_792_281_600_000L
+
 private val sharedBook = book(
     id = "shared",
     title = "Emma",
@@ -338,6 +624,31 @@ private val sharedWithMe = book(
     shared = true,
     ownerUsername = "ada",
 )
+
+/** The query typed in the search goldens. Account rows are whatever this would return. */
+private const val SearchQuery = "ada"
+
+private val accountDirectory = listOf(
+    AccountHit("ada", mine = true),
+    AccountHit("byron"),
+)
+
+/** Username contains [query], folded the way the server folds `q`. */
+private fun accountsMatching(query: String, accounts: List<AccountHit>): List<AccountHit> {
+    val q = query.trim().lowercase()
+    if (q.isEmpty()) return emptyList()
+    return accounts.filter { it.username.lowercase().contains(q) }
+}
+
+class SearchAccountFixtureTest {
+    @Test
+    fun aQueryKeepsOnlyUsernamesThatContainIt() {
+        assertEquals(listOf("ada"), accountsMatching("ada", accountDirectory).map { it.username })
+        assertEquals(listOf("byron"), accountsMatching("BYR", accountDirectory).map { it.username })
+        assertEquals(emptyList<String>(), accountsMatching("zzz", accountDirectory).map { it.username })
+        assertEquals(emptyList<String>(), accountsMatching("  ", accountDirectory).map { it.username })
+    }
+}
 
 private fun book(
     id: String,

@@ -25,6 +25,8 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.mewo.reader.data.BackendKind
 import com.mewo.reader.data.FeedPost
+import com.mewo.reader.data.hasReposted
+import com.mewo.reader.data.repostCount
 import com.mewo.reader.ui.LocalBackend
 import com.mewo.reader.ui.LocalLibraryStore
 import com.mewo.reader.ui.components.BindListTop
@@ -96,9 +98,12 @@ fun LikesScreen(
                             liked = true,
                             commentCount = state.comments[hit.book.id]?.count(hit.post.id) ?: 0,
                             commented = state.comments[hit.book.id]?.commented(hit.post.id) == true,
+                            reposted = state.comments[hit.book.id]?.hasReposted(hit.post.id) == true,
+                            repostCount = state.comments[hit.book.id]?.repostCount(hit.post.id) ?: 0,
                             onComment = { commentTarget = CommentTarget(hit.book, hit.post) },
                             onLike = { viewModel.unlike(hit.book.id, hit.post.id) },
-                            onRepost = {
+                            onRepost = { viewModel.toggleRepost(hit.book.id, hit.post.id) },
+                            onQuote = {
                                 shareText(context, quote(hit.book.author, hit.book.title, hit.post))
                             },
                             onShare = { shareText(context, hit.post.text) },
