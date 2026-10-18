@@ -590,6 +590,21 @@ final class HomeFeedStoreTests: XCTestCase {
         try await waitUntil { store.loadState.items.map(\.post.text) == ["fresh"] && !store.loadState.isRefreshing }
     }
 
+    func testASecondLoadMoreDoesNotFetchWhileTheFirstIsInFlight() async throws {
+        sessions.setSignedIn(username: "ada", token: "token-a")
+        try await gate.waitForCalls(1)
+        gate.respond("token-a", page: HomeFeedPage(items: [feedItem("a", at: 1)], nextCursor: "next"))
+        try await waitUntil { store.loadState.nextCursor == "next" && !store.loadState.isRefreshing }
+
+        Task { await store.loadMore() }
+        try await gate.waitForCalls(2)
+        await store.loadMore()
+        XCTAssertEqual(gate.callCount, 2)
+
+        gate.respond("token-a", page: HomeFeedPage(items: [feedItem("b", at: 2)], nextCursor: nil))
+        try await waitUntil { store.loadState.items.map(\.post.text) == ["a", "b"] }
+    }
+
     private func feedFile(user: String) -> URL {
         let key = shelfCacheKey(serverUrl: "https://mewo.example", username: user)
         return root.appendingPathComponent("hosted-feeds").appendingPathComponent(key + ".json")
@@ -754,6 +769,12 @@ private final class FeedGate: @unchecked Sendable {
             guard let self else { throw CancellationError() }
             return try await self.hold(session.token ?? "")
         }
+    }
+
+    var callCount: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return calls
     }
 
     func waitForCalls(_ count: Int) async throws {

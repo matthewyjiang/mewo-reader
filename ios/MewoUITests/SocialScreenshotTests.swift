@@ -52,6 +52,8 @@ final class SocialScreenshotTests: XCTestCase {
         field.tap()
         field.typeText("ada")
         XCTAssertTrue(app.buttons["account-ada"].waitForExistence(timeout: 8))
+        XCTAssertTrue(app.buttons["search-clear"].exists)
+        XCTAssertFalse(app.buttons["account-bea"].exists)
         dismissKeyboard(app)
         shot(app, theme, "search-accounts")
 
