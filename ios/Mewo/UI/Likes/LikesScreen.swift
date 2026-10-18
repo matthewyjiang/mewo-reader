@@ -29,6 +29,16 @@ final class LikesViewModel {
         }
     }
 
+    func toggleRepost(bookId: String, postId: String) {
+        commitRepostToggle(
+            bookId: bookId,
+            postId: postId,
+            read: { self.comments[bookId] ?? CommentIndex() },
+            library: env.library,
+            publish: { self.comments[bookId] = $0 }
+        )
+    }
+
     func unlike(bookId: String, postId: String) {
         Task {
             _ = try? await env.library.toggleLike(id: bookId, postId: postId)
@@ -92,9 +102,11 @@ struct LikesScreen: View {
                                 liked: true,
                                 commentCount: model.comments[hit.book.id]?.count(hit.post.id) ?? 0,
                                 commented: model.comments[hit.book.id]?.commented(hit.post.id) == true,
+                                reposted: model.comments[hit.book.id]?.didRepost(hit.post.id) == true,
+                                repostCount: model.comments[hit.book.id]?.repostCount(hit.post.id) ?? 0,
                                 onComment: { commentTarget = CommentTarget(book: hit.book, post: hit.post) },
                                 onLike: { model.unlike(bookId: hit.book.id, postId: hit.post.id) },
-                                onRepost: { shareText = quoteLine(author: hit.book.author, title: hit.book.title, text: hit.post.text) },
+                                onRepost: { model.toggleRepost(bookId: hit.book.id, postId: hit.post.id) },
                                 onShare: { shareText = hit.post.text },
                                 onOpen: { onOpenPost(hit.book.id, hit.post.id) }
                             )

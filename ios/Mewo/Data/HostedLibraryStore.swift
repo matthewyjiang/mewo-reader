@@ -360,6 +360,14 @@ final class HostedLibraryStore: LibraryStore {
         return try await expireOn401(session) { try await client.toggleLike(session, id: safe, postId: postId) }
     }
 
+    func setRepost(id: String, postId: String, on: Bool) async throws -> RepostState {
+        let session = try requireSession()
+        let safe = try requireBookId(id)
+        return try await expireOn401(session) {
+            try await client.setRepost(session, id: safe, postId: postId, on: on)
+        }
+    }
+
     func commentIndex(id: String) async throws -> CommentIndex {
         let session = try requireSession()
         let safe = try requireBookId(id)

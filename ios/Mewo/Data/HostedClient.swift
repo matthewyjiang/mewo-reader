@@ -12,6 +12,7 @@ final class HostedClientHooks: @unchecked Sendable {
     var posts: (@Sendable (HostedSession, String) async throws -> [FeedPost])?
     var downloadCover: (@Sendable (HostedSession, String, URL) async throws -> Bool)?
     var delete: (@Sendable (HostedSession, String) async throws -> Void)?
+    var feed: (@Sendable (HostedSession, String?) async throws -> HomeFeedPage)?
 }
 
 final class HostedClient: Sendable {
@@ -171,6 +172,44 @@ final class HostedClient: Sendable {
         return try await get(hosted, path: "/v1/profiles/\(encoded)/replies")
     }
 
+    func search(_ hosted: HostedSession, query: String, type: String, cursor: String?) async throws -> SearchPage {
+        var items = [
+            URLQueryItem(name: "q", value: query),
+            URLQueryItem(name: "type", value: type),
+        ]
+        if let cursor, !cursor.isEmpty {
+            items.append(URLQueryItem(name: "cursor", value: cursor))
+        }
+        return try await get(hosted, path: pathWithQuery("/v1/search", items))
+    }
+
+    func profile(_ hosted: HostedSession, username: String) async throws -> ProfileRecord {
+        try await get(hosted, path: "/v1/users/\(pathUser(username))")
+    }
+
+    func profilePosts(_ hosted: HostedSession, username: String, cursor: String?) async throws -> ProfilePostsPage {
+        try await get(hosted, path: paged("/v1/users/\(pathUser(username))/posts", cursor: cursor))
+    }
+
+    func profileReposts(_ hosted: HostedSession, username: String, cursor: String?) async throws -> ProfileRepostsPage {
+        try await get(hosted, path: paged("/v1/users/\(pathUser(username))/reposts", cursor: cursor))
+    }
+
+    func profileBooks(_ hosted: HostedSession, username: String) async throws -> ProfileBooksPage {
+        try await get(hosted, path: "/v1/users/\(pathUser(username))/books")
+    }
+
+    func feed(_ hosted: HostedSession, cursor: String?) async throws -> HomeFeedPage {
+        if let feed = hooks.feed { return try await feed(hosted, cursor) }
+        return try await get(hosted, path: paged("/v1/feed", cursor: cursor))
+    }
+
+    func setRepost(_ hosted: HostedSession, id: String, postId: String, on: Bool) async throws -> RepostState {
+        var request = try authorized(hosted, path: "/v1/books/\(id)/posts/\(postId)/repost")
+        request.httpMethod = on ? "PUT" : "DELETE"
+        return try await decode(request)
+    }
+
     private func postAuth(_ url: String, username: String, password: String) async throws -> AuthResponse {
         guard let target = URL(string: url) else {
             throw HostedException(message: "Set a server URL first.")
@@ -180,6 +219,22 @@ final class HostedClient: Sendable {
         request.setValue("application/json; charset=utf-8", forHTTPHeaderField: "Content-Type")
         request.httpBody = try JSONFiles.encoder.encode(AuthRequest(username: username, password: password))
         return try await decode(request)
+    }
+
+    private func pathUser(_ username: String) -> String {
+        username.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? username
+    }
+
+    private func paged(_ path: String, cursor: String?) -> String {
+        guard let cursor, !cursor.isEmpty else { return path }
+        return pathWithQuery(path, [URLQueryItem(name: "cursor", value: cursor)])
+    }
+
+    private func pathWithQuery(_ path: String, _ items: [URLQueryItem]) -> String {
+        var components = URLComponents()
+        components.path = path
+        components.queryItems = items
+        return components.string ?? path
     }
 
     private func get<T: Decodable>(_ hosted: HostedSession, path: String) async throws -> T {

@@ -50,47 +50,36 @@ struct AccountDrawer<Content: View>: View {
     }
 
     private var panel: some View {
-        VStack(alignment: .leading, spacing: 0) {
+        let me = app.readerIdentity
+        return VStack(alignment: .leading, spacing: 0) {
             Button {
-                let me = app.readerIdentity
                 onOpenProfile(me.handle, me.name)
             } label: {
-                VStack(alignment: .leading, spacing: 12) {
-                    Avatar(name: app.readerIdentity.name, size: 56)
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text(app.readerIdentity.name).font(MewoFont.bold(17)).foregroundStyle(mewo.ink)
-                        if LocalIdentity.showsHandle(name: app.readerIdentity.name, handle: app.readerIdentity.handle) {
-                            Text("@\(app.readerIdentity.handle)")
-                                .font(MewoFont.regular(13))
-                                .foregroundStyle(mewo.mute)
-                        }
-                    }
+                VStack(alignment: .leading, spacing: 4) {
+                    Avatar(name: me.name, size: 64)
+                    Text(me.name)
+                        .font(MewoFont.bold(20))
+                        .foregroundStyle(mewo.ink)
+                        .padding(.top, 8)
+                    Text("@\(me.handle)")
+                        .font(MewoFont.regular(15))
+                        .foregroundStyle(mewo.mute)
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(.horizontal, 16)
                 .padding(.top, 8)
-                .padding(.bottom, 16)
+                .padding(.bottom, 20)
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
             .accessibilityLabel("Profile")
-            .accessibilityIdentifier("drawer-profile")
-            Hairline()
-            Button {
-                onOpenSettings()
-            } label: {
-                HStack {
-                    Text("Settings").font(MewoFont.bold(17)).foregroundStyle(mewo.ink)
-                    Spacer()
-                    Image(systemName: "chevron.right").foregroundStyle(mewo.mute)
-                }
-                .padding(.horizontal, 16)
-                .frame(height: 52)
-                .contentShape(Rectangle())
+            .accessibilityIdentifier("drawer-header")
+            drawerRow(symbol: "person", title: "Profile", identifier: "drawer-profile") {
+                onOpenProfile(me.handle, me.name)
             }
-            .buttonStyle(.plain)
-            .accessibilityLabel("Settings")
-            .accessibilityIdentifier("drawer-settings")
+            drawerRow(symbol: "gearshape", title: "Settings", identifier: "drawer-settings") {
+                onOpenSettings()
+            }
             Spacer(minLength: 0)
         }
         .frame(width: 300)
@@ -99,6 +88,26 @@ struct AccountDrawer<Content: View>: View {
         // in the safe area; ignoring safe area on the whole panel pulled it
         // up over the status bar.
         .background(mewo.ground, ignoresSafeAreaEdges: .vertical)
+    }
+
+    private func drawerRow(symbol: String, title: String, identifier: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            HStack(alignment: .center, spacing: 16) {
+                Image(systemName: symbol)
+                    .font(.system(size: 27))
+                    .frame(width: 32, height: 32, alignment: .center)
+                Text(title)
+                    .font(MewoFont.bold(21))
+            }
+            .foregroundStyle(mewo.ink)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, 16)
+            .frame(height: 68)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(title)
+        .accessibilityIdentifier(identifier)
     }
 
     private var openGesture: some Gesture {

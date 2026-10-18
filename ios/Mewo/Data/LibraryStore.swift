@@ -17,6 +17,7 @@ protocol LibraryStore: AnyObject {
     func saveProgress(id: String, index: Int) async throws
     func likes(id: String) async throws -> Set<String>
     func toggleLike(id: String, postId: String) async throws -> Set<String>
+    func setRepost(id: String, postId: String, on: Bool) async throws -> RepostState
     func commentIndex(id: String) async throws -> CommentIndex
     func comments(id: String, postId: String) async throws -> [PostComment]
     func addComment(id: String, postId: String, text: String) async throws -> [PostComment]
@@ -57,6 +58,9 @@ final class SwitchingLibraryStore: LibraryStore {
     func likes(id: String) async throws -> Set<String> { try await active.likes(id: id) }
     func toggleLike(id: String, postId: String) async throws -> Set<String> {
         try await active.toggleLike(id: id, postId: postId)
+    }
+    func setRepost(id: String, postId: String, on: Bool) async throws -> RepostState {
+        try await active.setRepost(id: id, postId: postId, on: on)
     }
     func commentIndex(id: String) async throws -> CommentIndex { try await active.commentIndex(id: id) }
     func comments(id: String, postId: String) async throws -> [PostComment] {

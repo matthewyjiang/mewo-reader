@@ -20,6 +20,7 @@ final class AppEnvironment {
     let localLibrary: LocalLibraryStore
     let hostedLibrary: HostedLibraryStore
     let library: SwitchingLibraryStore
+    let homeFeed: HomeFeedStore
     let client = HostedClient()
 
     init() {
@@ -41,6 +42,12 @@ final class AppEnvironment {
             refreshesOnInit: backend.kind == .hosted
         )
         library = SwitchingLibraryStore(local: localLibrary, hosted: hostedLibrary, backend: backend)
+        homeFeed = HomeFeedStore(
+            sessions: hostedSession,
+            client: client,
+            files: files,
+            refreshesOnInit: backend.kind == .hosted
+        )
     }
 
     var readerIdentity: ReaderIdentity {

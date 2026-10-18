@@ -52,6 +52,16 @@ final class ReaderViewModel {
         Task { likes = (try? await env.library.toggleLike(id: bookId, postId: postId)) ?? likes }
     }
 
+    func toggleRepost(_ postId: String) {
+        commitRepostToggle(
+            bookId: bookId,
+            postId: postId,
+            read: { self.comments },
+            library: env.library,
+            publish: { self.comments = $0 }
+        )
+    }
+
     func onCommentsChanged(postId: String, comments: [PostComment]) {
         self.comments = self.comments.afterThread(postId: postId, comments: comments)
     }
@@ -202,9 +212,11 @@ struct ReaderScreen: View {
                             liked: model.likes.contains(post.id),
                             commentCount: model.comments.count(post.id),
                             commented: model.comments.commented(post.id),
+                            reposted: model.comments.didRepost(post.id),
+                            repostCount: model.comments.repostCount(post.id),
                             onComment: { if let book = model.book { commentTarget = CommentTarget(book: book, post: post) } },
                             onLike: { model.toggleLike(post.id) },
-                            onRepost: { shareText = quoteLine(author: model.book?.author, title: model.book?.title, text: post.text) },
+                            onRepost: { model.toggleRepost(post.id) },
                             onShare: { shareText = post.text },
                             onChapterClick: { showChapters = true }
                         )

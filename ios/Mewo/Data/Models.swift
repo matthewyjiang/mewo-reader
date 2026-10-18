@@ -84,9 +84,13 @@ struct LikeSet: Codable, Equatable, Sendable {
     var ids: Set<String> = []
 }
 
-struct CommentIndex: Codable, Equatable, Sendable {
+struct CommentIndex: Equatable, Sendable {
     var counts: [String: Int] = [:]
     var mine: Set<String> = []
+    /// Posts with at least one repost. Zero counts are omitted, same as `counts`.
+    var reposts: [String: Int] = [:]
+    /// Post ids this viewer has reposted.
+    var reposted: Set<String> = []
 
     func count(_ postId: String) -> Int {
         counts[postId] ?? 0
@@ -94,6 +98,34 @@ struct CommentIndex: Codable, Equatable, Sendable {
 
     func commented(_ postId: String) -> Bool {
         mine.contains(postId)
+    }
+
+    func repostCount(_ postId: String) -> Int {
+        reposts[postId] ?? 0
+    }
+
+    func didRepost(_ postId: String) -> Bool {
+        reposted.contains(postId)
+    }
+
+    func repostMark(_ postId: String) -> RepostMark {
+        RepostMark(count: repostCount(postId), on: didRepost(postId))
+    }
+
+    func applyingRepost(_ postId: String, _ mark: RepostMark) -> CommentIndex {
+        var nextReposts = reposts
+        if mark.count > 0 {
+            nextReposts[postId] = mark.count
+        } else {
+            nextReposts.removeValue(forKey: postId)
+        }
+        var nextIds = reposted
+        if mark.on {
+            nextIds.insert(postId)
+        } else {
+            nextIds.remove(postId)
+        }
+        return CommentIndex(counts: counts, mine: mine, reposts: nextReposts, reposted: nextIds)
     }
 
     func afterThread(postId: String, comments: [PostComment]) -> CommentIndex {
@@ -109,7 +141,29 @@ struct CommentIndex: Codable, Equatable, Sendable {
         } else {
             nextMine.remove(postId)
         }
-        return CommentIndex(counts: nextCounts, mine: nextMine)
+        return CommentIndex(counts: nextCounts, mine: nextMine, reposts: reposts, reposted: reposted)
+    }
+}
+
+extension CommentIndex: Codable {
+    enum CodingKeys: String, CodingKey {
+        case counts, mine, reposts, reposted
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        counts = try container.decodeIfPresent([String: Int].self, forKey: .counts) ?? [:]
+        mine = try container.decodeIfPresent(Set<String>.self, forKey: .mine) ?? []
+        reposts = try container.decodeIfPresent([String: Int].self, forKey: .reposts) ?? [:]
+        reposted = try container.decodeIfPresent(Set<String>.self, forKey: .reposted) ?? []
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(counts, forKey: .counts)
+        try container.encode(mine, forKey: .mine)
+        try container.encode(reposts, forKey: .reposts)
+        try container.encode(reposted, forKey: .reposted)
     }
 }
 
@@ -139,10 +193,12 @@ struct LocalComment: Codable, Equatable, Identifiable, Sendable {
     var createdAt: Int64
 }
 
-struct PostHit: Equatable, Hashable, Identifiable, Sendable {
+struct PostHit: Codable, Equatable, Hashable, Identifiable, Sendable {
     var book: BookRecord
     var post: FeedPost
     var id: String { "\(book.id):\(post.id)" }
+
+    enum CodingKeys: String, CodingKey { case book, post }
 }
 
 struct SearchResult: Equatable, Sendable {

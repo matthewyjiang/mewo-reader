@@ -10,6 +10,8 @@ struct TimelinePost: View {
     var liked: Bool
     var commentCount: Int = 0
     var commented: Bool = false
+    var reposted: Bool = false
+    var repostCount: Int = 0
     var onComment: () -> Void
     var onLike: () -> Void
     var onRepost: () -> Void
@@ -36,6 +38,8 @@ struct TimelinePost: View {
                         liked: liked,
                         commentCount: commentCount,
                         commented: commented,
+                        reposted: reposted,
+                        repostCount: repostCount,
                         onComment: onComment,
                         onLike: onLike,
                         onRepost: onRepost,
@@ -70,6 +74,8 @@ struct PostActions: View {
     var liked: Bool
     var commentCount: Int
     var commented: Bool
+    var reposted: Bool = false
+    var repostCount: Int = 0
     var onComment: () -> Void
     var onLike: () -> Void
     var onRepost: () -> Void
@@ -84,7 +90,13 @@ struct PostActions: View {
                 count: commentCount,
                 action: onComment
             )
-            action(icon: "arrow.2.squarepath", tint: mewo.mute, label: "Quote this line", action: onRepost)
+            action(
+                icon: "arrow.2.squarepath",
+                tint: reposted ? mewo.repost : mewo.mute,
+                label: reposted ? "Undo repost" : "Repost",
+                count: repostCount,
+                action: onRepost
+            )
             action(
                 icon: liked ? "heart.fill" : "heart",
                 tint: liked ? mewo.like : mewo.mute,

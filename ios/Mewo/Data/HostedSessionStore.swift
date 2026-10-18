@@ -33,6 +33,19 @@ final class HostedSessionStore {
     private(set) var session: HostedSession
     /// Fires after the URL, account, or sign-in changes. The library drops the previous shelf before the next refresh.
     var onSessionChange: ((HostedSession, HostedSession) -> Void)?
+    private var listeners: [UUID: (HostedSession, HostedSession) -> Void] = [:]
+
+    /// Extra observers. The library keeps the single `onSessionChange` slot.
+    @discardableResult
+    func addListener(_ body: @escaping (HostedSession, HostedSession) -> Void) -> UUID {
+        let id = UUID()
+        listeners[id] = body
+        return id
+    }
+
+    func removeListener(_ id: UUID) {
+        listeners[id] = nil
+    }
 
     init(
         defaults: UserDefaults = UserDefaults(suiteName: "mewo_hosted") ?? .standard,
@@ -80,5 +93,8 @@ final class HostedSessionStore {
     private func notify(_ previous: HostedSession) {
         guard previous != session else { return }
         onSessionChange?(previous, session)
+        for listener in listeners.values {
+            listener(previous, session)
+        }
     }
 }

@@ -131,11 +131,27 @@ final class LocalLibraryStore: LibraryStore {
         return current
     }
 
+    func setRepost(id: String, postId: String, on: Bool) async throws -> RepostState {
+        var ids = readReposts(id)
+        if on {
+            ids.insert(postId)
+        } else {
+            ids.remove(postId)
+        }
+        try JSONFiles.write(LikeSet(ids: ids), to: repostFile(id))
+        let onNow = ids.contains(postId)
+        return RepostState(reposts: onNow ? 1 : 0, reposted: onNow)
+    }
+
     func commentIndex(id: String) async throws -> CommentIndex {
         let file = readComments(id)
+        let reposted = readReposts(id)
+        let counts = Dictionary(uniqueKeysWithValues: reposted.map { ($0, 1) })
         return CommentIndex(
             counts: file.posts.mapValues(\.count),
-            mine: Set(file.posts.filter { !$0.value.isEmpty }.keys)
+            mine: Set(file.posts.filter { !$0.value.isEmpty }.keys),
+            reposts: counts,
+            reposted: reposted
         )
     }
 
@@ -253,6 +269,14 @@ final class LocalLibraryStore: LibraryStore {
     private func readComments(_ id: String) -> LocalCommentFile {
         let file = root.appendingPathComponent(id).appendingPathComponent("comments.json")
         return JSONFiles.read(LocalCommentFile.self, from: file) ?? LocalCommentFile()
+    }
+
+    private func repostFile(_ id: String) -> URL {
+        root.appendingPathComponent(id).appendingPathComponent("reposts.json")
+    }
+
+    private func readReposts(_ id: String) -> Set<String> {
+        JSONFiles.read(LikeSet.self, from: repostFile(id))?.ids ?? []
     }
 
     private func localThread(_ rows: [LocalComment]) -> [PostComment] {

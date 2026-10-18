@@ -14,7 +14,7 @@ enum UITestReset {
         }
         Keychain.deleteToken()
         let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
-        for name in ["books", "hosted", "hosted-shelves"] {
+        for name in ["books", "hosted", "hosted-shelves", "hosted-feeds"] {
             try? FileManager.default.removeItem(at: docs.appendingPathComponent(name, isDirectory: true))
         }
         seedHostedShelf(docs: docs)
