@@ -39,7 +39,6 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.mewo.reader.data.BackendKind
 import com.mewo.reader.data.BookRecord
 import com.mewo.reader.data.FeedPost
-import com.mewo.reader.data.PostKind
 import com.mewo.reader.data.ProfilePostRecord
 import com.mewo.reader.data.ProfileRecord
 import com.mewo.reader.data.ProfileRepostRecord
@@ -61,10 +60,9 @@ import com.mewo.reader.ui.components.SpinnerStatus
 import com.mewo.reader.ui.components.UnderlineTabs
 import com.mewo.reader.ui.currentReaderIdentity
 import com.mewo.reader.ui.library.BookPost
+import com.mewo.reader.ui.reader.CommentItem
 import com.mewo.reader.ui.reader.CommentSheet
 import com.mewo.reader.ui.reader.CommentTarget
-import com.mewo.reader.ui.reader.PostActions
-import com.mewo.reader.ui.reader.ThreadPost
 import com.mewo.reader.ui.reader.TimelinePost
 import com.mewo.reader.ui.reader.relativeTime
 
@@ -346,45 +344,29 @@ private fun ProfileReplyRow(
     onOpenReply: () -> Unit,
     onOpenProfile: (handle: String, name: String) -> Unit,
 ) {
-    val library = LocalLibraryStore.current
-    Column(Modifier.fillMaxWidth()) {
-        ThreadPost(
-            name = hit.book.author,
-            handle = hit.book.handle,
-            meta = hit.post.chapter,
-            text = hit.post.text,
-            heading = hit.post.kind == PostKind.Heading,
-            cover = library.coverFile(hit.book.id),
-            connectDown = true,
-            onOpen = onOpenPassage,
-        )
-        ThreadPost(
-            name = replyName,
-            handle = replyHandle,
-            meta = relativeTime(hit.comment.createdAt),
-            text = hit.comment.text,
-            heading = false,
-            cover = null,
-            connectDown = false,
-            onOpenProfile = onOpenProfile,
-            onOpen = onOpenReply,
-        )
-        Box(Modifier.padding(start = 68.dp, end = 12.dp)) {
-            PostActions(
-                liked = liked,
-                commentCount = commentCount,
-                commented = commented,
-                reposted = reposted,
-                repostCount = repostCount,
-                onComment = onComment,
-                onLike = onLike,
-                onRepost = onRepost,
-                onQuote = onQuote,
-                onShare = onShare,
-            )
-        }
-        HorizontalDivider(color = MaterialTheme.colorScheme.outline, thickness = 0.6.dp)
-    }
+    CommentItem(
+        author = hit.book.author,
+        handle = hit.book.handle,
+        post = hit.post,
+        cover = LocalLibraryStore.current.coverFile(hit.book.id),
+        replyName = replyName,
+        replyHandle = replyHandle,
+        replyMeta = relativeTime(hit.comment.createdAt),
+        replyText = hit.comment.text,
+        liked = liked,
+        commentCount = commentCount,
+        commented = commented,
+        reposted = reposted,
+        repostCount = repostCount,
+        onOpen = onOpenPassage,
+        onOpenReply = onOpenReply,
+        onOpenReplyProfile = onOpenProfile,
+        onComment = onComment,
+        onLike = onLike,
+        onRepost = onRepost,
+        onQuote = onQuote,
+        onShare = onShare,
+    )
 }
 
 @Composable

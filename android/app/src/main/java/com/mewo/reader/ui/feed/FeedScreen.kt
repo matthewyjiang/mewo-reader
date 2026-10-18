@@ -1,7 +1,6 @@
 package com.mewo.reader.ui.feed
 
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -15,7 +14,6 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Repeat
-import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
@@ -32,7 +30,6 @@ import com.mewo.reader.data.CommentIndex
 import com.mewo.reader.data.FeedPhase
 import com.mewo.reader.data.FeedPost
 import com.mewo.reader.data.HomeFeedItem
-import com.mewo.reader.data.PostKind
 import com.mewo.reader.data.hasReposted
 import com.mewo.reader.data.repostCount
 import com.mewo.reader.data.showFeedEmpty
@@ -42,9 +39,8 @@ import com.mewo.reader.ui.components.ErrorStatus
 import com.mewo.reader.ui.components.HideOnScrollState
 import com.mewo.reader.ui.components.LoadWhenNearEnd
 import com.mewo.reader.ui.components.SpinnerStatus
+import com.mewo.reader.ui.reader.CommentItem
 import com.mewo.reader.ui.reader.CommentTarget
-import com.mewo.reader.ui.reader.PostActions
-import com.mewo.reader.ui.reader.ThreadPost
 import com.mewo.reader.ui.reader.TimelinePost
 import com.mewo.reader.ui.reader.relativeTime
 
@@ -150,44 +146,29 @@ internal fun HomeFeedRow(
                 onShare = { onShare(item.post) },
             )
         }
-        is HomeFeedItem.Comment -> Column(Modifier.fillMaxWidth()) {
-            ThreadPost(
-                name = item.book.author,
-                handle = item.book.handle,
-                meta = item.post.chapter,
-                text = item.post.text,
-                heading = item.post.kind == PostKind.Heading,
-                cover = LocalLibraryStore.current.coverFile(item.book.id),
-                connectDown = true,
-                onOpen = { onOpenPost(item.book.id, item.post.id) },
-            )
-            ThreadPost(
-                name = item.actor.username,
-                handle = item.actor.username,
-                meta = relativeTime(item.comment.createdAt),
-                text = item.comment.text,
-                heading = false,
-                cover = null,
-                connectDown = false,
-                onOpenProfile = { handle, _ -> onOpenActor(handle) },
-                onOpen = { onComment(CommentTarget(item.book, item.post)) },
-            )
-            Box(Modifier.padding(start = 68.dp, end = 12.dp)) {
-                PostActions(
-                    liked = likes[item.book.id]?.contains(item.post.id) == true,
-                    commentCount = index?.count(item.post.id) ?: 0,
-                    commented = index?.commented(item.post.id) == true,
-                    reposted = index?.hasReposted(item.post.id) == true,
-                    repostCount = index?.repostCount(item.post.id) ?: 0,
-                    onComment = { onComment(CommentTarget(item.book, item.post)) },
-                    onLike = { onLike(item.book.id, item.post.id) },
-                    onRepost = { onRepost(item.book.id, item.post.id) },
-                    onQuote = { onQuote(item.book, item.post) },
-                    onShare = { onShare(item.post) },
-                )
-            }
-            HorizontalDivider(color = MaterialTheme.colorScheme.outline, thickness = 0.6.dp)
-        }
+        is HomeFeedItem.Comment -> CommentItem(
+            author = item.book.author,
+            handle = item.book.handle,
+            post = item.post,
+            cover = LocalLibraryStore.current.coverFile(item.book.id),
+            replyName = item.actor.username,
+            replyHandle = item.actor.username,
+            replyMeta = relativeTime(item.comment.createdAt),
+            replyText = item.comment.text,
+            liked = likes[item.book.id]?.contains(item.post.id) == true,
+            commentCount = index?.count(item.post.id) ?: 0,
+            commented = index?.commented(item.post.id) == true,
+            reposted = index?.hasReposted(item.post.id) == true,
+            repostCount = index?.repostCount(item.post.id) ?: 0,
+            onOpen = { onOpenPost(item.book.id, item.post.id) },
+            onOpenReply = { onComment(CommentTarget(item.book, item.post)) },
+            onOpenReplyProfile = { handle, _ -> onOpenActor(handle) },
+            onComment = { onComment(CommentTarget(item.book, item.post)) },
+            onLike = { onLike(item.book.id, item.post.id) },
+            onRepost = { onRepost(item.book.id, item.post.id) },
+            onQuote = { onQuote(item.book, item.post) },
+            onShare = { onShare(item.post) },
+        )
     }
 }
 

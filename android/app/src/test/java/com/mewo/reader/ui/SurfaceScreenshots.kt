@@ -35,7 +35,7 @@ import com.mewo.reader.ui.components.ProfileButton
 import com.mewo.reader.ui.components.UnderlineTabs
 import com.mewo.reader.ui.feed.ActivityLine
 import com.mewo.reader.ui.profile.ProfileHeader
-import com.mewo.reader.ui.reader.ThreadPost
+import com.mewo.reader.ui.reader.CommentItem
 import com.mewo.reader.ui.reader.TimelinePost
 import com.mewo.reader.ui.reader.relativeTime
 import com.mewo.reader.ui.search.AccountHitRow
@@ -210,24 +210,7 @@ class SurfaceScreenshots {
     @Test
     fun profilePosts() = shoot("profile-posts") {
         ProfileChrome("posts") {
-            ThreadPost(
-                name = "Austen",
-                handle = "austen",
-                meta = "One",
-                text = "Emma Woodhouse, handsome, clever, and rich.",
-                heading = false,
-                cover = null,
-                connectDown = true,
-            )
-            ThreadPost(
-                name = "ada",
-                handle = "ada",
-                meta = relativeTime(COMMENT_AT, SHOT_NOW),
-                text = "This opening still lands.",
-                heading = false,
-                cover = null,
-                connectDown = false,
-            )
+            commentItem(reposted = true, repostCount = 2)
         }
     }
 
@@ -250,24 +233,7 @@ class SurfaceScreenshots {
         HomeChrome("feed") {
             ActivityLine(username = "byron") {}
             passage(reposted = true, count = 2)
-            ThreadPost(
-                name = "Austen",
-                handle = "austen",
-                meta = "One",
-                text = "Emma Woodhouse, handsome, clever, and rich.",
-                heading = false,
-                cover = null,
-                connectDown = true,
-            )
-            ThreadPost(
-                name = "ada",
-                handle = "ada",
-                meta = relativeTime(COMMENT_AT, SHOT_NOW),
-                text = "This opening still lands.",
-                heading = false,
-                cover = null,
-                connectDown = false,
-            )
+            commentItem(reposted = false, repostCount = 1)
         }
     }
 
@@ -469,6 +435,33 @@ private fun HomeChrome(tab: String, content: @Composable () -> Unit) {
             content()
         }
     }
+}
+
+@Composable
+private fun commentItem(reposted: Boolean, repostCount: Int) {
+    CommentItem(
+        author = "Austen",
+        handle = "austen",
+        post = FeedPost("0", PostKind.Body, "Emma Woodhouse, handsome, clever, and rich.", "One"),
+        cover = null,
+        replyName = "ada",
+        replyHandle = "ada",
+        replyMeta = relativeTime(COMMENT_AT, SHOT_NOW),
+        replyText = "This opening still lands.",
+        liked = false,
+        commentCount = 1,
+        commented = true,
+        reposted = reposted,
+        repostCount = repostCount,
+        onOpen = {},
+        onOpenReply = {},
+        onOpenReplyProfile = { _, _ -> },
+        onComment = {},
+        onLike = {},
+        onRepost = {},
+        onQuote = {},
+        onShare = {},
+    )
 }
 
 @Composable

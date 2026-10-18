@@ -58,6 +58,7 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import com.mewo.reader.data.BookRecord
 import com.mewo.reader.data.FeedPost
@@ -286,6 +287,7 @@ fun ThreadPost(
     onOpenProfile: ((handle: String, name: String) -> Unit)? = null,
     onOpen: (() -> Unit)? = null,
     onDelete: (() -> Unit)? = null,
+    endPadding: Dp = 4.dp,
 ) {
     val readerType = LocalReaderFont.current.scale
     var menu by remember { mutableStateOf(false) }
@@ -293,7 +295,7 @@ fun ThreadPost(
         modifier = Modifier
             .fillMaxWidth()
             .height(IntrinsicSize.Min)
-            .padding(start = 16.dp, end = 4.dp, top = 12.dp),
+            .padding(start = 16.dp, end = endPadding, top = 12.dp),
     ) {
         Column(
             modifier = Modifier
