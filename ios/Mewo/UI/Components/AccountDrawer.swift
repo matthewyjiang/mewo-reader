@@ -55,25 +55,27 @@ struct AccountDrawer<Content: View>: View {
             Button {
                 onOpenProfile(me.handle, me.name)
             } label: {
-                VStack(alignment: .leading, spacing: 4) {
+                VStack(alignment: .leading, spacing: 0) {
                     Avatar(name: me.name, size: 64)
                     Text(me.name)
                         .font(MewoFont.bold(20))
                         .foregroundStyle(mewo.ink)
-                        .padding(.top, 8)
+                        .padding(.top, 12)
                     Text("@\(me.handle)")
                         .font(MewoFont.regular(15))
                         .foregroundStyle(mewo.mute)
+                        .padding(.top, 2)
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(.horizontal, 16)
-                .padding(.top, 8)
-                .padding(.bottom, 20)
+                .padding(.top, 16)
+                .padding(.bottom, 12)
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
             .accessibilityLabel("Profile")
             .accessibilityIdentifier("drawer-header")
+            Hairline()
             drawerRow(symbol: "person", title: "Profile", identifier: "drawer-profile") {
                 onOpenProfile(me.handle, me.name)
             }
@@ -94,15 +96,15 @@ struct AccountDrawer<Content: View>: View {
         Button(action: action) {
             HStack(alignment: .center, spacing: 16) {
                 Image(systemName: symbol)
-                    .font(.system(size: 27))
-                    .frame(width: 32, height: 32, alignment: .center)
+                    .font(.system(size: 26))
+                    .frame(width: 26, height: 26)
                 Text(title)
-                    .font(MewoFont.bold(21))
+                    .font(MewoFont.bold(22))
             }
             .foregroundStyle(mewo.ink)
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(.horizontal, 16)
-            .frame(height: 68)
+            .frame(minHeight: 64)
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)

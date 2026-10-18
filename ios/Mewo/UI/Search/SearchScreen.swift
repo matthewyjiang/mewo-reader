@@ -613,7 +613,7 @@ struct SearchScreen: View {
                     HStack(spacing: 12) {
                         Avatar(name: account.username, size: 40)
                         VStack(alignment: .leading, spacing: 2) {
-                            Text(account.username).font(MewoFont.bold(15)).foregroundStyle(mewo.ink)
+                            Text(account.username).font(MewoFont.bold(17)).foregroundStyle(mewo.ink)
                             Text("@\(account.username)").font(MewoFont.regular(13)).foregroundStyle(mewo.mute)
                         }
                         Spacer(minLength: 0)
@@ -662,6 +662,7 @@ struct SearchScreen: View {
                     onComment: { commentTarget = CommentTarget(book: hit.book, post: hit.post) },
                     onLike: { model.toggleLike(bookId: hit.book.id, postId: hit.post.id) },
                     onRepost: { model.toggleRepost(bookId: hit.book.id, postId: hit.post.id) },
+                    onQuote: { shareText = quoteLine(author: hit.book.author, title: hit.book.title, text: hit.post.text) },
                     onShare: { shareText = hit.post.text },
                     onOpen: { onOpenPost(hit.book.id, hit.post.id) }
                 )

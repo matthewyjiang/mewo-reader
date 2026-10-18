@@ -9,16 +9,16 @@ struct RepostContext: View {
         Button(action: onOpenActor) {
             HStack(spacing: 8) {
                 Image(systemName: "arrow.2.squarepath")
-                    .font(.system(size: 14))
+                    .font(.system(size: 16))
                     .frame(width: 16, height: 16)
                 Text("\(username) reposted")
-                    .font(MewoFont.regular(13))
+                    .font(MewoFont.bold(13))
             }
             .foregroundStyle(mewo.mute)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(.leading, 16)
+            .padding(.leading, 68)
             .padding(.trailing, 16)
-            .padding(.top, 10)
+            .padding(.top, 8)
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
@@ -47,6 +47,7 @@ struct PassageReply: View {
     var onComment: () -> Void
     var onLike: () -> Void
     var onRepost: () -> Void
+    var onQuote: () -> Void
     var onShare: () -> Void
 
     var body: some View {
@@ -81,6 +82,7 @@ struct PassageReply: View {
                 onComment: onComment,
                 onLike: onLike,
                 onRepost: onRepost,
+                onQuote: onQuote,
                 onShare: onShare
             )
             .padding(.leading, 68)

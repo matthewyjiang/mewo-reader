@@ -21,16 +21,17 @@ struct UnderlineTabs: View {
                         onSelect(item.id)
                     } label: {
                         Text(item.title)
-                            .font(on ? MewoFont.bold(15) : MewoFont.regular(15))
+                            .font(MewoFont.bold(15))
                             .foregroundStyle(on ? mewo.ink : mewo.mute)
-                            .overlay(alignment: .bottom) {
-                                Capsule()
-                                    .fill(on ? mewo.accent : Color.clear)
-                                    .frame(height: 3)
-                                    .offset(y: 8)
-                            }
                             .frame(maxWidth: .infinity)
                             .frame(height: 48)
+                            .overlay(alignment: .bottom) {
+                                if on {
+                                    Capsule()
+                                        .fill(mewo.accent)
+                                        .frame(width: 56, height: 3)
+                                }
+                            }
                             .contentShape(Rectangle())
                     }
                     .buttonStyle(.plain)

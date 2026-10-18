@@ -15,6 +15,7 @@ struct TimelinePost: View {
     var onComment: () -> Void
     var onLike: () -> Void
     var onRepost: () -> Void
+    var onQuote: () -> Void
     var onShare: () -> Void
     var onOpen: (() -> Void)?
     var onChapterClick: (() -> Void)?
@@ -43,6 +44,7 @@ struct TimelinePost: View {
                         onComment: onComment,
                         onLike: onLike,
                         onRepost: onRepost,
+                        onQuote: onQuote,
                         onShare: onShare
                     )
                 }
@@ -79,10 +81,11 @@ struct PostActions: View {
     var onComment: () -> Void
     var onLike: () -> Void
     var onRepost: () -> Void
+    var onQuote: () -> Void
     var onShare: () -> Void
 
     var body: some View {
-        HStack {
+        HStack(spacing: 0) {
             action(
                 icon: "bubble.right",
                 tint: commented ? mewo.accent : mewo.mute,
@@ -90,13 +93,17 @@ struct PostActions: View {
                 count: commentCount,
                 action: onComment
             )
+            Spacer(minLength: 0)
             action(
                 icon: "arrow.2.squarepath",
                 tint: reposted ? mewo.repost : mewo.mute,
-                label: reposted ? "Undo repost" : "Repost",
+                label: repostCount > 0 ? "Reposts, \(repostCount)" : (reposted ? "Undo repost" : "Repost"),
                 count: repostCount,
                 action: onRepost
             )
+            Spacer(minLength: 0)
+            action(icon: "quote.opening", tint: mewo.mute, label: "Quote this line", action: onQuote)
+            Spacer(minLength: 0)
             action(
                 icon: liked ? "heart.fill" : "heart",
                 tint: liked ? mewo.like : mewo.mute,
@@ -104,15 +111,17 @@ struct PostActions: View {
                 scale: liked ? 1.18 : 1,
                 action: onLike
             )
+            Spacer(minLength: 0)
             action(icon: "square.and.arrow.up", tint: mewo.mute, label: "Share", action: onShare)
         }
+        .frame(maxWidth: .infinity)
     }
 
     private func action(icon: String, tint: Color, label: String, count: Int = 0, scale: CGFloat = 1, action: @escaping () -> Void) -> some View {
         Button(action: action) {
             HStack(spacing: 4) {
                 Image(systemName: icon)
-                    .font(.system(size: 16))
+                    .font(.system(size: 18))
                     .scaleEffect(scale)
                 if count > 0 {
                     Text("\(count)").font(MewoFont.regular(13))

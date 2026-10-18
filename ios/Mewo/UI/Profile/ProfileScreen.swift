@@ -16,7 +16,7 @@ enum ProfileTab: String, CaseIterable, Identifiable {
     var emptyTitle: String {
         switch self {
         case .posts: return "No posts"
-        case .reposts: return "No reposts"
+        case .reposts: return "No posts"
         case .books: return "No books"
         }
     }
@@ -458,15 +458,15 @@ struct ProfileScreen: View {
                     mewo.hover.frame(height: 125)
                     Spacer().frame(height: 42)
                     Text(name).font(MewoFont.bold(20)).foregroundStyle(mewo.ink).padding(.horizontal, 16)
-                    Text("@\(handle)").font(MewoFont.regular(13)).foregroundStyle(mewo.mute).padding(.horizontal, 16)
+                    Text("@\(handle)").font(MewoFont.regular(13)).foregroundStyle(mewo.mute).padding(.horizontal, 16).padding(.top, 2)
                     if let joined = model.record.map({ joinedLabel($0.joinedAt) }) {
                         Text(joined)
-                            .font(MewoFont.regular(15))
+                            .font(MewoFont.regular(13))
                             .foregroundStyle(mewo.mute)
                             .padding(.horizontal, 16)
-                            .padding(.top, 8)
+                            .padding(.top, 2)
                     }
-                    Spacer().frame(height: 12)
+                    Spacer().frame(height: 16)
                 }
                 Circle()
                     .fill(mewo.ground)
@@ -610,6 +610,7 @@ struct ProfileScreen: View {
             onComment: { commentTarget = CommentTarget(book: hit.book, post: hit.post) },
             onLike: { model.toggleLike(bookId: hit.book.id, postId: hit.post.id) },
             onRepost: { model.toggleRepost(bookId: hit.book.id, postId: hit.post.id) },
+            onQuote: { shareText = quoteLine(author: hit.book.author, title: hit.book.title, text: hit.post.text) },
             onShare: { shareText = hit.post.text }
         )
     }
@@ -630,6 +631,7 @@ struct ProfileScreen: View {
                 onComment: { commentTarget = CommentTarget(book: hit.book, post: hit.post) },
                 onLike: { model.toggleLike(bookId: hit.book.id, postId: hit.post.id) },
                 onRepost: { model.toggleRepost(bookId: hit.book.id, postId: hit.post.id) },
+                onQuote: { shareText = quoteLine(author: hit.book.author, title: hit.book.title, text: hit.post.text) },
                 onShare: { shareText = hit.post.text },
                 onOpen: { onOpenPost(hit.book.id, hit.post.id) }
             )

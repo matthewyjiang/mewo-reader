@@ -107,6 +107,7 @@ struct LikesScreen: View {
                                 onComment: { commentTarget = CommentTarget(book: hit.book, post: hit.post) },
                                 onLike: { model.unlike(bookId: hit.book.id, postId: hit.post.id) },
                                 onRepost: { model.toggleRepost(bookId: hit.book.id, postId: hit.post.id) },
+                                onQuote: { shareText = quoteLine(author: hit.book.author, title: hit.book.title, text: hit.post.text) },
                                 onShare: { shareText = hit.post.text },
                                 onOpen: { onOpenPost(hit.book.id, hit.post.id) }
                             )

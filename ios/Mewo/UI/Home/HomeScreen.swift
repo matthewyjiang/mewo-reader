@@ -238,6 +238,7 @@ struct FeedScreen: View {
                 onComment: { commentTarget = CommentTarget(book: item.book, post: item.post) },
                 onLike: { bookSocial.toggleLike(postId: item.post.id) },
                 onRepost: { bookSocial.toggleRepost(postId: item.post.id) },
+                onQuote: { shareText = quoteLine(author: item.book.author, title: item.book.title, text: item.post.text) },
                 onShare: { shareText = item.post.text }
             )
         }
@@ -257,6 +258,7 @@ struct FeedScreen: View {
             onComment: { commentTarget = CommentTarget(book: item.book, post: item.post) },
             onLike: { social.toggleLike(postId: item.post.id) },
             onRepost: { social.toggleRepost(postId: item.post.id) },
+            onQuote: { shareText = quoteLine(author: item.book.author, title: item.book.title, text: item.post.text) },
             onShare: { shareText = item.post.text },
             onOpen: { onOpenPost(item.book.id, item.post.id) }
         )

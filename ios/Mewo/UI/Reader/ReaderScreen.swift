@@ -217,6 +217,7 @@ struct ReaderScreen: View {
                             onComment: { if let book = model.book { commentTarget = CommentTarget(book: book, post: post) } },
                             onLike: { model.toggleLike(post.id) },
                             onRepost: { model.toggleRepost(post.id) },
+                            onQuote: { shareText = quoteLine(author: model.book?.author, title: model.book?.title, text: post.text) },
                             onShare: { shareText = post.text },
                             onChapterClick: { showChapters = true }
                         )
