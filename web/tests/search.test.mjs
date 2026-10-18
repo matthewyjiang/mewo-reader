@@ -1,60 +1,119 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { searchLibrary } from '../src/lib/search.ts';
+import { SearchModel, SEARCH_DEBOUNCE_MS, showNoMatches } from '../src/lib/search.ts';
 
-const book = (id, title = id) => ({
-  id, title, author: 'Jane Austen', handle: 'jane', importedAt: 1, postCount: 0,
-  progressIndex: 0, isSample: false, mine: true, shared: false, ownerUsername: 'reader',
-});
-const post = (id, text, chapter = '') => ({ id, text, chapter, kind: 'Body' });
-const search = (books, feeds, query) => searchLibrary(books, feeds, query, new AbortController().signal);
+function deferred() {
+  let resolve;
+  let reject;
+  const promise = new Promise((res, rej) => { resolve = res; reject = rej; });
+  return { promise, resolve, reject };
+}
 
-test('matches metadata, text, and chapters without changing shelf or post order', async () => {
-  const books = [book('one', 'Pride and Prejudice'), book('two', 'Persuasion')];
-  const feeds = {
-    one: [post('a', 'A quiet room'), post('b', 'A walk', 'Quiet mornings')],
-    two: [post('c', 'QUIET waves')],
-    removed: [post('d', 'Quiet but no longer on this shelf')],
+function harness(session = 'token') {
+  const timers = [];
+  const calls = [];
+  let pending = deferred();
+  const model = new SearchModel(
+    (request) => {
+      calls.push({ query: request.query, kind: request.kind, cursor: request.cursor, session: request.session });
+      request.signal.addEventListener('abort', () => pending.reject(new DOMException('aborted', 'AbortError')));
+      return pending.promise;
+    },
+    () => {},
+    (fn, ms) => {
+      const id = { fn, ms };
+      timers.push(id);
+      return id;
+    },
+    (id) => {
+      const index = timers.indexOf(id);
+      if (index >= 0) timers.splice(index, 1);
+    },
+    session,
+    'accounts',
+  );
+  return {
+    model,
+    calls,
+    timers,
+    replace() { pending = deferred(); },
+    fire() {
+      const id = timers.shift();
+      assert.equal(id.ms, SEARCH_DEBOUNCE_MS);
+      id.fn();
+    },
+    settle(page) {
+      pending.resolve(page);
+      return pending.promise.catch(() => {});
+    },
+    fail(error) { pending.reject(error); return pending.promise.catch(() => {}); },
   };
-  assert.deepEqual((await search(books, feeds, ' quiet ')).posts.map(hit => hit.post.id), ['a', 'b', 'c']);
-  assert.deepEqual((await search(books, feeds, 'PREJUDICE')).books, [books[0]]);
-  assert.deepEqual((await search(books, feeds, 'Austen')).books, books);
-  assert.deepEqual((await search(books, feeds, 'jane')).books, books);
-  assert.deepEqual(await search(books, feeds, '   '), { books: [], posts: [] });
-  assert.deepEqual(await search(books, feeds, 'absent'), { books: [], posts: [] });
+}
+
+const emptyAccounts = { type: 'accounts', items: [], nextCursor: null };
+const ada = { type: 'accounts', items: [{ username: 'ada', mine: false }], nextCursor: null };
+
+test('no matches waits for a successful empty page', async () => {
+  const { model, fire, settle } = harness();
+  model.setQuery('ada');
+  assert.equal(showNoMatches(model.state), false);
+  assert.equal(model.state.phase.status, 'loading');
+  fire();
+  assert.equal(showNoMatches(model.state), false);
+  await settle(emptyAccounts);
+  assert.equal(showNoMatches(model.state), true);
 });
 
-test('yields before scanning so a superseded query can be cancelled', async () => {
-  const controller = new AbortController();
-  let reads = 0;
-  const feeds = { get one() { reads++; return [post('a', 'quiet')]; } };
-  const pending = searchLibrary([book('one')], feeds, 'quiet', controller.signal);
-  assert.equal(reads, 0);
-  controller.abort();
-  assert.equal(await pending, null);
-  assert.equal(reads, 0);
+test('a keystroke inside the debounce window cancels the older request', async () => {
+  const { model, calls, timers, fire, replace } = harness();
+  model.setQuery('a');
+  assert.equal(calls.length, 0);
+  assert.equal(timers.length, 1);
+  model.setQuery('ab');
+  assert.equal(timers.length, 1);
+  fire();
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].query, 'ab');
+  replace();
 });
 
-test('yields during a long scan and discards cancelled partial results', async (t) => {
-  const controller = new AbortController();
-  let clock = 0;
-  // Advance the slice clock per post so this does not depend on machine speed.
-  t.mock.method(performance, 'now', () => clock++);
-  const posts = Array.from({ length: 2000 }, (_, i) => post(`${i}`, 'quiet'));
-  let reads = 0;
-  Object.defineProperty(posts[20], 'text', { get() {
-    reads++;
-    setTimeout(() => controller.abort(), 0);
-    return 'quiet';
-  } });
-  assert.equal(await searchLibrary([book('one')], { one: posts }, 'quiet', controller.signal), null);
-  assert.equal(reads, 1);
+test('a stale page is dropped after sign-out and after a newer query', async () => {
+  const { model, fire, settle, replace } = harness();
+  model.setQuery('ada');
+  fire();
+  model.setSession(null);
+  await settle(ada);
+  assert.equal(model.state.phase.status, 'idle');
+  assert.equal(model.state.session, null);
+
+  model.setSession('token');
+  model.setQuery('');
+  replace();
+  model.setQuery('ada');
+  fire();
+  model.setQuery('bea');
+  await settle(ada);
+  assert.equal(model.state.phase.status, 'loading');
+  assert.equal(model.state.query, 'bea');
+  assert.equal(showNoMatches(model.state), false);
 });
 
-test('keeps every match and only searches feeds on the current shelf', async () => {
-  const books = [book('one'), book('unopened')];
-  const posts = Array.from({ length: 2000 }, (_, i) => post(`${i}`, 'quiet'));
-  const results = await search(books, { one: posts }, 'quiet');
-  assert.equal(results.posts.length, posts.length);
-  assert.equal(results.posts.at(-1).post, posts.at(-1));
+test('an error keeps the previous page and retry asks again', async () => {
+  const { model, fire, settle, fail, replace, calls } = harness();
+  model.setQuery('ada');
+  fire();
+  await settle(ada);
+  replace();
+  model.setQuery('bea');
+  fire();
+  await fail(new Error('offline'));
+  assert.equal(model.state.phase.status, 'failed');
+  assert.equal(model.state.phase.previous, ada);
+  assert.equal(showNoMatches(model.state), false);
+  replace();
+  model.retry();
+  assert.equal(calls.at(-1).query, 'bea');
+  await settle({ type: 'accounts', items: [{ username: 'bea', mine: false }], nextCursor: null });
+  assert.equal(model.state.phase.status, 'loaded');
+  assert.equal(model.state.phase.page.items[0].username, 'bea');
 });

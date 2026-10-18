@@ -45,6 +45,26 @@ class HostedLibraryRefreshTest {
     }
 
     @Test
+    fun signOutClearsTheFeedCache() = runBlocking {
+        val cache = FileHomeFeedCache(File(context.filesDir, "home-feeds"))
+        val key = "$SERVER\nada"
+        cache.write(key, HomeFeedPage())
+        assertTrue(cache.read(key) != null)
+        val client = GateClient()
+        val sessions = HostedSessionStore(context)
+        sessions.setBaseUrl(SERVER)
+        HostedLibraryStore(context, EpubOpener(context), sessions, client, scope)
+        sessions.setSignedIn("ada", "token-a")
+        withTimeout(5_000) { client.started("token-a") }
+        sessions.signOut()
+        withTimeout(5_000) {
+            while (cache.read(key) != null) delay(20)
+        }
+        assertEquals(null, cache.read(key))
+        client.respond("token-a", emptyList())
+    }
+
+    @Test
     fun switchingAccountsDoesNotLeakTheShelfOrSignOut() = runBlocking {
         val client = GateClient()
         val sessions = HostedSessionStore(context)

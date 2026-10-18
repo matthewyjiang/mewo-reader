@@ -54,8 +54,15 @@ class Router {
     const tab: Tab = url.pathname === '/search' ? 'search'
       : url.pathname === '/likes' ? 'likes'
         : url.pathname === '/' ? 'home' : this.current.tab;
+    // A profile tab is the same screen. A new key would remount it and flash the header.
+    const sameProfile = replace
+      && url.pathname === this.url.pathname
+      && url.pathname.startsWith('/profiles/');
     const next: Entry = {
-      mewo: true, key: newKey(), tab, previous: !replace || this.current.previous,
+      mewo: true,
+      key: sameProfile ? this.current.key : newKey(),
+      tab,
+      previous: !replace || this.current.previous,
     };
     if (fromTab) this.scroll.set(next.key, this.tabScroll.get(tab) ?? 0);
     if (replace) history.replaceState(next, '', url);
@@ -80,6 +87,24 @@ export function readerUrl(id: string, postId?: string): string {
   return `/books/${encodeURIComponent(id)}${focus}`;
 }
 
-export function profileUrl(username: string): string {
-  return `/profiles/${encodeURIComponent(username)}`;
+export type ProfileTab = 'posts' | 'reposts' | 'books';
+
+export function profileTab(url: URL): ProfileTab {
+  const tab = url.searchParams.get('tab');
+  return tab === 'reposts' || tab === 'books' ? tab : 'posts';
+}
+
+export function profileUrl(username: string, tab: ProfileTab = 'posts'): string {
+  const path = `/profiles/${encodeURIComponent(username)}`;
+  return tab === 'posts' ? path : `${path}?tab=${tab}`;
+}
+
+export type HomeTab = 'feed' | 'books';
+
+export function homeTab(url: URL): HomeTab {
+  return url.pathname === '/' && url.searchParams.get('tab') === 'books' ? 'books' : 'feed';
+}
+
+export function homeUrl(tab: HomeTab): string {
+  return tab === 'books' ? '/?tab=books' : '/';
 }

@@ -5,58 +5,45 @@
   import { router } from '../lib/router.svelte';
   import { store } from '../lib/store.svelte';
 
-  let { onclose, onprofile, onsignout }: {
+  let { onclose, onprofile }: {
     onclose: () => void;
     onprofile: (username: string) => void;
-    onsignout: () => void;
   } = $props();
 </script>
 
 <Sheet label="Account" kind="drawer" {onclose}>
-  <div class="drawer-header">
-    <button class="icon-button" aria-label="Close account drawer" onclick={onclose}>
-      <Icon name="close" />
-    </button>
-  </div>
   {#if store.session}
-    <button class="drawer-profile" onclick={() => onprofile(store.session!.username)}>
-      <Avatar name={store.session.username} size={48} />
-      <strong>{store.session.username}</strong>
+    {@const username = store.session.username}
+    <button class="drawer-profile" onclick={() => onprofile(username)}>
+      <Avatar name={username} size={64} />
+      <strong>{username}</strong>
+      <span class="meta">@{username}</span>
+    </button>
+    <button class="drawer-row" onclick={() => onprofile(username)}>
+      <Icon name="person" size={26} />
+      Profile
     </button>
   {/if}
-  <button
-    class="drawer-row"
-    onclick={() => { onclose(); router.go('/settings'); }}
-  >
-    <Icon name="settings" />
+  <button class="drawer-row" onclick={() => { onclose(); router.go('/settings'); }}>
+    <Icon name="settings" size={26} />
     Settings
-  </button>
-  <button class="drawer-row" onclick={onsignout}>
-    <span class="drawer-slot" aria-hidden="true"></span>
-    Sign out
   </button>
 </Sheet>
 
 <style>
-.drawer-header {
-  display: flex;
-  justify-content: flex-end;
-  padding: 8px;
-}
-
 .drawer-profile {
   display: flex;
   width: 100%;
   align-items: flex-start;
   flex-direction: column;
-  gap: 4px;
-  padding: 8px 16px 16px;
+  gap: 2px;
+  padding: 16px 16px 12px;
   text-align: left;
   border-bottom: .6px solid var(--line);
 }
 
 .drawer-profile :global(.avatar) {
-  margin-bottom: 8px;
+  margin-bottom: 10px;
 }
 
 .drawer-profile strong {
@@ -65,27 +52,25 @@
   overflow-wrap: anywhere;
 }
 
+.drawer-profile .meta {
+  font-size: .9375rem;
+  line-height: 1.2;
+}
+
 .drawer-row {
   display: flex;
   width: 100%;
   align-items: center;
   gap: 16px;
-  min-height: 52px;
+  min-height: 64px;
   padding: 0 16px;
   text-align: left;
-  font-size: 1.0625rem;
+  font-size: 1.375rem;
+  line-height: 1.2;
   font-weight: 700;
 }
 
-.drawer-slot {
-  width: 22px;
-  height: 22px;
-  flex: 0 0 22px;
-}
-
-.drawer-row:hover {
+.drawer-row:hover, .drawer-profile:hover {
   background: var(--hover);
 }
-
-
 </style>

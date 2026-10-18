@@ -8,6 +8,8 @@
   import RemoveBookSheet from './components/RemoveBookSheet.svelte';
   import SignIn from './components/SignIn.svelte';
   import TopBar from './components/TopBar.svelte';
+  import UnderlineTabs from './components/UnderlineTabs.svelte';
+  import Feed from './screens/Feed.svelte';
   import Home from './screens/Home.svelte';
   import Likes from './screens/Likes.svelte';
   import Profile from './screens/Profile.svelte';
@@ -19,7 +21,7 @@
   import {
     display, bodySizes, bodyLines, headingSizes, headingLines,
   } from './lib/preferences.svelte';
-  import { router, readerUrl, profileUrl } from './lib/router.svelte';
+  import { router, readerUrl, profileUrl, homeTab, homeUrl } from './lib/router.svelte';
   import { pullOffset, refreshGap, shouldRefresh } from './lib/pull';
   import { store, message } from './lib/store.svelte';
 
@@ -35,7 +37,7 @@
   let uploadPercent = $state(0);
   let readerTitle = $state('Post');
   let readerBusy = $state(true);
-  let profileCount = $state(0);
+  let profileCount = $state<number | null>(null);
   let query = $state('');
   let shelfToken = '';
   let shelfPromise: Promise<void> | undefined;
@@ -43,9 +45,11 @@
   let pullStart: { x: number; y: number; active: boolean } | null = null;
   let pull = $state(0);
   let pulling = $state(false);
-  let refreshing = $derived(store.shelf.status === 'loaded' && store.shelf.refreshing);
-
+  let section = $derived(homeTab(router.url));
   let path = $derived(router.url.pathname);
+  let shelfRefreshing = $derived(store.shelf.status === 'loaded' && store.shelf.refreshing);
+  let feedRefreshing = $derived(store.home.status === 'loaded' && store.home.refreshing);
+  let refreshing = $derived(path === '/' && (section === 'books' ? shelfRefreshing : feedRefreshing));
   let readerId = $derived(path.startsWith('/books/') ? decode(path.slice(7)) : null);
   let profileName = $derived(path.startsWith('/profiles/') ? decode(path.slice(10)) : null);
   let settings = $derived(path.startsWith('/settings'));
@@ -101,7 +105,7 @@
       removeTarget = null;
       readerTitle = 'Post';
       readerBusy = true;
-      profileCount = 0;
+      profileCount = null;
       chrome.reset();
       if (!token) {
         shelfToken = '';
@@ -279,7 +283,10 @@
     touchStart = null;
     const armed = pullStart?.active && shouldRefresh(pull);
     pulling = false;
-    if (armed) refreshShelf();
+    if (armed) {
+      if (section === 'books') refreshShelf();
+      else void store.loadFeed();
+    }
     // Drop the finger offset. A running refresh keeps its gap, and the
     // sheet eases from wherever the finger was.
     pull = 0;
@@ -299,15 +306,27 @@
         reader={readerId !== null}
         profile={profileName !== null}
         busy={refreshing || (readerId !== null && readerBusy)}
-        onrefresh={path === '/' ? refreshShelf : undefined}
+        onrefresh={path === '/' ? () => {
+          if (section === 'books') refreshShelf();
+          else void store.loadFeed();
+        } : undefined}
         count={profileCount}
         bind:query
         onaccount={() => drawer = true}
         onchapters={() => reader?.openChapters()}
       />
+      {#if path === '/'}
+        <UnderlineTabs
+          tabs={[{ id: 'feed', label: 'Feed' }, { id: 'books', label: 'Books' }]}
+          selected={section}
+          fixed
+          onselect={(id) => { if (id === 'feed' || id === 'books') router.go(homeUrl(id), true); }}
+        />
+      {/if}
       <main
         bind:this={main}
         class="timeline"
+        class:has-tabs={path === '/' || path === '/search'}
         class:settings-timeline={settings}
         tabindex="-1"
         aria-label={pageTitle}
@@ -322,13 +341,15 @@
           class:pull-dragging={pulling}
           style:transform={pullTransform()}
         >
-        {#if store.shelf.status === 'loading'}
-          <FeedStatus loading={true} error="" label="your shelf" onretry={retry} />
-        {:else if store.shelf.status === 'failed' && !store.shelf.books}
-          <FeedStatus loading={false} error={store.shelf.error} label="your shelf" onretry={retry} />
-        {:else if main}
+        {#if main}
           {#key router.current.key}
-            {#if path === '/'}
+            {#if path === '/' && section === 'feed'}
+              <Feed scroller={main} oncomment={openComments} onprofile={openProfile} />
+            {:else if store.shelf.status === 'loading'}
+              <FeedStatus loading={true} error="" label="your shelf" onretry={retry} />
+            {:else if store.shelf.status === 'failed' && !store.shelf.books}
+              <FeedStatus loading={false} error={store.shelf.error} label="your shelf" onretry={retry} />
+            {:else if path === '/'}
               <Home
                 scroller={main}
                 {uploading}
@@ -347,7 +368,13 @@
                 onbusy={(busy) => readerBusy = busy}
               />
             {:else if path === '/search'}
-              <Search bind:this={search} scroller={main} {query} oncomment={openComments} />
+              <Search
+                bind:this={search}
+                scroller={main}
+                {query}
+                oncomment={openComments}
+                onprofile={openProfile}
+              />
             {:else if path === '/likes'}
               <Likes scroller={main} oncomment={openComments} />
             {:else if profileName}
@@ -381,7 +408,7 @@
       </main>
       {#if path === '/'}
         <div
-          class="refresh-indicator"
+          class="refresh-indicator below-tabs"
           class:pull-dragging={pulling}
           style:height="{pullGap}px"
           role="status"
@@ -391,7 +418,7 @@
           <span class="sr-only">{refreshing ? 'Refreshing' : 'Pull to refresh'}</span>
         </div>
       {/if}
-      {#if path === '/' && store.books.length}
+      {#if path === '/' && section === 'books' && store.books.length}
         <button class="fab" aria-label="Add an EPUB" disabled={uploading} onclick={pickFile}>
           <Icon name="plus" size={28} />
         </button>
@@ -438,7 +465,6 @@
   <AccountDrawer
     onclose={() => drawer = false}
     onprofile={openProfile}
-    onsignout={signOut}
   />
 {/if}
 {#if commentTarget && store.session}
@@ -483,6 +509,11 @@
   transition: none;
 }
 
+.timeline.has-tabs {
+  padding-top: 104px;
+  scroll-padding-top: 104px;
+}
+
 .refresh-indicator {
   position: absolute;
   z-index: 4;
@@ -495,6 +526,10 @@
   overflow: hidden;
   pointer-events: none;
   transition: height 200ms ease-out;
+}
+
+.refresh-indicator.below-tabs {
+  top: 104px;
 }
 
 .refresh-indicator.pull-dragging {

@@ -199,6 +199,47 @@ open class HostedClient(
         return get(session, "/v1/profiles/${android.net.Uri.encode(handle)}/replies")
     }
 
+    fun search(session: HostedSession, query: String, kind: SearchKind, cursor: String?): SearchPage {
+        val q = android.net.Uri.encode(query)
+        val type = android.net.Uri.encode(kind.wire)
+        val cursorPart = if (cursor.isNullOrEmpty()) "" else "&cursor=${android.net.Uri.encode(cursor)}"
+        return get(session, "/v1/search?q=$q&type=$type$cursorPart")
+    }
+
+    fun user(session: HostedSession, username: String): ProfileRecord {
+        return get(session, "/v1/users/${android.net.Uri.encode(username)}")
+    }
+
+    fun userPosts(session: HostedSession, username: String, cursor: String?): ProfilePostsPage {
+        return get(session, userPath(username, "posts", cursor))
+    }
+
+    fun userReposts(session: HostedSession, username: String, cursor: String?): ProfileRepostsPage {
+        return get(session, userPath(username, "reposts", cursor))
+    }
+
+    fun userBooks(session: HostedSession, username: String): ProfileBooks {
+        return get(session, userPath(username, "books", null))
+    }
+
+    fun homeFeed(session: HostedSession, cursor: String?): HomeFeedPage {
+        val cursorPart = if (cursor.isNullOrEmpty()) "" else "?cursor=${android.net.Uri.encode(cursor)}"
+        return get(session, "/v1/feed$cursorPart")
+    }
+
+    fun setRepost(session: HostedSession, id: String, postId: String, reposted: Boolean): RepostState {
+        val url = session.api("/v1/books/$id/posts/${android.net.Uri.encode(postId)}/repost")
+        val call = request(url, session.token)
+            .method(if (reposted) "PUT" else "DELETE", ByteArray(0).toRequestBody(null))
+            .build()
+        return http.newCall(call).execute().use { it.decode() }
+    }
+
+    private fun userPath(username: String, suffix: String, cursor: String?): String {
+        val cursorPart = if (cursor.isNullOrEmpty()) "" else "?cursor=${android.net.Uri.encode(cursor)}"
+        return "/v1/users/${android.net.Uri.encode(username)}/$suffix$cursorPart"
+    }
+
     fun deleteComment(
         session: HostedSession,
         id: String,

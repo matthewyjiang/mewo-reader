@@ -3,7 +3,7 @@
   import Brand from './Brand.svelte';
   import Icon from './Icon.svelte';
   import { chrome } from '../lib/chrome.svelte';
-  import { router } from '../lib/router.svelte';
+  import { profileUrl, router } from '../lib/router.svelte';
   import type { Tab } from '../lib/router.svelte';
   import { store } from '../lib/store.svelte';
 
@@ -13,6 +13,13 @@
     { id: 'search', label: 'Search', path: '/search' },
     { id: 'likes', label: 'Likes', path: '/likes' },
   ];
+  let ownProfile = $derived.by(() => {
+    const name = store.session?.username;
+    if (!name || !router.url.pathname.startsWith('/profiles/')) return false;
+    let handle = router.url.pathname.slice('/profiles/'.length);
+    try { handle = decodeURIComponent(handle); } catch { /* keep the raw segment */ }
+    return handle.toLowerCase() === name.toLowerCase();
+  });
 </script>
 
 <nav
@@ -45,6 +52,21 @@
       {#if rail}<span>{tab.label}</span>{/if}
     </a>
   {/each}
+  {#if rail && store.session}
+    <a
+      href={profileUrl(store.session.username)}
+      class:active={ownProfile}
+      aria-label="Profile"
+      aria-current={ownProfile ? 'page' : undefined}
+      onclick={(event) => {
+        event.preventDefault();
+        router.go(profileUrl(store.session!.username));
+      }}
+    >
+      <Icon name="person" filled={ownProfile} />
+      <span>Profile</span>
+    </a>
+  {/if}
   {#if rail && store.session}
     <button onclick={onaccount} class="rail-account">
       <Avatar name={store.session.username} />

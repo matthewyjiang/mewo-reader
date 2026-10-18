@@ -58,6 +58,7 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import com.mewo.reader.data.BookRecord
 import com.mewo.reader.data.FeedPost
@@ -284,7 +285,9 @@ fun ThreadPost(
     cover: File?,
     connectDown: Boolean,
     onOpenProfile: ((handle: String, name: String) -> Unit)? = null,
+    onOpen: (() -> Unit)? = null,
     onDelete: (() -> Unit)? = null,
+    endPadding: Dp = 4.dp,
 ) {
     val readerType = LocalReaderFont.current.scale
     var menu by remember { mutableStateOf(false) }
@@ -292,7 +295,7 @@ fun ThreadPost(
         modifier = Modifier
             .fillMaxWidth()
             .height(IntrinsicSize.Min)
-            .padding(start = 16.dp, end = 4.dp, top = 12.dp),
+            .padding(start = 16.dp, end = endPadding, top = 12.dp),
     ) {
         Column(
             modifier = Modifier
@@ -406,6 +409,11 @@ fun ThreadPost(
                 } else {
                     readerType.bodyStyle(MaterialTheme.typography.bodyLarge)
                 },
+                modifier = if (onOpen != null) {
+                    Modifier.clickable(role = Role.Button, onClick = onOpen)
+                } else {
+                    Modifier
+                },
             )
         }
     }
@@ -492,6 +500,7 @@ private fun ComposePost(
     }
 }
 
+/** `now`, `5m`, `3h`, then a UTC date: `Oct 3` this year, `Oct 3, 2024` otherwise. */
 fun relativeTime(createdAt: Long, now: Long = System.currentTimeMillis()): String {
     val delta = (now - createdAt).coerceAtLeast(0)
     val minutes = delta / 60_000
@@ -499,6 +508,9 @@ fun relativeTime(createdAt: Long, now: Long = System.currentTimeMillis()): Strin
     if (minutes < 60) return "${minutes}m"
     val hours = minutes / 60
     if (hours < 24) return "${hours}h"
-    val days = hours / 24
-    return "${days}d"
+    val date = java.time.Instant.ofEpochMilli(createdAt).atZone(java.time.ZoneOffset.UTC)
+    val month = date.month.getDisplayName(java.time.format.TextStyle.SHORT, java.util.Locale.US)
+    val label = "$month ${date.dayOfMonth}"
+    val yearNow = java.time.Instant.ofEpochMilli(now).atZone(java.time.ZoneOffset.UTC).year
+    return if (date.year == yearNow) label else "$label, ${date.year}"
 }

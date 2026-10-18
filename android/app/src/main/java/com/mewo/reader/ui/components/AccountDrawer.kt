@@ -17,7 +17,8 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.systemGestureExclusion
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.outlined.KeyboardArrowRight
+import androidx.compose.material.icons.outlined.Person
+import androidx.compose.material.icons.outlined.Settings
 import androidx.compose.material3.DrawerState
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
@@ -30,6 +31,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.RectangleShape
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
@@ -98,44 +100,60 @@ internal fun AccountDrawerContent(
             modifier = Modifier
                 .fillMaxWidth()
                 .clickable(role = Role.Button) { onOpenProfile(me.handle, me.name) }
-                .padding(start = 16.dp, end = 16.dp, top = 8.dp, bottom = 16.dp)
+                .padding(start = 16.dp, end = 16.dp, top = 16.dp, bottom = 12.dp)
                 .semantics { contentDescription = "Profile" },
         ) {
-            Avatar(name = me.name, size = 56.dp)
+            Avatar(name = me.name, size = 64.dp)
             Spacer(Modifier.height(12.dp))
-            Text(me.name, style = MaterialTheme.typography.titleMedium)
-            if (!me.name.equals(me.handle, ignoreCase = true)) {
-                Spacer(Modifier.height(2.dp))
-                Text(
-                    text = "@${me.handle}",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            }
+            Text(me.name, style = MaterialTheme.typography.titleLarge)
+            Spacer(Modifier.height(2.dp))
+            Text(
+                text = "@${me.handle}",
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
         }
         HorizontalDivider(
             color = MaterialTheme.colorScheme.outline,
             thickness = 0.6.dp,
         )
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .heightIn(min = 52.dp)
-                .clickable(role = Role.Button, onClick = onOpenSettings)
-                .padding(horizontal = 16.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Text(
-                text = "Settings",
-                style = MaterialTheme.typography.titleMedium,
-                modifier = Modifier.weight(1f),
-            )
-            Icon(
-                imageVector = Icons.AutoMirrored.Outlined.KeyboardArrowRight,
-                contentDescription = null,
-                tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                modifier = Modifier.size(22.dp),
-            )
-        }
+        DrawerRow(
+            icon = Icons.Outlined.Person,
+            label = "Profile",
+            onClick = { onOpenProfile(me.handle, me.name) },
+        )
+        DrawerRow(
+            icon = Icons.Outlined.Settings,
+            label = "Settings",
+            onClick = onOpenSettings,
+        )
+    }
+}
+
+@Composable
+private fun DrawerRow(
+    icon: ImageVector,
+    label: String,
+    onClick: () -> Unit,
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .heightIn(min = 64.dp)
+            .clickable(role = Role.Button, onClick = onClick)
+            .padding(horizontal = 16.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Icon(
+            imageVector = icon,
+            contentDescription = null,
+            tint = MaterialTheme.colorScheme.onBackground,
+            modifier = Modifier.size(26.dp),
+        )
+        Spacer(Modifier.width(16.dp))
+        Text(
+            text = label,
+            style = MaterialTheme.typography.headlineLarge,
+        )
     }
 }

@@ -1621,6 +1621,40 @@ async fn search_cursors_list_every_match_once() {
 }
 
 #[tokio::test]
+async fn search_keyset_does_not_repeat_a_row_when_a_match_is_inserted() {
+    let (app, _tmp) = app().await;
+    let viewer = register(&app, "viewer", "password1").await;
+    for i in 1..=21 {
+        register(&app, &format!("s{i:02}"), "password1").await;
+    }
+    let (status, first) = search(&app, Some(&viewer), "s", "accounts", None).await;
+    assert_eq!(status, StatusCode::OK, "{first}");
+    let names = |body: &Value| -> Vec<String> {
+        body["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|row| row["username"].as_str().unwrap().to_string())
+            .collect()
+    };
+    let page1 = names(&first);
+    assert_eq!(page1.len(), 20, "{page1:?}");
+    assert_eq!(page1[0], "s01");
+    assert_eq!(page1[19], "s20");
+    let cursor = first["nextCursor"].as_str().expect("cursor");
+    // s00 sorts ahead of the first page. An offset cursor would repeat s20.
+    register(&app, "s00", "password1").await;
+    let (status, second) = search(&app, Some(&viewer), "s", "accounts", Some(cursor)).await;
+    assert_eq!(status, StatusCode::OK, "{second}");
+    let page2 = names(&second);
+    assert!(
+        page1.iter().all(|name| !page2.contains(name)),
+        "page1 {page1:?} page2 {page2:?}"
+    );
+    assert_eq!(page2, vec!["s21".to_string()]);
+}
+
+#[tokio::test]
 async fn search_rejects_bad_queries_and_sanitizes_fts() {
     let (app, _tmp) = app().await;
     let token = register(&app, "matt", "password1").await;
