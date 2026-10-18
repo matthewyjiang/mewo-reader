@@ -6,7 +6,9 @@ pub mod error;
 pub mod feed;
 pub mod models;
 pub mod routes;
+mod search;
 pub mod version;
+mod visibility;
 
 #[cfg(test)]
 #[path = "../tests/common/mod.rs"]
@@ -14,7 +16,7 @@ mod test_epub;
 
 use crate::config::{request_body_limit, Config};
 use axum::extract::DefaultBodyLimit;
-use axum::routing::{any, get, post};
+use axum::routing::{any, get, post, put};
 use axum::Router;
 use sqlx::SqlitePool;
 use std::path::PathBuf;
@@ -29,7 +31,8 @@ pub struct AppState {
     pub pool: SqlitePool,
     pub data_dir: PathBuf,
     pub web_dir: Option<PathBuf>,
-    /// Serializes legacy cache fills. Normal reads/uploads do not take this lock.
+    /// Serializes legacy cache fills and search backfill for one book.
+    /// Normal reads and uploads do not take this lock.
     pub lazy_parse_lock: Arc<Mutex<()>>,
     pub allow_signup: bool,
     pub max_epub_bytes: u64,
@@ -67,6 +70,16 @@ pub fn router(state: AppState) -> Router {
             axum::routing::delete(routes::delete_comment),
         )
         .route(
+            "/v1/books/{id}/posts/{post_id}/repost",
+            put(routes::put_repost).delete(routes::delete_repost),
+        )
+        .route("/v1/search", get(routes::search))
+        .route("/v1/feed", get(routes::feed))
+        .route("/v1/users/{username}", get(routes::profile))
+        .route("/v1/users/{username}/posts", get(routes::profile_posts))
+        .route("/v1/users/{username}/reposts", get(routes::profile_reposts))
+        .route("/v1/users/{username}/books", get(routes::profile_books))
+        .route(
             "/v1/profiles/{username}/replies",
             get(routes::profile_replies),
         )
@@ -97,12 +110,17 @@ pub async fn build(config: Config) -> Result<Router, sqlx::Error> {
         .map_err(sqlx::Error::Io)?;
     let data_dir = config.data_dir.canonicalize().map_err(sqlx::Error::Io)?;
     let pool = db::connect(&config.database_url(), &data_dir).await?;
-    Ok(router(AppState {
+    let state = AppState {
         pool,
         data_dir,
         web_dir: config.web_dir,
         lazy_parse_lock: Arc::new(Mutex::new(())),
         allow_signup: config.allow_signup,
         max_epub_bytes: config.max_epub_bytes,
-    }))
+    };
+    let backfill = state.clone();
+    tokio::spawn(async move {
+        search::backfill(backfill).await;
+    });
+    Ok(router(state))
 }

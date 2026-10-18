@@ -4,19 +4,24 @@ use crate::auth::{
 use crate::config::MAX_COVER_BYTES;
 use crate::db::now_ms;
 use crate::error::ApiError;
-use crate::feed::{slug, Posts};
+use crate::feed::{slug, Post, Posts};
 use crate::models::{
-    AuthRequest, AuthResponse, BookRecord, BookRow, CommentIndex, CommentRecord, CommentRow,
-    CommentThread, LibrarySnapshot, LikeSet, MeResponse, NewComment, PatchBook, ProfileReplies,
-    ProfileReplyRecord, ProfileReplyRow, MAX_COMMENT_CHARS, MAX_POST_ID_CHARS,
+    ActorRecord, AuthRequest, AuthResponse, BookRecord, BookRow, CommentIndex, CommentRecord,
+    CommentRow, CommentThread, FeedItem, FeedPage, LibrarySnapshot, LikeSet, MeResponse,
+    NewComment, PatchBook, ProfileBooks, ProfilePostRecord, ProfilePostsPage, ProfileRecord,
+    ProfileReplies, ProfileReplyRecord, ProfileReplyRow, ProfileRepostRecord, ProfileRepostsPage,
+    RepostState, SearchKind, SearchPage, MAX_COMMENT_CHARS, MAX_POST_ID_CHARS,
 };
+use crate::search::{self, PROFILE_POSTS_LIMIT};
 use crate::version::VersionInfo;
+use crate::visibility::{BOOK_SELECT, BOOK_VISIBLE_TO};
 use crate::AppState;
-use axum::extract::{Multipart, Path, State};
+use axum::extract::{Multipart, Path, Query, State};
 use axum::http::header::{CONTENT_DISPOSITION, CONTENT_TYPE};
 use axum::http::HeaderValue;
 use axum::response::IntoResponse;
 use axum::Json;
+use serde::Deserialize;
 use std::path::PathBuf;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio_util::io::ReaderStream;
@@ -174,6 +179,16 @@ pub async fn upload_book(
         .execute(&state.pool)
         .await?;
 
+    if let Err(err) = search::store_feed(&state.pool, &dest, &id, &parsed.posts).await {
+        let _ = sqlx::query("DELETE FROM books WHERE id = ? AND user_id = ?")
+            .bind(&id)
+            .bind(&authed.user_id)
+            .execute(&state.pool)
+            .await;
+        let _ = tokio::fs::remove_dir_all(&dest).await;
+        return Err(err);
+    }
+
     Ok(Json(BookRecord {
         id,
         title: parsed.title,
@@ -307,9 +322,9 @@ pub async fn get_posts(
 ) -> Result<impl IntoResponse, ApiError> {
     let row = visible_book(&state, &authed.user_id, &id).await?;
     let dir = book_dir(&state.data_dir, &row.owner_id, &row.id);
-    let bytes = match read_posts(&dir).await? {
+    let bytes = match search::read_posts(&dir).await? {
         Some(bytes) => bytes,
-        None => fill_posts(&state, &authed.user_id, &row.id, &dir).await?,
+        None => fill_posts(&state, &row.id, &dir).await?,
     };
     Ok((
         [(CONTENT_TYPE, HeaderValue::from_static("application/json"))],
@@ -320,31 +335,25 @@ pub async fn get_posts(
 /// Parses a book uploaded before the server parsed books, then caches it.
 async fn fill_posts(
     state: &AppState,
-    user_id: &str,
     book_id: &str,
     dir: &std::path::Path,
 ) -> Result<Vec<u8>, ApiError> {
     // Simple global lock for legacy fills; cache hits and new uploads bypass it.
     // Recheck after locking so concurrent requests don't duplicate the parse.
     let _guard = state.lazy_parse_lock.lock().await;
-    if let Some(bytes) = read_posts(dir).await? {
+    if let Some(bytes) = search::read_posts(dir).await? {
         return Ok(bytes);
     }
     let parsed = parse_epub(dir.join("book.epub")).await?;
-    let posts = Posts {
-        posts: parsed.posts,
-    };
-    sqlx::query(&format!(
-        "UPDATE books SET post_count = ? WHERE id IN (
-            SELECT b.id FROM books b WHERE b.id = ? AND {BOOK_VISIBLE_TO}
-        )"
-    ))
-    .bind(posts.posts.len() as i64)
-    .bind(book_id)
-    .bind(user_id)
-    .execute(&state.pool)
-    .await?;
-    write_posts(dir, &posts).await
+    search::store_feed(
+        &state.pool,
+        dir,
+        book_id,
+        &Posts {
+            posts: parsed.posts,
+        },
+    )
+    .await
 }
 
 async fn parse_epub(path: PathBuf) -> Result<crate::epub::ParsedEpub, ApiError> {
@@ -355,26 +364,6 @@ async fn parse_epub(path: PathBuf) -> Result<crate::epub::ParsedEpub, ApiError> 
             ApiError::Internal
         })?
         .map_err(|reason| ApiError::BadRequest(format!("Could not read that EPUB: {reason}")))
-}
-
-async fn read_posts(dir: &std::path::Path) -> Result<Option<Vec<u8>>, ApiError> {
-    match tokio::fs::read(dir.join("posts.json")).await {
-        Ok(bytes) => Ok(Some(bytes)),
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(err) => Err(err.into()),
-    }
-}
-
-/// Atomically writes posts.json and returns the bytes written.
-async fn write_posts(dir: &std::path::Path, posts: &Posts) -> Result<Vec<u8>, ApiError> {
-    let bytes = serde_json::to_vec(posts).map_err(|_| ApiError::Internal)?;
-    let temp = dir.join(format!("posts-{}.tmp", Uuid::new_v4()));
-    tokio::fs::write(&temp, &bytes).await?;
-    if let Err(err) = tokio::fs::rename(&temp, dir.join("posts.json")).await {
-        let _ = tokio::fs::remove_file(&temp).await;
-        return Err(err.into());
-    }
-    Ok(bytes)
 }
 
 pub async fn list_likes(
@@ -417,24 +406,131 @@ pub async fn comment_index(
     authed: Authed,
     Path(id): Path<String>,
 ) -> Result<Json<CommentIndex>, ApiError> {
-    let _ = visible_book(&state, &authed.user_id, &id).await?;
+    let book = visible_book(&state, &authed.user_id, &id).await?;
     let counts = sqlx::query_as::<_, (String, i64)>(
         "SELECT post_id, COUNT(*) FROM comments WHERE book_id = ? GROUP BY post_id",
     )
-    .bind(&id)
+    .bind(&book.id)
     .fetch_all(&state.pool)
     .await?;
     let mine = sqlx::query_scalar::<_, String>(
         "SELECT DISTINCT post_id FROM comments WHERE book_id = ? AND user_id = ?",
     )
-    .bind(&id)
+    .bind(&book.id)
+    .bind(&authed.user_id)
+    .fetch_all(&state.pool)
+    .await?;
+    let reposts = sqlx::query_as::<_, (String, i64)>(
+        "SELECT post_id, COUNT(*) FROM reposts WHERE book_id = ? GROUP BY post_id",
+    )
+    .bind(&book.id)
+    .fetch_all(&state.pool)
+    .await?;
+    let reposted = sqlx::query_scalar::<_, String>(
+        "SELECT post_id FROM reposts WHERE book_id = ? AND user_id = ?",
+    )
+    .bind(&book.id)
     .bind(&authed.user_id)
     .fetch_all(&state.pool)
     .await?;
     Ok(Json(CommentIndex {
         counts: counts.into_iter().collect(),
         mine,
+        reposts: reposts.into_iter().collect(),
+        reposted,
     }))
+}
+
+pub async fn put_repost(
+    State(state): State<AppState>,
+    authed: Authed,
+    Path((id, post_id)): Path<(String, String)>,
+) -> Result<Json<RepostState>, ApiError> {
+    let post_id = parse_post_id(&post_id)?;
+    let book = visible_book(&state, &authed.user_id, &id).await?;
+    require_post(&state, &book.id, &post_id).await?;
+    sqlx::query(
+        "INSERT INTO reposts (user_id, book_id, post_id, created_at)
+         VALUES (?, ?, ?, ?)
+         ON CONFLICT DO NOTHING",
+    )
+    .bind(&authed.user_id)
+    .bind(&book.id)
+    .bind(&post_id)
+    .bind(now_ms())
+    .execute(&state.pool)
+    .await?;
+    Ok(Json(
+        repost_state(&state, &authed.user_id, &book.id, &post_id).await?,
+    ))
+}
+
+pub async fn delete_repost(
+    State(state): State<AppState>,
+    authed: Authed,
+    Path((id, post_id)): Path<(String, String)>,
+) -> Result<Json<RepostState>, ApiError> {
+    let post_id = parse_post_id(&post_id)?;
+    let book = match visible_book(&state, &authed.user_id, &id).await {
+        Ok(book) => book,
+        Err(ApiError::NotFound) => {
+            // The caller may have reposted before the book was unshared.
+            // Drop only their row. The count of everyone else's reposts stays hidden.
+            let book_id = parse_book_id(&id)?.to_string();
+            let deleted = sqlx::query(
+                "DELETE FROM reposts WHERE user_id = ? AND book_id = ? AND post_id = ?",
+            )
+            .bind(&authed.user_id)
+            .bind(&book_id)
+            .bind(&post_id)
+            .execute(&state.pool)
+            .await?;
+            if deleted.rows_affected() == 0 {
+                return Err(ApiError::NotFound);
+            }
+            return Ok(Json(RepostState {
+                reposts: 0,
+                reposted: false,
+            }));
+        }
+        Err(err) => return Err(err),
+    };
+    sqlx::query("DELETE FROM reposts WHERE user_id = ? AND book_id = ? AND post_id = ?")
+        .bind(&authed.user_id)
+        .bind(&book.id)
+        .bind(&post_id)
+        .execute(&state.pool)
+        .await?;
+    Ok(Json(
+        repost_state(&state, &authed.user_id, &book.id, &post_id).await?,
+    ))
+}
+
+async fn repost_state(
+    state: &AppState,
+    user_id: &str,
+    book_id: &str,
+    post_id: &str,
+) -> Result<RepostState, ApiError> {
+    let reposts = sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*) FROM reposts WHERE book_id = ? AND post_id = ?",
+    )
+    .bind(book_id)
+    .bind(post_id)
+    .fetch_one(&state.pool)
+    .await?;
+    let mine = sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*) FROM reposts WHERE user_id = ? AND book_id = ? AND post_id = ?",
+    )
+    .bind(user_id)
+    .bind(book_id)
+    .bind(post_id)
+    .fetch_one(&state.pool)
+    .await?;
+    Ok(RepostState {
+        reposts,
+        reposted: mine != 0,
+    })
 }
 
 pub async fn list_comments(
@@ -456,7 +552,8 @@ pub async fn add_comment(
     Json(body): Json<NewComment>,
 ) -> Result<Json<CommentThread>, ApiError> {
     let post_id = parse_post_id(&post_id)?;
-    let _ = visible_book(&state, &authed.user_id, &id).await?;
+    let book = visible_book(&state, &authed.user_id, &id).await?;
+    require_post(&state, &book.id, &post_id).await?;
     let text = parse_comment_text(&body.text)?;
     let comment_id = Uuid::new_v4().to_string();
     sqlx::query(
@@ -465,7 +562,7 @@ pub async fn add_comment(
     )
     .bind(&comment_id)
     .bind(&authed.user_id)
-    .bind(&id)
+    .bind(&book.id)
     .bind(&post_id)
     .bind(&text)
     .bind(now_ms())
@@ -474,6 +571,609 @@ pub async fn add_comment(
     Ok(Json(
         thread_for(&state, &authed.user_id, &id, &post_id).await?,
     ))
+}
+
+#[derive(Deserialize)]
+pub struct SearchQuery {
+    q: String,
+    #[serde(rename = "type")]
+    kind: SearchKind,
+    cursor: Option<String>,
+}
+
+pub async fn search(
+    State(state): State<AppState>,
+    authed: Authed,
+    Query(params): Query<SearchQuery>,
+) -> Result<Json<SearchPage>, ApiError> {
+    Ok(Json(
+        search::run(
+            &state.pool,
+            &authed,
+            &params.q,
+            params.kind,
+            params.cursor.as_deref(),
+        )
+        .await?,
+    ))
+}
+
+pub async fn profile(
+    State(state): State<AppState>,
+    authed: Authed,
+    Path(username): Path<String>,
+) -> Result<Json<ProfileRecord>, ApiError> {
+    let (user_id, username, joined_at) = require_user(&state.pool, &username).await?;
+    let post_count = visible_reply_count(&state, &authed.user_id, &user_id).await?;
+    let repost_count = visible_repost_count(&state, &authed.user_id, &user_id).await?;
+    Ok(Json(ProfileRecord {
+        username,
+        joined_at,
+        post_count,
+        repost_count,
+        mine: user_id == authed.user_id,
+    }))
+}
+
+#[derive(Deserialize)]
+pub struct PageQuery {
+    cursor: Option<String>,
+}
+
+pub async fn profile_posts(
+    State(state): State<AppState>,
+    authed: Authed,
+    Path(username): Path<String>,
+    Query(query): Query<PageQuery>,
+) -> Result<Json<ProfilePostsPage>, ApiError> {
+    let (user_id, _, _) = require_user(&state.pool, &username).await?;
+    let cursor = match query
+        .cursor
+        .as_deref()
+        .map(str::trim)
+        .filter(|cursor| !cursor.is_empty())
+    {
+        Some(cursor) => Some(search::decode_keyset(cursor)?),
+        None => None,
+    };
+    // Keyset on (created_at, id) matches comments_user plus the id tiebreak.
+    // Newest first. The extra row is how we know there is a next page.
+    let (has_cursor, created_at, comment_id) = match cursor {
+        Some((created_at, id)) => (1i64, created_at, id),
+        None => (0, 0, String::new()),
+    };
+    let comment_posts = posts_for("c");
+    let sql = format!(
+        "SELECT b.id, b.title, b.author, b.handle, b.imported_at, b.post_count,
+                COALESCE(p.progress_index, 0) AS progress_index,
+                b.is_sample, b.shared, b.user_id AS owner_id,
+                owner.username AS owner_username,
+                posts.idx AS post_idx, posts.kind AS post_kind,
+                posts.chapter AS post_chapter, posts.text AS post_text,
+                c.id AS comment_id, u.username AS comment_username,
+                c.text AS comment_text, c.created_at AS comment_created_at,
+                c.user_id AS comment_user_id
+         FROM comments c
+         JOIN users u ON u.id = c.user_id
+         JOIN books b ON b.id = c.book_id
+         JOIN users owner ON owner.id = b.user_id
+         LEFT JOIN book_progress p ON p.book_id = b.id AND p.user_id = ?
+         {comment_posts}
+         WHERE c.user_id = ? AND {BOOK_VISIBLE_TO}
+           AND (
+             ? = 0
+             OR c.created_at < ?
+             OR (c.created_at = ? AND c.id < ?)
+           )
+         ORDER BY c.created_at DESC, c.id DESC
+         LIMIT ?"
+    );
+    let mut rows = sqlx::query_as::<_, ProfilePostRow>(&sql)
+        .bind(&authed.user_id)
+        .bind(&user_id)
+        .bind(&authed.user_id)
+        .bind(has_cursor)
+        .bind(created_at)
+        .bind(created_at)
+        .bind(&comment_id)
+        .bind(PROFILE_POSTS_LIMIT + 1)
+        .fetch_all(&state.pool)
+        .await?;
+    let next_cursor = if rows.len() > PROFILE_POSTS_LIMIT as usize {
+        rows.truncate(PROFILE_POSTS_LIMIT as usize);
+        rows.last()
+            .map(|row| search::encode_keyset(row.comment_created_at, &row.comment_id))
+    } else {
+        None
+    };
+    let mut items = Vec::with_capacity(rows.len());
+    for row in rows {
+        items.push(row.into_record(&authed.user_id)?);
+    }
+    Ok(Json(ProfilePostsPage { items, next_cursor }))
+}
+
+const PROFILE_REPOSTS_LIMIT: i64 = 30;
+const FEED_LIMIT: i64 = 20;
+
+pub async fn profile_reposts(
+    State(state): State<AppState>,
+    authed: Authed,
+    Path(username): Path<String>,
+    Query(query): Query<PageQuery>,
+) -> Result<Json<ProfileRepostsPage>, ApiError> {
+    let (user_id, _, _) = require_user(&state.pool, &username).await?;
+    let (has_cursor, created_at, cursor_book, cursor_post) = keyset3(&query, false)?;
+    let repost_posts = posts_for("r");
+    let sql = format!(
+        "SELECT b.id, b.title, b.author, b.handle, b.imported_at, b.post_count,
+                COALESCE(p.progress_index, 0) AS progress_index,
+                b.is_sample, b.shared, b.user_id AS owner_id,
+                owner.username AS owner_username,
+                posts.idx AS post_idx, posts.kind AS post_kind,
+                posts.chapter AS post_chapter, posts.text AS post_text,
+                r.created_at AS reposted_at, r.book_id AS repost_book_id,
+                r.post_id AS repost_post_id
+         FROM reposts r
+         JOIN books b ON b.id = r.book_id
+         JOIN users owner ON owner.id = b.user_id
+         LEFT JOIN book_progress p ON p.book_id = b.id AND p.user_id = ?
+         {repost_posts}
+         WHERE r.user_id = ? AND {BOOK_VISIBLE_TO}
+           AND (
+             ? = 0
+             OR r.created_at < ?
+             OR (r.created_at = ? AND r.book_id < ?)
+             OR (r.created_at = ? AND r.book_id = ? AND r.post_id < ?)
+           )
+         ORDER BY r.created_at DESC, r.book_id DESC, r.post_id DESC
+         LIMIT ?"
+    );
+    let mut rows = sqlx::query_as::<_, ProfileRepostRow>(&sql)
+        .bind(&authed.user_id)
+        .bind(&user_id)
+        .bind(&authed.user_id)
+        .bind(has_cursor)
+        .bind(created_at)
+        .bind(created_at)
+        .bind(&cursor_book)
+        .bind(created_at)
+        .bind(&cursor_book)
+        .bind(&cursor_post)
+        .bind(PROFILE_REPOSTS_LIMIT + 1)
+        .fetch_all(&state.pool)
+        .await?;
+    let next_cursor = if rows.len() > PROFILE_REPOSTS_LIMIT as usize {
+        rows.truncate(PROFILE_REPOSTS_LIMIT as usize);
+        rows.last().map(|row| {
+            search::encode_keyset3(row.reposted_at, &row.repost_book_id, &row.repost_post_id)
+        })
+    } else {
+        None
+    };
+    let mut items = Vec::with_capacity(rows.len());
+    for row in rows {
+        items.push(row.into_record(&authed.user_id)?);
+    }
+    Ok(Json(ProfileRepostsPage { items, next_cursor }))
+}
+
+pub async fn profile_books(
+    State(state): State<AppState>,
+    authed: Authed,
+    Path(username): Path<String>,
+) -> Result<Json<ProfileBooks>, ApiError> {
+    let (user_id, _, _) = require_user(&state.pool, &username).await?;
+    let rows = sqlx::query_as::<_, BookRow>(&format!(
+        "{BOOK_SELECT} WHERE b.user_id = ? AND b.shared = 1 AND b.is_sample = 0 AND {BOOK_VISIBLE_TO}
+         ORDER BY b.imported_at DESC, b.id ASC"
+    ))
+    .bind(&authed.user_id)
+    .bind(&user_id)
+    .bind(&authed.user_id)
+    .fetch_all(&state.pool)
+    .await?;
+    Ok(Json(ProfileBooks {
+        items: rows
+            .into_iter()
+            .map(|row| row.into_record(&authed.user_id))
+            .collect(),
+    }))
+}
+
+pub async fn feed(
+    State(state): State<AppState>,
+    authed: Authed,
+    Query(query): Query<PageQuery>,
+) -> Result<Json<FeedPage>, ApiError> {
+    let (has_cursor, at, kind, id) = keyset3(&query, true)?;
+    let comment_posts = posts_for("c");
+    let repost_posts = posts_for("r");
+    // Each branch keeps its own cursor and limit so the feed does not sort the
+    // whole history before discarding it. The outer query merges those pages.
+    let sql = format!(
+        "SELECT kind, id, at, actor_username, book_id, title, author, handle, imported_at,
+                post_count, progress_index, is_sample, shared, owner_id, owner_username,
+                post_idx, post_kind, post_chapter, post_text, comment_id, comment_username,
+                comment_text, comment_created_at, comment_user_id
+         FROM (
+             SELECT * FROM (
+                 SELECT 'comment' AS kind, c.id AS id, c.created_at AS at,
+                        u.username AS actor_username,
+                        b.id AS book_id, b.title AS title, b.author AS author, b.handle AS handle,
+                        b.imported_at AS imported_at, b.post_count AS post_count,
+                        COALESCE(p.progress_index, 0) AS progress_index,
+                        b.is_sample AS is_sample, b.shared AS shared, b.user_id AS owner_id,
+                        owner.username AS owner_username,
+                        posts.idx AS post_idx, posts.kind AS post_kind,
+                        posts.chapter AS post_chapter, posts.text AS post_text,
+                        c.id AS comment_id, u.username AS comment_username,
+                        c.text AS comment_text, c.created_at AS comment_created_at,
+                        c.user_id AS comment_user_id
+                 FROM comments c
+                 JOIN users u ON u.id = c.user_id
+                 JOIN books b ON b.id = c.book_id
+                 JOIN users owner ON owner.id = b.user_id
+                 LEFT JOIN book_progress p ON p.book_id = b.id AND p.user_id = ?
+                 {comment_posts}
+                 WHERE {BOOK_VISIBLE_TO}
+                   AND (
+                     ? = 0
+                     OR c.created_at < ?
+                     OR (c.created_at = ? AND 'comment' < ?)
+                     OR (c.created_at = ? AND 'comment' = ? AND c.id < ?)
+                   )
+                 ORDER BY c.created_at DESC, c.id DESC
+                 LIMIT ?
+             )
+             UNION ALL
+             SELECT * FROM (
+                 SELECT 'repost' AS kind,
+                        r.user_id || ':' || r.book_id || ':' || r.post_id AS id,
+                        r.created_at AS at, u.username AS actor_username,
+                        b.id AS book_id, b.title AS title, b.author AS author, b.handle AS handle,
+                        b.imported_at AS imported_at, b.post_count AS post_count,
+                        COALESCE(p.progress_index, 0) AS progress_index,
+                        b.is_sample AS is_sample, b.shared AS shared, b.user_id AS owner_id,
+                        owner.username AS owner_username,
+                        posts.idx AS post_idx, posts.kind AS post_kind,
+                        posts.chapter AS post_chapter, posts.text AS post_text,
+                        CAST(NULL AS TEXT) AS comment_id,
+                        CAST(NULL AS TEXT) AS comment_username,
+                        CAST(NULL AS TEXT) AS comment_text,
+                        CAST(NULL AS INTEGER) AS comment_created_at,
+                        CAST(NULL AS TEXT) AS comment_user_id
+                 FROM reposts r
+                 JOIN users u ON u.id = r.user_id
+                 JOIN books b ON b.id = r.book_id
+                 JOIN users owner ON owner.id = b.user_id
+                 LEFT JOIN book_progress p ON p.book_id = b.id AND p.user_id = ?
+                 {repost_posts}
+                 WHERE {BOOK_VISIBLE_TO}
+                   AND (
+                     ? = 0
+                     OR r.created_at < ?
+                     OR (r.created_at = ? AND 'repost' < ?)
+                     OR (r.created_at = ? AND 'repost' = ? AND (r.user_id || ':' || r.book_id || ':' || r.post_id) < ?)
+                   )
+                 ORDER BY r.created_at DESC, r.user_id || ':' || r.book_id || ':' || r.post_id DESC
+                 LIMIT ?
+             )
+         )
+         ORDER BY at DESC, kind DESC, id DESC
+         LIMIT ?"
+    );
+    let limit = FEED_LIMIT + 1;
+    let mut query = sqlx::query_as::<_, FeedRow>(&sql);
+    for _ in 0..2 {
+        query = query
+            .bind(&authed.user_id)
+            .bind(&authed.user_id)
+            .bind(has_cursor)
+            .bind(at)
+            .bind(at)
+            .bind(&kind)
+            .bind(at)
+            .bind(&kind)
+            .bind(&id)
+            .bind(limit);
+    }
+    let mut rows = query.bind(limit).fetch_all(&state.pool).await?;
+    let next_cursor = if rows.len() > FEED_LIMIT as usize {
+        rows.truncate(FEED_LIMIT as usize);
+        rows.last()
+            .map(|row| search::encode_keyset3(row.at, &row.kind, &row.id))
+    } else {
+        None
+    };
+    let mut items = Vec::with_capacity(rows.len());
+    for row in rows {
+        items.push(row.into_item(&authed.user_id)?);
+    }
+    Ok(Json(FeedPage { items, next_cursor }))
+}
+
+fn keyset3(query: &PageQuery, feed: bool) -> Result<(i64, i64, String, String), ApiError> {
+    let cursor = query
+        .cursor
+        .as_deref()
+        .map(str::trim)
+        .filter(|cursor| !cursor.is_empty());
+    let Some(cursor) = cursor else {
+        return Ok((0, 0, String::new(), String::new()));
+    };
+    let (at, second, third) = if feed {
+        search::decode_feed_cursor(cursor)?
+    } else {
+        search::decode_keyset3(cursor)?
+    };
+    Ok((1, at, second, third))
+}
+
+#[derive(Debug, sqlx::FromRow)]
+struct ProfileRepostRow {
+    id: String,
+    title: String,
+    author: String,
+    handle: String,
+    imported_at: i64,
+    post_count: i64,
+    progress_index: i64,
+    is_sample: i64,
+    shared: i64,
+    owner_id: String,
+    owner_username: String,
+    post_idx: i64,
+    post_kind: String,
+    post_chapter: String,
+    post_text: String,
+    reposted_at: i64,
+    repost_book_id: String,
+    repost_post_id: String,
+}
+
+impl ProfileRepostRow {
+    fn into_record(self, viewer: &str) -> Result<ProfileRepostRecord, ApiError> {
+        let book = BookRow {
+            id: self.id,
+            title: self.title,
+            author: self.author,
+            handle: self.handle,
+            imported_at: self.imported_at,
+            post_count: self.post_count,
+            progress_index: self.progress_index,
+            is_sample: self.is_sample,
+            shared: self.shared,
+            owner_id: self.owner_id,
+            owner_username: self.owner_username,
+        }
+        .into_record(viewer);
+        Ok(ProfileRepostRecord {
+            book,
+            post: stored_post(
+                self.post_idx,
+                &self.post_kind,
+                self.post_chapter,
+                self.post_text,
+            )?,
+            reposted_at: self.reposted_at,
+        })
+    }
+}
+
+#[derive(Debug, sqlx::FromRow)]
+struct FeedRow {
+    kind: String,
+    id: String,
+    at: i64,
+    actor_username: String,
+    book_id: String,
+    title: String,
+    author: String,
+    handle: String,
+    imported_at: i64,
+    post_count: i64,
+    progress_index: i64,
+    is_sample: i64,
+    shared: i64,
+    owner_id: String,
+    owner_username: String,
+    post_idx: i64,
+    post_kind: String,
+    post_chapter: String,
+    post_text: String,
+    comment_id: Option<String>,
+    comment_username: Option<String>,
+    comment_text: Option<String>,
+    comment_created_at: Option<i64>,
+    comment_user_id: Option<String>,
+}
+
+impl FeedRow {
+    fn into_item(self, viewer: &str) -> Result<FeedItem, ApiError> {
+        let book = BookRow {
+            id: self.book_id,
+            title: self.title,
+            author: self.author,
+            handle: self.handle,
+            imported_at: self.imported_at,
+            post_count: self.post_count,
+            progress_index: self.progress_index,
+            is_sample: self.is_sample,
+            shared: self.shared,
+            owner_id: self.owner_id,
+            owner_username: self.owner_username,
+        }
+        .into_record(viewer);
+        let post = stored_post(
+            self.post_idx,
+            &self.post_kind,
+            self.post_chapter,
+            self.post_text,
+        )?;
+        let actor = ActorRecord {
+            username: self.actor_username,
+        };
+        match self.kind.as_str() {
+            "comment" => {
+                let (Some(id), Some(username), Some(text), Some(created_at), Some(user_id)) = (
+                    self.comment_id,
+                    self.comment_username,
+                    self.comment_text,
+                    self.comment_created_at,
+                    self.comment_user_id,
+                ) else {
+                    tracing::error!("comment activity is missing its comment");
+                    return Err(ApiError::Internal);
+                };
+                Ok(FeedItem::Comment {
+                    actor,
+                    book,
+                    post,
+                    comment: CommentRecord {
+                        id,
+                        username,
+                        text,
+                        created_at,
+                        mine: user_id == viewer,
+                    },
+                    at: self.at,
+                })
+            }
+            "repost" => Ok(FeedItem::Repost {
+                actor,
+                book,
+                post,
+                at: self.at,
+            }),
+            _ => {
+                tracing::error!(kind = %self.kind, "activity kind is not comment or repost");
+                Err(ApiError::Internal)
+            }
+        }
+    }
+}
+
+fn stored_post(idx: i64, kind: &str, chapter: String, text: String) -> Result<Post, ApiError> {
+    Ok(Post {
+        id: idx.to_string(),
+        kind: search::parse_kind(kind)?,
+        text,
+        chapter,
+    })
+}
+
+#[derive(Debug, sqlx::FromRow)]
+struct ProfilePostRow {
+    id: String,
+    title: String,
+    author: String,
+    handle: String,
+    imported_at: i64,
+    post_count: i64,
+    progress_index: i64,
+    is_sample: i64,
+    shared: i64,
+    owner_id: String,
+    owner_username: String,
+    post_idx: i64,
+    post_kind: String,
+    post_chapter: String,
+    post_text: String,
+    comment_id: String,
+    comment_username: String,
+    comment_text: String,
+    comment_created_at: i64,
+    comment_user_id: String,
+}
+
+impl ProfilePostRow {
+    fn into_record(self, viewer: &str) -> Result<ProfilePostRecord, ApiError> {
+        let book = BookRow {
+            id: self.id,
+            title: self.title,
+            author: self.author,
+            handle: self.handle,
+            imported_at: self.imported_at,
+            post_count: self.post_count,
+            progress_index: self.progress_index,
+            is_sample: self.is_sample,
+            shared: self.shared,
+            owner_id: self.owner_id,
+            owner_username: self.owner_username,
+        }
+        .into_record(viewer);
+        Ok(ProfilePostRecord {
+            book,
+            post: Post {
+                id: self.post_idx.to_string(),
+                kind: search::parse_kind(&self.post_kind)?,
+                text: self.post_text,
+                chapter: self.post_chapter,
+            },
+            comment: CommentRecord {
+                id: self.comment_id,
+                username: self.comment_username,
+                text: self.comment_text,
+                created_at: self.comment_created_at,
+                mine: self.comment_user_id == viewer,
+            },
+        })
+    }
+}
+
+async fn require_user(
+    pool: &sqlx::SqlitePool,
+    username: &str,
+) -> Result<(String, String, i64), ApiError> {
+    let (_, norm) = normalize_username(username)?;
+    let row = sqlx::query_as::<_, (String, String, i64)>(
+        "SELECT id, username, created_at FROM users WHERE username_norm = ?",
+    )
+    .bind(&norm)
+    .fetch_optional(pool)
+    .await?;
+    row.ok_or(ApiError::NotFound)
+}
+
+async fn visible_reply_count(
+    state: &AppState,
+    viewer: &str,
+    user_id: &str,
+) -> Result<i64, ApiError> {
+    let comment_posts = posts_for("c");
+    let count = sqlx::query_scalar::<_, i64>(&format!(
+        "SELECT COUNT(*)
+         FROM comments c
+         JOIN books b ON b.id = c.book_id
+         {comment_posts}
+         WHERE c.user_id = ? AND {BOOK_VISIBLE_TO}"
+    ))
+    .bind(user_id)
+    .bind(viewer)
+    .fetch_one(&state.pool)
+    .await?;
+    Ok(count)
+}
+
+async fn visible_repost_count(
+    state: &AppState,
+    viewer: &str,
+    user_id: &str,
+) -> Result<i64, ApiError> {
+    let repost_posts = posts_for("r");
+    let count = sqlx::query_scalar::<_, i64>(&format!(
+        "SELECT COUNT(*)
+         FROM reposts r
+         JOIN books b ON b.id = r.book_id
+         {repost_posts}
+         WHERE r.user_id = ? AND {BOOK_VISIBLE_TO}"
+    ))
+    .bind(user_id)
+    .bind(viewer)
+    .fetch_one(&state.pool)
+    .await?;
+    Ok(count)
 }
 
 pub async fn profile_replies(
@@ -572,19 +1272,6 @@ fn parse_book_id(id: &str) -> Result<Uuid, ApiError> {
     Uuid::parse_str(id).map_err(|_| ApiError::NotFound)
 }
 
-const BOOK_SELECT: &str = "
-SELECT b.id, b.title, b.author, b.handle, b.imported_at, b.post_count,
-       COALESCE(p.progress_index, 0) as progress_index,
-       b.is_sample, b.shared, b.user_id as owner_id, owner.username as owner_username
-FROM books b
-JOIN users owner ON owner.id = b.user_id
-LEFT JOIN book_progress p ON p.book_id = b.id AND p.user_id = ?
-";
-
-/// Book alias `b` is visible to the next bound user id. A hidden book is 404.
-/// Owned, shared by its owner, or the built-in sample.
-const BOOK_VISIBLE_TO: &str = "(b.user_id = ? OR b.shared = 1 OR b.is_sample = 1)";
-
 async fn book_record(state: &AppState, user_id: &str, id: &str) -> Result<BookRecord, ApiError> {
     Ok(visible_book(state, user_id, id).await?.into_record(user_id))
 }
@@ -623,7 +1310,39 @@ fn parse_post_id(post_id: &str) -> Result<String, ApiError> {
             post_id.chars().count()
         )));
     }
-    Ok(post_id.to_string())
+    // `00`, `+0`, and `abc` must not collapse onto post 0 through CAST.
+    let Ok(idx) = post_id.parse::<u32>() else {
+        return Err(ApiError::BadRequest(
+            "Post id is not a canonical index.".into(),
+        ));
+    };
+    let canonical = idx.to_string();
+    if canonical != post_id {
+        return Err(ApiError::BadRequest(
+            "Post id is not a canonical index.".into(),
+        ));
+    }
+    Ok(canonical)
+}
+
+async fn require_post(state: &AppState, book_id: &str, post_id: &str) -> Result<(), ApiError> {
+    let idx: i64 = post_id.parse().map_err(|_| ApiError::NotFound)?;
+    let found = sqlx::query_scalar::<_, i64>("SELECT 1 FROM posts WHERE book_id = ? AND idx = ?")
+        .bind(book_id)
+        .bind(idx)
+        .fetch_optional(&state.pool)
+        .await?;
+    found.map(|_| ()).ok_or(ApiError::NotFound)
+}
+
+/// `alias` is `c` or `r`. The idx comparison uses UNIQUE (book_id, idx).
+/// The text comparison rejects a non-canonical id that CASTs to that idx.
+fn posts_for(alias: &str) -> String {
+    format!(
+        "JOIN posts ON posts.book_id = {alias}.book_id \
+         AND posts.idx = CAST({alias}.post_id AS INTEGER) \
+         AND {alias}.post_id = CAST(posts.idx AS TEXT)"
+    )
 }
 
 fn parse_comment_text(raw: &str) -> Result<String, ApiError> {
@@ -686,6 +1405,7 @@ struct ParsedUpload {
     handle: String,
     is_sample: bool,
     post_count: i32,
+    posts: Posts,
     temp_dir: PathBuf,
 }
 
@@ -762,19 +1482,15 @@ async fn read_upload(state: &AppState, mut multipart: Multipart) -> Result<Parse
                 parsed.posts.len()
             ))
         })?;
-        write_posts(
-            &temp_dir,
-            &Posts {
-                posts: parsed.posts,
-            },
-        )
-        .await?;
         Ok(ParsedUpload {
             title,
             author,
             handle,
             is_sample,
             post_count,
+            posts: Posts {
+                posts: parsed.posts,
+            },
             temp_dir: temp_dir.clone(),
         })
     }

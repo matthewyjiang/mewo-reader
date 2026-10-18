@@ -5,6 +5,11 @@ use mewo_server::build;
 use mewo_server::config::Config;
 use serde_json::{json, Value};
 use sqlx::migrate::Migrate;
+use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
+use sqlx::SqlitePool;
+use std::path::Path;
+use std::str::FromStr;
+use std::time::Duration;
 use tempfile::TempDir;
 use tower::ServiceExt;
 
@@ -1205,4 +1210,2139 @@ async fn migration_marks_existing_books_shared() {
     .await
     .unwrap();
     assert_eq!(index, 1);
+}
+
+fn percent_encode(value: &str) -> String {
+    let mut out = String::new();
+    for b in value.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(b as char);
+            }
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    out
+}
+
+fn search_path(q: &str, kind: &str, cursor: Option<&str>) -> String {
+    let mut path = format!("/v1/search?q={}&type={kind}", percent_encode(q));
+    if let Some(cursor) = cursor {
+        path.push_str("&cursor=");
+        path.push_str(&percent_encode(cursor));
+    }
+    path
+}
+
+async fn search(
+    app: &axum::Router,
+    token: Option<&str>,
+    q: &str,
+    kind: &str,
+    cursor: Option<&str>,
+) -> (StatusCode, Value) {
+    empty_req(app, "GET", &search_path(q, kind, cursor), token).await
+}
+
+async fn search_all(app: &axum::Router, token: &str, q: &str, kind: &str) -> Vec<Value> {
+    let mut cursor = None;
+    let mut items = Vec::new();
+    for _ in 0..20 {
+        let (status, body) = search(app, Some(token), q, kind, cursor.as_deref()).await;
+        assert_eq!(status, StatusCode::OK, "{q} {kind} {body}");
+        assert_eq!(body["type"], kind);
+        assert!(body.get("nextCursor").is_some(), "{body}");
+        assert!(body.get("next_cursor").is_none(), "{body}");
+        let page = body["items"].as_array().expect("items").clone();
+        if body["nextCursor"].is_null() {
+            assert!(page.len() <= 20, "{body}");
+            items.extend(page);
+            return items;
+        }
+        assert_eq!(page.len(), 20, "{body}");
+        items.extend(page);
+        let next = body["nextCursor"].as_str().unwrap().to_string();
+        assert_ne!(cursor.as_deref(), Some(next.as_str()));
+        cursor = Some(next);
+    }
+    panic!("cursor did not end");
+}
+
+fn db_options(path: &Path) -> SqliteConnectOptions {
+    let url = format!("sqlite://{}?mode=rwc", path.join("mewo.db").display());
+    SqliteConnectOptions::from_str(&url)
+        .unwrap()
+        .create_if_missing(true)
+        .foreign_keys(true)
+        .busy_timeout(Duration::from_secs(5))
+}
+
+async fn open_db(path: &Path) -> SqlitePool {
+    SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect_with(db_options(path))
+        .await
+        .unwrap()
+}
+
+async fn count(pool: &SqlitePool, sql: &str, bind: Option<&str>) -> i64 {
+    let mut query = sqlx::query_scalar::<_, i64>(sql);
+    if let Some(bind) = bind {
+        query = query.bind(bind);
+    }
+    query.fetch_one(pool).await.unwrap()
+}
+
+#[tokio::test]
+async fn search_accounts_rank_prefix_before_infix_ignoring_case() {
+    let (app, _tmp) = app().await;
+    let zed = register(&app, "zed", "password1").await;
+    register(&app, "ali", "password1").await;
+    let alice = register(&app, "Alice", "password1").await;
+    register(&app, "xali", "password1").await;
+    register(&app, "malice", "password1").await;
+    register(&app, "bob", "password1").await;
+    register(&app, "a_b", "password1").await;
+    register(&app, "axb", "password1").await;
+
+    let (status, _) = search(&app, None, "ali", "accounts", None).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+    for q in ["ali", "ALI", "aLi"] {
+        let items = search_all(&app, &zed, q, "accounts").await;
+        let names: Vec<&str> = items
+            .iter()
+            .map(|row| row["username"].as_str().unwrap())
+            .collect();
+        assert_eq!(names, vec!["ali", "Alice", "xali", "malice"], "{q}");
+        assert!(items.iter().all(|row| row["mine"] == false));
+    }
+
+    let items = search_all(&app, &alice, "alice", "accounts").await;
+    assert_eq!(items[0]["username"], "Alice");
+    assert_eq!(items[0]["mine"], true);
+    assert!(items[1..].iter().all(|row| row["mine"] == false));
+
+    let items = search_all(&app, &zed, "a_b", "accounts").await;
+    assert_eq!(items.len(), 1, "{items:?}");
+    assert_eq!(items[0]["username"], "a_b");
+    let items = search_all(&app, &zed, "A_B", "accounts").await;
+    assert_eq!(items[0]["username"], "a_b");
+}
+
+#[tokio::test]
+async fn search_hides_private_books_and_drops_them_when_deleted() {
+    let (app, tmp) = app().await;
+    let matt = register(&app, "matt", "password1").await;
+    let ted = register(&app, "ted", "password1").await;
+    let (status, secret) = upload(
+        &app,
+        &matt,
+        "SecretTitle",
+        "Nope",
+        &common::epub(),
+        None,
+        false,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{secret}");
+    let secret_id = secret["id"].as_str().unwrap().to_string();
+    let (status, sample) = upload(
+        &app,
+        &matt,
+        "SampleTitle",
+        "Mewo",
+        &common::epub(),
+        None,
+        true,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{sample}");
+    let sample_id = sample["id"].as_str().unwrap();
+
+    let titles = |items: &[Value]| -> Vec<String> {
+        items
+            .iter()
+            .map(|row| row["title"].as_str().unwrap().to_string())
+            .collect()
+    };
+    let post_books = |items: &[Value]| -> Vec<String> {
+        items
+            .iter()
+            .map(|row| row["book"]["id"].as_str().unwrap().to_string())
+            .collect()
+    };
+
+    let hidden = search_all(&app, &ted, "SecretTitle", "books").await;
+    assert!(hidden.is_empty(), "{hidden:?}");
+    let by_owner = search_all(&app, &ted, "matt", "books").await;
+    assert_eq!(titles(&by_owner), vec!["SampleTitle".to_string()]);
+    let sample_hits = search_all(&app, &ted, "SampleTitle", "books").await;
+    assert_eq!(sample_hits.len(), 1);
+    assert_eq!(sample_hits[0]["isSample"], true);
+    assert_eq!(sample_hits[0]["mine"], false);
+    assert_eq!(sample_hits[0]["ownerUsername"], "matt");
+
+    let owner_books = search_all(&app, &matt, "SecretTitle", "books").await;
+    assert_eq!(owner_books[0]["id"], secret_id);
+    assert_eq!(owner_books[0]["mine"], true);
+
+    let ted_posts = search_all(&app, &ted, "second", "posts").await;
+    assert_eq!(post_books(&ted_posts), vec![sample_id.to_string()]);
+    assert_eq!(ted_posts[0]["post"]["id"], "1");
+    assert!(ted_posts[0]["post"]["text"]
+        .as_str()
+        .unwrap()
+        .contains("second"));
+    let matt_posts = search_all(&app, &matt, "second", "posts").await;
+    let mut matt_ids = post_books(&matt_posts);
+    matt_ids.sort();
+    let mut expected = vec![secret_id.clone(), sample_id.to_string()];
+    expected.sort();
+    assert_eq!(matt_ids, expected);
+
+    share(&app, &matt, &secret_id).await;
+    let shared = search_all(&app, &ted, "SecretTitle", "books").await;
+    assert_eq!(shared[0]["id"], secret_id);
+    assert_eq!(shared[0]["shared"], true);
+    let ted_posts = search_all(&app, &ted, "second", "posts").await;
+    assert_eq!(ted_posts.len(), 2, "{ted_posts:?}");
+
+    let (status, hidden) = json_req(
+        &app,
+        "PATCH",
+        &format!("/v1/books/{secret_id}"),
+        Some(&matt),
+        json!({ "shared": false }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{hidden}");
+    assert!(search_all(&app, &ted, "SecretTitle", "books")
+        .await
+        .is_empty());
+    assert_eq!(search_all(&app, &ted, "second", "posts").await.len(), 1);
+    assert_eq!(
+        search_all(&app, &matt, "SecretTitle", "books").await.len(),
+        1
+    );
+
+    let (status, _) = empty_req(
+        &app,
+        "DELETE",
+        &format!("/v1/books/{secret_id}"),
+        Some(&matt),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    assert!(search_all(&app, &matt, "SecretTitle", "books")
+        .await
+        .is_empty());
+    assert_eq!(search_all(&app, &matt, "second", "posts").await.len(), 1);
+
+    let pool = open_db(tmp.path()).await;
+    assert_eq!(
+        count(
+            &pool,
+            "SELECT COUNT(*) FROM posts WHERE book_id = ?",
+            Some(&secret_id)
+        )
+        .await,
+        0
+    );
+    assert_eq!(count(&pool, "SELECT COUNT(*) FROM posts", None).await, 3);
+    assert_eq!(count(&pool, "SELECT COUNT(*) FROM post_fts", None).await, 3);
+    assert_eq!(
+        count(
+            &pool,
+            "SELECT COUNT(*) FROM post_fts WHERE post_fts MATCH '\"second\"'",
+            None,
+        )
+        .await,
+        1
+    );
+}
+
+#[tokio::test]
+async fn search_books_rank_title_prefix_and_escape_like() {
+    let (app, _tmp) = app().await;
+    let matt = register(&app, "matt", "password1").await;
+    let mut uploaded = Vec::new();
+    for (title, author, handle) in [
+        ("The Cat Book", "Nope", "h1"),
+        ("Cat", "Nope", "h2"),
+        ("Catalog", "Nope", "h3"),
+        ("Dog", "Cat Person", "h4"),
+        ("Zebra", "Nope", "uniquehandle"),
+        ("100%_done", "Nope", "h5"),
+        ("100Xd", "Nope", "h6"),
+    ] {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        let (status, book) = upload_fields(
+            &app,
+            &matt,
+            &[
+                ("title", None, title.as_bytes()),
+                ("author", None, author.as_bytes()),
+                ("handle", None, handle.as_bytes()),
+                ("isSample", None, b"false"),
+                ("epub", Some("book.epub"), &common::epub()),
+            ],
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{book}");
+        uploaded.push(book);
+    }
+
+    let items = search_all(&app, &matt, "cat", "books").await;
+    let mut expected: Vec<&Value> = uploaded
+        .iter()
+        .filter(|book| {
+            let title = book["title"].as_str().unwrap();
+            let author = book["author"].as_str().unwrap();
+            let handle = book["handle"].as_str().unwrap();
+            let owner = book["ownerUsername"].as_str().unwrap();
+            [title, author, handle, owner]
+                .iter()
+                .any(|field| field.to_ascii_lowercase().contains("cat"))
+        })
+        .collect();
+    expected.sort_by_key(|book| {
+        let title = book["title"].as_str().unwrap().to_ascii_lowercase();
+        let prefix = if title.starts_with("cat") { 0 } else { 1 };
+        let imported = book["importedAt"].as_i64().unwrap();
+        (prefix, -imported, book["id"].as_str().unwrap().to_string())
+    });
+    let got: Vec<&str> = items
+        .iter()
+        .map(|row| row["id"].as_str().unwrap())
+        .collect();
+    let want: Vec<&str> = expected
+        .iter()
+        .map(|row| row["id"].as_str().unwrap())
+        .collect();
+    assert_eq!(got, want, "{items:?}");
+    assert_eq!(items[0]["title"], "Catalog");
+    assert_eq!(items[1]["title"], "Cat");
+
+    let again = search_all(&app, &matt, "CAT", "books").await;
+    let again_ids: Vec<&str> = again
+        .iter()
+        .map(|row| row["id"].as_str().unwrap())
+        .collect();
+    assert_eq!(again_ids, got);
+
+    let handle_hits = search_all(&app, &matt, "uniquehandle", "books").await;
+    assert_eq!(handle_hits.len(), 1);
+    assert_eq!(handle_hits[0]["title"], "Zebra");
+    let author_hits = search_all(&app, &matt, "CAT PERSON", "books").await;
+    assert_eq!(author_hits.len(), 1);
+    assert_eq!(author_hits[0]["title"], "Dog");
+
+    let literal = search_all(&app, &matt, "100%_", "books").await;
+    assert_eq!(literal.len(), 1, "{literal:?}");
+    assert_eq!(literal[0]["title"], "100%_done");
+    assert!(search_all(&app, &matt, "100_d", "books").await.is_empty());
+    let plain = search_all(&app, &matt, "100Xd", "books").await;
+    assert_eq!(plain.len(), 1);
+    assert_eq!(plain[0]["title"], "100Xd");
+}
+
+#[tokio::test]
+async fn search_cursors_list_every_match_once() {
+    let (app, _tmp) = app().await;
+    let viewer = register(&app, "viewer", "password1").await;
+    let mut accounts = Vec::new();
+    for i in 0..25 {
+        let name = format!("s{i:02}");
+        register(&app, &name, "password1").await;
+        accounts.push(name);
+    }
+    let once = search_all(&app, &viewer, "s", "accounts").await;
+    let twice = search_all(&app, &viewer, "s", "accounts").await;
+    let names = |items: &[Value]| -> Vec<String> {
+        items
+            .iter()
+            .map(|row| row["username"].as_str().unwrap().to_string())
+            .collect()
+    };
+    assert_eq!(names(&once), accounts);
+    assert_eq!(names(&once), names(&twice));
+    assert!(once.iter().all(|row| row["mine"] == false));
+
+    let mut books = Vec::new();
+    for i in 0..21 {
+        let title = format!("PageBook {i:02}");
+        let (status, book) =
+            upload(&app, &viewer, &title, "Nope", &common::epub(), None, false).await;
+        assert_eq!(status, StatusCode::OK, "{book}");
+        books.push(book["id"].as_str().unwrap().to_string());
+    }
+    let book_items = search_all(&app, &viewer, "PageBook", "books").await;
+    let book_again = search_all(&app, &viewer, "PageBook", "books").await;
+    let ids = |items: &[Value]| -> Vec<String> {
+        items
+            .iter()
+            .map(|row| row["id"].as_str().unwrap().to_string())
+            .collect()
+    };
+    let mut found = ids(&book_items);
+    let mut expect = books.clone();
+    found.sort();
+    expect.sort();
+    assert_eq!(found, expect);
+    assert_eq!(ids(&book_items), ids(&book_again));
+
+    let post_key = |items: &[Value]| -> Vec<String> {
+        items
+            .iter()
+            .map(|row| {
+                format!(
+                    "{}:{}",
+                    row["book"]["id"].as_str().unwrap(),
+                    row["post"]["id"].as_str().unwrap()
+                )
+            })
+            .collect()
+    };
+    let posts = search_all(&app, &viewer, "second", "posts").await;
+    let posts_again = search_all(&app, &viewer, "second", "posts").await;
+    assert_eq!(post_key(&posts), post_key(&posts_again));
+    let mut keys = post_key(&posts);
+    keys.sort();
+    let mut want = Vec::new();
+    for id in &books {
+        want.push(format!("{id}:1"));
+    }
+    want.sort();
+    assert_eq!(keys, want);
+    assert!(posts
+        .iter()
+        .all(|row| row["post"]["text"].as_str().unwrap().contains("second")));
+}
+
+#[tokio::test]
+async fn search_rejects_bad_queries_and_sanitizes_fts() {
+    let (app, _tmp) = app().await;
+    let token = register(&app, "matt", "password1").await;
+    let (status, book) = upload(&app, &token, "Book", "Writer", &common::epub(), None, false).await;
+    assert_eq!(status, StatusCode::OK, "{book}");
+
+    for q in ["", "   ", "\t"] {
+        let (status, body) = search(&app, Some(&token), q, "posts", None).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{q:?} {body}");
+        assert!(body["error"].as_str().unwrap().contains("Enter a search."));
+    }
+    let long = "a".repeat(101);
+    let (status, body) = search(&app, Some(&token), &long, "accounts", None).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    let error = body["error"].as_str().unwrap();
+    assert!(error.contains("100"), "{error}");
+    assert!(error.contains("asked 101"), "{error}");
+    let (status, body) = search(&app, Some(&token), &"a".repeat(100), "accounts", None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(body["items"].as_array().unwrap().is_empty());
+
+    for q in [
+        "\"",
+        "*",
+        "NEAR",
+        "-",
+        "(",
+        ")",
+        "\" * NEAR - ( )",
+        "first OR second",
+        "para*",
+    ] {
+        let (status, body) = search(&app, Some(&token), q, "posts", None).await;
+        assert_eq!(status, StatusCode::OK, "{q} {body}");
+        assert!(body["items"].is_array(), "{q} {body}");
+    }
+
+    let hits = search_all(&app, &token, "first para", "posts").await;
+    assert_eq!(hits.len(), 1, "{hits:?}");
+    assert!(hits[0]["post"]["text"]
+        .as_str()
+        .unwrap()
+        .to_ascii_lowercase()
+        .contains("first"));
+    assert!(hits[0]["post"]["text"]
+        .as_str()
+        .unwrap()
+        .to_ascii_lowercase()
+        .contains("para"));
+
+    let (status, body) = search(&app, Some(&token), "para", "posts", Some("%%%")).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body["error"].as_str().unwrap().contains("page token"));
+}
+
+#[tokio::test]
+async fn profile_hides_private_replies_and_pages_newest_first() {
+    let (app, _tmp) = app().await;
+    let matt = register(&app, "matt", "password1").await;
+    let ted = register(&app, "ted", "password1").await;
+    let (status, shared) = upload(&app, &matt, "Shared", "A", &common::epub(), None, false).await;
+    assert_eq!(status, StatusCode::OK, "{shared}");
+    let shared_id = shared["id"].as_str().unwrap();
+    share(&app, &matt, shared_id).await;
+    let (status, private) = upload(&app, &matt, "Private", "A", &common::epub(), None, false).await;
+    assert_eq!(status, StatusCode::OK, "{private}");
+    let private_id = private["id"].as_str().unwrap();
+
+    for i in 0..31 {
+        tokio::time::sleep(Duration::from_millis(5)).await;
+        let (status, body) = json_req(
+            &app,
+            "POST",
+            &format!("/v1/books/{shared_id}/comments/0"),
+            Some(&matt),
+            json!({ "text": format!("c{i}") }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+    }
+    tokio::time::sleep(Duration::from_millis(5)).await;
+    let (status, body) = json_req(
+        &app,
+        "POST",
+        &format!("/v1/books/{private_id}/comments/1"),
+        Some(&matt),
+        json!({ "text": "secret-reply" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    let (status, missing) = empty_req(&app, "GET", "/v1/users/nobody", Some(&ted)).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{missing}");
+    let (status, missing_posts) =
+        empty_req(&app, "GET", "/v1/users/nobody/posts", Some(&ted)).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{missing_posts}");
+    let (status, old_missing) =
+        empty_req(&app, "GET", "/v1/profiles/nobody/replies", Some(&ted)).await;
+    assert_eq!(status, StatusCode::OK, "{old_missing}");
+    assert_eq!(old_missing["username"], "nobody");
+    assert_eq!(old_missing["replies"], json!([]));
+
+    let (status, ted_view) = empty_req(&app, "GET", "/v1/users/matt", Some(&ted)).await;
+    assert_eq!(status, StatusCode::OK, "{ted_view}");
+    assert_eq!(ted_view["username"], "matt");
+    assert_eq!(ted_view["postCount"], 31);
+    assert_eq!(ted_view["mine"], false);
+    assert!(ted_view["joinedAt"].as_i64().unwrap() > 0);
+    assert!(ted_view.get("joined_at").is_none());
+    let (status, mine) = empty_req(&app, "GET", "/v1/users/Matt", Some(&matt)).await;
+    assert_eq!(status, StatusCode::OK, "{mine}");
+    assert_eq!(mine["postCount"], 32);
+    assert_eq!(mine["mine"], true);
+
+    let load = |token: String, cursor: Option<String>| {
+        let app = app.clone();
+        async move {
+            let path = match cursor {
+                Some(cursor) => format!("/v1/users/matt/posts?cursor={}", percent_encode(&cursor)),
+                None => "/v1/users/matt/posts".to_string(),
+            };
+            empty_req(&app, "GET", &path, Some(&token)).await
+        }
+    };
+    let mut ted_items = Vec::new();
+    let mut cursor = None;
+    for _ in 0..5 {
+        let (status, page) = load(ted.clone(), cursor.clone()).await;
+        assert_eq!(status, StatusCode::OK, "{page}");
+        assert!(page.get("nextCursor").is_some());
+        let items = page["items"].as_array().unwrap();
+        if page["nextCursor"].is_null() {
+            ted_items.extend(items.clone());
+            break;
+        }
+        assert_eq!(items.len(), 30, "{page}");
+        ted_items.extend(items.clone());
+        cursor = Some(page["nextCursor"].as_str().unwrap().to_string());
+    }
+    assert_eq!(ted_items.len(), 31);
+    let texts: Vec<&str> = ted_items
+        .iter()
+        .map(|row| row["comment"]["text"].as_str().unwrap())
+        .collect();
+    assert_eq!(texts[0], "c30");
+    assert_eq!(texts[30], "c0");
+    assert!(texts.iter().all(|text| *text != "secret-reply"));
+    for pair in ted_items.windows(2) {
+        assert!(
+            pair[0]["comment"]["createdAt"].as_i64().unwrap()
+                >= pair[1]["comment"]["createdAt"].as_i64().unwrap()
+        );
+    }
+    assert!(ted_items.iter().all(|row| {
+        row["book"]["id"] == shared_id
+            && row["post"]["id"] == "0"
+            && row["post"]["kind"] == "Heading"
+            && row["post"]["text"] == "Chapter I"
+            && row["comment"]["mine"] == false
+            && row["comment"]["username"] == "matt"
+            && row["comment"].get("created_at").is_none()
+    }));
+    let mut ids: Vec<&str> = ted_items
+        .iter()
+        .map(|row| row["comment"]["id"].as_str().unwrap())
+        .collect();
+    ids.sort();
+    ids.dedup();
+    assert_eq!(ids.len(), 31);
+
+    let (status, owner_page) = empty_req(&app, "GET", "/v1/users/matt/posts", Some(&matt)).await;
+    assert_eq!(status, StatusCode::OK, "{owner_page}");
+    let owner_texts: Vec<&str> = owner_page["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|row| row["comment"]["text"].as_str().unwrap())
+        .collect();
+    assert_eq!(owner_texts[0], "secret-reply");
+    assert_eq!(owner_page["items"][0]["book"]["id"], private_id);
+    assert_eq!(owner_page["items"][0]["post"]["id"], "1");
+    assert!(owner_page["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|row| row["comment"]["mine"] == true));
+
+    let (status, old) = empty_req(&app, "GET", "/v1/profiles/matt/replies", Some(&ted)).await;
+    assert_eq!(status, StatusCode::OK, "{old}");
+    assert_eq!(old["username"], "matt");
+    let old_replies = old["replies"].as_array().unwrap();
+    assert_eq!(old_replies.len(), 31);
+    assert!(old_replies.iter().all(|row| {
+        row["bookId"] == shared_id
+            && row["comment"]["text"] != "secret-reply"
+            && row.get("post").is_none()
+    }));
+
+    let (status, bad) = empty_req(&app, "GET", "/v1/users/matt/posts?cursor=%%%", Some(&ted)).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{bad}");
+}
+
+#[tokio::test]
+async fn migration_adds_search_on_an_existing_database() {
+    let tmp = TempDir::new().unwrap();
+    let pool = open_db(tmp.path()).await;
+    let migrator = sqlx::migrate!("./migrations");
+    let mut conn = pool.acquire().await.unwrap();
+    Migrate::ensure_migrations_table(&mut *conn).await.unwrap();
+    for migration in migrator.iter() {
+        if migration.version < 5 {
+            Migrate::apply(&mut *conn, migration).await.unwrap();
+        }
+    }
+    drop(conn);
+
+    sqlx::query(
+        "INSERT INTO users (id, username, username_norm, password_hash, created_at)
+         VALUES ('user', 'matt', 'matt', 'x', 1)",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO books (id, user_id, title, author, handle, imported_at)
+         VALUES ('book', 'user', 'Old', 'Author', 'author', 1)",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    assert!(
+        sqlx::query_scalar::<_, i64>("SELECT posts_indexed FROM books WHERE id = 'book'")
+            .fetch_one(&pool)
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        count(
+            &pool,
+            "SELECT COUNT(*) FROM sqlite_master WHERE name = 'posts'",
+            None
+        )
+        .await,
+        0
+    );
+
+    sqlx::migrate!("./migrations").run(&pool).await.unwrap();
+
+    assert_eq!(
+        count(
+            &pool,
+            "SELECT posts_indexed FROM books WHERE id = 'book'",
+            None
+        )
+        .await,
+        0
+    );
+    sqlx::query(
+        "INSERT INTO books (id, user_id, title, author, handle, imported_at)
+         VALUES ('new', 'user', 'New', 'Author', 'author', 2)",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        count(
+            &pool,
+            "SELECT posts_indexed FROM books WHERE id = 'new'",
+            None
+        )
+        .await,
+        0
+    );
+    let triggers: Vec<String> = sqlx::query_scalar(
+        "SELECT name FROM sqlite_master WHERE type = 'trigger' AND tbl_name = 'posts' ORDER BY name",
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        triggers,
+        vec!["posts_ad".to_string(), "posts_ai".to_string()]
+    );
+    assert_eq!(
+        count(
+            &pool,
+            "SELECT COUNT(*) FROM sqlite_master WHERE name = 'post_fts'",
+            None
+        )
+        .await,
+        1
+    );
+    assert_eq!(
+        count(
+            &pool,
+            "SELECT COUNT(*) FROM sqlite_master WHERE name = 'reposts'",
+            None
+        )
+        .await,
+        1
+    );
+    let repost_indexes: Vec<String> = sqlx::query_scalar(
+        "SELECT name FROM sqlite_master
+         WHERE type = 'index' AND tbl_name = 'reposts' AND sql IS NOT NULL
+         ORDER BY name",
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        repost_indexes,
+        vec!["reposts_created".to_string(), "reposts_user".to_string()]
+    );
+
+    sqlx::query(
+        "INSERT INTO posts (book_id, idx, kind, chapter, text)
+         VALUES ('book', 0, 'Body', 'Ch', 'secretword')",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        count(
+            &pool,
+            "SELECT COUNT(*) FROM post_fts WHERE post_fts MATCH 'secretword'",
+            None,
+        )
+        .await,
+        1
+    );
+    sqlx::query(
+        "INSERT INTO reposts (user_id, book_id, post_id, created_at)
+         VALUES ('user', 'book', '0', 1), ('user', 'new', '0', 2)",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query("DELETE FROM books WHERE id = 'book'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        count(
+            &pool,
+            "SELECT COUNT(*) FROM posts WHERE book_id = 'book'",
+            None
+        )
+        .await,
+        0
+    );
+    assert_eq!(
+        count(
+            &pool,
+            "SELECT COUNT(*) FROM reposts WHERE book_id = 'book'",
+            None
+        )
+        .await,
+        0
+    );
+    assert_eq!(
+        count(
+            &pool,
+            "SELECT COUNT(*) FROM reposts WHERE book_id = 'new'",
+            None
+        )
+        .await,
+        1
+    );
+    assert_eq!(
+        count(
+            &pool,
+            "SELECT COUNT(*) FROM post_fts WHERE post_fts MATCH 'secretword'",
+            None,
+        )
+        .await,
+        0
+    );
+}
+
+#[tokio::test]
+async fn backfill_indexes_unindexed_books_once() {
+    let tmp = TempDir::new().unwrap();
+    let pool = open_db(tmp.path()).await;
+    sqlx::migrate!("./migrations").run(&pool).await.unwrap();
+    sqlx::query(
+        "INSERT INTO users (id, username, username_norm, password_hash, created_at)
+         VALUES ('owner', 'owner', 'owner', 'x', 1)",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO sessions (token, user_id, created_at) VALUES ('backfill-token', 'owner', 1)",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO books
+         (id, user_id, title, author, handle, imported_at, post_count, progress_index, is_sample, shared, posts_indexed)
+         VALUES ('cached-book', 'owner', 'Cached', 'Author', 'author', 1, 1, 0, 0, 0, 0),
+                ('legacy-book', 'owner', 'Legacy', 'Author', 'author', 2, 0, 0, 0, 0, 0)",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    pool.close().await;
+
+    let cached = tmp.path().join("books").join("owner").join("cached-book");
+    let legacy = tmp.path().join("books").join("owner").join("legacy-book");
+    tokio::fs::create_dir_all(&cached).await.unwrap();
+    tokio::fs::create_dir_all(&legacy).await.unwrap();
+    let epub = common::epub();
+    tokio::fs::write(cached.join("book.epub"), &epub)
+        .await
+        .unwrap();
+    tokio::fs::write(legacy.join("book.epub"), &epub)
+        .await
+        .unwrap();
+    tokio::fs::write(
+        cached.join("posts.json"),
+        r#"{"posts":[{"id":"0","kind":"Body","text":"cacheonlyword","chapter":"Cache"}]}"#,
+    )
+    .await
+    .unwrap();
+
+    let config = Config {
+        listen: "127.0.0.1:0".into(),
+        data_dir: tmp.path().to_path_buf(),
+        web_dir: None,
+        allow_signup: true,
+        max_epub_bytes: 1024 * 1024,
+    };
+    let app = build(config.clone()).await.unwrap();
+    let pool = open_db(tmp.path()).await;
+    let start = std::time::Instant::now();
+    loop {
+        let pending = count(
+            &pool,
+            "SELECT COUNT(*) FROM books WHERE posts_indexed = 0",
+            None,
+        )
+        .await;
+        if pending == 0 {
+            break;
+        }
+        assert!(
+            start.elapsed() < Duration::from_secs(15),
+            "backfill did not finish"
+        );
+        tokio::time::sleep(Duration::from_millis(30)).await;
+    }
+
+    let token = "backfill-token";
+    let cached_hits = search_all(&app, token, "cacheonlyword", "posts").await;
+    assert_eq!(cached_hits.len(), 1, "{cached_hits:?}");
+    assert_eq!(cached_hits[0]["book"]["id"], "cached-book");
+    assert_eq!(cached_hits[0]["post"]["text"], "cacheonlyword");
+    let parsed = search_all(&app, token, "paragraph", "posts").await;
+    assert_eq!(parsed.len(), 2, "{parsed:?}");
+    assert!(parsed.iter().all(|row| row["book"]["id"] == "legacy-book"));
+    let legacy_json: Value =
+        serde_json::from_slice(&tokio::fs::read(legacy.join("posts.json")).await.unwrap()).unwrap();
+    assert!(legacy_json["posts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|post| post["text"].as_str().unwrap().contains("Last paragraph")));
+    assert_eq!(
+        count(
+            &pool,
+            "SELECT COUNT(*) FROM posts WHERE book_id = 'cached-book'",
+            None
+        )
+        .await,
+        1
+    );
+    assert_eq!(
+        count(
+            &pool,
+            "SELECT COUNT(*) FROM posts WHERE book_id = 'legacy-book'",
+            None
+        )
+        .await,
+        3
+    );
+
+    let signature: Vec<String> = sqlx::query_scalar(
+        "SELECT rowid || ':' || book_id || ':' || idx || ':' || text
+         FROM posts ORDER BY book_id, idx",
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    let cached_mtime = tokio::fs::metadata(cached.join("posts.json"))
+        .await
+        .unwrap()
+        .modified()
+        .unwrap();
+    let legacy_mtime = tokio::fs::metadata(legacy.join("posts.json"))
+        .await
+        .unwrap()
+        .modified()
+        .unwrap();
+
+    let third = tmp.path().join("books").join("owner").join("third-book");
+    tokio::fs::create_dir_all(&third).await.unwrap();
+    tokio::fs::write(third.join("book.epub"), &epub)
+        .await
+        .unwrap();
+    tokio::fs::write(
+        third.join("posts.json"),
+        r#"{"posts":[{"id":"0","kind":"Body","text":"thirdword","chapter":"Later"}]}"#,
+    )
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO books
+         (id, user_id, title, author, handle, imported_at, post_count, progress_index, is_sample, shared, posts_indexed)
+         VALUES ('third-book', 'owner', 'Third', 'Author', 'author', 3, 1, 0, 0, 0, 0)",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let app = build(config).await.unwrap();
+    let start = std::time::Instant::now();
+    loop {
+        let indexed = count(
+            &pool,
+            "SELECT posts_indexed FROM books WHERE id = 'third-book'",
+            None,
+        )
+        .await;
+        if indexed == 1 {
+            break;
+        }
+        assert!(
+            start.elapsed() < Duration::from_secs(15),
+            "second backfill did not index the new book"
+        );
+        tokio::time::sleep(Duration::from_millis(30)).await;
+    }
+    let third_hits = search_all(&app, token, "thirdword", "posts").await;
+    assert_eq!(third_hits.len(), 1);
+    assert_eq!(third_hits[0]["book"]["id"], "third-book");
+
+    let again: Vec<String> = sqlx::query_scalar(
+        "SELECT rowid || ':' || book_id || ':' || idx || ':' || text
+         FROM posts WHERE book_id != 'third-book' ORDER BY book_id, idx",
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(again, signature);
+    assert_eq!(
+        tokio::fs::metadata(cached.join("posts.json"))
+            .await
+            .unwrap()
+            .modified()
+            .unwrap(),
+        cached_mtime
+    );
+    assert_eq!(
+        tokio::fs::metadata(legacy.join("posts.json"))
+            .await
+            .unwrap()
+            .modified()
+            .unwrap(),
+        legacy_mtime
+    );
+}
+
+fn repost_path(id: &str, post: &str) -> String {
+    format!("/v1/books/{id}/posts/{}/repost", percent_encode(post))
+}
+
+async fn unshare(app: &axum::Router, token: &str, id: &str) {
+    let (status, body) = json_req(
+        app,
+        "PATCH",
+        &format!("/v1/books/{id}"),
+        Some(token),
+        json!({ "shared": false }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["shared"], false);
+}
+
+async fn pause() {
+    tokio::time::sleep(Duration::from_millis(8)).await;
+}
+
+async fn feed_all(app: &axum::Router, token: &str) -> Vec<Value> {
+    let mut cursor: Option<String> = None;
+    let mut items = Vec::new();
+    for _ in 0..20 {
+        let path = match &cursor {
+            Some(cursor) => format!("/v1/feed?cursor={}", percent_encode(cursor)),
+            None => "/v1/feed".to_string(),
+        };
+        let (status, page) = empty_req(app, "GET", &path, Some(token)).await;
+        assert_eq!(status, StatusCode::OK, "{page}");
+        assert!(page.get("nextCursor").is_some(), "{page}");
+        assert!(page.get("next_cursor").is_none(), "{page}");
+        let batch = page["items"].as_array().expect("items");
+        if page["nextCursor"].is_null() {
+            assert!(batch.len() <= 20, "{page}");
+            items.extend(batch.clone());
+            return items;
+        }
+        assert_eq!(batch.len(), 20, "{page}");
+        items.extend(batch.clone());
+        let next = page["nextCursor"].as_str().unwrap().to_string();
+        assert_ne!(cursor.as_deref(), Some(next.as_str()));
+        cursor = Some(next);
+    }
+    panic!("feed cursor did not end");
+}
+
+fn feed_identity(item: &Value) -> String {
+    let kind = item["type"].as_str().unwrap();
+    let actor = item["actor"]["username"].as_str().unwrap();
+    let book = item["book"]["id"].as_str().unwrap();
+    let post = item["post"]["id"].as_str().unwrap();
+    match kind {
+        "comment" => format!(
+            "comment:{actor}:{book}:{post}:{}",
+            item["comment"]["text"].as_str().unwrap()
+        ),
+        "repost" => format!("repost:{actor}:{book}:{post}"),
+        other => panic!("unexpected feed type {other}"),
+    }
+}
+
+fn assert_feed_order(items: &[Value]) {
+    for pair in items.windows(2) {
+        let a_at = pair[0]["at"].as_i64().unwrap();
+        let b_at = pair[1]["at"].as_i64().unwrap();
+        assert!(a_at >= b_at, "{pair:?}");
+        if a_at != b_at {
+            continue;
+        }
+        let rank = |item: &Value| if item["type"] == "repost" { 1 } else { 0 };
+        assert!(rank(&pair[0]) >= rank(&pair[1]), "{pair:?}");
+        if pair[0]["type"] == "comment" && pair[1]["type"] == "comment" {
+            assert!(
+                pair[0]["comment"]["id"].as_str().unwrap()
+                    >= pair[1]["comment"]["id"].as_str().unwrap()
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn repost_put_and_delete_are_idempotent() {
+    let (app, _tmp) = app().await;
+    let matt = register(&app, "matt", "password1").await;
+    let ted = register(&app, "ted", "password1").await;
+    let epub = common::epub();
+    let (status, book) = upload(&app, &matt, "Shared", "Author", &epub, None, false).await;
+    assert_eq!(status, StatusCode::OK, "{book}");
+    let id = book["id"].as_str().unwrap();
+    share(&app, &matt, id).await;
+    let path = repost_path(id, "0");
+
+    let (status, _) = empty_req(&app, "PUT", &path, None).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+    let (status, body) = empty_req(&app, "PUT", &path, Some(&matt)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["reposts"], 1);
+    assert_eq!(body["reposted"], true);
+    let (status, again) = empty_req(&app, "PUT", &path, Some(&matt)).await;
+    assert_eq!(status, StatusCode::OK, "{again}");
+    assert_eq!(again, body);
+
+    let (status, index) = empty_req(
+        &app,
+        "GET",
+        &format!("/v1/books/{id}/comments"),
+        Some(&matt),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{index}");
+    assert_eq!(index["reposts"]["0"], 1);
+    assert_eq!(index["reposted"], json!(["0"]));
+    assert!(index["counts"].as_object().unwrap().is_empty());
+    assert_eq!(index["mine"], json!([]));
+
+    let (status, ted_index) =
+        empty_req(&app, "GET", &format!("/v1/books/{id}/comments"), Some(&ted)).await;
+    assert_eq!(status, StatusCode::OK, "{ted_index}");
+    assert_eq!(ted_index["reposts"]["0"], 1);
+    assert_eq!(ted_index["reposted"], json!([]));
+
+    let (status, ted_put) = empty_req(&app, "PUT", &path, Some(&ted)).await;
+    assert_eq!(status, StatusCode::OK, "{ted_put}");
+    assert_eq!(ted_put["reposts"], 2);
+    assert_eq!(ted_put["reposted"], true);
+    let (status, matt_index) = empty_req(
+        &app,
+        "GET",
+        &format!("/v1/books/{id}/comments"),
+        Some(&matt),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{matt_index}");
+    assert_eq!(matt_index["reposts"]["0"], 2);
+    assert_eq!(matt_index["reposted"], json!(["0"]));
+
+    let (status, other) = empty_req(&app, "PUT", &repost_path(id, "1"), Some(&matt)).await;
+    assert_eq!(status, StatusCode::OK, "{other}");
+    assert_eq!(other["reposts"], 1);
+    let (status, gone) = empty_req(&app, "DELETE", &repost_path(id, "1"), Some(&matt)).await;
+    assert_eq!(status, StatusCode::OK, "{gone}");
+    assert_eq!(gone["reposts"], 0);
+    assert_eq!(gone["reposted"], false);
+
+    let (status, deleted) = empty_req(&app, "DELETE", &path, Some(&matt)).await;
+    assert_eq!(status, StatusCode::OK, "{deleted}");
+    assert_eq!(deleted["reposts"], 1);
+    assert_eq!(deleted["reposted"], false);
+    let (status, deleted_again) = empty_req(&app, "DELETE", &path, Some(&matt)).await;
+    assert_eq!(status, StatusCode::OK, "{deleted_again}");
+    assert_eq!(deleted_again, deleted);
+
+    let (status, clear) = empty_req(&app, "DELETE", &path, Some(&ted)).await;
+    assert_eq!(status, StatusCode::OK, "{clear}");
+    assert_eq!(clear["reposts"], 0);
+    assert_eq!(clear["reposted"], false);
+    let (status, empty) =
+        empty_req(&app, "GET", &format!("/v1/books/{id}/comments"), Some(&ted)).await;
+    assert_eq!(status, StatusCode::OK, "{empty}");
+    assert_eq!(empty["reposts"], json!({}));
+    assert_eq!(empty["reposted"], json!([]));
+}
+
+#[tokio::test]
+async fn repost_on_another_users_private_book_is_404() {
+    let (app, tmp) = app().await;
+    let matt = register(&app, "matt", "password1").await;
+    let ted = register(&app, "ted", "password1").await;
+    let epub = common::epub();
+    let (status, book) = upload(&app, &matt, "Private", "Author", &epub, None, false).await;
+    assert_eq!(status, StatusCode::OK, "{book}");
+    let id = book["id"].as_str().unwrap().to_string();
+    let path = repost_path(&id, "0");
+
+    let (status, body) = empty_req(&app, "PUT", &path, Some(&ted)).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    let (status, body) = empty_req(&app, "DELETE", &path, Some(&ted)).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+
+    let (status, mine) = empty_req(&app, "PUT", &path, Some(&matt)).await;
+    assert_eq!(status, StatusCode::OK, "{mine}");
+    assert_eq!(mine["reposts"], 1);
+    assert_eq!(mine["reposted"], true);
+    let (status, body) = empty_req(&app, "DELETE", &path, Some(&ted)).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+
+    let pool = open_db(tmp.path()).await;
+    assert_eq!(
+        count(
+            &pool,
+            "SELECT COUNT(*) FROM reposts WHERE book_id = ?",
+            Some(&id)
+        )
+        .await,
+        1
+    );
+}
+
+#[tokio::test]
+async fn private_reposts_leave_other_feeds_and_counts() {
+    let (app, _tmp) = app().await;
+    let matt = register(&app, "matt", "password1").await;
+    let ted = register(&app, "ted", "password1").await;
+    let epub = common::epub();
+    let (status, private_book) = upload(&app, &matt, "Private", "Author", &epub, None, false).await;
+    assert_eq!(status, StatusCode::OK, "{private_book}");
+    let private_id = private_book["id"].as_str().unwrap().to_string();
+    let (status, body) = json_req(
+        &app,
+        "POST",
+        &format!("/v1/books/{private_id}/comments/0"),
+        Some(&matt),
+        json!({ "text": "own-private" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    pause().await;
+    let (status, body) = empty_req(&app, "PUT", &repost_path(&private_id, "1"), Some(&matt)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    let (status, shared_book) = upload(&app, &matt, "Shared", "Author", &epub, None, false).await;
+    assert_eq!(status, StatusCode::OK, "{shared_book}");
+    let shared_id = shared_book["id"].as_str().unwrap().to_string();
+    share(&app, &matt, &shared_id).await;
+    pause().await;
+    let (status, body) = json_req(
+        &app,
+        "POST",
+        &format!("/v1/books/{shared_id}/comments/0"),
+        Some(&matt),
+        json!({ "text": "matt-shared" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    pause().await;
+    let (status, body) = empty_req(&app, "PUT", &repost_path(&shared_id, "0"), Some(&matt)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    pause().await;
+    let (status, body) = json_req(
+        &app,
+        "POST",
+        &format!("/v1/books/{shared_id}/comments/1"),
+        Some(&ted),
+        json!({ "text": "ted-shared" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    pause().await;
+    let (status, body) = empty_req(&app, "PUT", &repost_path(&shared_id, "1"), Some(&ted)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    let ted_feed = feed_all(&app, &ted).await;
+    assert!(
+        ted_feed.iter().all(|row| row["book"]["id"] == shared_id),
+        "{ted_feed:?}"
+    );
+    assert_eq!(ted_feed.len(), 4, "{ted_feed:?}");
+
+    let matt_feed = feed_all(&app, &matt).await;
+    assert_eq!(matt_feed.len(), 6, "{matt_feed:?}");
+    assert!(matt_feed
+        .iter()
+        .any(|row| { row["book"]["id"] == private_id && row["actor"]["username"] == "matt" }));
+    assert!(matt_feed
+        .iter()
+        .any(|row| { row["book"]["id"] == shared_id && row["actor"]["username"] == "ted" }));
+    assert!(matt_feed
+        .iter()
+        .any(|row| row["type"] == "comment" && row["comment"]["mine"] == true));
+
+    let (status, ted_profile) = empty_req(&app, "GET", "/v1/users/ted", Some(&ted)).await;
+    assert_eq!(status, StatusCode::OK, "{ted_profile}");
+    assert_eq!(ted_profile["repostCount"], 1);
+    let (status, matt_as_ted) = empty_req(&app, "GET", "/v1/users/matt", Some(&ted)).await;
+    assert_eq!(status, StatusCode::OK, "{matt_as_ted}");
+    assert_eq!(matt_as_ted["repostCount"], 1);
+    let (status, matt_as_matt) = empty_req(&app, "GET", "/v1/users/matt", Some(&matt)).await;
+    assert_eq!(status, StatusCode::OK, "{matt_as_matt}");
+    assert_eq!(matt_as_matt["repostCount"], 2);
+
+    unshare(&app, &matt, &shared_id).await;
+
+    let ted_after = feed_all(&app, &ted).await;
+    assert!(ted_after.is_empty(), "{ted_after:?}");
+    let matt_after = feed_all(&app, &matt).await;
+    assert_eq!(matt_after.len(), 6, "{matt_after:?}");
+    assert!(matt_after.iter().any(|row| {
+        row["actor"]["username"] == "matt"
+            && row["book"]["id"] == shared_id
+            && row["type"] == "repost"
+    }));
+    assert!(matt_after
+        .iter()
+        .any(|row| row["actor"]["username"] == "ted" && row["type"] == "repost"));
+    assert!(matt_after.iter().any(|row| row["book"]["id"] == private_id));
+
+    let (status, ted_reposts) = empty_req(&app, "GET", "/v1/users/ted/reposts", Some(&ted)).await;
+    assert_eq!(status, StatusCode::OK, "{ted_reposts}");
+    assert_eq!(ted_reposts["items"], json!([]));
+    assert!(ted_reposts["nextCursor"].is_null());
+    let (status, ted_self) = empty_req(&app, "GET", "/v1/users/ted", Some(&ted)).await;
+    assert_eq!(status, StatusCode::OK, "{ted_self}");
+    assert_eq!(ted_self["repostCount"], 0);
+    let (status, matt_hidden) = empty_req(&app, "GET", "/v1/users/matt", Some(&ted)).await;
+    assert_eq!(status, StatusCode::OK, "{matt_hidden}");
+    assert_eq!(matt_hidden["repostCount"], 0);
+    let (status, matt_reposts_hidden) =
+        empty_req(&app, "GET", "/v1/users/matt/reposts", Some(&ted)).await;
+    assert_eq!(status, StatusCode::OK, "{matt_reposts_hidden}");
+    assert_eq!(matt_reposts_hidden["items"], json!([]));
+
+    let (status, owner_count) = empty_req(&app, "GET", "/v1/users/matt", Some(&matt)).await;
+    assert_eq!(status, StatusCode::OK, "{owner_count}");
+    assert_eq!(owner_count["repostCount"], 2);
+    let (status, owner_reposts) =
+        empty_req(&app, "GET", "/v1/users/matt/reposts", Some(&matt)).await;
+    assert_eq!(status, StatusCode::OK, "{owner_reposts}");
+    let rows = owner_reposts["items"].as_array().unwrap();
+    assert_eq!(rows.len(), 2);
+    assert!(rows[0]["repostedAt"].as_i64().unwrap() >= rows[1]["repostedAt"].as_i64().unwrap());
+    assert!(rows[0].get("reposted_at").is_none());
+    let mut pairs: Vec<(String, String)> = rows
+        .iter()
+        .map(|row| {
+            (
+                row["book"]["id"].as_str().unwrap().to_string(),
+                row["post"]["id"].as_str().unwrap().to_string(),
+            )
+        })
+        .collect();
+    pairs.sort();
+    let mut expected = vec![(private_id, "1".to_string()), (shared_id, "0".to_string())];
+    expected.sort();
+    assert_eq!(pairs, expected);
+}
+
+enum Made {
+    Comment {
+        text: String,
+    },
+    Repost {
+        actor: &'static str,
+        post: &'static str,
+    },
+}
+
+#[tokio::test]
+async fn feed_orders_and_pages_a_comment_repost_mix() {
+    let (app, tmp) = app().await;
+    let matt = register(&app, "matt", "password1").await;
+    let ted = register(&app, "ted", "password1").await;
+    let epub = common::epub();
+    let (status, book) = upload(&app, &matt, "Feed", "Author", &epub, None, false).await;
+    assert_eq!(status, StatusCode::OK, "{book}");
+    let id = book["id"].as_str().unwrap().to_string();
+    share(&app, &matt, &id).await;
+    let (status, quiet) = upload(&app, &matt, "Quiet", "Author", &epub, None, false).await;
+    assert_eq!(status, StatusCode::OK, "{quiet}");
+    let quiet_id = quiet["id"].as_str().unwrap();
+    share(&app, &matt, quiet_id).await;
+
+    let (status, _) = empty_req(&app, "GET", "/v1/feed", None).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+    let mut made = Vec::new();
+    let mut reposts = vec![
+        ("ted", "0"),
+        ("ted", "1"),
+        ("ted", "2"),
+        ("matt", "0"),
+        ("matt", "1"),
+        ("matt", "2"),
+    ];
+    let mut comments = 0;
+    while made.len() < 22 {
+        let text = format!("c{comments}");
+        let (status, body) = json_req(
+            &app,
+            "POST",
+            &format!("/v1/books/{id}/comments/0"),
+            Some(&matt),
+            json!({ "text": text }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        made.push(Made::Comment { text });
+        comments += 1;
+        if made.len() < 22 && !reposts.is_empty() {
+            let (actor, post) = reposts.remove(0);
+            let token = if actor == "matt" { &matt } else { &ted };
+            let (status, body) = empty_req(&app, "PUT", &repost_path(&id, post), Some(token)).await;
+            assert_eq!(status, StatusCode::OK, "{body}");
+            made.push(Made::Repost { actor, post });
+        }
+    }
+
+    let pool = open_db(tmp.path()).await;
+    let matt_id: String = sqlx::query_scalar("SELECT id FROM users WHERE username_norm = 'matt'")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    let ted_id: String = sqlx::query_scalar("SELECT id FROM users WHERE username_norm = 'ted'")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    for (index, event) in made.iter().enumerate() {
+        let at = index as i64 + 1;
+        match event {
+            Made::Comment { text } => {
+                sqlx::query("UPDATE comments SET created_at = ? WHERE book_id = ? AND text = ?")
+                    .bind(at)
+                    .bind(&id)
+                    .bind(text)
+                    .execute(&pool)
+                    .await
+                    .unwrap();
+            }
+            Made::Repost { actor, post } => {
+                let user = if *actor == "ted" { &ted_id } else { &matt_id };
+                sqlx::query(
+                    "UPDATE reposts SET created_at = ? WHERE user_id = ? AND book_id = ? AND post_id = ?",
+                )
+                .bind(at)
+                .bind(user)
+                .bind(&id)
+                .bind(post)
+                .execute(&pool)
+                .await
+                .unwrap();
+            }
+        }
+    }
+    let mut expected = Vec::new();
+    for event in made.iter().rev() {
+        expected.push(match event {
+            Made::Comment { text } => format!("comment:matt:{id}:0:{text}"),
+            Made::Repost { actor, post } => format!("repost:{actor}:{id}:{post}"),
+        });
+    }
+
+    let first = feed_all(&app, &ted).await;
+    let second = feed_all(&app, &matt).await;
+    let third = feed_all(&app, &ted).await;
+    let keys = |items: &[Value]| items.iter().map(feed_identity).collect::<Vec<_>>();
+    assert_eq!(keys(&first), expected, "{first:?}");
+    assert_eq!(first, third);
+    assert_eq!(keys(&second), keys(&first));
+    assert_feed_order(&first);
+    assert!(first.iter().any(|row| row["type"] == "comment"));
+    assert!(first.iter().any(|row| row["type"] == "repost"));
+    assert!(first.iter().all(|row| row["book"]["id"] != quiet_id));
+    assert!(first.iter().all(|row| row["post"]["text"].is_string()));
+    assert!(second
+        .iter()
+        .any(|row| { row["actor"]["username"] == "matt" && row["comment"]["mine"] == true }));
+    let (status, bad) = empty_req(&app, "GET", "/v1/feed?cursor=%%%", Some(&ted)).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{bad}");
+
+    sqlx::query("UPDATE comments SET created_at = 100000 WHERE book_id = ? AND text = 'c0'")
+        .bind(&id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query(
+        "UPDATE reposts SET created_at = 100000 WHERE user_id = ? AND book_id = ? AND post_id = '0'",
+    )
+    .bind(&ted_id)
+    .bind(&id)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let tied = feed_all(&app, &ted).await;
+    assert_eq!(tied, feed_all(&app, &ted).await);
+    assert_eq!(tied[0]["at"], 100000);
+    assert_eq!(tied[0]["type"], "repost");
+    assert_eq!(tied[0]["actor"]["username"], "ted");
+    assert_eq!(tied[0]["post"]["id"], "0");
+    assert_eq!(tied[1]["at"], 100000);
+    assert_eq!(tied[1]["type"], "comment");
+    assert_eq!(tied[1]["comment"]["text"], "c0");
+    assert_feed_order(&tied);
+}
+
+#[tokio::test]
+async fn profile_reposts_page_newest_first() {
+    let (app, tmp) = app().await;
+    let matt = register(&app, "matt", "password1").await;
+    let epub = common::epub();
+    let (status, book) = upload(&app, &matt, "Pages", "Author", &epub, None, false).await;
+    assert_eq!(status, StatusCode::OK, "{book}");
+    let id = book["id"].as_str().unwrap().to_string();
+    share(&app, &matt, &id).await;
+    let pool = open_db(tmp.path()).await;
+    for idx in 3..31 {
+        sqlx::query(
+            "INSERT INTO posts (book_id, idx, kind, chapter, text) VALUES (?, ?, 'Body', 'Ch', ?)",
+        )
+        .bind(&id)
+        .bind(idx)
+        .bind(format!("fill {idx}"))
+        .execute(&pool)
+        .await
+        .unwrap();
+    }
+    for idx in 0..31 {
+        let (status, body) = empty_req(
+            &app,
+            "PUT",
+            &repost_path(&id, &idx.to_string()),
+            Some(&matt),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+    }
+    sqlx::query("UPDATE reposts SET created_at = CAST(post_id AS INTEGER) WHERE book_id = ?")
+        .bind(&id)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let (status, profile) = empty_req(&app, "GET", "/v1/users/matt", Some(&matt)).await;
+    assert_eq!(status, StatusCode::OK, "{profile}");
+    assert_eq!(profile["repostCount"], 31);
+
+    let mut cursor: Option<String> = None;
+    let mut posts = Vec::new();
+    for _ in 0..4 {
+        let path = match &cursor {
+            Some(cursor) => format!("/v1/users/matt/reposts?cursor={}", percent_encode(cursor)),
+            None => "/v1/users/matt/reposts".to_string(),
+        };
+        let (status, page) = empty_req(&app, "GET", &path, Some(&matt)).await;
+        assert_eq!(status, StatusCode::OK, "{page}");
+        let items = page["items"].as_array().unwrap();
+        if page["nextCursor"].is_null() {
+            posts.extend(
+                items
+                    .iter()
+                    .map(|row| row["post"]["id"].as_str().unwrap().to_string()),
+            );
+            break;
+        }
+        assert_eq!(items.len(), 30, "{page}");
+        posts.extend(
+            items
+                .iter()
+                .map(|row| row["post"]["id"].as_str().unwrap().to_string()),
+        );
+        cursor = Some(page["nextCursor"].as_str().unwrap().to_string());
+    }
+    let expected: Vec<String> = (0..31).rev().map(|idx| idx.to_string()).collect();
+    assert_eq!(posts, expected);
+    let (status, bad) = empty_req(
+        &app,
+        "GET",
+        "/v1/users/matt/reposts?cursor=%%%",
+        Some(&matt),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{bad}");
+}
+
+#[tokio::test]
+async fn profile_books_are_shared_and_not_samples() {
+    let (app, _tmp) = app().await;
+    let matt = register(&app, "matt", "password1").await;
+    let ted = register(&app, "ted", "password1").await;
+    let epub = common::epub();
+    let (status, private_book) = upload(&app, &matt, "Private", "Author", &epub, None, false).await;
+    assert_eq!(status, StatusCode::OK, "{private_book}");
+    let private_id = private_book["id"].as_str().unwrap();
+    let (status, sample) = upload(&app, &matt, "Sample", "Author", &epub, None, true).await;
+    assert_eq!(status, StatusCode::OK, "{sample}");
+    let sample_id = sample["id"].as_str().unwrap();
+    assert_eq!(sample["isSample"], true);
+    share(&app, &matt, sample_id).await;
+    let (status, shared_book) = upload(&app, &matt, "Shared", "Author", &epub, None, false).await;
+    assert_eq!(status, StatusCode::OK, "{shared_book}");
+    let shared_id = shared_book["id"].as_str().unwrap();
+    share(&app, &matt, shared_id).await;
+
+    for token in [&matt, &ted] {
+        let (status, page) = empty_req(&app, "GET", "/v1/users/matt/books", Some(token)).await;
+        assert_eq!(status, StatusCode::OK, "{page}");
+        let ids: Vec<&str> = page["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|row| row["id"].as_str().unwrap())
+            .collect();
+        assert_eq!(ids, vec![shared_id], "{page}");
+        assert_eq!(page["items"][0]["shared"], true);
+        assert_eq!(page["items"][0]["isSample"], false);
+        assert_eq!(page["items"][0]["ownerUsername"], "matt");
+    }
+    let (status, owner) = empty_req(&app, "GET", "/v1/users/matt/books", Some(&matt)).await;
+    assert_eq!(status, StatusCode::OK, "{owner}");
+    assert_eq!(owner["items"][0]["mine"], true);
+    let (status, other) = empty_req(&app, "GET", "/v1/users/matt/books", Some(&ted)).await;
+    assert_eq!(status, StatusCode::OK, "{other}");
+    assert_eq!(other["items"][0]["mine"], false);
+
+    let (status, library) = empty_req(&app, "GET", "/v1/library", Some(&ted)).await;
+    assert_eq!(status, StatusCode::OK, "{library}");
+    let shelf: Vec<&str> = library["books"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|row| row["id"].as_str().unwrap())
+        .collect();
+    assert!(shelf.contains(&sample_id), "{library}");
+    assert!(!shelf.contains(&private_id));
+
+    let (status, missing) = empty_req(&app, "GET", "/v1/users/nobody/books", Some(&ted)).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{missing}");
+    let (status, missing_reposts) =
+        empty_req(&app, "GET", "/v1/users/nobody/reposts", Some(&ted)).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{missing_reposts}");
+}
+
+#[tokio::test]
+async fn deleting_a_book_cascades_reposts() {
+    let (app, tmp) = app().await;
+    let matt = register(&app, "matt", "password1").await;
+    let ted = register(&app, "ted", "password1").await;
+    let epub = common::epub();
+    let (status, book) = upload(&app, &matt, "Gone", "Author", &epub, None, false).await;
+    assert_eq!(status, StatusCode::OK, "{book}");
+    let id = book["id"].as_str().unwrap().to_string();
+    share(&app, &matt, &id).await;
+    let (status, body) = empty_req(&app, "PUT", &repost_path(&id, "0"), Some(&matt)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (status, body) = empty_req(&app, "PUT", &repost_path(&id, "1"), Some(&ted)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (status, body) = json_req(
+        &app,
+        "POST",
+        &format!("/v1/books/{id}/comments/0"),
+        Some(&ted),
+        json!({ "text": "bye" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    let pool = open_db(tmp.path()).await;
+    assert_eq!(
+        count(
+            &pool,
+            "SELECT COUNT(*) FROM reposts WHERE book_id = ?",
+            Some(&id)
+        )
+        .await,
+        2
+    );
+    let (status, _) = empty_req(&app, "DELETE", &format!("/v1/books/{id}"), Some(&matt)).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    assert_eq!(
+        count(
+            &pool,
+            "SELECT COUNT(*) FROM reposts WHERE book_id = ?",
+            Some(&id)
+        )
+        .await,
+        0
+    );
+    let feed = feed_all(&app, &matt).await;
+    assert!(feed.iter().all(|row| row["book"]["id"] != id), "{feed:?}");
+    assert!(feed_all(&app, &ted).await.is_empty());
+}
+
+fn posts_json(n: usize) -> String {
+    let mut body = String::from("{\"posts\":[");
+    for i in 0..n {
+        if i > 0 {
+            body.push(',');
+        }
+        body.push_str(&format!(
+            "{{\"id\":\"{i}\",\"kind\":\"Body\",\"text\":\"t{i}\",\"chapter\":\"c\"}}"
+        ));
+    }
+    body.push_str("]}");
+    body
+}
+
+#[tokio::test]
+async fn backfill_lets_writers_through() {
+    let tmp = TempDir::new().unwrap();
+    let pool = open_db(tmp.path()).await;
+    sqlx::migrate!("./migrations").run(&pool).await.unwrap();
+    sqlx::query(
+        "INSERT INTO users (id, username, username_norm, password_hash, created_at)
+         VALUES ('owner', 'owner', 'owner', 'x', 1)",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO sessions (token, user_id, created_at) VALUES ('writer-token', 'owner', 1)",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO books
+         (id, user_id, title, author, handle, imported_at, post_count, progress_index, is_sample, shared, posts_indexed)
+         VALUES ('11111111-1111-4111-8111-111111111111', 'owner', 'Ready', 'Author', 'author', 1, 1, 0, 0, 1, 1),
+                ('bulk-a', 'owner', 'A', 'Author', 'author', 2, 0, 0, 0, 0, 0),
+                ('bulk-b', 'owner', 'B', 'Author', 'author', 3, 0, 0, 0, 0, 0)",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO posts (book_id, idx, kind, chapter, text) VALUES ('11111111-1111-4111-8111-111111111111', 0, 'Body', 'c', 'ready')",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    pool.close().await;
+
+    for id in ["bulk-a", "bulk-b"] {
+        let dir = tmp.path().join("books").join("owner").join(id);
+        tokio::fs::create_dir_all(&dir).await.unwrap();
+        tokio::fs::write(dir.join("posts.json"), posts_json(24_000))
+            .await
+            .unwrap();
+    }
+
+    let config = Config {
+        listen: "127.0.0.1:0".into(),
+        data_dir: tmp.path().to_path_buf(),
+        web_dir: None,
+        allow_signup: true,
+        max_epub_bytes: 1024 * 1024,
+    };
+    let app = build(config).await.unwrap();
+    let pool = open_db(tmp.path()).await;
+    let token = "writer-token";
+    let bound = Duration::from_millis(1000);
+    let started = std::time::Instant::now();
+    let mut saw_pending = false;
+    let mut samples = 0u32;
+    loop {
+        let pending = count(
+            &pool,
+            "SELECT COUNT(*) FROM books WHERE id IN ('bulk-a', 'bulk-b') AND posts_indexed = 0",
+            None,
+        )
+        .await;
+        if pending > 0 {
+            saw_pending = true;
+        }
+        let call_started = std::time::Instant::now();
+        let (status, body) = if samples % 2 == 0 {
+            json_req(
+                &app,
+                "POST",
+                "/v1/books/11111111-1111-4111-8111-111111111111/comments/0",
+                Some(token),
+                json!({ "text": format!("n{samples}") }),
+            )
+            .await
+        } else {
+            json_req(
+                &app,
+                "PATCH",
+                "/v1/books/11111111-1111-4111-8111-111111111111",
+                Some(token),
+                json!({ "progressIndex": samples }),
+            )
+            .await
+        };
+        let elapsed = call_started.elapsed();
+        assert_ne!(status, StatusCode::INTERNAL_SERVER_ERROR, "{body}");
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert!(
+            elapsed < bound,
+            "write waited {elapsed:?} during backfill (pending {pending})"
+        );
+        samples += 1;
+        if pending == 0 && saw_pending {
+            break;
+        }
+        // A gap so backfill can take the write lock. Much shorter than the
+        // stall this test is watching for.
+        tokio::time::sleep(Duration::from_millis(5)).await;
+        assert!(
+            started.elapsed() < Duration::from_secs(30),
+            "backfill did not finish"
+        );
+    }
+    assert!(saw_pending);
+    assert!(samples > 1, "no writes overlapped backfill");
+}
+
+#[tokio::test]
+async fn post_ids_must_be_canonical_and_counts_match_lists() {
+    let (app, tmp) = app().await;
+    let matt = register(&app, "matt", "password1").await;
+    let epub = common::epub();
+    let (status, book) = upload(&app, &matt, "Ids", "Author", &epub, None, false).await;
+    assert_eq!(status, StatusCode::OK, "{book}");
+    let id = book["id"].as_str().unwrap().to_string();
+    share(&app, &matt, &id).await;
+
+    for post_id in ["00", "000", "+0", "abc", "0 ", "01"] {
+        let (status, body) = empty_req(&app, "PUT", &repost_path(&id, post_id), Some(&matt)).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{post_id} {body}");
+        let (status, body) = json_req(
+            &app,
+            "POST",
+            &format!("/v1/books/{id}/comments/{}", percent_encode(post_id)),
+            Some(&matt),
+            json!({ "text": "nope" }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{post_id} {body}");
+    }
+    for post_id in ["3", "999"] {
+        let (status, body) = empty_req(&app, "PUT", &repost_path(&id, post_id), Some(&matt)).await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{post_id} {body}");
+        let (status, body) = json_req(
+            &app,
+            "POST",
+            &format!("/v1/books/{id}/comments/{}", percent_encode(post_id)),
+            Some(&matt),
+            json!({ "text": "missing" }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{post_id} {body}");
+    }
+
+    let (status, body) = empty_req(&app, "PUT", &repost_path(&id, "0"), Some(&matt)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (status, body) = json_req(
+        &app,
+        "POST",
+        &format!("/v1/books/{id}/comments/0"),
+        Some(&matt),
+        json!({ "text": "real-comment" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    let pool = open_db(tmp.path()).await;
+    let user_id: String = sqlx::query_scalar("SELECT id FROM users WHERE username_norm = 'matt'")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    for post_id in ["00", "000", "+0", "abc", "999"] {
+        sqlx::query(
+            "INSERT INTO reposts (user_id, book_id, post_id, created_at) VALUES (?, ?, ?, 1)",
+        )
+        .bind(&user_id)
+        .bind(&id)
+        .bind(post_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    }
+    sqlx::query(
+        "INSERT INTO comments (id, user_id, book_id, post_id, text, created_at)
+         VALUES ('legacy-abc', ?, ?, 'abc', 'alias-comment', 2),
+                ('legacy-00', ?, ?, '00', 'zero-alias', 3)",
+    )
+    .bind(&user_id)
+    .bind(&id)
+    .bind(&user_id)
+    .bind(&id)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let (status, profile) = empty_req(&app, "GET", "/v1/users/matt", Some(&matt)).await;
+    assert_eq!(status, StatusCode::OK, "{profile}");
+    let posts = profile_page_all(&app, &matt, "/v1/users/matt/posts").await;
+    let reposts = profile_page_all(&app, &matt, "/v1/users/matt/reposts").await;
+    assert_eq!(profile["postCount"], posts.len() as i64, "{posts:?}");
+    assert_eq!(profile["repostCount"], reposts.len() as i64, "{reposts:?}");
+    let comment_texts: Vec<&str> = posts
+        .iter()
+        .map(|row| row["comment"]["text"].as_str().unwrap())
+        .collect();
+    assert_eq!(comment_texts, vec!["real-comment"]);
+    assert_eq!(reposts.len(), 1, "{reposts:?}");
+    assert_eq!(reposts[0]["post"]["id"], "0");
+
+    let feed = feed_all(&app, &matt).await;
+    let identities: Vec<String> = feed.iter().map(feed_identity).collect();
+    let mut unique = identities.clone();
+    unique.sort();
+    unique.dedup();
+    assert_eq!(unique.len(), identities.len(), "{identities:?}");
+    assert!(identities.iter().all(|row| !row.contains("alias-comment")));
+    assert!(identities.iter().all(|row| !row.contains("zero-alias")));
+    assert_eq!(
+        identities
+            .iter()
+            .filter(|row| row.starts_with("repost:"))
+            .count(),
+        1,
+        "{identities:?}"
+    );
+}
+
+async fn profile_page_all(app: &axum::Router, token: &str, path: &str) -> Vec<Value> {
+    let mut cursor: Option<String> = None;
+    let mut items = Vec::new();
+    for _ in 0..10 {
+        let page_path = match &cursor {
+            Some(cursor) => format!("{path}?cursor={}", percent_encode(cursor)),
+            None => path.to_string(),
+        };
+        let (status, page) = empty_req(app, "GET", &page_path, Some(token)).await;
+        assert_eq!(status, StatusCode::OK, "{page}");
+        let batch = page["items"].as_array().unwrap();
+        items.extend(batch.clone());
+        match page["nextCursor"].as_str() {
+            Some(next) => cursor = Some(next.to_string()),
+            None => return items,
+        }
+    }
+    panic!("profile cursor did not end");
+}
+
+#[tokio::test]
+async fn delete_own_repost_works_after_unshare() {
+    let (app, tmp) = app().await;
+    let matt = register(&app, "matt", "password1").await;
+    let ted = register(&app, "ted", "password1").await;
+    let epub = common::epub();
+    let (status, book) = upload(&app, &matt, "Undo", "Author", &epub, None, false).await;
+    assert_eq!(status, StatusCode::OK, "{book}");
+    let id = book["id"].as_str().unwrap().to_string();
+    share(&app, &matt, &id).await;
+    let (status, body) = empty_req(&app, "PUT", &repost_path(&id, "0"), Some(&ted)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    unshare(&app, &matt, &id).await;
+
+    let (status, body) = empty_req(&app, "DELETE", &repost_path(&id, "0"), Some(&ted)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["reposted"], false);
+    assert_eq!(body["reposts"], 0);
+    let (status, again) = empty_req(&app, "DELETE", &repost_path(&id, "0"), Some(&ted)).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{again}");
+
+    let pool = open_db(tmp.path()).await;
+    assert_eq!(
+        count(
+            &pool,
+            "SELECT COUNT(*) FROM reposts WHERE book_id = ?",
+            Some(&id)
+        )
+        .await,
+        0
+    );
+    share(&app, &matt, &id).await;
+    let (status, profile) = empty_req(&app, "GET", "/v1/users/ted", Some(&ted)).await;
+    assert_eq!(status, StatusCode::OK, "{profile}");
+    assert_eq!(profile["repostCount"], 0);
+    let reposts = profile_page_all(&app, &ted, "/v1/users/ted/reposts").await;
+    assert!(reposts.is_empty(), "{reposts:?}");
+    let feed = feed_all(&app, &matt).await;
+    assert!(
+        feed.iter()
+            .all(|row| row["type"] != "repost" || row["actor"]["username"] != "ted"),
+        "{feed:?}"
+    );
+}
+
+#[tokio::test]
+async fn backfill_skips_an_unreadable_epub_after_recording_it() {
+    let tmp = TempDir::new().unwrap();
+    let pool = open_db(tmp.path()).await;
+    sqlx::migrate!("./migrations").run(&pool).await.unwrap();
+    sqlx::query(
+        "INSERT INTO users (id, username, username_norm, password_hash, created_at)
+         VALUES ('owner', 'owner', 'owner', 'x', 1)",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO books
+         (id, user_id, title, author, handle, imported_at, post_count, progress_index, is_sample, shared, posts_indexed)
+         VALUES ('bad-book', 'owner', 'Bad', 'Author', 'author', 1, 0, 0, 0, 0, 0)",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    pool.close().await;
+    let dir = tmp.path().join("books").join("owner").join("bad-book");
+    tokio::fs::create_dir_all(&dir).await.unwrap();
+    tokio::fs::write(dir.join("book.epub"), b"not an epub")
+        .await
+        .unwrap();
+
+    let config = Config {
+        listen: "127.0.0.1:0".into(),
+        data_dir: tmp.path().to_path_buf(),
+        web_dir: None,
+        allow_signup: true,
+        max_epub_bytes: 1024 * 1024,
+    };
+    let _app = build(config.clone()).await.unwrap();
+    let pool = open_db(tmp.path()).await;
+    let started = std::time::Instant::now();
+    loop {
+        let flag = count(
+            &pool,
+            "SELECT posts_indexed FROM books WHERE id = 'bad-book'",
+            None,
+        )
+        .await;
+        if flag == -1 {
+            break;
+        }
+        assert!(
+            started.elapsed() < Duration::from_secs(15),
+            "backfill left posts_indexed at {flag}"
+        );
+        tokio::time::sleep(Duration::from_millis(30)).await;
+    }
+    drop(_app);
+
+    tokio::fs::write(dir.join("book.epub"), common::epub())
+        .await
+        .unwrap();
+    let pool = open_db(tmp.path()).await;
+    sqlx::query(
+        "INSERT INTO books
+         (id, user_id, title, author, handle, imported_at, post_count, progress_index, is_sample, shared, posts_indexed)
+         VALUES ('sentinel', 'owner', 'Sentinel', 'Author', 'author', 2, 1, 0, 0, 0, 0)",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    tokio::fs::create_dir_all(tmp.path().join("books").join("owner").join("sentinel"))
+        .await
+        .unwrap();
+    tokio::fs::write(
+        tmp.path()
+            .join("books")
+            .join("owner")
+            .join("sentinel")
+            .join("posts.json"),
+        posts_json(1),
+    )
+    .await
+    .unwrap();
+    pool.close().await;
+
+    let _app = build(config).await.unwrap();
+    let pool = open_db(tmp.path()).await;
+    let started = std::time::Instant::now();
+    loop {
+        let flag = count(
+            &pool,
+            "SELECT posts_indexed FROM books WHERE id = 'sentinel'",
+            None,
+        )
+        .await;
+        if flag == 1 {
+            break;
+        }
+        assert!(
+            started.elapsed() < Duration::from_secs(15),
+            "second backfill did not finish"
+        );
+        tokio::time::sleep(Duration::from_millis(30)).await;
+    }
+    assert_eq!(
+        count(
+            &pool,
+            "SELECT posts_indexed FROM books WHERE id = 'bad-book'",
+            None
+        )
+        .await,
+        -1
+    );
+    assert!(!dir.join("posts.json").exists());
+}
+
+#[tokio::test]
+async fn vacuum_keeps_fts_aligned_with_post_ids() {
+    let tmp = TempDir::new().unwrap();
+    let pool = open_db(tmp.path()).await;
+    sqlx::migrate!("./migrations").run(&pool).await.unwrap();
+    sqlx::query(
+        "INSERT INTO users (id, username, username_norm, password_hash, created_at)
+         VALUES ('user', 'matt', 'matt', 'x', 1)",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO books (id, user_id, title, author, handle, imported_at, post_count, progress_index, is_sample, shared, posts_indexed)
+         VALUES ('book', 'user', 'B', 'A', 'a', 1, 2, 0, 0, 1, 1)",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO posts (book_id, idx, kind, chapter, text)
+         VALUES ('book', 0, 'Body', 'c', 'secretword'), ('book', 1, 'Body', 'c', 'otherword')",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query("DELETE FROM posts WHERE idx = 0")
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query(
+        "INSERT INTO posts (book_id, idx, kind, chapter, text) VALUES ('book', 0, 'Body', 'c', 'secretword')",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query("VACUUM").execute(&pool).await.unwrap();
+    assert_eq!(
+        count(
+            &pool,
+            "SELECT COUNT(*) FROM post_fts WHERE post_fts MATCH 'secretword'",
+            None
+        )
+        .await,
+        1
+    );
+    let posts_sql: String =
+        sqlx::query_scalar("SELECT sql FROM sqlite_master WHERE name = 'posts'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert!(posts_sql.contains("id INTEGER PRIMARY KEY"), "{posts_sql}");
+    let fts_sql: String =
+        sqlx::query_scalar("SELECT sql FROM sqlite_master WHERE name = 'post_fts'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert!(fts_sql.contains("content_rowid='id'"), "{fts_sql}");
+    let comments_index: i64 = count(
+        &pool,
+        "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = 'comments_created'",
+        None,
+    )
+    .await;
+    assert_eq!(comments_index, 1);
 }
