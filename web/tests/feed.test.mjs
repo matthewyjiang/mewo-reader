@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import {
-  appendFeed, beginFeedRefresh, failFeed, finishFeedRefresh, phaseFromFeedCache,
+  appendFeed, beginFeedRefresh, failFeed, feedMoreAllowed, finishFeedRefresh, phaseFromFeedCache,
   showFeedEmpty, startFeedMore,
 } from '../src/lib/feed.ts';
 
@@ -34,6 +34,16 @@ test('a cached page shows immediately and a failed refresh keeps it', () => {
   assert.equal(failed.page.items.length, 1);
   assert.equal(showFeedEmpty(failed), false);
   assert.equal(phaseFromFeedCache(null).status, 'loading');
+});
+
+test('the next page waits until a refresh has finished', () => {
+  const cached = phaseFromFeedCache(page(['1'], 'c'));
+  assert.equal(feedMoreAllowed(cached), false);
+  assert.equal(feedMoreAllowed(beginFeedRefresh(cached)), false);
+  const fresh = finishFeedRefresh(page(['1'], 'c'));
+  assert.equal(feedMoreAllowed(fresh), true);
+  assert.equal(feedMoreAllowed(startFeedMore(fresh)), false);
+  assert.equal(feedMoreAllowed(finishFeedRefresh(page(['1']))), false);
 });
 
 test('the next cursor appends and a failed next page keeps the rows', () => {

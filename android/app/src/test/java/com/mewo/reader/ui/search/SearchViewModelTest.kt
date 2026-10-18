@@ -353,6 +353,26 @@ class SearchViewModelTest {
     }
 
     @Test
+    fun aRepostSurvivesTheCommentLoadThatStartedBeforeIt() = runTest(main) {
+        val store = FakeStore()
+        val vm = SearchViewModel(store)
+        arm(vm, "line")
+        store.finishSearch("line", resultFor("line"))
+        runCurrent()
+        store.likes.getValue(BOOK).complete(emptySet())
+        runCurrent()
+        vm.toggleRepost(BOOK, "p1")
+        runCurrent()
+        assertTrue(vm.state.value.comments.getValue(BOOK).hasReposted("p1"))
+        store.comments.getValue(BOOK).complete(CommentIndex())
+        advanceUntilIdle()
+        assertTrue(vm.state.value.comments.getValue(BOOK).hasReposted("p1"))
+        store.reposts.getValue(BOOK).complete(RepostState(1, true))
+        advanceUntilIdle()
+        assertTrue(vm.state.value.comments.getValue(BOOK).hasReposted("p1"))
+    }
+
+    @Test
     fun repostRollsBackWhenTheServerRejects() = runTest(main) {
         val store = FakeStore()
         val vm = SearchViewModel(store)

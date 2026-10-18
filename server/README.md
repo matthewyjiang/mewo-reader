@@ -111,7 +111,7 @@ Search JSON is one object. `type` is `accounts`, `books`, or `posts`. `nextCurso
 
 `{ "type": "posts", "items": [{ "book": BookRecord, "post": { "id": "1", "kind": "Body", "text": "...", "chapter": "..." } }], "nextCursor": null }`
 
-Accounts match `username` with a case-insensitive substring. A prefix ranks before an infix, then shorter names. Books match title, author, handle, or the owner's username. A title prefix ranks first, then newer `importedAt`. Posts match the line or its chapter. Rank is FTS5 bm25, then newer books, then the post index. Private books are missing from book and post hits, profile replies, profile reposts, and the home feed, unless you own them. Sharing or the sample makes them visible without a reindex. `postCount` is how many of that account's replies sit on books you can see. `repostCount` is the same for reposts.
+Accounts match `username` with a case-insensitive substring. A prefix ranks before an infix, then shorter names. Books match title, author, handle, or the owner's username. A title prefix ranks first, then newer `importedAt`. Posts match the line or its chapter. Rank is FTS5 bm25, then newer books, then the post index. `nextCursor` is an opaque keyset for that order. An offset is not a valid cursor. Private books are missing from book and post hits, profile replies, profile reposts, and the home feed, unless you own them. Sharing or the sample makes them visible without a reindex. `postCount` is how many of that account's replies sit on books you can see. `repostCount` is the same for reposts.
 
 `ProfileRecord` is `{ "username", "joinedAt", "postCount", "repostCount", "mine" }`. `joinedAt` is the account's `created_at` in milliseconds.
 

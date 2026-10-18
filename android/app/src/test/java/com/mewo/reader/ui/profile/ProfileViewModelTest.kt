@@ -92,6 +92,44 @@ class ProfileViewModelTest {
     }
 
     @Test
+    fun switchingTabsClearsALoadMore() = runTest(main) {
+        val store = FakeStore(postsCursor = "next")
+        val vm = ProfileViewModel(store, "ada")
+        vm.refresh()
+        advanceUntilIdle()
+        assertEquals("next", vm.state.value.postsCursor)
+        vm.loadMore()
+        runCurrent()
+        assertTrue(vm.state.value.more)
+        vm.select(ProfileTab.Reposts)
+        runCurrent()
+        assertFalse(vm.state.value.more)
+        assertEquals(ProfileTab.Reposts, vm.state.value.tab)
+        store.nextPage.complete(ProfilePostsPage(listOf(store.anotherPost)))
+        advanceUntilIdle()
+        assertFalse(vm.state.value.more)
+        assertEquals(1, vm.state.value.posts.size)
+    }
+
+    @Test
+    fun aCommentLoadDoesNotDropARepostThatStartedAfterIt() = runTest(main) {
+        val store = FakeStore()
+        store.heldComments = CompletableDeferred()
+        val vm = ProfileViewModel(store, "ada")
+        vm.refresh()
+        advanceUntilIdle()
+        vm.toggleRepost("b1", "0")
+        runCurrent()
+        assertTrue(vm.state.value.comments.getValue("b1").hasReposted("0"))
+        store.heldComments?.complete(CommentIndex())
+        advanceUntilIdle()
+        assertTrue(vm.state.value.comments.getValue("b1").hasReposted("0"))
+        store.reposts.complete(RepostState(1, true))
+        advanceUntilIdle()
+        assertTrue(vm.state.value.comments.getValue("b1").hasReposted("0"))
+    }
+
+    @Test
     fun repostRollsBackWhenTheServerRejects() = runTest(main) {
         val store = FakeStore()
         val vm = ProfileViewModel(store, "ada")
@@ -105,13 +143,24 @@ class ProfileViewModelTest {
         assertFalse(vm.state.value.comments.getValue("b1").hasReposted("0"))
     }
 
-    private class FakeStore(private val missing: Boolean = false) : LibraryStore {
+    private class FakeStore(
+        private val missing: Boolean = false,
+        private val postsCursor: String? = null,
+    ) : LibraryStore {
         override val hostedSocial: Boolean = true
         val reposts = CompletableDeferred<RepostState>()
+        val nextPage = CompletableDeferred<ProfilePostsPage>()
+        var heldComments: CompletableDeferred<CommentIndex>? = null
+        val anotherPost: ProfilePostRecord
         private val book = BookRecord(
             id = "b1", title = "Emma", author = "Austen", handle = "austen", importedAt = 1, shared = true,
         )
         private val post = FeedPost("0", PostKind.Body, "A line.", "One")
+
+        init {
+            val extra = PostComment("c2", "ada", "More", createdAt = 6, mine = true)
+            anotherPost = ProfilePostRecord(book, post, extra)
+        }
 
         override suspend fun profile(username: String): ProfileRecord {
             if (missing) throw HostedException("Not found.", 404)
@@ -119,8 +168,9 @@ class ProfileViewModelTest {
         }
 
         override suspend fun profilePosts(username: String, cursor: String?): ProfilePostsPage {
+            if (cursor != null) return nextPage.await()
             val comment = PostComment("c1", "ada", "Nice", createdAt = 5, mine = true)
-            return ProfilePostsPage(listOf(ProfilePostRecord(book, post, comment)))
+            return ProfilePostsPage(listOf(ProfilePostRecord(book, post, comment)), postsCursor)
         }
 
         override suspend fun profileReposts(username: String, cursor: String?): ProfileRepostsPage =
@@ -129,7 +179,8 @@ class ProfileViewModelTest {
         override suspend fun profileBooks(username: String): ProfileBooks = ProfileBooks(listOf(book))
 
         override suspend fun likes(id: String): Set<String> = emptySet()
-        override suspend fun commentIndex(id: String): CommentIndex = CommentIndex()
+        override suspend fun commentIndex(id: String): CommentIndex =
+            heldComments?.await() ?: CommentIndex()
         override suspend fun setRepost(id: String, postId: String, reposted: Boolean): RepostState =
             reposts.await()
 

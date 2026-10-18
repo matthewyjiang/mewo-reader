@@ -9,7 +9,7 @@ use crate::config::MAX_COVER_BYTES;
 use crate::error::ApiError;
 use crate::feed::{Post, PostKind, Posts};
 use crate::models::{AccountRecord, BookRow, PostHitRecord, SearchHits, SearchKind, SearchPage};
-use crate::visibility::{BOOK_SELECT, BOOK_VISIBLE_TO};
+use crate::visibility::BOOK_VISIBLE_TO;
 use crate::AppState;
 use base64::engine::general_purpose::STANDARD;
 use base64::Engine;
@@ -40,14 +40,10 @@ pub(crate) async fn run(
             "Search is longer than {MAX_QUERY_CHARS} characters (asked {asked})."
         )));
     }
-    let offset = match cursor.map(str::trim).filter(|cursor| !cursor.is_empty()) {
-        Some(cursor) => decode_offset(cursor)?,
-        None => 0,
-    };
     match kind {
-        SearchKind::Accounts => accounts(pool, viewer, q, offset).await,
-        SearchKind::Books => books(pool, viewer, q, offset).await,
-        SearchKind::Posts => posts(pool, viewer, q, offset).await,
+        SearchKind::Accounts => accounts(pool, viewer, q, cursor).await,
+        SearchKind::Books => books(pool, viewer, q, cursor).await,
+        SearchKind::Posts => posts(pool, viewer, q, cursor).await,
     }
 }
 
@@ -102,34 +98,49 @@ async fn accounts(
     pool: &SqlitePool,
     viewer: &Authed,
     q: &str,
-    offset: i64,
+    cursor: Option<&str>,
 ) -> Result<SearchPage, ApiError> {
     // username_norm is the ASCII-lowercase username, so fold the query the same way.
     let folded = q.to_ascii_lowercase();
     let infix = format!("%{}%", like_pattern(&folded));
     let prefix = format!("{}%", like_pattern(&folded));
-    let rows = sqlx::query_as::<_, (String, String)>(
-        "SELECT id, username FROM users
-         WHERE username_norm LIKE ? ESCAPE '\\'
-         ORDER BY CASE WHEN username_norm LIKE ? ESCAPE '\\' THEN 0 ELSE 1 END,
-                  length(username_norm),
-                  username_norm
-         LIMIT ? OFFSET ?",
+    let after = account_cursor(cursor)?;
+    let rows = sqlx::query_as::<_, AccountHitRow>(
+        "SELECT id, username, rank, name_len, username_norm
+         FROM (
+             SELECT id, username, username_norm,
+                    CASE WHEN username_norm LIKE ? ESCAPE '\\' THEN 0 ELSE 1 END AS rank,
+                    length(username_norm) AS name_len
+             FROM users
+             WHERE username_norm LIKE ? ESCAPE '\\'
+         ) AS ranked
+         WHERE rank > ?
+            OR (rank = ? AND name_len > ?)
+            OR (rank = ? AND name_len = ? AND username_norm > ?)
+         ORDER BY rank, name_len, username_norm
+         LIMIT ?",
     )
-    .bind(&infix)
     .bind(&prefix)
+    .bind(&infix)
+    .bind(after.rank)
+    .bind(after.rank)
+    .bind(after.name_len)
+    .bind(after.rank)
+    .bind(after.name_len)
+    .bind(&after.username_norm)
     .bind(SEARCH_LIMIT + 1)
-    .bind(offset)
     .fetch_all(pool)
     .await?;
-    let (rows, next_cursor) = page(rows, offset);
+    let (rows, next_cursor) = page_rows(rows, |row| {
+        encode_json(serde_json::json!([row.rank, row.name_len, row.username_norm]))
+    });
     Ok(SearchPage {
         hits: SearchHits::Accounts {
             items: rows
                 .into_iter()
-                .map(|(id, username)| AccountRecord {
-                    mine: id == viewer.user_id,
-                    username,
+                .map(|row| AccountRecord {
+                    mine: row.id == viewer.user_id,
+                    username: row.username,
                 })
                 .collect(),
         },
@@ -141,42 +152,62 @@ async fn books(
     pool: &SqlitePool,
     viewer: &Authed,
     q: &str,
-    offset: i64,
+    cursor: Option<&str>,
 ) -> Result<SearchPage, ApiError> {
     let infix = format!("%{}%", like_pattern(q));
     let prefix = format!("{}%", like_pattern(q));
+    let after = book_cursor(cursor)?;
     let sql = format!(
-        "{BOOK_SELECT}
-         WHERE {BOOK_VISIBLE_TO}
-           AND (
-             b.title LIKE ? ESCAPE '\\'
-             OR b.author LIKE ? ESCAPE '\\'
-             OR b.handle LIKE ? ESCAPE '\\'
-             OR owner.username LIKE ? ESCAPE '\\'
-           )
-         ORDER BY CASE WHEN b.title LIKE ? ESCAPE '\\' THEN 0 ELSE 1 END,
-                  b.imported_at DESC,
-                  b.id ASC
-         LIMIT ? OFFSET ?"
+        "SELECT id, title, author, handle, imported_at, post_count, progress_index,
+                is_sample, shared, owner_id, owner_username, rank
+         FROM (
+             SELECT b.id, b.title, b.author, b.handle, b.imported_at, b.post_count,
+                    COALESCE(p.progress_index, 0) AS progress_index,
+                    b.is_sample, b.shared, b.user_id AS owner_id,
+                    owner.username AS owner_username,
+                    CASE WHEN b.title LIKE ? ESCAPE '\\' THEN 0 ELSE 1 END AS rank
+             FROM books b
+             JOIN users owner ON owner.id = b.user_id
+             LEFT JOIN book_progress p ON p.book_id = b.id AND p.user_id = ?
+             WHERE {BOOK_VISIBLE_TO}
+               AND (
+                 b.title LIKE ? ESCAPE '\\'
+                 OR b.author LIKE ? ESCAPE '\\'
+                 OR b.handle LIKE ? ESCAPE '\\'
+                 OR owner.username LIKE ? ESCAPE '\\'
+               )
+         ) AS ranked
+         WHERE rank > ?
+            OR (rank = ? AND imported_at < ?)
+            OR (rank = ? AND imported_at = ? AND id > ?)
+         ORDER BY rank, imported_at DESC, id ASC
+         LIMIT ?"
     );
-    let rows = sqlx::query_as::<_, BookRow>(&sql)
-        .bind(&viewer.user_id)
-        .bind(&viewer.user_id)
-        .bind(&infix)
-        .bind(&infix)
-        .bind(&infix)
-        .bind(&infix)
+    let rows = sqlx::query_as::<_, RankedBook>(&sql)
         .bind(&prefix)
+        .bind(&viewer.user_id)
+        .bind(&viewer.user_id)
+        .bind(&infix)
+        .bind(&infix)
+        .bind(&infix)
+        .bind(&infix)
+        .bind(after.rank)
+        .bind(after.rank)
+        .bind(after.imported_at)
+        .bind(after.rank)
+        .bind(after.imported_at)
+        .bind(&after.id)
         .bind(SEARCH_LIMIT + 1)
-        .bind(offset)
         .fetch_all(pool)
         .await?;
-    let (rows, next_cursor) = page(rows, offset);
+    let (rows, next_cursor) = page_rows(rows, |row| {
+        encode_json(serde_json::json!([row.rank, row.row.imported_at, row.row.id]))
+    });
     Ok(SearchPage {
         hits: SearchHits::Books {
             items: rows
                 .into_iter()
-                .map(|row| row.into_record(&viewer.user_id))
+                .map(|row| row.row.into_record(&viewer.user_id))
                 .collect(),
         },
         next_cursor,
@@ -187,7 +218,7 @@ async fn posts(
     pool: &SqlitePool,
     viewer: &Authed,
     q: &str,
-    offset: i64,
+    cursor: Option<&str>,
 ) -> Result<SearchPage, ApiError> {
     let Some(match_query) = fts_match(q) else {
         return Ok(SearchPage {
@@ -196,38 +227,69 @@ async fn posts(
         });
     };
     // The visible-books CTE is the only visibility check in this statement.
-    // bm25 is the relevance order; id breaks ties so offset pages stay stable.
+    // bm25 is the relevance order. The cursor is that key, not an offset, so a
+    // row inserted ahead of this page is not repeated on the next one.
+    let after = post_cursor(cursor)?;
     let sql = format!(
         "WITH visible_books AS (
              SELECT b.id AS id
              FROM books b
              WHERE {BOOK_VISIBLE_TO}
          )
-         SELECT b.id, b.title, b.author, b.handle, b.imported_at, b.post_count,
-                COALESCE(p.progress_index, 0) AS progress_index,
-                b.is_sample, b.shared, b.user_id AS owner_id,
-                owner.username AS owner_username,
-                posts.idx AS post_idx, posts.kind AS post_kind,
-                posts.chapter AS post_chapter, posts.text AS post_text
-         FROM post_fts
-         JOIN posts ON posts.rowid = post_fts.rowid
-         JOIN visible_books ON visible_books.id = posts.book_id
-         JOIN books b ON b.id = posts.book_id
-         JOIN users owner ON owner.id = b.user_id
-         LEFT JOIN book_progress p ON p.book_id = b.id AND p.user_id = ?
-         WHERE post_fts MATCH ?
-         ORDER BY bm25(post_fts), b.imported_at DESC, posts.idx ASC, b.id ASC
-         LIMIT ? OFFSET ?"
+         SELECT id, title, author, handle, imported_at, post_count, progress_index,
+                is_sample, shared, owner_id, owner_username,
+                post_idx, post_kind, post_chapter, post_text, score
+         FROM (
+             SELECT b.id AS id, b.title AS title, b.author AS author, b.handle AS handle,
+                    b.imported_at AS imported_at, b.post_count AS post_count,
+                    COALESCE(p.progress_index, 0) AS progress_index,
+                    b.is_sample AS is_sample, b.shared AS shared, b.user_id AS owner_id,
+                    owner.username AS owner_username,
+                    posts.idx AS post_idx, posts.kind AS post_kind,
+                    posts.chapter AS post_chapter, posts.text AS post_text,
+                    bm25(post_fts) AS score
+             FROM post_fts
+             JOIN posts ON posts.rowid = post_fts.rowid
+             JOIN visible_books ON visible_books.id = posts.book_id
+             JOIN books b ON b.id = posts.book_id
+             JOIN users owner ON owner.id = b.user_id
+             LEFT JOIN book_progress p ON p.book_id = b.id AND p.user_id = ?
+             WHERE post_fts MATCH ?
+         ) AS ranked
+         WHERE ? = 0
+            OR score > ?
+            OR (score = ? AND imported_at < ?)
+            OR (score = ? AND imported_at = ? AND post_idx > ?)
+            OR (score = ? AND imported_at = ? AND post_idx = ? AND id > ?)
+         ORDER BY score ASC, imported_at DESC, post_idx ASC, id ASC
+         LIMIT ?"
     );
     let rows = sqlx::query_as::<_, PostHitRow>(&sql)
         .bind(&viewer.user_id)
         .bind(&viewer.user_id)
         .bind(&match_query)
+        .bind(after.has)
+        .bind(after.score)
+        .bind(after.score)
+        .bind(after.imported_at)
+        .bind(after.score)
+        .bind(after.imported_at)
+        .bind(after.idx)
+        .bind(after.score)
+        .bind(after.imported_at)
+        .bind(after.idx)
+        .bind(&after.book_id)
         .bind(SEARCH_LIMIT + 1)
-        .bind(offset)
         .fetch_all(pool)
         .await?;
-    let (rows, next_cursor) = page(rows, offset);
+    let (rows, next_cursor) = page_rows(rows, |row| {
+        encode_json(serde_json::json!([
+            row.score.to_bits().to_string(),
+            row.imported_at,
+            row.post_idx,
+            row.id,
+        ]))
+    });
     let mut items = Vec::with_capacity(rows.len());
     for row in rows {
         items.push(row.into_hit(&viewer.user_id)?);
@@ -255,6 +317,7 @@ struct PostHitRow {
     post_kind: String,
     post_chapter: String,
     post_text: String,
+    score: f64,
 }
 
 impl PostHitRow {
@@ -296,27 +359,134 @@ pub(crate) fn parse_kind(kind: &str) -> Result<PostKind, ApiError> {
     }
 }
 
-fn page<T>(mut rows: Vec<T>, offset: i64) -> (Vec<T>, Option<String>) {
+fn page_rows<T>(mut rows: Vec<T>, cursor_of: impl Fn(&T) -> String) -> (Vec<T>, Option<String>) {
     if rows.len() > SEARCH_LIMIT as usize {
         rows.truncate(SEARCH_LIMIT as usize);
-        let next = offset.checked_add(SEARCH_LIMIT).map(encode_offset);
-        (rows, next)
+        let next = cursor_of(rows.last().expect("truncated page"));
+        (rows, Some(next))
     } else {
         (rows, None)
     }
 }
 
-fn encode_offset(offset: i64) -> String {
-    STANDARD.encode(offset.to_string())
+#[derive(Debug, FromRow)]
+struct AccountHitRow {
+    id: String,
+    username: String,
+    rank: i64,
+    name_len: i64,
+    username_norm: String,
 }
 
-fn decode_offset(cursor: &str) -> Result<i64, ApiError> {
-    let text = decode_text(cursor)?;
-    let offset: i64 = text.parse().map_err(|_| bad_cursor())?;
-    if offset < 0 {
+struct AccountCursor {
+    rank: i64,
+    name_len: i64,
+    username_norm: String,
+}
+
+fn account_cursor(cursor: Option<&str>) -> Result<AccountCursor, ApiError> {
+    let Some(cursor) = nonempty(cursor) else {
+        return Ok(AccountCursor {
+            rank: -1,
+            name_len: 0,
+            username_norm: String::new(),
+        });
+    };
+    let items = decode_json_array(cursor)?;
+    if items.len() != 3 {
         return Err(bad_cursor());
     }
-    Ok(offset)
+    Ok(AccountCursor {
+        rank: items[0].as_i64().filter(|rank| *rank >= 0).ok_or_else(bad_cursor)?,
+        name_len: items[1].as_i64().filter(|len| *len >= 0).ok_or_else(bad_cursor)?,
+        username_norm: items[2].as_str().ok_or_else(bad_cursor)?.to_string(),
+    })
+}
+
+#[derive(Debug, FromRow)]
+struct RankedBook {
+    #[sqlx(flatten)]
+    row: BookRow,
+    rank: i64,
+}
+
+struct BookCursor {
+    rank: i64,
+    imported_at: i64,
+    id: String,
+}
+
+fn book_cursor(cursor: Option<&str>) -> Result<BookCursor, ApiError> {
+    let Some(cursor) = nonempty(cursor) else {
+        return Ok(BookCursor {
+            rank: -1,
+            imported_at: i64::MAX,
+            id: String::new(),
+        });
+    };
+    let items = decode_json_array(cursor)?;
+    if items.len() != 3 {
+        return Err(bad_cursor());
+    }
+    let id = items[2].as_str().filter(|id| !id.is_empty()).ok_or_else(bad_cursor)?;
+    Ok(BookCursor {
+        rank: items[0].as_i64().filter(|rank| *rank >= 0).ok_or_else(bad_cursor)?,
+        imported_at: items[1].as_i64().ok_or_else(bad_cursor)?,
+        id: id.to_string(),
+    })
+}
+
+struct PostCursor {
+    has: i64,
+    score: f64,
+    imported_at: i64,
+    idx: i64,
+    book_id: String,
+}
+
+fn post_cursor(cursor: Option<&str>) -> Result<PostCursor, ApiError> {
+    let Some(cursor) = nonempty(cursor) else {
+        return Ok(PostCursor {
+            has: 0,
+            score: 0.0,
+            imported_at: 0,
+            idx: 0,
+            book_id: String::new(),
+        });
+    };
+    let items = decode_json_array(cursor)?;
+    if items.len() != 4 {
+        return Err(bad_cursor());
+    }
+    let bits: u64 = items[0]
+        .as_str()
+        .ok_or_else(bad_cursor)?
+        .parse()
+        .map_err(|_| bad_cursor())?;
+    let book_id = items[3].as_str().filter(|id| !id.is_empty()).ok_or_else(bad_cursor)?;
+    Ok(PostCursor {
+        has: 1,
+        score: f64::from_bits(bits),
+        imported_at: items[1].as_i64().ok_or_else(bad_cursor)?,
+        idx: items[2].as_i64().ok_or_else(bad_cursor)?,
+        book_id: book_id.to_string(),
+    })
+}
+
+fn nonempty(cursor: Option<&str>) -> Option<&str> {
+    cursor.map(str::trim).filter(|cursor| !cursor.is_empty())
+}
+
+fn encode_json(value: serde_json::Value) -> String {
+    STANDARD.encode(serde_json::to_vec(&value).unwrap_or_default())
+}
+
+fn decode_json_array(cursor: &str) -> Result<Vec<serde_json::Value>, ApiError> {
+    let text = decode_text(cursor)?;
+    match serde_json::from_str(&text).map_err(|_| bad_cursor())? {
+        serde_json::Value::Array(items) => Ok(items),
+        _ => Err(bad_cursor()),
+    }
 }
 
 pub(crate) fn encode_keyset(created_at: i64, id: &str) -> String {

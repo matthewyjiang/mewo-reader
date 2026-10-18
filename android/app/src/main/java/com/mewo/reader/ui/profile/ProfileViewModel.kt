@@ -49,6 +49,7 @@ class ProfileViewModel(
     private var session: String? = "local"
     private var generation = 0L
     private var job: Job? = null
+    private val repostTicket = mutableMapOf<String, Long>()
 
     fun bindSession(id: String?) {
         if (id == session) return
@@ -78,7 +79,7 @@ class ProfileViewModel(
             ProfileTab.Books -> now.books.isEmpty()
         }
         _state.update {
-            it.copy(loading = visibleEmpty || it.record == null, error = null, missing = false)
+            it.copy(loading = visibleEmpty || it.record == null, error = null, missing = false, more = false)
         }
         job = viewModelScope.launch {
             if (!store.hostedSocial) {
@@ -116,9 +117,11 @@ class ProfileViewModel(
         val id = session ?: return
         val gen = ++generation
         _state.update { it.copy(more = true) }
-        viewModelScope.launch {
+        job = viewModelScope.launch {
             try {
                 loadTab(now.handle, now.tab, cursor, gen, id)
+            } catch (error: kotlinx.coroutines.CancellationException) {
+                throw error
             } catch (error: Exception) {
                 if (current(gen, id)) {
                     _state.update { it.copy(error = error.message ?: "Could not load this profile.") }
@@ -176,13 +179,18 @@ class ProfileViewModel(
     }
 
     private suspend fun rememberSocial(bookIds: List<String>) {
-        val likes = bookIds.distinct().associateWith { id ->
+        val ids = bookIds.distinct()
+        val started = ids.associateWith { id -> repostTicket[id] ?: 0L }
+        val likes = ids.associateWith { id ->
             runCatching { store.likes(id) }.getOrDefault(_state.value.likes[id] ?: emptySet())
         }
-        val comments = bookIds.distinct().associateWith { id ->
+        val comments = ids.associateWith { id ->
             runCatching { store.commentIndex(id) }.getOrDefault(_state.value.comments[id] ?: CommentIndex())
         }
-        _state.update { it.copy(likes = it.likes + likes, comments = it.comments + comments) }
+        _state.update { state ->
+            val fresh = comments.filterKeys { id -> (repostTicket[id] ?: 0L) == started[id] }
+            state.copy(likes = state.likes + likes, comments = state.comments + fresh)
+        }
     }
 
     fun toggleLike(bookId: String, postId: String) {
@@ -194,6 +202,7 @@ class ProfileViewModel(
 
     fun toggleRepost(bookId: String, postId: String) {
         val before = _state.value.comments[bookId] ?: CommentIndex()
+        repostTicket[bookId] = (repostTicket[bookId] ?: 0L) + 1
         viewModelScope.launch {
             runCatching {
                 commitRepost(

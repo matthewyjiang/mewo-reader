@@ -3,7 +3,7 @@
   import Post from '../components/Post.svelte';
   import ThreadRow from '../components/ThreadRow.svelte';
   import Icon from '../components/Icon.svelte';
-  import { showFeedEmpty } from '../lib/feed';
+  import { feedMoreAllowed, showFeedEmpty } from '../lib/feed';
   import { relativeTime } from '../lib/models';
   import type { BookRecord, FeedPost } from '../lib/models';
   import { readerUrl, router } from '../lib/router.svelte';
@@ -24,7 +24,7 @@
   let socialKey = $derived(JSON.stringify(socialIds));
   $effect(() => {
     socialKey;
-    void Promise.all(socialIds.map((id) => store.social(id)));
+    for (const id of socialIds) void store.social(id).catch(() => {});
   });
 
   function sentinel(node: HTMLElement): { destroy: () => void } {
@@ -87,7 +87,7 @@
     <span class="spinner"></span>
   </div>
 {/if}
-{#if phase.status === 'loaded' && phase.page.nextCursor && !phase.more}
+{#if feedMoreAllowed(phase)}
   <div use:sentinel></div>
 {/if}
 {#if showFeedEmpty(phase)}

@@ -66,6 +66,13 @@ export function phaseFromFeedCache(page: HomeFeedPage | null): FeedPhase {
   return { status: 'loaded', page, refreshing: true, more: false };
 }
 
+/** Page 2 of a cached cursor must not run while the first page is refreshing. */
+export function feedMoreAllowed(
+  phase: FeedPhase,
+): phase is FeedLoaded & { page: HomeFeedPage & { nextCursor: string } } {
+  return phase.status === 'loaded' && !phase.refreshing && !phase.more && !!phase.page.nextCursor;
+}
+
 /** One feed per origin (or server URL) and username. */
 export function feedKey(server: string, username: string): string {
   return `mewo.feed.${encodeURIComponent(server)}.${encodeURIComponent(username)}`;

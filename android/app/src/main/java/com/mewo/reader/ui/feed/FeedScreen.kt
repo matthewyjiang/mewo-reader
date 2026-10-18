@@ -75,7 +75,7 @@ fun HomeFeed(
     hideOnScroll.BindListTop(listState)
     LoadWhenNearEnd(
         listState = listState,
-        enabled = loaded != null && !loaded.more && loaded.page.nextCursor != null,
+        enabled = loaded != null && !loaded.refreshing && !loaded.more && loaded.page.nextCursor != null,
         onLoad = onLoadMore,
     )
     LazyColumn(
@@ -84,7 +84,7 @@ fun HomeFeed(
             .fillMaxSize()
             .nestedScroll(hideOnScroll.connection),
     ) {
-        if (phase is FeedPhase.Loading || loaded?.more == true) {
+        if (phase is FeedPhase.Loading) {
             item(key = "feed-loading") { SpinnerStatus() }
         }
         failed?.let { error ->
@@ -107,6 +107,9 @@ fun HomeFeed(
                     onShare = onShare,
                 )
             }
+        }
+        if (loaded?.more == true) {
+            item(key = "feed-more") { SpinnerStatus() }
         }
         if (showFeedEmpty(phase)) {
             item(key = "feed-empty") { FeedEmpty() }

@@ -125,6 +125,48 @@ class FeedViewModelTest {
     }
 
     @Test
+    fun loadMoreDuringRefreshDoesNotAppendTheCachedCursor() = runTest(main) {
+        val store = FakeStore()
+        val cache = MemoryFeedCache()
+        cache.write("ada", HomeFeedPage(listOf(repost("byron")), nextCursor = "c2"))
+        val vm = FeedViewModel(store, cache)
+        vm.bindSession("ada")
+        runCurrent()
+        vm.loadMore()
+        runCurrent()
+        val during = vm.state.value.phase as FeedPhase.Loaded
+        assertTrue(during.refreshing)
+        assertFalse(during.more)
+        assertEquals(1, during.page.items.size)
+        store.finish(HomeFeedPage(listOf(repost("ada"))))
+        advanceUntilIdle()
+        val done = vm.state.value.phase as FeedPhase.Loaded
+        assertEquals(1, done.page.items.size)
+        assertFalse(done.refreshing)
+    }
+
+    @Test
+    fun aCommentLoadDoesNotDropARepostThatStartedAfterIt() = runTest(main) {
+        val store = FakeStore()
+        val vm = FeedViewModel(store, MemoryFeedCache())
+        vm.bindSession("ada")
+        runCurrent()
+        store.finish(HomeFeedPage(listOf(repost("byron"))))
+        runCurrent()
+        store.likes.complete(emptySet())
+        runCurrent()
+        vm.toggleRepost("b1", "0")
+        runCurrent()
+        assertTrue(vm.state.value.comments.getValue("b1").hasReposted("0"))
+        store.comments.complete(CommentIndex())
+        advanceUntilIdle()
+        assertTrue(vm.state.value.comments.getValue("b1").hasReposted("0"))
+        store.reposts.complete(RepostState(1, true))
+        advanceUntilIdle()
+        assertTrue(vm.state.value.comments.getValue("b1").hasReposted("0"))
+    }
+
+    @Test
     fun repostRollsBackWhenTheServerRejects() = runTest(main) {
         val store = FakeStore()
         val cache = MemoryFeedCache()

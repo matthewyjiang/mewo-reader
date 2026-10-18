@@ -39,6 +39,7 @@ class FeedViewModel(
     private var session: String? = null
     private var generation = 0L
     private var job: Job? = null
+    private val repostTicket = mutableMapOf<String, Long>()
 
     fun bindSession(id: String?) {
         if (id == session) return
@@ -83,7 +84,7 @@ class FeedViewModel(
 
     fun loadMore() {
         val phase = _state.value.phase as? FeedPhase.Loaded ?: return
-        if (phase.more || phase.page.nextCursor == null) return
+        if (phase.refreshing || phase.more || phase.page.nextCursor == null) return
         val id = session ?: return
         if (!store.hostedSocial) return
         val cursor = phase.page.nextCursor
@@ -125,6 +126,7 @@ class FeedViewModel(
 
     fun toggleRepost(bookId: String, postId: String) {
         val before = _state.value.comments[bookId] ?: CommentIndex()
+        repostTicket[bookId] = (repostTicket[bookId] ?: 0L) + 1
         viewModelScope.launch {
             runCatching {
                 commitRepost(
@@ -140,13 +142,17 @@ class FeedViewModel(
 
     private suspend fun loadSocial(page: HomeFeedPage) {
         val ids = page.items.map { it.book.id }.distinct()
+        val started = ids.associateWith { id -> repostTicket[id] ?: 0L }
         val likes = ids.associateWith { id ->
             runCatching { store.likes(id) }.getOrDefault(_state.value.likes[id] ?: emptySet())
         }
         val comments = ids.associateWith { id ->
             runCatching { store.commentIndex(id) }.getOrDefault(_state.value.comments[id] ?: CommentIndex())
         }
-        _state.update { it.copy(likes = it.likes + likes, comments = it.comments + comments) }
+        _state.update { state ->
+            val fresh = comments.filterKeys { id -> (repostTicket[id] ?: 0L) == started[id] }
+            state.copy(likes = state.likes + likes, comments = state.comments + fresh)
+        }
     }
 
     private fun current(gen: Long, id: String): Boolean = gen == generation && id == session

@@ -148,20 +148,7 @@ class SearchViewModel(
 
     fun toggleLike(bookId: String, postId: String) = social.toggleLike(bookId, postId)
 
-    fun toggleRepost(bookId: String, postId: String) {
-        val before = _state.value.comments[bookId] ?: CommentIndex()
-        viewModelScope.launch {
-            runCatching {
-                com.mewo.reader.data.commitRepost(
-                    before,
-                    postId,
-                    { on -> store.setRepost(bookId, postId, on) },
-                    { _state.value.comments[bookId] ?: CommentIndex() },
-                    { next -> _state.update { it.copy(comments = it.comments + (bookId to next)) } },
-                )
-            }
-        }
-    }
+    fun toggleRepost(bookId: String, postId: String) = social.toggleRepost(bookId, postId)
 
     private fun arm(gen: Long, query: String, kind: SearchKind, cursor: String?) {
         val requestSession = session ?: return

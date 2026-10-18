@@ -3,6 +3,7 @@ package com.mewo.reader.ui.search
 import com.mewo.reader.data.CommentIndex
 import com.mewo.reader.data.LibraryStore
 import com.mewo.reader.data.PostComment
+import com.mewo.reader.data.commitRepost
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineStart
@@ -21,8 +22,9 @@ import kotlinx.coroutines.sync.withLock
  * and cancel cannot stop it, so a fan-out could fill the IO pool. A load still
  * waiting its turn is dropped when its book leaves the results.
  *
- * Like toggles and comment edits come from the user, so they win over any load
- * that started before them.
+ * Like toggles, reposts, and comment edits come from the user, so they win over
+ * any load that started before them. Reposts live in the comment index, and this
+ * class is the only writer of that map.
  *
  * Call everything from [scope]'s thread (the main thread in the app); the
  * per-book fields have no locks.
@@ -48,6 +50,11 @@ internal class BookSocial(
         var toggles = 0L
         var shownToggle = 0L
         var togglesRunning = 0
+
+        // Same ticket for reposts, which share the comment index with loads.
+        var reposts = 0L
+        var shownRepost = 0L
+        var repostsRunning = 0
 
         // Threads edited since the current comment load began.
         val edits = mutableMapOf<String, List<PostComment>>()
@@ -101,6 +108,39 @@ internal class BookSocial(
         }
     }
 
+    fun toggleRepost(id: String, postId: String) {
+        val book = book(id)
+        val ticket = ++book.reposts
+        book.repostsRunning++
+        val before = comments[id] ?: CommentIndex()
+        scope.launch {
+            try {
+                commitRepost(
+                    before,
+                    postId,
+                    { on -> store.setRepost(id, postId, on) },
+                    { comments[id] ?: CommentIndex() },
+                    { next ->
+                        if (ticket >= book.shownRepost) {
+                            book.shownRepost = ticket
+                            comments = comments + (id to next)
+                            onChange(likes, comments)
+                        }
+                    },
+                )
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Exception) {
+                // commitRepost already put the post back when this ticket still owned it.
+            } finally {
+                book.repostsRunning--
+                // The index answer is one post. A load skipped for this toggle still
+                // has to fetch the other posts' counts once the toggle has landed.
+                if (book.repostsRunning == 0 && !book.commentsFresh && id in shown) ensure(id)
+            }
+        }
+    }
+
     /** Shows the edited thread of [postId] now, and keeps it over a comment load already running. */
     fun onThreadChanged(id: String, postId: String, thread: List<PostComment>) {
         book(id).edits[postId] = thread
@@ -116,11 +156,11 @@ internal class BookSocial(
         if (book.load != null || (book.likesFresh && book.commentsFresh)) return
         lateinit var job: Job
         job = scope.launch(start = CoroutineStart.LAZY) {
-            var staleNow = false
+            var again = false
             try {
                 queue.withLock {
                     book.loadStarted = true
-                    staleNow = fetch(id, book)
+                    again = fetch(id, book)
                 }
             } finally {
                 if (book.load === job) {
@@ -128,15 +168,19 @@ internal class BookSocial(
                     book.loadStarted = false
                 }
             }
-            if (staleNow && id in shown) ensure(id)
+            if (again && id in shown && book.repostsRunning == 0) ensure(id)
         }
         book.load = job
         job.start()
     }
 
-    /** Loads the fields of [id] that are not fresh. Returns true if [markStale] ran meanwhile. */
+    /**
+     * Loads the fields of [id] that are not fresh. Returns true when the book
+     * should load again: [markStale] ran, or a repost overlapped the index.
+     */
     private suspend fun fetch(id: String, book: Book): Boolean {
         val epoch = book.epoch
+        var overlapped = false
         if (!book.likesFresh) {
             // A toggle that overlaps this load may land on the server before or
             // after it, so its answer is the one to trust.
@@ -151,17 +195,22 @@ internal class BookSocial(
         }
         if (!book.commentsFresh) {
             book.edits.clear()
+            // A repost that overlaps this load may land before or after it.
+            val ticket = book.reposts
+            val calm = book.repostsRunning == 0
             val loaded = attempt { store.commentIndex(id) }
-            if (loaded != null) {
+            if (loaded != null && calm && ticket == book.reposts) {
                 book.commentsFresh = epoch == book.epoch
                 val merged = book.edits.entries.fold(loaded) { index, (postId, thread) ->
                     index.afterThread(postId, thread)
                 }
                 comments = comments + (id to merged)
                 onChange(likes, comments)
+            } else if (loaded != null) {
+                overlapped = true
             }
         }
-        return epoch != book.epoch
+        return epoch != book.epoch || overlapped
     }
 }
 

@@ -71,7 +71,7 @@
   $effect(() => {
     socialKey;
     untrack(() => {
-      void Promise.all(socialIds.map((id) => store.social(id)));
+      for (const id of socialIds) void store.social(id).catch(() => {});
     });
   });
 

@@ -199,6 +199,7 @@ class HostedLibraryStore(
         val url = session.normalizedUrl() ?: return
         val user = session.username ?: return
         shelfCache.clear(url, user)
+        FileHomeFeedCache(File(context.filesDir, "home-feeds")).clear("$url\n$user")
     }
 
     override suspend fun importFromUri(uri: Uri): BookRecord = withContext(Dispatchers.IO) {
