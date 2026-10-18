@@ -14,7 +14,9 @@ use crate::AppState;
 use base64::engine::general_purpose::STANDARD;
 use base64::Engine;
 use sqlx::{FromRow, SqlitePool};
+use std::ops::DerefMut;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 use uuid::Uuid;
 
 const SEARCH_LIMIT: i64 = 20;
@@ -393,20 +395,7 @@ pub(crate) async fn store_feed(
         .bind(book_id)
         .execute(&mut *tx)
         .await?;
-    for post in &posts.posts {
-        let idx: i64 = post.id.parse().map_err(|_| {
-            tracing::error!(id = %post.id, book_id, "post id is not an index");
-            ApiError::Internal
-        })?;
-        sqlx::query("INSERT INTO posts (book_id, idx, kind, chapter, text) VALUES (?, ?, ?, ?, ?)")
-            .bind(book_id)
-            .bind(idx)
-            .bind(kind_label(&post.kind))
-            .bind(&post.chapter)
-            .bind(&post.text)
-            .execute(&mut *tx)
-            .await?;
-    }
+    insert_posts(&mut tx, book_id, &posts.posts).await?;
     sqlx::query("UPDATE books SET posts_indexed = 1, post_count = ? WHERE id = ?")
         .bind(posts.posts.len() as i64)
         .bind(book_id)
@@ -415,6 +404,39 @@ pub(crate) async fn store_feed(
     write_posts_file(dir, &bytes).await?;
     tx.commit().await?;
     Ok(bytes)
+}
+
+const POST_INSERT_BATCH: usize = 500;
+
+async fn insert_posts(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    book_id: &str,
+    posts: &[Post],
+) -> Result<(), ApiError> {
+    for chunk in posts.chunks(POST_INSERT_BATCH) {
+        let mut sql = String::from("INSERT INTO posts (book_id, idx, kind, chapter, text) VALUES ");
+        for (offset, _) in chunk.iter().enumerate() {
+            if offset > 0 {
+                sql.push(',');
+            }
+            sql.push_str("(?,?,?,?,?)");
+        }
+        let mut query = sqlx::query(&sql);
+        for post in chunk {
+            let idx: i64 = post.id.parse().map_err(|_| {
+                tracing::error!(id = %post.id, book_id, "post id is not an index");
+                ApiError::Internal
+            })?;
+            query = query
+                .bind(book_id)
+                .bind(idx)
+                .bind(kind_label(&post.kind))
+                .bind(&post.chapter)
+                .bind(&post.text);
+        }
+        query.execute(tx.deref_mut()).await?;
+    }
+    Ok(())
 }
 
 fn kind_label(kind: &PostKind) -> &'static str {
@@ -442,8 +464,11 @@ pub(crate) async fn read_posts(dir: &Path) -> Result<Option<Vec<u8>>, ApiError> 
     }
 }
 
+const BACKFILL_PAUSE: Duration = Duration::from_millis(75);
+
 /// Indexes every book still at `posts_indexed = 0`. Safe to run again: a book
 /// is marked only after its file and rows commit, and a second pass skips it.
+/// An unreadable EPUB with no `posts.json` is marked `-1` and left alone.
 pub(crate) async fn backfill(state: AppState) {
     let pending = sqlx::query_as::<_, (String, String)>(
         "SELECT id, user_id FROM books WHERE posts_indexed = 0 ORDER BY imported_at ASC, id ASC",
@@ -458,13 +483,18 @@ pub(crate) async fn backfill(state: AppState) {
         }
     };
     let mut indexed = 0u64;
-    for (book_id, user_id) in &pending {
+    for (offset, (book_id, user_id)) in pending.iter().enumerate() {
         match index_pending(&state, book_id, user_id).await {
             Ok(true) => indexed += 1,
             Ok(false) => {}
             Err(err) => {
                 tracing::error!(error = %err, %book_id, "search backfill failed for a book");
             }
+        }
+        // The write lock is free between books. A pause lets comments and
+        // progress updates in before the next book starts.
+        if offset + 1 != pending.len() {
+            tokio::time::sleep(BACKFILL_PAUSE).await;
         }
     }
     tracing::info!(indexed, pending = pending.len(), "search backfill finished");
@@ -487,7 +517,20 @@ async fn index_pending(state: &AppState, book_id: &str, user_id: &str) -> Result
             tracing::error!(error = %err, book_id, "posts.json is not a feed");
             ApiError::Internal
         })?,
-        None => posts_from_epub(dir.join("book.epub")).await?,
+        None => match posts_from_epub(dir.join("book.epub")).await {
+            Ok(posts) => posts,
+            Err(err @ ApiError::BadRequest(_)) => {
+                tracing::error!(%book_id, error = %err, "search backfill skipped an unreadable EPUB");
+                sqlx::query(
+                    "UPDATE books SET posts_indexed = -1 WHERE id = ? AND posts_indexed = 0",
+                )
+                .bind(book_id)
+                .execute(&state.pool)
+                .await?;
+                return Ok(false);
+            }
+            Err(err) => return Err(err),
+        },
     };
     store_feed(&state.pool, &dir, book_id, &posts).await?;
     Ok(true)

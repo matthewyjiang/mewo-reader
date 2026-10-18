@@ -93,11 +93,11 @@ Prefix `/v1`.
 - `GET /books/{id}/cover`
 - `GET /books/{id}/likes` → `{ "ids" }`
 - `POST /books/{id}/likes/{postId}` toggles
-- `PUT /books/{id}/posts/{postId}/repost` → `{ "reposts": 1, "reposted": true }`. A second PUT keeps the count and the original time
-- `DELETE /books/{id}/posts/{postId}/repost` → the same shape. A second DELETE keeps `{ "reposts": 0, "reposted": false }` once yours is gone
+- `PUT /books/{id}/posts/{postId}/repost` → `{ "reposts": 1, "reposted": true }`. A second PUT keeps the count and the original time. `postId` is the canonical decimal index (`0`, `1`, …). `00`, `+0`, and `abc` are 400. A post that is not in the feed is 404
+- `DELETE /books/{id}/posts/{postId}/repost` → the same shape when you can see the book, including a second DELETE after yours is already gone. After the book is unshared, DELETE still removes your own row and returns `{ "reposts": 0, "reposted": false }` without anyone else's count. A DELETE of a book you cannot see, when you have no row, is 404
 - `GET /books/{id}/comments` → `{ "counts": { "0": 2 }, "mine": ["0"], "reposts": { "0": 1 }, "reposted": ["0"] }`
 - `GET /books/{id}/comments/{postId}` → `{ "comments": [ { "id", "username", "text", "createdAt", "mine" } ] }`
-- `POST /books/{id}/comments/{postId}` `{ "text" }`
+- `POST /books/{id}/comments/{postId}` `{ "text" }`. The post id follows the same canonical-index rule as repost, and a missing post is 404
 - `DELETE /books/{id}/comments/{postId}/{commentId}`
 - `GET /profiles/{username}/replies` → `{ "username", "replies": [ { "bookId", "postId", "comment" } ] }`, newest first. An unknown username is an empty list. Lines from a book you cannot see are omitted. Shipped clients call this. `GET /users/{username}` is the newer profile and 404s an unknown username
 
@@ -127,7 +127,7 @@ Accounts match `username` with a case-insensitive substring. A prefix ranks befo
 
 `at` is milliseconds. Newest `at` first, then `repost` before `comment` at the same time, then the activity id. A line of a book shows up here when someone comments on it or reposts it. `reposts` on `GET /books/{id}/comments` is the per-post count (posts with zero are left out, same as `counts`). `reposted` is the post ids you reposted, same shape as `mine`. A book you cannot see is 404 for repost, same as likes and comments. Deleting a book deletes its reposts.
 
-Migration `005_search.sql` adds the `posts` table, the FTS5 index, `books.posts_indexed`, and the `reposts` table. Snapshot `/data` before deploying a build that includes it. Books already on disk are indexed in the background at startup.
+Migration `005_search.sql` adds the `posts` table (`id INTEGER PRIMARY KEY`, FTS `content_rowid` is that id), the FTS5 index, `books.posts_indexed`, `comments (created_at)`, and the `reposts` table. Snapshot `/data` before deploying a build that includes it. Books already on disk are indexed in the background at startup, one book at a time, with a short pause between books. An EPUB that cannot be read, and has no `posts.json`, is marked `posts_indexed = -1` and is not parsed again. Comments already stored under a non-canonical post id are left in place; count them with `SELECT COUNT(*) FROM comments WHERE post_id GLOB '*[^0-9]*' OR (post_id GLOB '0*' AND post_id <> '0')` before release. They no longer show up as a different post.
 
 A new upload is private (`shared` false). Books already on the shelf when sharing shipped stay shared. Opening, downloading, or commenting on a book you cannot see is 404. Anyone who can see a book can move their own reading place, like a post, and comment.
 

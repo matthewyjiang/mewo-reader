@@ -448,6 +448,7 @@ pub async fn put_repost(
 ) -> Result<Json<RepostState>, ApiError> {
     let post_id = parse_post_id(&post_id)?;
     let book = visible_book(&state, &authed.user_id, &id).await?;
+    require_post(&state, &book.id, &post_id).await?;
     sqlx::query(
         "INSERT INTO reposts (user_id, book_id, post_id, created_at)
          VALUES (?, ?, ?, ?)
@@ -470,7 +471,30 @@ pub async fn delete_repost(
     Path((id, post_id)): Path<(String, String)>,
 ) -> Result<Json<RepostState>, ApiError> {
     let post_id = parse_post_id(&post_id)?;
-    let book = visible_book(&state, &authed.user_id, &id).await?;
+    let book = match visible_book(&state, &authed.user_id, &id).await {
+        Ok(book) => book,
+        Err(ApiError::NotFound) => {
+            // The caller may have reposted before the book was unshared.
+            // Drop only their row. The count of everyone else's reposts stays hidden.
+            let book_id = parse_book_id(&id)?.to_string();
+            let deleted = sqlx::query(
+                "DELETE FROM reposts WHERE user_id = ? AND book_id = ? AND post_id = ?",
+            )
+            .bind(&authed.user_id)
+            .bind(&book_id)
+            .bind(&post_id)
+            .execute(&state.pool)
+            .await?;
+            if deleted.rows_affected() == 0 {
+                return Err(ApiError::NotFound);
+            }
+            return Ok(Json(RepostState {
+                reposts: 0,
+                reposted: false,
+            }));
+        }
+        Err(err) => return Err(err),
+    };
     sqlx::query("DELETE FROM reposts WHERE user_id = ? AND book_id = ? AND post_id = ?")
         .bind(&authed.user_id)
         .bind(&book.id)
@@ -528,7 +552,8 @@ pub async fn add_comment(
     Json(body): Json<NewComment>,
 ) -> Result<Json<CommentThread>, ApiError> {
     let post_id = parse_post_id(&post_id)?;
-    let _ = visible_book(&state, &authed.user_id, &id).await?;
+    let book = visible_book(&state, &authed.user_id, &id).await?;
+    require_post(&state, &book.id, &post_id).await?;
     let text = parse_comment_text(&body.text)?;
     let comment_id = Uuid::new_v4().to_string();
     sqlx::query(
@@ -537,7 +562,7 @@ pub async fn add_comment(
     )
     .bind(&comment_id)
     .bind(&authed.user_id)
-    .bind(&id)
+    .bind(&book.id)
     .bind(&post_id)
     .bind(&text)
     .bind(now_ms())
@@ -617,6 +642,7 @@ pub async fn profile_posts(
         Some((created_at, id)) => (1i64, created_at, id),
         None => (0, 0, String::new()),
     };
+    let comment_posts = posts_for("c");
     let sql = format!(
         "SELECT b.id, b.title, b.author, b.handle, b.imported_at, b.post_count,
                 COALESCE(p.progress_index, 0) AS progress_index,
@@ -632,7 +658,7 @@ pub async fn profile_posts(
          JOIN books b ON b.id = c.book_id
          JOIN users owner ON owner.id = b.user_id
          LEFT JOIN book_progress p ON p.book_id = b.id AND p.user_id = ?
-         JOIN posts ON posts.book_id = c.book_id AND posts.idx = CAST(c.post_id AS INTEGER)
+         {comment_posts}
          WHERE c.user_id = ? AND {BOOK_VISIBLE_TO}
            AND (
              ? = 0
@@ -678,6 +704,7 @@ pub async fn profile_reposts(
 ) -> Result<Json<ProfileRepostsPage>, ApiError> {
     let (user_id, _, _) = require_user(&state.pool, &username).await?;
     let (has_cursor, created_at, cursor_book, cursor_post) = keyset3(&query, false)?;
+    let repost_posts = posts_for("r");
     let sql = format!(
         "SELECT b.id, b.title, b.author, b.handle, b.imported_at, b.post_count,
                 COALESCE(p.progress_index, 0) AS progress_index,
@@ -691,7 +718,7 @@ pub async fn profile_reposts(
          JOIN books b ON b.id = r.book_id
          JOIN users owner ON owner.id = b.user_id
          LEFT JOIN book_progress p ON p.book_id = b.id AND p.user_id = ?
-         JOIN posts ON posts.book_id = r.book_id AND posts.idx = CAST(r.post_id AS INTEGER)
+         {repost_posts}
          WHERE r.user_id = ? AND {BOOK_VISIBLE_TO}
            AND (
              ? = 0
@@ -760,66 +787,98 @@ pub async fn feed(
     Query(query): Query<PageQuery>,
 ) -> Result<Json<FeedPage>, ApiError> {
     let (has_cursor, at, kind, id) = keyset3(&query, true)?;
+    let comment_posts = posts_for("c");
+    let repost_posts = posts_for("r");
+    // Each branch keeps its own cursor and limit so the feed does not sort the
+    // whole history before discarding it. The outer query merges those pages.
     let sql = format!(
-        "SELECT activity.kind AS kind, activity.id AS id, activity.at AS at,
-                activity.actor_username AS actor_username,
-                b.id AS book_id, b.title AS title, b.author AS author, b.handle AS handle,
-                b.imported_at AS imported_at, b.post_count AS post_count,
-                COALESCE(p.progress_index, 0) AS progress_index,
-                b.is_sample AS is_sample, b.shared AS shared, b.user_id AS owner_id,
-                owner.username AS owner_username,
-                posts.idx AS post_idx, posts.kind AS post_kind,
-                posts.chapter AS post_chapter, posts.text AS post_text,
-                activity.comment_id AS comment_id,
-                activity.comment_username AS comment_username,
-                activity.comment_text AS comment_text,
-                activity.comment_created_at AS comment_created_at,
-                activity.comment_user_id AS comment_user_id
+        "SELECT kind, id, at, actor_username, book_id, title, author, handle, imported_at,
+                post_count, progress_index, is_sample, shared, owner_id, owner_username,
+                post_idx, post_kind, post_chapter, post_text, comment_id, comment_username,
+                comment_text, comment_created_at, comment_user_id
          FROM (
-             SELECT 'comment' AS kind, c.id AS id, c.created_at AS at,
-                    u.username AS actor_username, c.book_id AS book_id, c.post_id AS post_id,
-                    c.id AS comment_id, u.username AS comment_username,
-                    c.text AS comment_text, c.created_at AS comment_created_at,
-                    c.user_id AS comment_user_id
-             FROM comments c
-             JOIN users u ON u.id = c.user_id
+             SELECT * FROM (
+                 SELECT 'comment' AS kind, c.id AS id, c.created_at AS at,
+                        u.username AS actor_username,
+                        b.id AS book_id, b.title AS title, b.author AS author, b.handle AS handle,
+                        b.imported_at AS imported_at, b.post_count AS post_count,
+                        COALESCE(p.progress_index, 0) AS progress_index,
+                        b.is_sample AS is_sample, b.shared AS shared, b.user_id AS owner_id,
+                        owner.username AS owner_username,
+                        posts.idx AS post_idx, posts.kind AS post_kind,
+                        posts.chapter AS post_chapter, posts.text AS post_text,
+                        c.id AS comment_id, u.username AS comment_username,
+                        c.text AS comment_text, c.created_at AS comment_created_at,
+                        c.user_id AS comment_user_id
+                 FROM comments c
+                 JOIN users u ON u.id = c.user_id
+                 JOIN books b ON b.id = c.book_id
+                 JOIN users owner ON owner.id = b.user_id
+                 LEFT JOIN book_progress p ON p.book_id = b.id AND p.user_id = ?
+                 {comment_posts}
+                 WHERE {BOOK_VISIBLE_TO}
+                   AND (
+                     ? = 0
+                     OR c.created_at < ?
+                     OR (c.created_at = ? AND 'comment' < ?)
+                     OR (c.created_at = ? AND 'comment' = ? AND c.id < ?)
+                   )
+                 ORDER BY c.created_at DESC, c.id DESC
+                 LIMIT ?
+             )
              UNION ALL
-             SELECT 'repost',
-                    r.user_id || ':' || r.book_id || ':' || r.post_id,
-                    r.created_at, u.username, r.book_id, r.post_id,
-                    CAST(NULL AS TEXT), CAST(NULL AS TEXT), CAST(NULL AS TEXT),
-                    CAST(NULL AS INTEGER), CAST(NULL AS TEXT)
-             FROM reposts r
-             JOIN users u ON u.id = r.user_id
-         ) activity
-         JOIN books b ON b.id = activity.book_id
-         JOIN users owner ON owner.id = b.user_id
-         LEFT JOIN book_progress p ON p.book_id = b.id AND p.user_id = ?
-         JOIN posts ON posts.book_id = activity.book_id
-                    AND posts.idx = CAST(activity.post_id AS INTEGER)
-         WHERE {BOOK_VISIBLE_TO}
-           AND (
-             ? = 0
-             OR activity.at < ?
-             OR (activity.at = ? AND activity.kind < ?)
-             OR (activity.at = ? AND activity.kind = ? AND activity.id < ?)
-           )
-         ORDER BY activity.at DESC, activity.kind DESC, activity.id DESC
+             SELECT * FROM (
+                 SELECT 'repost' AS kind,
+                        r.user_id || ':' || r.book_id || ':' || r.post_id AS id,
+                        r.created_at AS at, u.username AS actor_username,
+                        b.id AS book_id, b.title AS title, b.author AS author, b.handle AS handle,
+                        b.imported_at AS imported_at, b.post_count AS post_count,
+                        COALESCE(p.progress_index, 0) AS progress_index,
+                        b.is_sample AS is_sample, b.shared AS shared, b.user_id AS owner_id,
+                        owner.username AS owner_username,
+                        posts.idx AS post_idx, posts.kind AS post_kind,
+                        posts.chapter AS post_chapter, posts.text AS post_text,
+                        CAST(NULL AS TEXT) AS comment_id,
+                        CAST(NULL AS TEXT) AS comment_username,
+                        CAST(NULL AS TEXT) AS comment_text,
+                        CAST(NULL AS INTEGER) AS comment_created_at,
+                        CAST(NULL AS TEXT) AS comment_user_id
+                 FROM reposts r
+                 JOIN users u ON u.id = r.user_id
+                 JOIN books b ON b.id = r.book_id
+                 JOIN users owner ON owner.id = b.user_id
+                 LEFT JOIN book_progress p ON p.book_id = b.id AND p.user_id = ?
+                 {repost_posts}
+                 WHERE {BOOK_VISIBLE_TO}
+                   AND (
+                     ? = 0
+                     OR r.created_at < ?
+                     OR (r.created_at = ? AND 'repost' < ?)
+                     OR (r.created_at = ? AND 'repost' = ? AND (r.user_id || ':' || r.book_id || ':' || r.post_id) < ?)
+                   )
+                 ORDER BY r.created_at DESC, r.user_id || ':' || r.book_id || ':' || r.post_id DESC
+                 LIMIT ?
+             )
+         )
+         ORDER BY at DESC, kind DESC, id DESC
          LIMIT ?"
     );
-    let mut rows = sqlx::query_as::<_, FeedRow>(&sql)
-        .bind(&authed.user_id)
-        .bind(&authed.user_id)
-        .bind(has_cursor)
-        .bind(at)
-        .bind(at)
-        .bind(&kind)
-        .bind(at)
-        .bind(&kind)
-        .bind(&id)
-        .bind(FEED_LIMIT + 1)
-        .fetch_all(&state.pool)
-        .await?;
+    let limit = FEED_LIMIT + 1;
+    let mut query = sqlx::query_as::<_, FeedRow>(&sql);
+    for _ in 0..2 {
+        query = query
+            .bind(&authed.user_id)
+            .bind(&authed.user_id)
+            .bind(has_cursor)
+            .bind(at)
+            .bind(at)
+            .bind(&kind)
+            .bind(at)
+            .bind(&kind)
+            .bind(&id)
+            .bind(limit);
+    }
+    let mut rows = query.bind(limit).fetch_all(&state.pool).await?;
     let next_cursor = if rows.len() > FEED_LIMIT as usize {
         rows.truncate(FEED_LIMIT as usize);
         rows.last()
@@ -1082,10 +1141,12 @@ async fn visible_reply_count(
     viewer: &str,
     user_id: &str,
 ) -> Result<i64, ApiError> {
+    let comment_posts = posts_for("c");
     let count = sqlx::query_scalar::<_, i64>(&format!(
         "SELECT COUNT(*)
          FROM comments c
          JOIN books b ON b.id = c.book_id
+         {comment_posts}
          WHERE c.user_id = ? AND {BOOK_VISIBLE_TO}"
     ))
     .bind(user_id)
@@ -1100,10 +1161,12 @@ async fn visible_repost_count(
     viewer: &str,
     user_id: &str,
 ) -> Result<i64, ApiError> {
+    let repost_posts = posts_for("r");
     let count = sqlx::query_scalar::<_, i64>(&format!(
         "SELECT COUNT(*)
          FROM reposts r
          JOIN books b ON b.id = r.book_id
+         {repost_posts}
          WHERE r.user_id = ? AND {BOOK_VISIBLE_TO}"
     ))
     .bind(user_id)
@@ -1247,7 +1310,39 @@ fn parse_post_id(post_id: &str) -> Result<String, ApiError> {
             post_id.chars().count()
         )));
     }
-    Ok(post_id.to_string())
+    // `00`, `+0`, and `abc` must not collapse onto post 0 through CAST.
+    let Ok(idx) = post_id.parse::<u32>() else {
+        return Err(ApiError::BadRequest(
+            "Post id is not a canonical index.".into(),
+        ));
+    };
+    let canonical = idx.to_string();
+    if canonical != post_id {
+        return Err(ApiError::BadRequest(
+            "Post id is not a canonical index.".into(),
+        ));
+    }
+    Ok(canonical)
+}
+
+async fn require_post(state: &AppState, book_id: &str, post_id: &str) -> Result<(), ApiError> {
+    let idx: i64 = post_id.parse().map_err(|_| ApiError::NotFound)?;
+    let found = sqlx::query_scalar::<_, i64>("SELECT 1 FROM posts WHERE book_id = ? AND idx = ?")
+        .bind(book_id)
+        .bind(idx)
+        .fetch_optional(&state.pool)
+        .await?;
+    found.map(|_| ()).ok_or(ApiError::NotFound)
+}
+
+/// `alias` is `c` or `r`. The idx comparison uses UNIQUE (book_id, idx).
+/// The text comparison rejects a non-canonical id that CASTs to that idx.
+fn posts_for(alias: &str) -> String {
+    format!(
+        "JOIN posts ON posts.book_id = {alias}.book_id \
+         AND posts.idx = CAST({alias}.post_id AS INTEGER) \
+         AND {alias}.post_id = CAST(posts.idx AS TEXT)"
+    )
 }
 
 fn parse_comment_text(raw: &str) -> Result<String, ApiError> {

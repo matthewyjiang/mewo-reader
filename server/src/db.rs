@@ -15,7 +15,8 @@ pub async fn connect(database_url: &str, data_dir: &Path) -> Result<SqlitePool, 
         .create_if_missing(true)
         .foreign_keys(true)
         .journal_mode(SqliteJournalMode::Wal)
-        .busy_timeout(Duration::from_secs(5));
+        // Backfill yields between books. This only covers one book's write.
+        .busy_timeout(Duration::from_secs(10));
 
     let pool = SqlitePoolOptions::new()
         .max_connections(8)
