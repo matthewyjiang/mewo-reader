@@ -450,6 +450,56 @@ textarea::placeholder, input::placeholder {
   }
 }
 
+.account-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+  padding: 12px 16px;
+  text-align: left;
+  border-bottom: .6px solid var(--line);
+}
+
+.account-row:hover {
+  background: var(--hover);
+}
+
+.account-names {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  gap: 2px;
+}
+
+.account-names strong {
+  font-size: 1.0625rem;
+  line-height: 1.23;
+}
+
+.status-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-height: 48px;
+  padding: 12px 16px;
+}
+
+.activity-line {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 32px;
+  padding: 8px 16px 0 68px;
+  color: var(--mute);
+  font-size: .8125rem;
+  font-weight: 700;
+  line-height: 1.2;
+}
+
+.activity-line:hover {
+  text-decoration: underline;
+}
+
 @media (forced-colors: active) {
   .thread-rule { background: CanvasText; }
 }

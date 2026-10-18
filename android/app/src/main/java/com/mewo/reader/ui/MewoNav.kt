@@ -2,6 +2,7 @@ package com.mewo.reader.ui
 
 import android.net.Uri
 import android.os.Build
+import androidx.compose.ui.platform.LocalContext
 import android.view.inputmethod.InputMethodManager
 import androidx.activity.compose.LocalActivity
 import androidx.activity.compose.PredictiveBackHandler
@@ -21,6 +22,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
@@ -46,6 +48,8 @@ import com.mewo.reader.ui.profile.ProfileScreen
 import com.mewo.reader.ui.profile.ProfileViewModel
 import com.mewo.reader.ui.reader.ReaderScreen
 import com.mewo.reader.ui.reader.ReaderViewModel
+import com.mewo.reader.data.BackendKind
+import com.mewo.reader.ui.search.PrefSearchKind
 import com.mewo.reader.ui.search.SearchScreen
 import com.mewo.reader.ui.search.SearchViewModel
 import com.mewo.reader.ui.settings.SettingsAboutPage
@@ -61,6 +65,10 @@ import kotlinx.coroutines.launch
 @Composable
 fun MewoNav() {
     val store = LocalLibraryStore.current
+    val auth = LocalHostedAuth.current
+    val hosted = LocalBackend.current.kind == BackendKind.Hosted
+    val context = LocalContext.current
+    val searchKinds = remember { PrefSearchKind(context) }
     val nav = rememberNavController()
     val drawerState = rememberDrawerState(initialValue = DrawerValue.Closed)
     val scope = rememberCoroutineScope()
@@ -175,6 +183,16 @@ fun MewoNav() {
         gesturesEnabled = !coverFeed,
         onOpenSettings = ::openSettings,
         onOpenProfile = ::openProfile,
+        onSignOut = if (hosted && auth.session.signedIn) {
+            {
+                scope.launch {
+                    drawerState.close()
+                    auth.signOut()
+                }
+            }
+        } else {
+            null
+        },
     ) {
         Column(
             modifier = Modifier
@@ -194,13 +212,15 @@ fun MewoNav() {
                     LibraryScreen(
                         viewModel = vm,
                         onOpenBook = { id -> openBook(id) },
+                        onOpenPost = { bookId, postId -> openBook(bookId, postId) },
                         onOpenAccount = openAccount,
+                        onOpenProfile = ::openProfile,
                         hideOnScroll = chrome,
                     )
                 }
                 composable("search") {
                     val vm: SearchViewModel = viewModel(
-                        factory = SearchViewModel.factory(store),
+                        factory = SearchViewModel.factory(store, searchKinds),
                     )
                     SearchScreen(
                         viewModel = vm,
@@ -274,6 +294,8 @@ fun MewoNav() {
                             chrome.show()
                             nav.popBackStack()
                         },
+                        onOpenPost = { bookId, postId -> openBook(bookId, postId) },
+                        onOpenBook = { id -> openBook(id) },
                         onOpenProfile = ::openProfile,
                         hideOnScroll = chrome,
                     )

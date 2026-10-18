@@ -284,6 +284,7 @@ fun ThreadPost(
     cover: File?,
     connectDown: Boolean,
     onOpenProfile: ((handle: String, name: String) -> Unit)? = null,
+    onOpen: (() -> Unit)? = null,
     onDelete: (() -> Unit)? = null,
 ) {
     val readerType = LocalReaderFont.current.scale
@@ -405,6 +406,11 @@ fun ThreadPost(
                     readerType.headingStyle(MaterialTheme.typography.titleMedium)
                 } else {
                     readerType.bodyStyle(MaterialTheme.typography.bodyLarge)
+                },
+                modifier = if (onOpen != null) {
+                    Modifier.clickable(role = Role.Button, onClick = onOpen)
+                } else {
+                    Modifier
                 },
             )
         }

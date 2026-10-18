@@ -33,6 +33,79 @@ export interface PostComment {
 export interface CommentIndex {
   counts: Record<string, number>;
   mine: string[];
+  /** Posts with at least one repost. Zero counts are omitted, same as `counts`. */
+  reposts?: Record<string, number>;
+  /** Post ids this viewer has reposted. Same shape as `mine`. */
+  reposted?: string[];
+}
+
+export interface RepostState {
+  reposts: number;
+  reposted: boolean;
+}
+
+export interface AccountHit {
+  username: string;
+  mine: boolean;
+}
+
+export type SearchKind = 'accounts' | 'books' | 'posts';
+
+export type SearchPage =
+  | { type: 'accounts'; items: AccountHit[]; nextCursor: string | null }
+  | { type: 'books'; items: BookRecord[]; nextCursor: string | null }
+  | { type: 'posts'; items: PostHit[]; nextCursor: string | null };
+
+export interface ProfileRecord {
+  username: string;
+  joinedAt: number;
+  postCount: number;
+  repostCount: number;
+  mine: boolean;
+}
+
+export interface ProfilePost extends PostHit {
+  comment: PostComment;
+}
+
+export interface ProfilePostsPage {
+  items: ProfilePost[];
+  nextCursor: string | null;
+}
+
+export interface ProfileRepost extends PostHit {
+  repostedAt: number;
+}
+
+export interface ProfileRepostsPage {
+  items: ProfileRepost[];
+  nextCursor: string | null;
+}
+
+export interface ProfileBooks {
+  items: BookRecord[];
+}
+
+export type HomeFeedItem =
+  | {
+    type: 'comment';
+    actor: { username: string };
+    book: BookRecord;
+    post: FeedPost;
+    comment: PostComment;
+    at: number;
+  }
+  | {
+    type: 'repost';
+    actor: { username: string };
+    book: BookRecord;
+    post: FeedPost;
+    at: number;
+  };
+
+export interface HomeFeedPage {
+  items: HomeFeedItem[];
+  nextCursor: string | null;
 }
 
 export interface AuthResponse {
@@ -93,6 +166,14 @@ export function currentHeadingIndex(
   let current = 0;
   for (let i = 0; i < headings.length && headings[i].index <= visibleIndex; i++) current = i;
   return current;
+}
+
+const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+
+/** `Joined Mon YYYY` from `users.created_at` milliseconds, in UTC. */
+export function joinedLabel(joinedAt: number): string {
+  const date = new Date(joinedAt);
+  return `Joined ${months[date.getUTCMonth()]} ${date.getUTCFullYear()}`;
 }
 
 export function relativeTime(createdAt: number): string {

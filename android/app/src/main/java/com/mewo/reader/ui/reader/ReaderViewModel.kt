@@ -8,6 +8,7 @@ import com.mewo.reader.data.CommentIndex
 import com.mewo.reader.data.FeedPost
 import com.mewo.reader.data.LibraryStore
 import com.mewo.reader.data.PostComment
+import com.mewo.reader.data.commitRepost
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -65,6 +66,21 @@ class ReaderViewModel(
         viewModelScope.launch {
             val next = store.toggleLike(bookId, postId)
             _state.update { it.copy(likes = next) }
+        }
+    }
+
+    fun toggleRepost(postId: String) {
+        val before = _state.value.comments
+        viewModelScope.launch {
+            runCatching {
+                commitRepost(
+                    before,
+                    postId,
+                    { on -> store.setRepost(bookId, postId, on) },
+                    { _state.value.comments },
+                    { next -> _state.update { it.copy(comments = next) } },
+                )
+            }
         }
     }
 

@@ -1,5 +1,6 @@
 package com.mewo.reader.ui.library
 
+import android.content.Intent
 import android.net.Uri
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -54,9 +55,11 @@ import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.material3.pulltorefresh.PullToRefreshDefaults
 import androidx.compose.material3.pulltorefresh.rememberPullToRefreshState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -66,11 +69,15 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.mewo.reader.data.BackendKind
 import com.mewo.reader.data.BookRecord
+import com.mewo.reader.data.FeedPhase
+import com.mewo.reader.data.FeedPost
+import com.mewo.reader.data.FileHomeFeedCache
 import com.mewo.reader.data.LibraryFailed
 import com.mewo.reader.data.LibraryLoading
 import com.mewo.reader.data.LibraryStore
@@ -78,7 +85,13 @@ import com.mewo.reader.data.cachedBooks
 import com.mewo.reader.data.isRefreshing
 import com.mewo.reader.data.showEmpty
 import com.mewo.reader.ui.LocalBackend
+import com.mewo.reader.ui.LocalHostedAuth
 import com.mewo.reader.ui.LocalLibraryStore
+import com.mewo.reader.ui.components.UnderlineTabs
+import com.mewo.reader.ui.feed.FeedViewModel
+import com.mewo.reader.ui.feed.HomeFeed
+import com.mewo.reader.ui.reader.CommentSheet
+import com.mewo.reader.ui.reader.CommentTarget
 import com.mewo.reader.ui.components.Avatar
 import com.mewo.reader.ui.components.BindListTop
 import com.mewo.reader.ui.components.BrandMark
@@ -88,13 +101,16 @@ import com.mewo.reader.ui.components.ProfileButton
 import com.mewo.reader.ui.components.ShowWhenIdle
 import java.io.File
 import kotlin.math.roundToInt
+import androidx.lifecycle.viewmodel.compose.viewModel as composeViewModel
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun LibraryScreen(
     viewModel: LibraryViewModel,
     onOpenBook: (String) -> Unit,
+    onOpenPost: (bookId: String, postId: String) -> Unit,
     onOpenAccount: () -> Unit,
+    onOpenProfile: (handle: String, name: String) -> Unit,
     hideOnScroll: HideOnScrollState,
 ) {
     val state by viewModel.state.collectAsStateWithLifecycle()
@@ -102,6 +118,18 @@ fun LibraryScreen(
     val books = load.cachedBooks().orEmpty()
     val library = LocalLibraryStore.current
     val hosted = LocalBackend.current.kind == BackendKind.Hosted
+    val context = LocalContext.current
+    val auth = LocalHostedAuth.current
+    var home by rememberSaveable { mutableStateOf("feed") }
+    val onBooks = home == "books"
+    val feedCache = remember { FileHomeFeedCache(File(context.filesDir, "home-feeds")) }
+    val feedViewModel: FeedViewModel = composeViewModel(
+        factory = FeedViewModel.factory(library, feedCache),
+    )
+    val feedState by feedViewModel.state.collectAsStateWithLifecycle()
+    val feedSession = feedSessionKey(hosted, auth.session.signedIn, auth.session.normalizedUrl(), auth.session.username)
+    LaunchedEffect(feedSession) { feedViewModel.bindSession(feedSession) }
+    var commentTarget by remember { mutableStateOf<CommentTarget?>(null) }
     var pendingDelete by remember { mutableStateOf<BookRecord?>(null) }
     val picker = rememberLauncherForActivityResult(
         ActivityResultContracts.OpenDocument(),
@@ -116,12 +144,23 @@ fun LibraryScreen(
     ) {
         Column(Modifier.fillMaxSize()) {
             HomeBar(onOpenAccount = onOpenAccount, visible = hideOnScroll.visible)
-            hideOnScroll.ShowWhenIdle(books.isEmpty())
+            UnderlineTabs(
+                tabs = listOf("feed" to "Feed", "books" to "Books"),
+                selected = home,
+                onSelect = { home = it },
+            )
+            val feedItems = when (val phase = feedState.phase) {
+                FeedPhase.Loading -> emptyList()
+                is FeedPhase.Loaded -> phase.page.items
+                is FeedPhase.Failed -> phase.page?.items.orEmpty()
+            }
+            hideOnScroll.ShowWhenIdle(if (onBooks) books.isEmpty() else feedItems.isEmpty())
             val pullState = rememberPullToRefreshState()
             val pullThreshold = PullToRefreshDefaults.PositionalThreshold
+            val feedRefreshing = (feedState.phase as? FeedPhase.Loaded)?.refreshing == true
             PullToRefreshBox(
-                isRefreshing = load.isRefreshing(),
-                onRefresh = viewModel::refresh,
+                isRefreshing = if (onBooks) load.isRefreshing() else feedRefreshing,
+                onRefresh = { if (onBooks) viewModel.refresh() else feedViewModel.refresh() },
                 state = pullState,
                 modifier = Modifier.weight(1f).fillMaxWidth(),
                 // The default indicator hangs over the first row. Open a gap the
@@ -156,7 +195,23 @@ fun LibraryScreen(
                             )
                         },
                 ) {
-                when {
+                if (!onBooks) {
+                    HomeFeed(
+                        phase = feedState.phase,
+                        likes = feedState.likes,
+                        comments = feedState.comments,
+                        hideOnScroll = hideOnScroll,
+                        onOpenPost = onOpenPost,
+                        onOpenActor = { username -> onOpenProfile(username, username) },
+                        onComment = { commentTarget = it },
+                        onLike = feedViewModel::toggleLike,
+                        onRepost = feedViewModel::toggleRepost,
+                        onQuote = { book, post -> shareText(context, quote(book.author, book.title, post)) },
+                        onShare = { post -> shareText(context, post.text) },
+                        onRetry = feedViewModel::refresh,
+                        onLoadMore = feedViewModel::loadMore,
+                    )
+                } else when {
                     load is LibraryLoading -> LibraryLoading()
                     load is LibraryFailed && load.books == null -> LibraryUnavailable(
                         message = load.message,
@@ -206,17 +261,19 @@ fun LibraryScreen(
             }
         }
 
-        FloatingActionButton(
-            onClick = { picker.launch(arrayOf("application/epub+zip", "application/octet-stream")) },
-            containerColor = MaterialTheme.colorScheme.primary,
-            contentColor = MaterialTheme.colorScheme.onPrimary,
-            shape = CircleShape,
-            modifier = Modifier
-                .align(Alignment.BottomEnd)
-                .padding(end = 16.dp, bottom = 16.dp)
-                .size(56.dp),
-        ) {
-            Icon(Icons.Outlined.Add, contentDescription = "Add an EPUB")
+        if (onBooks) {
+            FloatingActionButton(
+                onClick = { picker.launch(arrayOf("application/epub+zip", "application/octet-stream")) },
+                containerColor = MaterialTheme.colorScheme.primary,
+                contentColor = MaterialTheme.colorScheme.onPrimary,
+                shape = CircleShape,
+                modifier = Modifier
+                    .align(Alignment.BottomEnd)
+                    .padding(end = 16.dp, bottom = 16.dp)
+                    .size(56.dp),
+            ) {
+                Icon(Icons.Outlined.Add, contentDescription = "Add an EPUB")
+            }
         }
 
         if (state.busy) {
@@ -253,7 +310,46 @@ fun LibraryScreen(
                 onDismiss = { pendingDelete = null },
             )
         }
+
+        commentTarget?.let { target ->
+            CommentSheet(
+                target = target,
+                publicNotes = hosted,
+                onThreadChanged = { postId, comments ->
+                    feedViewModel.onCommentsChanged(target.book.id, postId, comments)
+                },
+                onDismiss = { commentTarget = null },
+                onOpenProfile = { handle, name ->
+                    commentTarget = null
+                    onOpenProfile(handle, name)
+                },
+            )
+        }
     }
+}
+
+private fun feedSessionKey(
+    hosted: Boolean,
+    signedIn: Boolean,
+    url: String?,
+    username: String?,
+): String? {
+    if (!hosted) return "local"
+    if (!signedIn || url.isNullOrBlank() || username.isNullOrBlank()) return null
+    return "$url\n$username"
+}
+
+private fun quote(author: String?, title: String?, post: FeedPost): String {
+    val by = listOfNotNull(author, title).joinToString(", ")
+    return if (by.isBlank()) post.text else "${post.text}\n\n— $by"
+}
+
+private fun shareText(context: android.content.Context, text: String) {
+    val intent = Intent(Intent.ACTION_SEND).apply {
+        type = "text/plain"
+        putExtra(Intent.EXTRA_TEXT, text)
+    }
+    context.startActivity(Intent.createChooser(intent, null))
 }
 
 @Composable

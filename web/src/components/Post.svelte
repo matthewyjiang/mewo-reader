@@ -4,6 +4,7 @@
   import type { BookRecord, FeedPost } from '../lib/models';
   import { store, message } from '../lib/store.svelte';
   import { readerUrl, router } from '../lib/router.svelte';
+  import { hasReposted, repostCount } from '../lib/repost';
   import { shareText } from '../lib/share';
 
   let { book, post, oncomment, onopen, onchapter, connected = false }: {
@@ -16,9 +17,12 @@
   } = $props();
 
   let liking = $state(false);
+  let reposting = $state(false);
   let liked = $derived((store.likes[book.id] ?? []).includes(post.id));
   let count = $derived(store.indexes[book.id]?.counts[post.id] ?? 0);
   let commented = $derived((store.indexes[book.id]?.mine ?? []).includes(post.id));
+  let reposted = $derived(hasReposted(store.indexes[book.id], post.id));
+  let reposts = $derived(repostCount(store.indexes[book.id], post.id));
 
   async function toggle(): Promise<void> {
     if (liking) return;
@@ -29,6 +33,18 @@
       store.notice = message(error);
     } finally {
       liking = false;
+    }
+  }
+
+  async function repost(): Promise<void> {
+    if (reposting) return;
+    reposting = true;
+    try {
+      await store.toggleRepost(book.id, post.id);
+    } catch (error) {
+      store.notice = message(error);
+    } finally {
+      reposting = false;
     }
   }
 
@@ -83,6 +99,17 @@
       >
         <Icon name="comment" size={18} />
         {#if count}<span class="meta">{count}</span>{/if}
+      </button>
+      <button
+        class:reposted
+        class="icon-button repost-action"
+        aria-label={reposts ? `Reposts, ${reposts}` : reposted ? 'Undo repost' : 'Repost'}
+        aria-pressed={reposted}
+        disabled={reposting}
+        onclick={repost}
+      >
+        <Icon name="repost" size={18} />
+        {#if reposts}<span class="meta">{reposts}</span>{/if}
       </button>
       <button
         class="icon-button quote-action"
@@ -148,6 +175,15 @@
 
 .post-actions .liked {
   color: var(--like);
+}
+
+.post-actions .reposted {
+  color: var(--green);
+}
+
+.repost-action:hover:not(:disabled) {
+  color: var(--green);
+  background: color-mix(in srgb, var(--green) 10%, transparent);
 }
 
 .like-action:hover:not(:disabled) {

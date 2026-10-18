@@ -1,7 +1,13 @@
 import { HostedClient } from './api';
+import {
+  beginFeedRefresh, clearFeed, failFeed, finishFeedRefresh, phaseFromFeedCache,
+  readFeed, startFeedMore, appendFeed, writeFeed, type FeedPhase,
+} from './feed';
 import type {
-  AuthResponse, BookRecord, CommentIndex, FeedPost, PostComment, PostHit, ProfileReply,
+  AuthResponse, BookRecord, CommentIndex, FeedPost, PostComment, PostHit,
+  ProfileBooks, ProfilePostsPage, ProfileRecord, ProfileRepostsPage,
 } from './models';
+import { commitRepost } from './repost';
 import {
   indexedPosts, loadCachedPosts, postKey, postPrefix, type PostCache,
 } from './posts';
@@ -33,6 +39,10 @@ const initialShelf: LibraryPhase = initialSession
   ? phaseFromCache(readShelf(origin(), initialSession.username))
   : { status: 'loading' };
 
+const initialFeed: FeedPhase = initialSession
+  ? phaseFromFeedCache(readFeed(origin(), initialSession.username))
+  : { status: 'loading' };
+
 /** Hosted library. Logout and book removal invalidate pending responses. */
 class HostedStore {
   session = $state<AuthResponse | null>(initialSession);
@@ -47,6 +57,7 @@ class HostedStore {
   feeds = $state.raw<Record<string, FeedPost[]>>({});
   likes = $state<Record<string, string[]>>({});
   indexes = $state<Record<string, CommentIndex>>({});
+  home = $state<FeedPhase>(initialFeed);
   covers = $state<Record<string, string | null>>({});
   notice = $state('');
   api = new HostedClient(
@@ -60,6 +71,8 @@ class HostedStore {
   }
 
   private epoch = 0;
+  private feedRequest = 0;
+  private feedAbort: AbortController | undefined;
   private shelfNotice = '';
   private removed = new Set<string>();
   private pendingFeeds = new Map<string, Promise<FeedPost[]>>();
@@ -95,8 +108,13 @@ class HostedStore {
     this.refresh.reset();
     if (username) {
       clearShelf(server, username);
+      clearFeed(server, username);
       void this.posts.clearPrefix(postPrefix(server, username));
     }
+    this.feedAbort?.abort();
+    this.feedAbort = undefined;
+    this.feedRequest += 1;
+    this.home = { status: 'loading' };
     this.feeds = {};
     this.likes = {};
     this.indexes = {};
@@ -132,6 +150,7 @@ class HostedStore {
     const epoch = this.epoch;
     const session = this.session;
     if (!session) return;
+    void this.loadFeed();
     const server = origin();
     if (this.shelf.status === 'loading') {
       const cached = readShelf(server, session.username);
@@ -338,10 +357,89 @@ class HostedStore {
   private afterThread(id: string, postId: string, comments: PostComment[]): void {
     const current = this.indexes[id] ?? { counts: {}, mine: [] };
     this.indexes[id] = {
+      ...current,
       counts: { ...current.counts, [postId]: comments.length },
       mine: [...current.mine.filter((value) => value !== postId),
         ...(comments.some((comment) => comment.mine) ? [postId] : [])],
     };
+  }
+
+  toggleRepost(id: string, postId: string): Promise<void> {
+    const epoch = this.epoch;
+    const before = this.indexes[id] ?? { counts: {}, mine: [] };
+    return commitRepost(
+      before,
+      postId,
+      (reposted) => this.api.setRepost(id, postId, reposted),
+      () => this.indexes[id] ?? before,
+      (index) => { if (epoch === this.epoch) this.indexes[id] = index; },
+    );
+  }
+
+  async loadFeed(): Promise<void> {
+    const request = ++this.feedRequest;
+    const epoch = this.epoch;
+    const session = this.session;
+    if (!session) return;
+    this.feedAbort?.abort();
+    const abort = new AbortController();
+    this.feedAbort = abort;
+    this.home = beginFeedRefresh(this.home);
+    try {
+      const page = await this.api.homeFeed(null, abort.signal);
+      if (!this.feedCurrent(request, epoch, session.token)) return;
+      this.home = finishFeedRefresh(page);
+      writeFeed(origin(), session.username, page);
+    } catch (error) {
+      if (abort.signal.aborted || !this.feedCurrent(request, epoch, session.token)) return;
+      this.home = failFeed(this.home, message(error));
+    }
+  }
+
+  async moreFeed(): Promise<void> {
+    const phase = this.home;
+    if (phase.status !== 'loaded' || phase.more || !phase.page.nextCursor) return;
+    const request = ++this.feedRequest;
+    const epoch = this.epoch;
+    const session = this.session;
+    if (!session) return;
+    const cursor = phase.page.nextCursor;
+    this.feedAbort?.abort();
+    const abort = new AbortController();
+    this.feedAbort = abort;
+    this.home = startFeedMore(phase);
+    try {
+      const page = await this.api.homeFeed(cursor, abort.signal);
+      if (!this.feedCurrent(request, epoch, session.token)) return;
+      this.home = appendFeed(this.home, page);
+    } catch (error) {
+      if (abort.signal.aborted || !this.feedCurrent(request, epoch, session.token)) return;
+      this.home = failFeed(this.home, message(error));
+    }
+  }
+
+  private feedCurrent(request: number, epoch: number, token: string): boolean {
+    return request === this.feedRequest && epoch === this.epoch && token === this.session?.token;
+  }
+
+  profileRecord(username: string, signal?: AbortSignal): Promise<ProfileRecord> {
+    return this.api.user(username, signal);
+  }
+
+  profilePosts(username: string, cursor?: string | null, signal?: AbortSignal): Promise<ProfilePostsPage> {
+    return this.api.userPosts(username, cursor, signal);
+  }
+
+  profileReposts(
+    username: string,
+    cursor?: string | null,
+    signal?: AbortSignal,
+  ): Promise<ProfileRepostsPage> {
+    return this.api.userReposts(username, cursor, signal);
+  }
+
+  profileBooks(username: string, signal?: AbortSignal): Promise<ProfileBooks> {
+    return this.api.userBooks(username, signal);
   }
 
   async loadLikes(): Promise<void> {
@@ -371,31 +469,6 @@ class HostedStore {
       return (this.feeds[book.id] ?? []).filter((post) => ids.has(post.id))
         .map((post) => ({ book, post }));
     });
-  }
-
-  async profile(username: string): Promise<ProfileReply[]> {
-    const epoch = this.epoch;
-    const remote = await this.api.profile(username);
-    if (epoch !== this.epoch) return [];
-    const groups = new Map<string, typeof remote.replies>();
-    for (const row of remote.replies) {
-      const group = groups.get(row.bookId) ?? [];
-      group.push(row);
-      groups.set(row.bookId, group);
-    }
-    const replies = await Promise.all([...groups].map(async ([id, rows]) => {
-      const book = this.books.find((row) => row.id === id);
-      if (!book) return [];
-      await Promise.all([this.feed(id), this.social(id)]);
-      if (!this.valid(id, epoch)) return [];
-      const posts = this.postMaps.get(id);
-      return rows.flatMap((row) => {
-        const post = posts?.get(row.postId);
-        return post ? [{ book, post, comment: row.comment }] : [];
-      });
-    }));
-    return replies.flat().filter((reply) => this.valid(reply.book.id, epoch))
-      .sort((a, b) => b.comment.createdAt - a.comment.createdAt);
   }
 
   async upload(file: File, sample: boolean, progress: (percent: number) => void): Promise<BookRecord> {

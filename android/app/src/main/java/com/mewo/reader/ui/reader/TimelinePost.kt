@@ -15,6 +15,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.ChatBubbleOutline
 import androidx.compose.material.icons.outlined.Favorite
 import androidx.compose.material.icons.outlined.FavoriteBorder
+import androidx.compose.material.icons.outlined.FormatQuote
 import androidx.compose.material.icons.outlined.IosShare
 import androidx.compose.material.icons.outlined.Repeat
 import androidx.compose.material3.HorizontalDivider
@@ -51,9 +52,12 @@ fun TimelinePost(
     liked: Boolean,
     commentCount: Int = 0,
     commented: Boolean = false,
+    reposted: Boolean = false,
+    repostCount: Int = 0,
     onComment: () -> Unit,
     onLike: () -> Unit,
     onRepost: () -> Unit,
+    onQuote: () -> Unit = {},
     onShare: () -> Unit,
     onOpen: (() -> Unit)? = null,
     onChapterClick: (() -> Unit)? = null,
@@ -117,9 +121,12 @@ fun TimelinePost(
                 liked = liked,
                 commentCount = commentCount,
                 commented = commented,
+                reposted = reposted,
+                repostCount = repostCount,
                 onComment = onComment,
                 onLike = onLike,
                 onRepost = onRepost,
+                onQuote = onQuote,
                 onShare = onShare,
             )
             Spacer(Modifier.height(4.dp))
@@ -133,13 +140,17 @@ fun PostActions(
     liked: Boolean,
     commentCount: Int,
     commented: Boolean,
+    reposted: Boolean = false,
+    repostCount: Int = 0,
     onComment: () -> Unit,
     onLike: () -> Unit,
     onRepost: () -> Unit,
+    onQuote: () -> Unit,
     onShare: () -> Unit,
 ) {
     val mute = MaterialTheme.colorScheme.onSurfaceVariant
     val likeColor = LocalMewoColors.current.like
+    val repostColor = LocalMewoColors.current.repost
     val accent = MaterialTheme.colorScheme.primary
     val likeScale by animateFloatAsState(if (liked) 1.18f else 1f, label = "like")
     Row(
@@ -160,9 +171,20 @@ fun PostActions(
         )
         ActionIcon(
             icon = Icons.Outlined.Repeat,
+            tint = if (reposted) repostColor else mute,
+            label = when {
+                repostCount > 0 -> "Reposts, $repostCount"
+                reposted -> "Undo repost"
+                else -> "Repost"
+            },
+            count = repostCount,
+            onClick = onRepost,
+        )
+        ActionIcon(
+            icon = Icons.Outlined.FormatQuote,
             tint = mute,
             label = "Quote this line",
-            onClick = onRepost,
+            onClick = onQuote,
         )
         ActionIcon(
             icon = if (liked) Icons.Outlined.Favorite else Icons.Outlined.FavoriteBorder,

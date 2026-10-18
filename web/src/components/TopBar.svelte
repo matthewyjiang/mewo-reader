@@ -13,7 +13,7 @@
     reader: boolean;
     profile: boolean;
     busy: boolean;
-    count: number;
+    count: number | null;
     query: string;
     onaccount: () => void;
     onchapters: () => void;
@@ -87,7 +87,9 @@
     {:else if profile}
       <div class="profile-title">
         <strong>{title}</strong>
-        <span class="meta">{count} {count === 1 ? 'post' : 'posts'}</span>
+        {#if count !== null}
+          <span class="meta">{count} {count === 1 ? 'post' : 'posts'}</span>
+        {/if}
       </div>
     {:else}
       <h1 class="bar-title">{title}</h1>

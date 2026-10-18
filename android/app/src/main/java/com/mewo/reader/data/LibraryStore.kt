@@ -56,6 +56,27 @@ interface LibraryStore {
 
     suspend fun search(query: String): SearchResult
 
+    /** Hosted paged search. Local keeps [search] and has no accounts tab. */
+    val hostedSocial: Boolean get() = false
+
+    suspend fun searchPage(query: String, kind: SearchKind, cursor: String?): SearchPage =
+        error("Search pages are hosted only.")
+
+    suspend fun homeFeed(cursor: String?): HomeFeedPage = error("The home feed is hosted only.")
+
+    suspend fun profile(username: String): ProfileRecord = error("Profiles are hosted only.")
+
+    suspend fun profilePosts(username: String, cursor: String?): ProfilePostsPage =
+        error("Profiles are hosted only.")
+
+    suspend fun profileReposts(username: String, cursor: String?): ProfileRepostsPage =
+        error("Profiles are hosted only.")
+
+    suspend fun profileBooks(username: String): ProfileBooks = error("Profiles are hosted only.")
+
+    suspend fun setRepost(id: String, postId: String, reposted: Boolean): RepostState =
+        error("Reposts are hosted only.")
+
     suspend fun likedPosts(): List<PostHit>
 
     /** Replies by this handle, newest first, each with the line they answered. */
@@ -125,6 +146,26 @@ class SwitchingLibraryStore(
         active().deleteComment(id, postId, commentId)
 
     override suspend fun search(query: String) = active().search(query)
+
+    override val hostedSocial: Boolean get() = active().hostedSocial
+
+    override suspend fun searchPage(query: String, kind: SearchKind, cursor: String?) =
+        active().searchPage(query, kind, cursor)
+
+    override suspend fun homeFeed(cursor: String?) = active().homeFeed(cursor)
+
+    override suspend fun profile(username: String) = active().profile(username)
+
+    override suspend fun profilePosts(username: String, cursor: String?) =
+        active().profilePosts(username, cursor)
+
+    override suspend fun profileReposts(username: String, cursor: String?) =
+        active().profileReposts(username, cursor)
+
+    override suspend fun profileBooks(username: String) = active().profileBooks(username)
+
+    override suspend fun setRepost(id: String, postId: String, reposted: Boolean) =
+        active().setRepost(id, postId, reposted)
 
     override suspend fun likedPosts() = active().likedPosts()
 

@@ -61,6 +61,10 @@ data class LikeSet(
 data class CommentIndex(
     val counts: Map<String, Int> = emptyMap(),
     val mine: Set<String> = emptySet(),
+    /** Posts with at least one repost. Zero counts are omitted, same as [counts]. */
+    val reposts: Map<String, Int> = emptyMap(),
+    /** Post ids this viewer has reposted. Same shape as [mine]. */
+    val reposted: Set<String> = emptySet(),
 ) {
     fun count(postId: String): Int = counts[postId] ?: 0
 
@@ -135,3 +139,157 @@ data class ProfileReply(
     val post: FeedPost,
     val comment: PostComment,
 )
+
+@Serializable
+data class RepostState(
+    val reposts: Int = 0,
+    val reposted: Boolean = false,
+)
+
+enum class SearchKind {
+    Accounts,
+    Books,
+    Posts,
+    ;
+
+    val wire: String get() = name.lowercase()
+}
+
+@Serializable
+data class AccountHit(
+    val username: String,
+    val mine: Boolean = false,
+)
+
+@Serializable
+sealed class SearchPage {
+    @Serializable
+    @kotlinx.serialization.SerialName("accounts")
+    data class Accounts(
+        val items: List<AccountHit> = emptyList(),
+        val nextCursor: String? = null,
+    ) : SearchPage()
+
+    @Serializable
+    @kotlinx.serialization.SerialName("books")
+    data class Books(
+        val items: List<BookRecord> = emptyList(),
+        val nextCursor: String? = null,
+    ) : SearchPage()
+
+    @Serializable
+    @kotlinx.serialization.SerialName("posts")
+    data class Posts(
+        val items: List<PostHitRecord> = emptyList(),
+        val nextCursor: String? = null,
+    ) : SearchPage()
+}
+
+@Serializable
+data class PostHitRecord(
+    val book: BookRecord,
+    val post: FeedPost,
+)
+
+fun SearchPage.cursor(): String? = when (this) {
+    is SearchPage.Accounts -> nextCursor
+    is SearchPage.Books -> nextCursor
+    is SearchPage.Posts -> nextCursor
+}
+
+fun SearchPage.isEmpty(): Boolean = when (this) {
+    is SearchPage.Accounts -> items.isEmpty()
+    is SearchPage.Books -> items.isEmpty()
+    is SearchPage.Posts -> items.isEmpty()
+}
+
+fun SearchPage.kind(): SearchKind = when (this) {
+    is SearchPage.Accounts -> SearchKind.Accounts
+    is SearchPage.Books -> SearchKind.Books
+    is SearchPage.Posts -> SearchKind.Posts
+}
+
+@Serializable
+data class ProfileRecord(
+    val username: String,
+    val joinedAt: Long = 0,
+    val postCount: Int = 0,
+    val repostCount: Int = 0,
+    val mine: Boolean = false,
+)
+
+@Serializable
+data class ProfilePostRecord(
+    val book: BookRecord,
+    val post: FeedPost,
+    val comment: PostComment,
+)
+
+@Serializable
+data class ProfilePostsPage(
+    val items: List<ProfilePostRecord> = emptyList(),
+    val nextCursor: String? = null,
+)
+
+@Serializable
+data class ProfileRepostRecord(
+    val book: BookRecord,
+    val post: FeedPost,
+    val repostedAt: Long = 0,
+)
+
+@Serializable
+data class ProfileRepostsPage(
+    val items: List<ProfileRepostRecord> = emptyList(),
+    val nextCursor: String? = null,
+)
+
+@Serializable
+data class ProfileBooks(
+    val items: List<BookRecord> = emptyList(),
+)
+
+@Serializable
+data class ActorRecord(
+    val username: String,
+)
+
+@Serializable
+sealed class HomeFeedItem {
+    abstract val actor: ActorRecord
+    abstract val book: BookRecord
+    abstract val post: FeedPost
+    abstract val at: Long
+
+    @Serializable
+    @kotlinx.serialization.SerialName("comment")
+    data class Comment(
+        override val actor: ActorRecord,
+        override val book: BookRecord,
+        override val post: FeedPost,
+        val comment: PostComment,
+        override val at: Long,
+    ) : HomeFeedItem()
+
+    @Serializable
+    @kotlinx.serialization.SerialName("repost")
+    data class Repost(
+        override val actor: ActorRecord,
+        override val book: BookRecord,
+        override val post: FeedPost,
+        override val at: Long,
+    ) : HomeFeedItem()
+}
+
+@Serializable
+data class HomeFeedPage(
+    val items: List<HomeFeedItem> = emptyList(),
+    val nextCursor: String? = null,
+)
+
+/** `Joined Mon YYYY` from `users.created_at` milliseconds, in UTC. */
+fun joinedLabel(joinedAt: Long): String {
+    val date = java.time.Instant.ofEpochMilli(joinedAt).atZone(java.time.ZoneOffset.UTC)
+    val month = date.month.getDisplayName(java.time.format.TextStyle.SHORT, java.util.Locale.US)
+    return "Joined $month ${date.year}"
+}

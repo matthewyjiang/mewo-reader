@@ -10,6 +10,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.ui.Alignment
@@ -17,16 +18,26 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import app.cash.paparazzi.DeviceConfig
 import app.cash.paparazzi.Paparazzi
+import com.mewo.reader.data.AccountHit
 import com.mewo.reader.data.BackendKind
 import com.mewo.reader.data.BookRecord
+import com.mewo.reader.data.FeedPost
 import com.mewo.reader.data.HostedSession
 import com.mewo.reader.data.LocalProfile
+import com.mewo.reader.data.PostKind
+import com.mewo.reader.data.ProfileRecord
 import com.mewo.reader.ui.components.AccountDrawerContent
 import com.mewo.reader.ui.components.AppTab
 import com.mewo.reader.ui.components.BrandMark
 import com.mewo.reader.ui.components.HomeTabBar
 import com.mewo.reader.ui.components.MewoAppBar
 import com.mewo.reader.ui.components.ProfileButton
+import com.mewo.reader.ui.components.UnderlineTabs
+import com.mewo.reader.ui.feed.ActivityLine
+import com.mewo.reader.ui.profile.ProfileHeader
+import com.mewo.reader.ui.reader.ThreadPost
+import com.mewo.reader.ui.reader.TimelinePost
+import com.mewo.reader.ui.search.AccountHitRow
 import com.mewo.reader.ui.library.BookPost
 import com.mewo.reader.ui.library.EmptyTimeline
 import com.mewo.reader.ui.library.LibraryLoading
@@ -173,6 +184,106 @@ class SurfaceScreenshots {
     @Test
     fun postsEmpty() = shoot("posts-empty") { Surface { EmptyPosts() } }
 
+    @Test
+    fun searchAccounts() = shoot("search-accounts") {
+        SearchChrome("accounts") {
+            AccountHitRow(AccountHit("ada", mine = true)) {}
+            AccountHitRow(AccountHit("byron")) {}
+        }
+    }
+
+    @Test
+    fun searchBooks() = shoot("search-books") {
+        SearchChrome("books") {
+            shelfBook(sharedBook)
+        }
+    }
+
+    @Test
+    fun searchPosts() = shoot("search-posts") {
+        SearchChrome("posts") {
+            passage(reposted = false, count = 0)
+        }
+    }
+
+    @Test
+    fun profilePosts() = shoot("profile-posts") {
+        ProfileChrome("posts") {
+            ThreadPost(
+                name = "Austen",
+                handle = "austen",
+                meta = "One",
+                text = "Emma Woodhouse, handsome, clever, and rich.",
+                heading = false,
+                cover = null,
+                connectDown = true,
+            )
+            ThreadPost(
+                name = "ada",
+                handle = "ada",
+                meta = "2m",
+                text = "This opening still lands.",
+                heading = false,
+                cover = null,
+                connectDown = false,
+            )
+        }
+    }
+
+    @Test
+    fun profileReposts() = shoot("profile-reposts") {
+        ProfileChrome("reposts") {
+            passage(reposted = true, count = 1)
+        }
+    }
+
+    @Test
+    fun profileBooks() = shoot("profile-books") {
+        ProfileChrome("books") {
+            shelfBook(sharedBook)
+        }
+    }
+
+    @Test
+    fun homeFeed() = shoot("home-feed") {
+        HomeChrome("feed") {
+            ActivityLine(username = "byron") {}
+            passage(reposted = true, count = 2)
+            ThreadPost(
+                name = "Austen",
+                handle = "austen",
+                meta = "One",
+                text = "Emma Woodhouse, handsome, clever, and rich.",
+                heading = false,
+                cover = null,
+                connectDown = true,
+            )
+            ThreadPost(
+                name = "ada",
+                handle = "ada",
+                meta = "2m",
+                text = "This opening still lands.",
+                heading = false,
+                cover = null,
+                connectDown = false,
+            )
+        }
+    }
+
+    @Test
+    fun homeBooks() = shoot("home-books") {
+        HomeChrome("books") {
+            SectionLabel("My books")
+            shelfBook(privateBook)
+            shelfBook(sharedBook)
+        }
+    }
+
+    @Test
+    fun repostActive() = shoot("repost-active") {
+        Surface { passage(reposted = true, count = 2) }
+    }
+
     private fun shoot(
         name: String,
         signedIn: Boolean = true,
@@ -292,6 +403,91 @@ private fun HostedLibrary() {
             shelfBook(sharedWithMe)
         }
     }
+}
+
+@Composable
+private fun SearchChrome(tab: String, content: @Composable () -> Unit) {
+    Column(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)) {
+        MewoAppBar(
+            leading = { ProfileButton(onClick = {}) },
+            content = {
+                Text(
+                    text = "ada",
+                    style = MaterialTheme.typography.bodyLarge,
+                    modifier = Modifier.weight(1f),
+                )
+            },
+        )
+        UnderlineTabs(
+            tabs = listOf("accounts" to "Accounts", "books" to "Books", "posts" to "Posts"),
+            selected = tab,
+            onSelect = {},
+        )
+        content()
+    }
+}
+
+@Composable
+private fun ProfileChrome(tab: String, content: @Composable () -> Unit) {
+    Column(
+        Modifier
+            .fillMaxSize()
+            .background(MaterialTheme.colorScheme.background)
+            .verticalScroll(rememberScrollState()),
+    ) {
+        ProfileHeader(
+            name = "ada",
+            handle = "ada",
+            record = ProfileRecord(
+                username = "ada",
+                joinedAt = 1609459200000,
+                postCount = 2,
+                repostCount = 1,
+                mine = true,
+            ),
+        )
+        UnderlineTabs(
+            tabs = listOf("posts" to "Posts", "reposts" to "Reposts", "books" to "Books"),
+            selected = tab,
+            onSelect = {},
+        )
+        content()
+    }
+}
+
+@Composable
+private fun HomeChrome(tab: String, content: @Composable () -> Unit) {
+    Column(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)) {
+        MewoAppBar(leading = { ProfileButton(onClick = {}) }, center = { BrandMark() })
+        UnderlineTabs(
+            tabs = listOf("feed" to "Feed", "books" to "Books"),
+            selected = tab,
+            onSelect = {},
+        )
+        Column(Modifier.verticalScroll(rememberScrollState())) {
+            content()
+        }
+    }
+}
+
+@Composable
+private fun passage(reposted: Boolean, count: Int) {
+    TimelinePost(
+        post = FeedPost("0", PostKind.Body, "Emma Woodhouse, handsome, clever, and rich.", "One"),
+        author = "Austen",
+        handle = "austen",
+        cover = null,
+        liked = false,
+        commentCount = 1,
+        commented = true,
+        reposted = reposted,
+        repostCount = count,
+        onComment = {},
+        onLike = {},
+        onRepost = {},
+        onQuote = {},
+        onShare = {},
+    )
 }
 
 @Composable
