@@ -27,6 +27,9 @@ final class LibraryRefreshUITests: XCTestCase {
         ]
         app.launch()
 
+        let books = app.buttons["home-books"]
+        XCTAssertTrue(books.waitForExistence(timeout: 8))
+        books.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
         let title = app.staticTexts["A Timeline of My Own"]
         XCTAssertTrue(title.waitForExistence(timeout: 8), "cached shelf did not paint")
         let scroll = app.scrollViews["library-scroll"]

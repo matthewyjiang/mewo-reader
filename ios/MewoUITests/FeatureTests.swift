@@ -29,6 +29,17 @@ final class FeatureTests: XCTestCase {
         XCTAssertTrue(app.buttons["tab-likes"].exists)
     }
 
+    func testDrawerProfileRowOpensProfile() {
+        onboard(name: "Matt", handle: "matt")
+        openAccount()
+        XCTAssertTrue(app.staticTexts["@matt"].exists)
+        XCTAssertTrue(app.buttons["drawer-profile"].exists)
+        XCTAssertTrue(app.buttons["drawer-settings"].exists)
+        tapCenter("drawer-profile")
+        XCTAssertTrue(app.buttons["profile-tab-posts"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.staticTexts["@matt"].exists)
+    }
+
     func testImportSampleAndReadFeed() {
         onboard()
         openSample()
@@ -73,8 +84,10 @@ final class FeatureTests: XCTestCase {
         openSample()
         app.buttons["tab-search"].tap()
         let search = field("search-field")
+        tapCenter("search-tab-posts")
         typeInto(search, "windowsill")
         XCTAssertTrue(app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "windowsill")).firstMatch.waitForExistence(timeout: 10))
+        tapCenter("search-tab-books")
         search.tap()
         search.clearAndType("Timeline of My Own")
         XCTAssertTrue(app.staticTexts["A Timeline of My Own"].waitForExistence(timeout: 10))
@@ -90,13 +103,12 @@ final class FeatureTests: XCTestCase {
         XCTAssertTrue(app.staticTexts["I used to end with a blank leaf and a printer's ornament. Now I end when you run out of posts."].waitForExistence(timeout: 8))
     }
 
-    func testQuoteAndShareSheets() {
+    func testRepostAndShare() {
         onboard()
         openSample()
         openSampleBook()
-        tapPostAction("Quote this line")
-        XCTAssertTrue(shareVisible)
-        dismissShare()
+        tapPostAction("Repost")
+        XCTAssertTrue(app.buttons["Undo repost"].waitForExistence(timeout: 5))
         tapPostAction("Share")
         XCTAssertTrue(shareVisible)
         dismissShare()
@@ -198,6 +210,7 @@ final class FeatureTests: XCTestCase {
         XCTAssertTrue(waitAny(15, signedIn), "hosted account did not sign in")
         tapCenter("Back")
         tapCenter("Back")
+        showBooks()
         if app.buttons["open-sample"].waitForExistence(timeout: 8) {
             openSample()
         }
@@ -265,10 +278,22 @@ final class FeatureTests: XCTestCase {
         XCTAssertTrue(next.waitForExistence(timeout: 3))
         XCTAssertTrue(next.isEnabled)
         next.tap()
-        XCTAssertTrue(app.buttons["open-sample"].waitForExistence(timeout: 10) || app.buttons["tab-home"].waitForExistence(timeout: 3))
+        XCTAssertTrue(app.staticTexts["Nothing here yet"].waitForExistence(timeout: 10), "home did not open on Feed")
+        showBooks()
+        XCTAssertTrue(app.buttons["open-sample"].waitForExistence(timeout: 10) || app.staticTexts["A Timeline of My Own"].waitForExistence(timeout: 3))
+    }
+
+    private func showBooks() {
+        if app.buttons["open-sample"].exists || app.staticTexts["No books"].exists { return }
+        if app.staticTexts["A Timeline of My Own"].exists && app.buttons["home-books"].exists == false { return }
+        let books = app.buttons["home-books"]
+        if books.waitForExistence(timeout: 5) {
+            books.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
+        }
     }
 
     private func openSample() {
+        showBooks()
         let sample = app.buttons["open-sample"]
         if sample.waitForExistence(timeout: 4) {
             sample.tap()
