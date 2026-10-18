@@ -132,7 +132,11 @@ async fn accounts(
     .fetch_all(pool)
     .await?;
     let (rows, next_cursor) = page_rows(rows, |row| {
-        encode_json(serde_json::json!([row.rank, row.name_len, row.username_norm]))
+        encode_json(serde_json::json!([
+            row.rank,
+            row.name_len,
+            row.username_norm
+        ]))
     });
     Ok(SearchPage {
         hits: SearchHits::Accounts {
@@ -201,7 +205,11 @@ async fn books(
         .fetch_all(pool)
         .await?;
     let (rows, next_cursor) = page_rows(rows, |row| {
-        encode_json(serde_json::json!([row.rank, row.row.imported_at, row.row.id]))
+        encode_json(serde_json::json!([
+            row.rank,
+            row.row.imported_at,
+            row.row.id
+        ]))
     });
     Ok(SearchPage {
         hits: SearchHits::Books {
@@ -397,8 +405,14 @@ fn account_cursor(cursor: Option<&str>) -> Result<AccountCursor, ApiError> {
         return Err(bad_cursor());
     }
     Ok(AccountCursor {
-        rank: items[0].as_i64().filter(|rank| *rank >= 0).ok_or_else(bad_cursor)?,
-        name_len: items[1].as_i64().filter(|len| *len >= 0).ok_or_else(bad_cursor)?,
+        rank: items[0]
+            .as_i64()
+            .filter(|rank| *rank >= 0)
+            .ok_or_else(bad_cursor)?,
+        name_len: items[1]
+            .as_i64()
+            .filter(|len| *len >= 0)
+            .ok_or_else(bad_cursor)?,
         username_norm: items[2].as_str().ok_or_else(bad_cursor)?.to_string(),
     })
 }
@@ -428,9 +442,15 @@ fn book_cursor(cursor: Option<&str>) -> Result<BookCursor, ApiError> {
     if items.len() != 3 {
         return Err(bad_cursor());
     }
-    let id = items[2].as_str().filter(|id| !id.is_empty()).ok_or_else(bad_cursor)?;
+    let id = items[2]
+        .as_str()
+        .filter(|id| !id.is_empty())
+        .ok_or_else(bad_cursor)?;
     Ok(BookCursor {
-        rank: items[0].as_i64().filter(|rank| *rank >= 0).ok_or_else(bad_cursor)?,
+        rank: items[0]
+            .as_i64()
+            .filter(|rank| *rank >= 0)
+            .ok_or_else(bad_cursor)?,
         imported_at: items[1].as_i64().ok_or_else(bad_cursor)?,
         id: id.to_string(),
     })
@@ -463,7 +483,10 @@ fn post_cursor(cursor: Option<&str>) -> Result<PostCursor, ApiError> {
         .ok_or_else(bad_cursor)?
         .parse()
         .map_err(|_| bad_cursor())?;
-    let book_id = items[3].as_str().filter(|id| !id.is_empty()).ok_or_else(bad_cursor)?;
+    let book_id = items[3]
+        .as_str()
+        .filter(|id| !id.is_empty())
+        .ok_or_else(bad_cursor)?;
     Ok(PostCursor {
         has: 1,
         score: f64::from_bits(bits),
