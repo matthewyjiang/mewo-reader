@@ -51,7 +51,7 @@ data class ServerVersion(
     val commit: String? = null,
 )
 
-class HostedClient(
+open class HostedClient(
     private val http: OkHttpClient = OkHttpClient.Builder()
         .connectTimeout(30, TimeUnit.SECONDS)
         .readTimeout(120, TimeUnit.SECONDS)
@@ -76,7 +76,7 @@ class HostedClient(
         ).execute().use { it.expectOk() }
     }
 
-    fun library(session: HostedSession): LibrarySnapshot {
+    open fun library(session: HostedSession): LibrarySnapshot {
         return get(session, "/v1/library")
     }
 
@@ -145,12 +145,12 @@ class HostedClient(
     }
 
     /** Timeline posts the server parsed from this book. Ids match likes and comments. */
-    fun posts(session: HostedSession, id: String): List<FeedPost> {
+    open fun posts(session: HostedSession, id: String): List<FeedPost> {
         val body: PostsResponse = get(session, "/v1/books/$id/posts")
         return body.posts
     }
 
-    fun downloadCover(session: HostedSession, id: String, dest: File): Boolean {
+    open fun downloadCover(session: HostedSession, id: String, dest: File): Boolean {
         return try {
             download(session, "/v1/books/$id/cover", dest)
             dest.exists() && dest.length() > 0L

@@ -3,9 +3,13 @@ package com.mewo.reader.data
 import android.content.Context
 import android.graphics.Bitmap
 import android.net.Uri
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -35,10 +39,17 @@ class HostedLibraryStore(
         prettyPrint = true
     }
     private val root = File(context.filesDir, "hosted").apply { mkdirs() }
+    private val shelfCache = ShelfCache(File(context.filesDir, "hosted-shelves"), json)
     private val mutex = Mutex()
     private var epoch = 0
+    private var inFlight: CompletableDeferred<Unit>? = null
+    private var inFlightToken: String? = null
+    private var refreshJob: Job? = null
+    private val importedWhileRefreshing = mutableSetOf<String>()
     private val _library = MutableStateFlow(LibrarySnapshot())
     override val library: StateFlow<LibrarySnapshot> = _library.asStateFlow()
+    private val _load = MutableStateFlow<LibraryLoad>(LibraryLoading)
+    override val loadState: StateFlow<LibraryLoad> = _load.asStateFlow()
     private val shares = HostedShareToggle(
         books = { _library.value.books },
         replace = { replaceBook(it) },
@@ -46,51 +57,147 @@ class HostedLibraryStore(
 
     init {
         scope.launch {
-            var wasSignedIn = sessions.session.value.signedIn
+            var previous = sessions.session.value
+            // Don't load inside the collector. A blocked refresh must not delay
+            // the next account's clear, or the old shelf stays on screen.
             sessions.session.collect { session ->
-                if (wasSignedIn && !session.signedIn) {
-                    wipeCache()
+                val urlChanged = previous.normalizedUrl() != session.normalizedUrl()
+                val userChanged = previous.username != session.username
+                val signedOut = previous.signedIn && !session.signedIn
+                if (previous.signedIn && (signedOut || urlChanged || userChanged)) {
+                    refreshJob?.cancel()
+                    clearShelf(previous)
+                    if (signedOut || urlChanged) wipeCache()
+                    mutex.withLock {
+                        _library.value = LibrarySnapshot()
+                        _load.value = if (session.signedIn) LibraryLoading else LibraryLoaded(emptyList(), false)
+                    }
                 }
-                wasSignedIn = session.signedIn
-                runCatching { load() }
+                previous = session
+                launch { runCatching { load() } }
             }
         }
     }
 
     override suspend fun load() {
+        val token = sessions.session.value.token
+        val existing = mutex.withLock {
+            if (inFlight != null && inFlightToken == token) inFlight else null
+        }
+        if (existing != null) {
+            existing.await()
+            return
+        }
+        coroutineScope {
+            val flight = CompletableDeferred<Unit>()
+            val job = coroutineContext[Job]
+            val joined = mutex.withLock {
+                val winner = if (inFlight != null && inFlightToken == token) inFlight else null
+                if (winner == null) {
+                    refreshJob?.cancel()
+                    refreshJob = job
+                    inFlight = flight
+                    inFlightToken = token
+                }
+                winner
+            }
+            if (joined != null) {
+                joined.await()
+                return@coroutineScope
+            }
+            try {
+                loadBody()
+                flight.complete(Unit)
+            } catch (err: Throwable) {
+                flight.completeExceptionally(err)
+                throw err
+            } finally {
+                mutex.withLock {
+                    if (inFlight === flight) {
+                        inFlight = null
+                        inFlightToken = null
+                        if (refreshJob === job) refreshJob = null
+                    }
+                }
+            }
+        }
+    }
+
+    override fun dismissLoadError() {
+        _load.value = reduceLibraryLoad(_load.value, LibraryEvent.Dismissed)
+    }
+
+    private suspend fun loadBody() {
         val session = sessions.session.value
         if (!session.signedIn) {
             mutex.withLock {
                 _library.value = LibrarySnapshot()
+                _load.value = LibraryLoaded(emptyList(), refreshing = false)
             }
             return
         }
-        val start = mutex.withLock { epoch }
-        val snap = withContext(Dispatchers.IO) {
-            try {
-                val remote = client.library(session)
-                remote.books.forEach { book ->
-                    val id = safeBookId(book.id) ?: return@forEach
-                    ensureCover(session, id)
-                }
-                remote.copy(books = remote.books.filter { safeBookId(it.id) != null })
-            } catch (err: HostedException) {
-                if (err.code == 401) sessions.signOut()
-                throw err
+        val url = session.normalizedUrl() ?: return
+        val user = session.username.orEmpty()
+        val cached = withContext(Dispatchers.IO) { shelfCache.read(url, user) }
+        if (sessions.session.value.token != session.token) return
+        val start = mutex.withLock {
+            if (sessions.session.value.token != session.token) return@withLock null
+            if (cached != null && _library.value.books.isEmpty()) {
+                _library.value = LibrarySnapshot(cached)
+                _load.value = reduceLibraryLoad(_load.value, LibraryEvent.Cached(cached))
             }
-        }
-        mutex.withLock {
-            if (epoch == start) {
-                _library.value = snap
-            } else {
-                val extras = _library.value.books.filter { local ->
-                    snap.books.none { it.id == local.id }
+            _load.value = reduceLibraryLoad(_load.value, LibraryEvent.RefreshStarted)
+            importedWhileRefreshing.clear()
+            epoch
+        } ?: return
+        try {
+            val snap = withContext(Dispatchers.IO) {
+                try {
+                    val remote = client.library(session)
+                    remote.books.forEach { book ->
+                        val id = safeBookId(book.id) ?: return@forEach
+                        ensureCover(session, id)
+                    }
+                    remote.copy(books = remote.books.filter { safeBookId(it.id) != null })
+                } catch (err: HostedException) {
+                    if (err.code == 401 && sessions.session.value.token == session.token) {
+                        sessions.signOut()
+                    }
+                    throw err
                 }
-                _library.value = snap.copy(
-                    books = (snap.books + extras).sortedByDescending { it.importedAt },
-                )
             }
+            if (sessions.session.value.token != session.token) return
+            mutex.withLock {
+                if (sessions.session.value.token != session.token) return@withLock
+                val serverBooks = snap.books
+                val merged = if (epoch == start) {
+                    serverBooks
+                } else {
+                    val extras = _library.value.books.filter { local ->
+                        local.id in importedWhileRefreshing && serverBooks.none { it.id == local.id }
+                    }
+                    (serverBooks + extras).sortedByDescending { it.importedAt }
+                }
+                publish(merged, LibraryEvent.RefreshSucceeded(merged), session)
+            }
+        } catch (err: Exception) {
+            if (err is CancellationException) throw err
+            if (sessions.session.value.token == session.token) {
+                mutex.withLock {
+                    _load.value = reduceLibraryLoad(
+                        _load.value,
+                        LibraryEvent.RefreshFailed(err.message ?: "Could not load the library."),
+                    )
+                }
+            }
+            throw err
         }
+    }
+
+    private fun clearShelf(session: HostedSession) {
+        val url = session.normalizedUrl() ?: return
+        val user = session.username ?: return
+        shelfCache.clear(url, user)
     }
 
     override suspend fun importFromUri(uri: Uri): BookRecord = withContext(Dispatchers.IO) {
@@ -127,14 +234,13 @@ class HostedLibraryStore(
         val session = requireSession()
         val safe = requireBookId(id)
         withContext(Dispatchers.IO) {
-            expireOn401 { client.delete(session, safe) }
+            expireOn401(session) { client.delete(session, safe) }
             bookDir(safe).deleteRecursively()
         }
         mutex.withLock {
             epoch += 1
-            _library.value = _library.value.copy(
-                books = _library.value.books.filterNot { it.id == safe },
-            )
+            val books = _library.value.books.filterNot { it.id == safe }
+            publish(books, LibraryEvent.BooksReplaced(books))
         }
     }
 
@@ -143,7 +249,7 @@ class HostedLibraryStore(
         val safe = requireBookId(id)
         shares.setShared(safe, shared) {
             withContext(Dispatchers.IO) {
-                expireOn401 { client.setShared(session, safe, shared) }
+                expireOn401(session) { client.setShared(session, safe, shared) }
             }
         }
     }
@@ -159,7 +265,7 @@ class HostedLibraryStore(
         val session = requireSession()
         val safe = requireBookId(id)
         cachedFeed(safe)?.let { return@withContext it }
-        val posts = expireOn401 { client.posts(session, safe) }
+        val posts = expireOn401(session) { client.posts(session, safe) }
         val dir = bookDir(safe).apply { mkdirs() }
         // Builds before server parsing kept the EPUB and a Readium feed here.
         File(dir, "book.epub").delete()
@@ -176,7 +282,7 @@ class HostedLibraryStore(
         val session = requireSession()
         val safe = requireBookId(id)
         val updated = withContext(Dispatchers.IO) {
-            expireOn401 {
+            expireOn401(session) {
                 client.patch(session, safe, PatchBook(progressIndex = index.coerceAtLeast(0)))
             }
         }
@@ -184,31 +290,36 @@ class HostedLibraryStore(
     }
 
     override suspend fun likes(id: String): Set<String> = withContext(Dispatchers.IO) {
+        val session = requireSession()
         val safe = requireBookId(id)
-        expireOn401 { client.likes(requireSession(), safe) }
+        expireOn401(session) { client.likes(session, safe) }
     }
 
     override suspend fun toggleLike(id: String, postId: String): Set<String> =
         withContext(Dispatchers.IO) {
+            val session = requireSession()
             val safe = requireBookId(id)
-            expireOn401 { client.toggleLike(requireSession(), safe, postId) }
+            expireOn401(session) { client.toggleLike(session, safe, postId) }
         }
 
     override suspend fun commentIndex(id: String): CommentIndex = withContext(Dispatchers.IO) {
+        val session = requireSession()
         val safe = requireBookId(id)
-        expireOn401 { client.commentIndex(requireSession(), safe) }
+        expireOn401(session) { client.commentIndex(session, safe) }
     }
 
     override suspend fun comments(id: String, postId: String): List<PostComment> =
         withContext(Dispatchers.IO) {
+            val session = requireSession()
             val safe = requireBookId(id)
-            expireOn401 { client.comments(requireSession(), safe, postId) }
+            expireOn401(session) { client.comments(session, safe, postId) }
         }
 
     override suspend fun addComment(id: String, postId: String, text: String): List<PostComment> =
         withContext(Dispatchers.IO) {
+            val session = requireSession()
             val safe = requireBookId(id)
-            expireOn401 { client.addComment(requireSession(), safe, postId, text) }
+            expireOn401(session) { client.addComment(session, safe, postId, text) }
         }
 
     override suspend fun deleteComment(
@@ -216,8 +327,9 @@ class HostedLibraryStore(
         postId: String,
         commentId: String,
     ): List<PostComment> = withContext(Dispatchers.IO) {
+        val session = requireSession()
         val safe = requireBookId(id)
-        expireOn401 { client.deleteComment(requireSession(), safe, postId, commentId) }
+        expireOn401(session) { client.deleteComment(session, safe, postId, commentId) }
     }
 
     override suspend fun search(query: String): SearchResult = withContext(Dispatchers.IO) {
@@ -246,7 +358,7 @@ class HostedLibraryStore(
         val session = sessions.session.value
         if (!session.signedIn) return@withContext emptyList()
         _library.value.books.flatMap { book ->
-            val ids = expireOn401 { client.likes(session, book.id) }
+            val ids = expireOn401(session) { client.likes(session, book.id) }
             if (ids.isEmpty()) emptyList()
             else {
                 val posts = cachedFeed(book.id) ?: emptyList()
@@ -258,7 +370,7 @@ class HostedLibraryStore(
     override suspend fun profileReplies(handle: String): List<ProfileReply> =
         withContext(Dispatchers.IO) {
             val session = requireSession()
-            val remote = expireOn401 { client.profileReplies(session, handle) }
+            val remote = expireOn401(session) { client.profileReplies(session, handle) }
             val books = _library.value.books.associateBy { it.id }
             val feeds = mutableMapOf<String, Map<String, FeedPost>>()
             remote.replies.mapNotNull { row ->
@@ -281,7 +393,7 @@ class HostedLibraryStore(
         val meta = opener.metadata(epub)
         val cover = File(scratch, "cover.jpg")
         writeCover(cover, meta.cover)
-        val record = expireOn401 {
+        val record = expireOn401(session) {
             client.upload(
                 session = session,
                 epub = epub,
@@ -311,26 +423,52 @@ class HostedLibraryStore(
     private fun ensureCover(session: HostedSession, id: String) {
         val dest = File(bookDir(id), "cover.jpg")
         if (dest.exists() && dest.length() > 0L) return
-        expireOn401 { client.downloadCover(session, id, dest) }
+        expireOn401(session) { client.downloadCover(session, id, dest) }
     }
 
     private fun cachedFeed(id: String): List<FeedPost>? {
         val safe = safeBookId(id) ?: return null
-        val cacheFile = File(bookDir(safe), POSTS_CACHE)
-        if (!cacheFile.exists()) return null
-        return runCatching {
-            val cache = json.decodeFromString<FeedCache>(cacheFile.readText())
-            if (cache.version == HOSTED_POSTS_CACHE_VERSION) cache.posts else null
-        }.getOrNull()
+        return readHostedPosts(File(bookDir(safe), POSTS_CACHE), json)
     }
 
     private suspend fun replaceBook(record: BookRecord) {
         mutex.withLock {
             epoch += 1
-            val books = _library.value.books.filterNot { it.id == record.id } + record
-            _library.value = _library.value.copy(
-                books = books.sortedByDescending { it.importedAt },
-            )
+            if (_library.value.books.none { it.id == record.id }) {
+                importedWhileRefreshing.add(record.id)
+            }
+            val books = (_library.value.books.filterNot { it.id == record.id } + record)
+                .sortedByDescending { it.importedAt }
+            publish(books, LibraryEvent.BooksReplaced(books))
+        }
+    }
+
+    private fun publish(
+        books: List<BookRecord>,
+        event: LibraryEvent,
+        owner: HostedSession = sessions.session.value,
+    ) {
+        if (sessions.session.value.token == owner.token) {
+            val previous = _library.value.books
+            _library.value = LibrarySnapshot(books)
+            _load.value = reduceLibraryLoad(_load.value, event)
+            if (event is LibraryEvent.RefreshSucceeded) forgetPosts(previous, books)
+        }
+        val url = owner.normalizedUrl()
+        val user = owner.username
+        if (owner.signedIn && url != null && !user.isNullOrBlank() &&
+            (event is LibraryEvent.BooksReplaced || event is LibraryEvent.RefreshSucceeded)
+        ) {
+            runCatching { shelfCache.write(url, user, books) }
+        }
+    }
+
+    private fun forgetPosts(previous: List<BookRecord>, next: List<BookRecord>) {
+        val kept = next.map { it.id }.toSet()
+        for (book in previous) {
+            if (book.id in kept) continue
+            val safe = safeBookId(book.id) ?: continue
+            File(bookDir(safe), POSTS_CACHE).delete()
         }
     }
 
@@ -342,11 +480,11 @@ class HostedLibraryStore(
         return session
     }
 
-    private fun <T> expireOn401(block: () -> T): T {
+    private fun <T> expireOn401(session: HostedSession, block: () -> T): T {
         return try {
             block()
         } catch (err: HostedException) {
-            if (err.code == 401) sessions.signOut()
+            if (err.code == 401 && sessions.session.value.token == session.token) sessions.signOut()
             throw err
         }
     }
@@ -372,3 +510,12 @@ const val HOSTED_NOT_SIGNED_IN = "Sign in to the hosted library first."
 /** Server posts cached per hosted book. Bump the version if the server's post shape changes. */
 private const val POSTS_CACHE = "posts.json"
 private const val HOSTED_POSTS_CACHE_VERSION = 1
+
+/** A hit means [HostedLibraryStore.feed] can skip the network. A version mismatch is a miss. */
+internal fun readHostedPosts(file: File, json: Json): List<FeedPost>? {
+    if (!file.exists()) return null
+    return runCatching {
+        val cache = json.decodeFromString<FeedCache>(file.readText())
+        if (cache.version == HOSTED_POSTS_CACHE_VERSION) cache.posts else null
+    }.getOrNull()
+}

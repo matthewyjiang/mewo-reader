@@ -7,7 +7,7 @@
   import { router } from '../lib/router.svelte';
   import { store } from '../lib/store.svelte';
 
-  let { title, root, reader, profile, busy, count, query = $bindable(), onaccount, onchapters }: {
+  let { title, root, reader, profile, busy, count, query = $bindable(), onaccount, onchapters, onrefresh }: {
     title: string;
     root: boolean;
     reader: boolean;
@@ -17,6 +17,7 @@
     query: string;
     onaccount: () => void;
     onchapters: () => void;
+    onrefresh?: () => void;
   } = $props();
   let searchInput = $state<HTMLInputElement>();
   $effect(() => {
@@ -58,6 +59,17 @@
       </label>
     {:else}
       <div class="center-mark"><Brand /></div>
+    {/if}
+    {#if onrefresh}
+      <button
+        class="icon-button refresh-button"
+        aria-label="Refresh"
+        aria-busy={busy}
+        disabled={busy}
+        onclick={onrefresh}
+      >
+        <Icon name="refresh" size={20} />
+      </button>
     {/if}
   {:else}
     <button class="icon-button" aria-label="Back" onclick={() => router.back()}>
@@ -110,6 +122,14 @@
   display: flex;
   align-items: center;
   pointer-events: none;
+}
+
+.refresh-button {
+  margin-left: auto;
+}
+
+@media (pointer: coarse) {
+  .refresh-button { display: none; }
 }
 
 
