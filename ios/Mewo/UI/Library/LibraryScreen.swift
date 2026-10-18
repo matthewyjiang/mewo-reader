@@ -14,15 +14,12 @@ final class LibraryViewModel {
     }
 
     func start() {
-        Task { await load() }
+        Task { await refresh() }
     }
 
-    func load() async {
-        do {
-            try await env.library.load()
-        } catch {
-            self.error = error.localizedDescription
-        }
+    /// Same load the screen uses on launch. A pull while one is running waits on it.
+    func refresh() async {
+        try? await env.library.load()
     }
 
     func importFile(_ url: URL) {
@@ -59,8 +56,12 @@ final class LibraryViewModel {
     }
 
     func dismissBanner() {
-        error = nil
-        notice = nil
+        if error != nil || notice != nil {
+            error = nil
+            notice = nil
+            return
+        }
+        env.library.dismissLoadError()
     }
 
     private func runWork(_ block: @escaping () async throws -> Void) {
@@ -100,10 +101,14 @@ struct LibraryScreen: View {
         ZStack(alignment: .bottomTrailing) {
             VStack(spacing: 0) {
                 MewoAppBar(visible: chrome.visible, leading: { ProfileButton(onClick: onOpenAccount) }, center: { BrandMark() })
-                if shelf.isEmpty && !model.busy {
-                    empty
-                } else {
-                    list
+                GeometryReader { geo in
+                    ScrollView {
+                        shelfBody(minHeight: geo.size.height)
+                    }
+                    .refreshable { await model.refresh() }
+                    .scrollBounceBehavior(.always)
+                    .scrollIndicators(.hidden)
+                    .accessibilityIdentifier("library-scroll")
                 }
             }
             Button {
@@ -120,7 +125,7 @@ struct LibraryScreen: View {
             .padding(.bottom, 16)
             .accessibilityLabel("Add an EPUB")
             .accessibilityIdentifier("add-epub")
-            if let message = model.error ?? model.notice {
+            if let message = model.error ?? model.notice ?? loadNotice {
                 banner(message)
                     .padding(.horizontal, 16)
                     .padding(.bottom, 80)
@@ -168,15 +173,75 @@ struct LibraryScreen: View {
         }
     }
 
-    /// Live shelf, not the view-model snapshot. Progress saved in the reader
-    /// has to move a book under Finished when you come back.
-    private var shelf: [BookRecord] {
-        app.backend.kind == .hosted ? app.hostedLibrary.books : app.localLibrary.books
+    /// Live shelf. Empty copy waits until a fetch succeeds with nothing saved.
+    private var load: LibraryLoad {
+        app.backend.kind == .hosted ? app.hostedLibrary.loadState : app.localLibrary.loadState
     }
 
-    private var empty: some View {
+    private var shelf: [BookRecord] { load.books }
+
+    private var loadNotice: String? {
+        if case .failed(let message, .some) = load { return message }
+        return nil
+    }
+
+    @ViewBuilder
+    private func shelfBody(minHeight: CGFloat) -> some View {
+        if showsQuiet {
+            quiet(minHeight: minHeight) {
+                if case .failed(let message, nil) = load {
+                    unavailable(message)
+                } else if load.showEmpty && !model.busy {
+                    emptyContent
+                } else if !model.busy {
+                    ProgressView()
+                        .tint(mewo.accent)
+                        .accessibilityIdentifier("library-loading")
+                        .accessibilityLabel("Loading your shelf")
+                }
+            }
+        } else {
+            list
+        }
+    }
+
+    private var showsQuiet: Bool {
+        if case .failed(_, nil) = load { return true }
+        if case .loading = load { return true }
+        return load.showEmpty
+    }
+
+    private func quiet<Content: View>(minHeight: CGFloat, @ViewBuilder content: () -> Content) -> some View {
         VStack(alignment: .leading, spacing: 0) {
             Spacer()
+            content()
+            Spacer()
+        }
+        .frame(maxWidth: .infinity, minHeight: minHeight, alignment: .leading)
+        .padding(.horizontal, 28)
+    }
+
+    private func unavailable(_ message: String) -> some View {
+        VStack(alignment: .leading, spacing: 0) {
+            Text("Couldn't load")
+                .font(MewoFont.bold(22))
+                .foregroundStyle(mewo.ink)
+            Spacer().frame(height: 12)
+            Text(message)
+                .font(MewoFont.regular(15))
+                .foregroundStyle(mewo.mute)
+            Button("Try again") { Task { await model.refresh() } }
+                .font(MewoFont.regular(15))
+                .foregroundStyle(mewo.accent)
+                .buttonStyle(.plain)
+                .padding(.top, 8)
+                .accessibilityIdentifier("library-retry")
+        }
+        .accessibilityIdentifier("library-unavailable")
+    }
+
+    private var emptyContent: some View {
+        VStack(alignment: .leading, spacing: 0) {
             Text("No books")
                 .font(MewoFont.bold(22))
                 .foregroundStyle(mewo.ink)
@@ -199,10 +264,7 @@ struct LibraryScreen: View {
                 .buttonStyle(.plain)
                 .padding(.top, 8)
                 .accessibilityIdentifier("open-sample")
-            Spacer()
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(.horizontal, 28)
     }
 
     private var hosted: Bool { app.backend.kind == .hosted }
@@ -210,34 +272,31 @@ struct LibraryScreen: View {
     private var finished: [BookRecord] { shelf.filter(\.isFinished) }
 
     private var list: some View {
-        ScrollView {
-            LazyVStack(spacing: 0) {
-                offsetTracker
-                if hosted {
-                    let groups = hostedShelfGroups(shelf)
-                    if !groups.mine.isEmpty {
-                        sectionLabel("My books")
-                        rows(groups.mine)
-                    }
-                    if !groups.sharedWithMe.isEmpty {
-                        sectionLabel("Shared with me")
-                        rows(groups.sharedWithMe)
-                    }
-                    if !groups.finished.isEmpty {
-                        sectionLabel("Finished")
-                        rows(groups.finished)
-                    }
-                } else {
-                    rows(reading)
-                    if !finished.isEmpty {
-                        sectionLabel("Finished")
-                        rows(finished)
-                    }
+        LazyVStack(spacing: 0) {
+            offsetTracker
+            if hosted {
+                let groups = hostedShelfGroups(shelf)
+                if !groups.mine.isEmpty {
+                    sectionLabel("My books")
+                    rows(groups.mine)
+                }
+                if !groups.sharedWithMe.isEmpty {
+                    sectionLabel("Shared with me")
+                    rows(groups.sharedWithMe)
+                }
+                if !groups.finished.isEmpty {
+                    sectionLabel("Finished")
+                    rows(groups.finished)
+                }
+            } else {
+                rows(reading)
+                if !finished.isEmpty {
+                    sectionLabel("Finished")
+                    rows(finished)
                 }
             }
-            .padding(.bottom, 96)
         }
-        .scrollIndicators(.hidden)
+        .padding(.bottom, 96)
     }
 
     private func rows(_ books: [BookRecord]) -> some View {

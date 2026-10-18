@@ -28,33 +28,52 @@ func normalizeBaseUrl(_ raw: String) -> String {
 
 @Observable
 final class HostedSessionStore {
-    private let defaults = UserDefaults(suiteName: "mewo_hosted") ?? .standard
+    private let defaults: UserDefaults
+    private let persistToken: Bool
     private(set) var session: HostedSession
+    /// Fires after the URL, account, or sign-in changes. The library drops the previous shelf before the next refresh.
+    var onSessionChange: ((HostedSession, HostedSession) -> Void)?
 
-    init() {
+    init(
+        defaults: UserDefaults = UserDefaults(suiteName: "mewo_hosted") ?? .standard,
+        persistToken: Bool = true
+    ) {
+        self.defaults = defaults
+        self.persistToken = persistToken
         session = HostedSession(
             baseUrl: defaults.string(forKey: "base_url") ?? "",
             username: defaults.string(forKey: "username"),
-            token: Keychain.readToken()
+            token: persistToken ? Keychain.readToken() : nil
         )
     }
 
     func setBaseUrl(_ url: String) {
+        let previous = session
         defaults.set(url, forKey: "base_url")
         session.baseUrl = url
+        notify(previous)
     }
 
     func setSignedIn(username: String, token: String) {
+        let previous = session
         defaults.set(username, forKey: "username")
-        Keychain.saveToken(token)
+        if persistToken { Keychain.saveToken(token) }
         session.username = username
         session.token = token
+        notify(previous)
     }
 
     func signOut() {
+        let previous = session
         defaults.removeObject(forKey: "username")
-        Keychain.deleteToken()
+        if persistToken { Keychain.deleteToken() }
         session.username = nil
         session.token = nil
+        notify(previous)
+    }
+
+    private func notify(_ previous: HostedSession) {
+        guard previous != session else { return }
+        onSessionChange?(previous, session)
     }
 }

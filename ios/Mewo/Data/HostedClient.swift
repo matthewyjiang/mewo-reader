@@ -6,7 +6,15 @@ struct HostedException: LocalizedError {
     var errorDescription: String? { message }
 }
 
+/// Tests replace these. The app leaves them nil.
+final class HostedClientHooks: @unchecked Sendable {
+    var library: (@Sendable (HostedSession) async throws -> LibrarySnapshot)?
+    var posts: (@Sendable (HostedSession, String) async throws -> [FeedPost])?
+    var downloadCover: (@Sendable (HostedSession, String, URL) async throws -> Bool)?
+}
+
 final class HostedClient: Sendable {
+    let hooks = HostedClientHooks()
     private let session: URLSession
 
     init() {
@@ -32,7 +40,8 @@ final class HostedClient: Sendable {
     }
 
     func library(_ hosted: HostedSession) async throws -> LibrarySnapshot {
-        try await get(hosted, path: "/v1/library")
+        if let library = hooks.library { return try await library(hosted) }
+        return try await get(hosted, path: "/v1/library")
     }
 
     /// Public version. No session token. `GET /v1/version`.
@@ -100,11 +109,13 @@ final class HostedClient: Sendable {
 
     /// Timeline posts the server parsed from this book. Ids match likes and comments.
     func posts(_ hosted: HostedSession, id: String) async throws -> [FeedPost] {
+        if let posts = hooks.posts { return try await posts(hosted, id) }
         let body: PostsResponse = try await get(hosted, path: "/v1/books/\(id)/posts")
         return body.posts
     }
 
     func downloadCover(_ hosted: HostedSession, id: String, dest: URL) async throws -> Bool {
+        if let downloadCover = hooks.downloadCover { return try await downloadCover(hosted, id, dest) }
         do {
             try await download(hosted, path: "/v1/books/\(id)/cover", dest: dest)
             return FileManager.default.fileExists(atPath: dest.path)

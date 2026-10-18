@@ -254,6 +254,7 @@ final class SearchViewModelTests: XCTestCase {
 @MainActor
 private final class FakeSearchStore: LibraryStore {
     var books: [BookRecord] = []
+    var loadState: LibraryLoad = .loaded(books: [], refreshing: false)
     var holdLikes = false
     var searches: [CheckedContinuation<SearchResult, Never>] = []
     var likeCalls: [CheckedContinuation<Set<String>, Never>] = []
@@ -293,6 +294,7 @@ private final class FakeSearchStore: LibraryStore {
     }
 
     func load() async throws {}
+    func dismissLoadError() {}
     func importFromFile(_ file: URL) async throws -> BookRecord { throw CancellationError() }
     func importSample() async throws -> BookRecord { throw CancellationError() }
     func delete(id: String) async throws {}
