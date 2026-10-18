@@ -75,7 +75,8 @@ struct PassageReply: View {
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 
-    /// Same insets as a normal post: 12 top, 12 trailing, 16 leading, 4 under the link.
+    /// Same insets as a normal post: 16 leading, 12 trailing, 12 top. The thread
+    /// line fills this row so it meets the reply under the passage actions.
     private var passage: some View {
         HStack(alignment: .top, spacing: 12) {
             Color.clear.frame(width: 40, height: 40)
@@ -123,7 +124,6 @@ struct PassageReply: View {
         .padding(.leading, 16)
         .padding(.trailing, 12)
         .padding(.top, 12)
-        .padding(.bottom, 4)
         .background(alignment: .topLeading) {
             VStack(spacing: 0) {
                 Avatar(name: passageName, cover: passageCover, size: 40)
@@ -134,7 +134,6 @@ struct PassageReply: View {
             }
             .padding(.leading, 16)
             .padding(.top, 12)
-            .padding(.bottom, 4)
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         }
     }
