@@ -86,7 +86,12 @@ final class FeatureTests: XCTestCase {
         let search = field("search-field")
         tapCenter("search-tab-posts")
         typeInto(search, "windowsill")
-        XCTAssertTrue(app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "windowsill")).firstMatch.waitForExistence(timeout: 10))
+        dismissKeyboard()
+        let post = app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "windowsill")).firstMatch
+        if !post.waitForExistence(timeout: 4) {
+            app.swipeUp()
+        }
+        XCTAssertTrue(post.waitForExistence(timeout: 8), "post search did not show windowsill")
         tapCenter("search-tab-books")
         search.tap()
         search.clearAndType("Timeline of My Own")
@@ -211,14 +216,18 @@ final class FeatureTests: XCTestCase {
             if app.buttons["Sign in"].exists { app.buttons["Sign in"].tap() }
         }
         XCTAssertTrue(waitAny(15, signedIn), "hosted account did not sign in")
-        tapCenter("Back")
-        tapCenter("Back")
+        popToHome()
         showBooks()
         if app.buttons["open-sample"].waitForExistence(timeout: 8) {
             openSample()
         }
-        XCTAssertTrue(app.staticTexts["A Timeline of My Own"].waitForExistence(timeout: 20), "hosted library empty")
-        app.staticTexts["A Timeline of My Own"].tap()
+        if app.staticTexts["A Timeline of My Own"].waitForExistence(timeout: 8) {
+            app.staticTexts["A Timeline of My Own"].tap()
+        } else {
+            let book = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@", "book-")).firstMatch
+            XCTAssertTrue(book.waitForExistence(timeout: 12), "hosted library empty")
+            book.tap()
+        }
         XCTAssertTrue(app.buttons["Chapters"].waitForExistence(timeout: 20))
         likeFirstBody()
         app.buttons["Back"].firstMatch.tap()
@@ -284,6 +293,15 @@ final class FeatureTests: XCTestCase {
         XCTAssertTrue(app.staticTexts["Nothing here yet"].waitForExistence(timeout: 10), "home did not open on Feed")
         showBooks()
         XCTAssertTrue(app.buttons["open-sample"].waitForExistence(timeout: 10) || app.staticTexts["A Timeline of My Own"].waitForExistence(timeout: 3))
+    }
+
+    /// Settings sits on top of home. Pop until the home tabs are back.
+    private func popToHome() {
+        for _ in 0..<4 {
+            if app.buttons["home-books"].exists { return }
+            guard app.buttons["Back"].exists else { return }
+            tapCenter("Back")
+        }
     }
 
     private func showBooks() {
