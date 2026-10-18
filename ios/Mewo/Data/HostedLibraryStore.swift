@@ -44,7 +44,7 @@ final class HostedLibraryStore: LibraryStore {
             try await flight.task.value
             return
         }
-        let task = Task { try await self.loadBody() }
+        let task = Task { try await self.loadBody(startedWith: token) }
         let mine = RefreshFlight(id: UUID(), task: task, token: token)
         let previous = flight
         flight = mine
@@ -65,8 +65,12 @@ final class HostedLibraryStore: LibraryStore {
         loadState = reduceLibraryLoad(loadState, .dismissed)
     }
 
-    private func loadBody() async throws {
+    private func loadBody(startedWith token: String?) async throws {
+        try Task.checkCancellation()
         let session = sessions.session
+        // The flight token is the one captured when this refresh started. A sign-in that
+        // landed while this task was queued must not fetch with the new account's session.
+        guard session.token == token else { return }
         if !session.signedIn {
             books = []
             loadState = .loaded(books: [], refreshing: false)

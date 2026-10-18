@@ -164,7 +164,7 @@ private final class GateClient: @unchecked Sendable {
     var expireToken: String?
     private(set) var libraryCalls = 0
     private let lock = NSLock()
-    private var gates: [String: CheckedContinuation<LibrarySnapshot, Error>] = [:]
+    private var gates: [String: UnsafeContinuation<LibrarySnapshot, Error>] = [:]
     private var startWaiters: [StartWait] = []
 
     init() {
@@ -220,7 +220,9 @@ private final class GateClient: @unchecked Sendable {
 
     private func library(_ hosted: HostedSession) async throws -> LibrarySnapshot {
         let token = hosted.token ?? ""
-        return try await withCheckedThrowingContinuation { cont in
+        // Unsafe so a cancelled refresh still accepts the response. A 401 from that
+        // response has to be delivered, not dropped, so the store can ignore it.
+        return try await withUnsafeThrowingContinuation { cont in
             lock.lock()
             libraryCalls += 1
             gates[token] = cont
