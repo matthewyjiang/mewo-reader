@@ -184,7 +184,7 @@ struct Avatar: View {
     var size: CGFloat = 40
 
     var body: some View {
-        let color = avatarPalette[abs(name.hashValue) % avatarPalette.count]
+        let color = avatarPalette[avatarIndex(for: name)]
         let letter = String(name.trimmingCharacters(in: .whitespacesAndNewlines).first ?? "M").uppercased()
         ZStack {
             color
@@ -209,7 +209,7 @@ struct ProfileButton: View {
 
     var body: some View {
         Button(action: onClick) {
-            Avatar(name: app.readerIdentity.name, size: 32)
+            Avatar(name: app.readerIdentity.handle.ifBlank { app.readerIdentity.name }, size: 32)
         }
         .buttonStyle(.plain)
         .frame(width: 56, height: 56)

@@ -77,6 +77,17 @@ let avatarPalette: [Color] = [
     Color(hex: 0xFFAD1F),
 ]
 
+/// Same slot web and Android pick: Java's `String.hashCode` over UTF-16,
+/// `s[0]*31^(n-1) + …`, then the non-negative value modulo the palette.
+func avatarIndex(for name: String) -> Int {
+    var hash: Int32 = 0
+    for unit in name.utf16 {
+        hash = hash &* 31 &+ Int32(unit)
+    }
+    let positive = Int(hash & 0x7fff_ffff)
+    return positive % avatarPalette.count
+}
+
 let twitterBlue = Color(hex: 0x1DA1F2)
 
 extension Color {

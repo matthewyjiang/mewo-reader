@@ -304,6 +304,9 @@ private final class FakeSearchStore: LibraryStore {
     func toggleLike(id: String, postId: String) async throws -> Set<String> {
         toggled
     }
+    func setRepost(id: String, postId: String, on: Bool) async throws -> RepostState {
+        RepostState(reposts: on ? 1 : 0, reposted: on)
+    }
     func comments(id: String, postId: String) async throws -> [PostComment] { [] }
     func addComment(id: String, postId: String, text: String) async throws -> [PostComment] { [] }
     func deleteComment(id: String, postId: String, commentId: String) async throws -> [PostComment] { [] }

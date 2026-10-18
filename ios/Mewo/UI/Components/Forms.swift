@@ -9,7 +9,7 @@ struct ProfilePreview: View {
         let tag = LocalIdentity.normalizeHandle(handle)
         let display = name.trimmingCharacters(in: .whitespacesAndNewlines).ifBlank { tag }
         HStack(spacing: 12) {
-            Avatar(name: display, size: 40)
+            Avatar(name: tag.ifBlank { display }, size: 40)
             VStack(alignment: .leading, spacing: 2) {
                 Text(display)
                     .font(MewoFont.bold(15))

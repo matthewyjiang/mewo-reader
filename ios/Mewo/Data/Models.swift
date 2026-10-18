@@ -84,9 +84,13 @@ struct LikeSet: Codable, Equatable, Sendable {
     var ids: Set<String> = []
 }
 
-struct CommentIndex: Codable, Equatable, Sendable {
+struct CommentIndex: Equatable, Sendable {
     var counts: [String: Int] = [:]
     var mine: Set<String> = []
+    /// Posts with at least one repost. Zero counts are omitted, same as `counts`.
+    var reposts: [String: Int] = [:]
+    /// Post ids this viewer has reposted.
+    var reposted: Set<String> = []
 
     func count(_ postId: String) -> Int {
         counts[postId] ?? 0
@@ -94,6 +98,34 @@ struct CommentIndex: Codable, Equatable, Sendable {
 
     func commented(_ postId: String) -> Bool {
         mine.contains(postId)
+    }
+
+    func repostCount(_ postId: String) -> Int {
+        reposts[postId] ?? 0
+    }
+
+    func didRepost(_ postId: String) -> Bool {
+        reposted.contains(postId)
+    }
+
+    func repostMark(_ postId: String) -> RepostMark {
+        RepostMark(count: repostCount(postId), on: didRepost(postId))
+    }
+
+    func applyingRepost(_ postId: String, _ mark: RepostMark) -> CommentIndex {
+        var nextReposts = reposts
+        if mark.count > 0 {
+            nextReposts[postId] = mark.count
+        } else {
+            nextReposts.removeValue(forKey: postId)
+        }
+        var nextIds = reposted
+        if mark.on {
+            nextIds.insert(postId)
+        } else {
+            nextIds.remove(postId)
+        }
+        return CommentIndex(counts: counts, mine: mine, reposts: nextReposts, reposted: nextIds)
     }
 
     func afterThread(postId: String, comments: [PostComment]) -> CommentIndex {
@@ -109,7 +141,29 @@ struct CommentIndex: Codable, Equatable, Sendable {
         } else {
             nextMine.remove(postId)
         }
-        return CommentIndex(counts: nextCounts, mine: nextMine)
+        return CommentIndex(counts: nextCounts, mine: nextMine, reposts: reposts, reposted: reposted)
+    }
+}
+
+extension CommentIndex: Codable {
+    enum CodingKeys: String, CodingKey {
+        case counts, mine, reposts, reposted
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        counts = try container.decodeIfPresent([String: Int].self, forKey: .counts) ?? [:]
+        mine = try container.decodeIfPresent(Set<String>.self, forKey: .mine) ?? []
+        reposts = try container.decodeIfPresent([String: Int].self, forKey: .reposts) ?? [:]
+        reposted = try container.decodeIfPresent(Set<String>.self, forKey: .reposted) ?? []
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(counts, forKey: .counts)
+        try container.encode(mine, forKey: .mine)
+        try container.encode(reposts, forKey: .reposts)
+        try container.encode(reposted, forKey: .reposted)
     }
 }
 
@@ -139,10 +193,12 @@ struct LocalComment: Codable, Equatable, Identifiable, Sendable {
     var createdAt: Int64
 }
 
-struct PostHit: Equatable, Hashable, Identifiable, Sendable {
+struct PostHit: Codable, Equatable, Hashable, Identifiable, Sendable {
     var book: BookRecord
     var post: FeedPost
     var id: String { "\(book.id):\(post.id)" }
+
+    enum CodingKeys: String, CodingKey { case book, post }
 }
 
 struct SearchResult: Equatable, Sendable {
@@ -161,10 +217,11 @@ struct ProfileReplies: Codable, Equatable, Sendable {
     var replies: [ProfileReplyRecord] = []
 }
 
-struct ProfileReply: Equatable, Hashable, Sendable {
+struct ProfileReply: Equatable, Hashable, Identifiable, Sendable {
     var book: BookRecord
     var post: FeedPost
     var comment: PostComment
+    var id: String { comment.id }
 }
 
 struct AuthRequest: Codable, Sendable {
@@ -313,7 +370,16 @@ func relativeTime(createdAt: Int64, now: Int64 = nowMillis()) -> String {
     if minutes < 60 { return "\(minutes)m" }
     let hours = minutes / 60
     if hours < 24 { return "\(hours)h" }
-    return "\(hours / 24)d"
+    var calendar = Calendar(identifier: .gregorian)
+    calendar.timeZone = TimeZone(secondsFromGMT: 0)!
+    let date = Date(timeIntervalSince1970: TimeInterval(createdAt) / 1000)
+    let today = Date(timeIntervalSince1970: TimeInterval(now) / 1000)
+    let formatter = DateFormatter()
+    formatter.locale = Locale(identifier: "en_US_POSIX")
+    formatter.timeZone = TimeZone(secondsFromGMT: 0)
+    let sameYear = calendar.component(.year, from: date) == calendar.component(.year, from: today)
+    formatter.dateFormat = sameYear ? "MMM d" : "MMM d, yyyy"
+    return formatter.string(from: date)
 }
 
 func quoteLine(author: String?, title: String?, text: String) -> String {

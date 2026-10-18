@@ -6,6 +6,7 @@ final class LikesViewModel {
     var hits: [PostHit] = []
     var comments: [String: CommentIndex] = [:]
     var loading = true
+    private var reposts: [String: RepostOverlay] = [:]
     private let env: AppEnvironment
 
     init(env: AppEnvironment) { self.env = env }
@@ -17,7 +18,8 @@ final class LikesViewModel {
                 let hits = try await env.library.likedPosts()
                 var comments: [String: CommentIndex] = [:]
                 for id in Set(hits.map(\.book.id)) {
-                    comments[id] = (try? await env.library.commentIndex(id: id)) ?? CommentIndex()
+                    let loaded = (try? await env.library.commentIndex(id: id)) ?? self.comments[id] ?? CommentIndex()
+                    comments[id] = overlay(id).replay(over: loaded)
                 }
                 self.hits = hits
                 self.comments = comments
@@ -27,6 +29,24 @@ final class LikesViewModel {
                 loading = false
             }
         }
+    }
+
+    func toggleRepost(bookId: String, postId: String) {
+        commitRepostToggle(
+            bookId: bookId,
+            postId: postId,
+            read: { self.comments[bookId] ?? CommentIndex() },
+            library: env.library,
+            publish: { self.comments[bookId] = $0 },
+            overlay: overlay(bookId)
+        )
+    }
+
+    private func overlay(_ id: String) -> RepostOverlay {
+        if let overlay = reposts[id] { return overlay }
+        let overlay = RepostOverlay()
+        reposts[id] = overlay
+        return overlay
     }
 
     func unlike(bookId: String, postId: String) {
@@ -92,9 +112,12 @@ struct LikesScreen: View {
                                 liked: true,
                                 commentCount: model.comments[hit.book.id]?.count(hit.post.id) ?? 0,
                                 commented: model.comments[hit.book.id]?.commented(hit.post.id) == true,
+                                reposted: model.comments[hit.book.id]?.didRepost(hit.post.id) == true,
+                                repostCount: model.comments[hit.book.id]?.repostCount(hit.post.id) ?? 0,
                                 onComment: { commentTarget = CommentTarget(book: hit.book, post: hit.post) },
                                 onLike: { model.unlike(bookId: hit.book.id, postId: hit.post.id) },
-                                onRepost: { shareText = quoteLine(author: hit.book.author, title: hit.book.title, text: hit.post.text) },
+                                onRepost: { model.toggleRepost(bookId: hit.book.id, postId: hit.post.id) },
+                                onQuote: { shareText = quoteLine(author: hit.book.author, title: hit.book.title, text: hit.post.text) },
                                 onShare: { shareText = hit.post.text },
                                 onOpen: { onOpenPost(hit.book.id, hit.post.id) }
                             )

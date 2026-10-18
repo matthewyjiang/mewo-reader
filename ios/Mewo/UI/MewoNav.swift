@@ -79,13 +79,13 @@ struct MewoNav: View {
     private var tabRoot: some View {
         switch tab {
         case .home:
-            LibraryScreen(
-                env: app,
+            HomeScreen(
                 chrome: chrome,
                 onOpenBook: { push(.reader(bookId: $0, postId: nil)) },
-                onOpenAccount: { withAnimation(.easeInOut(duration: 0.22)) { drawerOpen = true } }
+                onOpenPost: { book, post in push(.reader(bookId: book, postId: post)) },
+                onOpenAccount: { withAnimation(.easeInOut(duration: 0.22)) { drawerOpen = true } },
+                onOpenProfile: { handle, name in push(.profile(handle: handle, name: name)) }
             )
-            .coordinateSpace(name: "library")
         case .search:
             SearchScreen(
                 env: app,
@@ -125,6 +125,8 @@ struct MewoNav: View {
                 displayName: name,
                 chrome: chrome,
                 onBack: { path.removeLast() },
+                onOpenBook: { push(.reader(bookId: $0, postId: nil)) },
+                onOpenPost: { book, post in push(.reader(bookId: book, postId: post)) },
                 onOpenProfile: { nextHandle, nextName in
                     if nextHandle.caseInsensitiveCompare(handle) != .orderedSame {
                         push(.profile(handle: nextHandle, name: nextName))

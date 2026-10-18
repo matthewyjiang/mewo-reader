@@ -163,7 +163,9 @@ struct ThreadPost: View {
     var cover: URL?
     var connectDown: Bool
     var onOpenProfile: ((String, String) -> Void)?
+    var onOpen: (() -> Void)?
     var onDelete: (() -> Void)?
+    var trailing: CGFloat = 4
 
     var body: some View {
         HStack(alignment: .top, spacing: 12) {
@@ -198,15 +200,27 @@ struct ThreadPost: View {
                         .accessibilityLabel("More")
                     }
                 }
-                Text(text)
-                    .font(heading ? MewoFont.bold(scale.headingSize) : MewoFont.regular(scale.bodySize))
-                    .foregroundStyle(mewo.ink)
+                replyText
             }
             .padding(.bottom, 12)
         }
         .padding(.leading, 16)
-        .padding(.trailing, 4)
+        .padding(.trailing, trailing)
         .padding(.top, 12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    @ViewBuilder
+    private var replyText: some View {
+        let label = Text(text)
+            .font(heading ? MewoFont.bold(scale.headingSize) : MewoFont.regular(scale.bodySize))
+            .foregroundStyle(mewo.ink)
+            .frame(maxWidth: .infinity, alignment: .leading)
+        if let onOpen {
+            label.contentShape(Rectangle()).onTapGesture(perform: onOpen)
+        } else {
+            label
+        }
     }
 }
 

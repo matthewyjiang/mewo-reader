@@ -13,6 +13,7 @@ final class ReaderViewModel {
     private let env: AppEnvironment
     private let bookId: String
     private let focusPostId: String?
+    private let reposts = RepostOverlay()
 
     init(env: AppEnvironment, bookId: String, focusPostId: String?) {
         self.env = env
@@ -39,7 +40,7 @@ final class ReaderViewModel {
             self.book = book
             self.posts = posts
             self.likes = likes
-            self.comments = comments
+            self.comments = reposts.replay(over: comments)
             self.startIndex = start
             self.loading = false
         } catch {
@@ -50,6 +51,17 @@ final class ReaderViewModel {
 
     func toggleLike(_ postId: String) {
         Task { likes = (try? await env.library.toggleLike(id: bookId, postId: postId)) ?? likes }
+    }
+
+    func toggleRepost(_ postId: String) {
+        commitRepostToggle(
+            bookId: bookId,
+            postId: postId,
+            read: { self.comments },
+            library: env.library,
+            publish: { self.comments = $0 },
+            overlay: reposts
+        )
     }
 
     func onCommentsChanged(postId: String, comments: [PostComment]) {
@@ -202,9 +214,12 @@ struct ReaderScreen: View {
                             liked: model.likes.contains(post.id),
                             commentCount: model.comments.count(post.id),
                             commented: model.comments.commented(post.id),
+                            reposted: model.comments.didRepost(post.id),
+                            repostCount: model.comments.repostCount(post.id),
                             onComment: { if let book = model.book { commentTarget = CommentTarget(book: book, post: post) } },
                             onLike: { model.toggleLike(post.id) },
-                            onRepost: { shareText = quoteLine(author: model.book?.author, title: model.book?.title, text: post.text) },
+                            onRepost: { model.toggleRepost(post.id) },
+                            onQuote: { shareText = quoteLine(author: model.book?.author, title: model.book?.title, text: post.text) },
                             onShare: { shareText = post.text },
                             onChapterClick: { showChapters = true }
                         )

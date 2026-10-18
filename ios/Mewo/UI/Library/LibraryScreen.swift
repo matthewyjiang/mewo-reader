@@ -85,26 +85,31 @@ struct LibraryScreen: View {
     @Bindable var chrome: HideOnScrollState
     var onOpenBook: (String) -> Void
     var onOpenAccount: () -> Void
+    var showsBar: Bool
     @State private var model: LibraryViewModel
     @State private var picking = false
     @State private var pendingDelete: BookRecord?
     @State private var lastOffset: CGFloat = 0
 
-    init(env: AppEnvironment, chrome: HideOnScrollState, onOpenBook: @escaping (String) -> Void, onOpenAccount: @escaping () -> Void) {
+    init(env: AppEnvironment, chrome: HideOnScrollState, onOpenBook: @escaping (String) -> Void, onOpenAccount: @escaping () -> Void, showsBar: Bool = true) {
         self.chrome = chrome
         self.onOpenBook = onOpenBook
         self.onOpenAccount = onOpenAccount
+        self.showsBar = showsBar
         _model = State(initialValue: LibraryViewModel(env: env))
     }
 
     var body: some View {
         ZStack(alignment: .bottomTrailing) {
             VStack(spacing: 0) {
-                MewoAppBar(visible: chrome.visible, leading: { ProfileButton(onClick: onOpenAccount) }, center: { BrandMark() })
+                if showsBar {
+                    MewoAppBar(visible: chrome.visible, leading: { ProfileButton(onClick: onOpenAccount) }, center: { BrandMark() })
+                }
                 GeometryReader { geo in
                     ScrollView {
                         shelfBody(minHeight: geo.size.height)
                     }
+                    .coordinateSpace(name: "library")
                     .refreshable { await model.refresh() }
                     .scrollBounceBehavior(.always)
                     .scrollIndicators(.hidden)
