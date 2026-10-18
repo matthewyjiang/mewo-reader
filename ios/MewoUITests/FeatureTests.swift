@@ -82,6 +82,8 @@ final class FeatureTests: XCTestCase {
     func testSearchFindsBookAndPost() {
         onboard()
         openSample()
+        openSampleBook()
+        app.buttons["Back"].firstMatch.tap()
         app.buttons["tab-search"].tap()
         let search = field("search-field")
         tapCenter("search-tab-posts")

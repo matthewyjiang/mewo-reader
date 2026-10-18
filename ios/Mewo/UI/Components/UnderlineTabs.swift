@@ -37,6 +37,7 @@ struct UnderlineTabs: View {
                     .buttonStyle(.plain)
                     .accessibilityLabel(item.title)
                     .accessibilityIdentifier("\(idPrefix)-\(item.id)")
+                    .accessibilityAddTraits(on ? .isSelected : [])
                 }
             }
             Hairline()
