@@ -11,8 +11,11 @@ pub fn zip_files(files: &[(&str, &[u8])]) -> Vec<u8> {
         } else {
             CompressionMethod::Deflated
         };
-        zip.start_file(*path, SimpleFileOptions::default().compression_method(method))
-            .unwrap();
+        zip.start_file(
+            *path,
+            SimpleFileOptions::default().compression_method(method),
+        )
+        .unwrap();
         zip.write_all(bytes).unwrap();
     }
     zip.finish().unwrap().into_inner()

@@ -1,3 +1,4 @@
+use crate::feed::Post;
 use serde::{Deserialize, Serialize};
 use sqlx::FromRow;
 use std::collections::HashMap;
@@ -169,4 +170,64 @@ pub struct ProfileReplyRecord {
 pub struct ProfileReplies {
     pub username: String,
     pub replies: Vec<ProfileReplyRecord>,
+}
+
+/// Query value for `type`. Serde name is lowercase (`accounts`, `books`, `posts`).
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SearchKind {
+    Accounts,
+    Books,
+    Posts,
+}
+
+#[derive(Debug, Serialize)]
+pub struct AccountRecord {
+    pub username: String,
+    pub mine: bool,
+}
+
+#[derive(Debug, Serialize)]
+pub struct PostHitRecord {
+    pub book: BookRecord,
+    pub post: Post,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(tag = "type", rename_all = "lowercase")]
+pub enum SearchHits {
+    Accounts { items: Vec<AccountRecord> },
+    Books { items: Vec<BookRecord> },
+    Posts { items: Vec<PostHitRecord> },
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SearchPage {
+    #[serde(flatten)]
+    pub hits: SearchHits,
+    pub next_cursor: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProfileRecord {
+    pub username: String,
+    pub joined_at: i64,
+    pub post_count: i64,
+    pub mine: bool,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ProfilePostRecord {
+    pub book: BookRecord,
+    pub post: Post,
+    pub comment: CommentRecord,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProfilePostsPage {
+    pub items: Vec<ProfilePostRecord>,
+    pub next_cursor: Option<String>,
 }

@@ -5,6 +5,11 @@ use mewo_server::build;
 use mewo_server::config::Config;
 use serde_json::{json, Value};
 use sqlx::migrate::Migrate;
+use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
+use sqlx::SqlitePool;
+use std::path::Path;
+use std::str::FromStr;
+use std::time::Duration;
 use tempfile::TempDir;
 use tower::ServiceExt;
 
@@ -1205,4 +1210,940 @@ async fn migration_marks_existing_books_shared() {
     .await
     .unwrap();
     assert_eq!(index, 1);
+}
+
+fn percent_encode(value: &str) -> String {
+    let mut out = String::new();
+    for b in value.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(b as char);
+            }
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    out
+}
+
+fn search_path(q: &str, kind: &str, cursor: Option<&str>) -> String {
+    let mut path = format!("/v1/search?q={}&type={kind}", percent_encode(q));
+    if let Some(cursor) = cursor {
+        path.push_str("&cursor=");
+        path.push_str(&percent_encode(cursor));
+    }
+    path
+}
+
+async fn search(
+    app: &axum::Router,
+    token: Option<&str>,
+    q: &str,
+    kind: &str,
+    cursor: Option<&str>,
+) -> (StatusCode, Value) {
+    empty_req(app, "GET", &search_path(q, kind, cursor), token).await
+}
+
+async fn search_all(app: &axum::Router, token: &str, q: &str, kind: &str) -> Vec<Value> {
+    let mut cursor = None;
+    let mut items = Vec::new();
+    for _ in 0..20 {
+        let (status, body) = search(app, Some(token), q, kind, cursor.as_deref()).await;
+        assert_eq!(status, StatusCode::OK, "{q} {kind} {body}");
+        assert_eq!(body["type"], kind);
+        assert!(body.get("nextCursor").is_some(), "{body}");
+        assert!(body.get("next_cursor").is_none(), "{body}");
+        let page = body["items"].as_array().expect("items").clone();
+        if body["nextCursor"].is_null() {
+            assert!(page.len() <= 20, "{body}");
+            items.extend(page);
+            return items;
+        }
+        assert_eq!(page.len(), 20, "{body}");
+        items.extend(page);
+        let next = body["nextCursor"].as_str().unwrap().to_string();
+        assert_ne!(cursor.as_deref(), Some(next.as_str()));
+        cursor = Some(next);
+    }
+    panic!("cursor did not end");
+}
+
+fn db_options(path: &Path) -> SqliteConnectOptions {
+    let url = format!("sqlite://{}?mode=rwc", path.join("mewo.db").display());
+    SqliteConnectOptions::from_str(&url)
+        .unwrap()
+        .create_if_missing(true)
+        .foreign_keys(true)
+        .busy_timeout(Duration::from_secs(5))
+}
+
+async fn open_db(path: &Path) -> SqlitePool {
+    SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect_with(db_options(path))
+        .await
+        .unwrap()
+}
+
+async fn count(pool: &SqlitePool, sql: &str, bind: Option<&str>) -> i64 {
+    let mut query = sqlx::query_scalar::<_, i64>(sql);
+    if let Some(bind) = bind {
+        query = query.bind(bind);
+    }
+    query.fetch_one(pool).await.unwrap()
+}
+
+#[tokio::test]
+async fn search_accounts_rank_prefix_before_infix_ignoring_case() {
+    let (app, _tmp) = app().await;
+    let zed = register(&app, "zed", "password1").await;
+    register(&app, "ali", "password1").await;
+    let alice = register(&app, "Alice", "password1").await;
+    register(&app, "xali", "password1").await;
+    register(&app, "malice", "password1").await;
+    register(&app, "bob", "password1").await;
+    register(&app, "a_b", "password1").await;
+    register(&app, "axb", "password1").await;
+
+    let (status, _) = search(&app, None, "ali", "accounts", None).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+    for q in ["ali", "ALI", "aLi"] {
+        let items = search_all(&app, &zed, q, "accounts").await;
+        let names: Vec<&str> = items
+            .iter()
+            .map(|row| row["username"].as_str().unwrap())
+            .collect();
+        assert_eq!(names, vec!["ali", "Alice", "xali", "malice"], "{q}");
+        assert!(items.iter().all(|row| row["mine"] == false));
+    }
+
+    let items = search_all(&app, &alice, "alice", "accounts").await;
+    assert_eq!(items[0]["username"], "Alice");
+    assert_eq!(items[0]["mine"], true);
+    assert!(items[1..].iter().all(|row| row["mine"] == false));
+
+    let items = search_all(&app, &zed, "a_b", "accounts").await;
+    assert_eq!(items.len(), 1, "{items:?}");
+    assert_eq!(items[0]["username"], "a_b");
+    let items = search_all(&app, &zed, "A_B", "accounts").await;
+    assert_eq!(items[0]["username"], "a_b");
+}
+
+#[tokio::test]
+async fn search_hides_private_books_and_drops_them_when_deleted() {
+    let (app, tmp) = app().await;
+    let matt = register(&app, "matt", "password1").await;
+    let ted = register(&app, "ted", "password1").await;
+    let (status, secret) = upload(
+        &app,
+        &matt,
+        "SecretTitle",
+        "Nope",
+        &common::epub(),
+        None,
+        false,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{secret}");
+    let secret_id = secret["id"].as_str().unwrap().to_string();
+    let (status, sample) = upload(
+        &app,
+        &matt,
+        "SampleTitle",
+        "Mewo",
+        &common::epub(),
+        None,
+        true,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{sample}");
+    let sample_id = sample["id"].as_str().unwrap();
+
+    let titles = |items: &[Value]| -> Vec<String> {
+        items
+            .iter()
+            .map(|row| row["title"].as_str().unwrap().to_string())
+            .collect()
+    };
+    let post_books = |items: &[Value]| -> Vec<String> {
+        items
+            .iter()
+            .map(|row| row["book"]["id"].as_str().unwrap().to_string())
+            .collect()
+    };
+
+    let hidden = search_all(&app, &ted, "SecretTitle", "books").await;
+    assert!(hidden.is_empty(), "{hidden:?}");
+    let by_owner = search_all(&app, &ted, "matt", "books").await;
+    assert_eq!(titles(&by_owner), vec!["SampleTitle".to_string()]);
+    let sample_hits = search_all(&app, &ted, "SampleTitle", "books").await;
+    assert_eq!(sample_hits.len(), 1);
+    assert_eq!(sample_hits[0]["isSample"], true);
+    assert_eq!(sample_hits[0]["mine"], false);
+    assert_eq!(sample_hits[0]["ownerUsername"], "matt");
+
+    let owner_books = search_all(&app, &matt, "SecretTitle", "books").await;
+    assert_eq!(owner_books[0]["id"], secret_id);
+    assert_eq!(owner_books[0]["mine"], true);
+
+    let ted_posts = search_all(&app, &ted, "second", "posts").await;
+    assert_eq!(post_books(&ted_posts), vec![sample_id.to_string()]);
+    assert_eq!(ted_posts[0]["post"]["id"], "1");
+    assert!(ted_posts[0]["post"]["text"]
+        .as_str()
+        .unwrap()
+        .contains("second"));
+    let matt_posts = search_all(&app, &matt, "second", "posts").await;
+    let mut matt_ids = post_books(&matt_posts);
+    matt_ids.sort();
+    let mut expected = vec![secret_id.clone(), sample_id.to_string()];
+    expected.sort();
+    assert_eq!(matt_ids, expected);
+
+    share(&app, &matt, &secret_id).await;
+    let shared = search_all(&app, &ted, "SecretTitle", "books").await;
+    assert_eq!(shared[0]["id"], secret_id);
+    assert_eq!(shared[0]["shared"], true);
+    let ted_posts = search_all(&app, &ted, "second", "posts").await;
+    assert_eq!(ted_posts.len(), 2, "{ted_posts:?}");
+
+    let (status, hidden) = json_req(
+        &app,
+        "PATCH",
+        &format!("/v1/books/{secret_id}"),
+        Some(&matt),
+        json!({ "shared": false }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{hidden}");
+    assert!(search_all(&app, &ted, "SecretTitle", "books")
+        .await
+        .is_empty());
+    assert_eq!(search_all(&app, &ted, "second", "posts").await.len(), 1);
+    assert_eq!(
+        search_all(&app, &matt, "SecretTitle", "books").await.len(),
+        1
+    );
+
+    let (status, _) = empty_req(
+        &app,
+        "DELETE",
+        &format!("/v1/books/{secret_id}"),
+        Some(&matt),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    assert!(search_all(&app, &matt, "SecretTitle", "books")
+        .await
+        .is_empty());
+    assert_eq!(search_all(&app, &matt, "second", "posts").await.len(), 1);
+
+    let pool = open_db(tmp.path()).await;
+    assert_eq!(
+        count(
+            &pool,
+            "SELECT COUNT(*) FROM posts WHERE book_id = ?",
+            Some(&secret_id)
+        )
+        .await,
+        0
+    );
+    assert_eq!(count(&pool, "SELECT COUNT(*) FROM posts", None).await, 3);
+    assert_eq!(count(&pool, "SELECT COUNT(*) FROM post_fts", None).await, 3);
+    assert_eq!(
+        count(
+            &pool,
+            "SELECT COUNT(*) FROM post_fts WHERE post_fts MATCH '\"second\"'",
+            None,
+        )
+        .await,
+        1
+    );
+}
+
+#[tokio::test]
+async fn search_books_rank_title_prefix_and_escape_like() {
+    let (app, _tmp) = app().await;
+    let matt = register(&app, "matt", "password1").await;
+    let mut uploaded = Vec::new();
+    for (title, author, handle) in [
+        ("The Cat Book", "Nope", "h1"),
+        ("Cat", "Nope", "h2"),
+        ("Catalog", "Nope", "h3"),
+        ("Dog", "Cat Person", "h4"),
+        ("Zebra", "Nope", "uniquehandle"),
+        ("100%_done", "Nope", "h5"),
+        ("100Xd", "Nope", "h6"),
+    ] {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        let (status, book) = upload_fields(
+            &app,
+            &matt,
+            &[
+                ("title", None, title.as_bytes()),
+                ("author", None, author.as_bytes()),
+                ("handle", None, handle.as_bytes()),
+                ("isSample", None, b"false"),
+                ("epub", Some("book.epub"), &common::epub()),
+            ],
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{book}");
+        uploaded.push(book);
+    }
+
+    let items = search_all(&app, &matt, "cat", "books").await;
+    let mut expected: Vec<&Value> = uploaded
+        .iter()
+        .filter(|book| {
+            let title = book["title"].as_str().unwrap();
+            let author = book["author"].as_str().unwrap();
+            let handle = book["handle"].as_str().unwrap();
+            let owner = book["ownerUsername"].as_str().unwrap();
+            [title, author, handle, owner]
+                .iter()
+                .any(|field| field.to_ascii_lowercase().contains("cat"))
+        })
+        .collect();
+    expected.sort_by_key(|book| {
+        let title = book["title"].as_str().unwrap().to_ascii_lowercase();
+        let prefix = if title.starts_with("cat") { 0 } else { 1 };
+        let imported = book["importedAt"].as_i64().unwrap();
+        (prefix, -imported, book["id"].as_str().unwrap().to_string())
+    });
+    let got: Vec<&str> = items
+        .iter()
+        .map(|row| row["id"].as_str().unwrap())
+        .collect();
+    let want: Vec<&str> = expected
+        .iter()
+        .map(|row| row["id"].as_str().unwrap())
+        .collect();
+    assert_eq!(got, want, "{items:?}");
+    assert_eq!(items[0]["title"], "Catalog");
+    assert_eq!(items[1]["title"], "Cat");
+
+    let again = search_all(&app, &matt, "CAT", "books").await;
+    let again_ids: Vec<&str> = again
+        .iter()
+        .map(|row| row["id"].as_str().unwrap())
+        .collect();
+    assert_eq!(again_ids, got);
+
+    let handle_hits = search_all(&app, &matt, "uniquehandle", "books").await;
+    assert_eq!(handle_hits.len(), 1);
+    assert_eq!(handle_hits[0]["title"], "Zebra");
+    let author_hits = search_all(&app, &matt, "CAT PERSON", "books").await;
+    assert_eq!(author_hits.len(), 1);
+    assert_eq!(author_hits[0]["title"], "Dog");
+
+    let literal = search_all(&app, &matt, "100%_", "books").await;
+    assert_eq!(literal.len(), 1, "{literal:?}");
+    assert_eq!(literal[0]["title"], "100%_done");
+    assert!(search_all(&app, &matt, "100_d", "books").await.is_empty());
+    let plain = search_all(&app, &matt, "100Xd", "books").await;
+    assert_eq!(plain.len(), 1);
+    assert_eq!(plain[0]["title"], "100Xd");
+}
+
+#[tokio::test]
+async fn search_cursors_list_every_match_once() {
+    let (app, _tmp) = app().await;
+    let viewer = register(&app, "viewer", "password1").await;
+    let mut accounts = Vec::new();
+    for i in 0..25 {
+        let name = format!("s{i:02}");
+        register(&app, &name, "password1").await;
+        accounts.push(name);
+    }
+    let once = search_all(&app, &viewer, "s", "accounts").await;
+    let twice = search_all(&app, &viewer, "s", "accounts").await;
+    let names = |items: &[Value]| -> Vec<String> {
+        items
+            .iter()
+            .map(|row| row["username"].as_str().unwrap().to_string())
+            .collect()
+    };
+    assert_eq!(names(&once), accounts);
+    assert_eq!(names(&once), names(&twice));
+    assert!(once.iter().all(|row| row["mine"] == false));
+
+    let mut books = Vec::new();
+    for i in 0..21 {
+        let title = format!("PageBook {i:02}");
+        let (status, book) =
+            upload(&app, &viewer, &title, "Nope", &common::epub(), None, false).await;
+        assert_eq!(status, StatusCode::OK, "{book}");
+        books.push(book["id"].as_str().unwrap().to_string());
+    }
+    let book_items = search_all(&app, &viewer, "PageBook", "books").await;
+    let book_again = search_all(&app, &viewer, "PageBook", "books").await;
+    let ids = |items: &[Value]| -> Vec<String> {
+        items
+            .iter()
+            .map(|row| row["id"].as_str().unwrap().to_string())
+            .collect()
+    };
+    let mut found = ids(&book_items);
+    let mut expect = books.clone();
+    found.sort();
+    expect.sort();
+    assert_eq!(found, expect);
+    assert_eq!(ids(&book_items), ids(&book_again));
+
+    let post_key = |items: &[Value]| -> Vec<String> {
+        items
+            .iter()
+            .map(|row| {
+                format!(
+                    "{}:{}",
+                    row["book"]["id"].as_str().unwrap(),
+                    row["post"]["id"].as_str().unwrap()
+                )
+            })
+            .collect()
+    };
+    let posts = search_all(&app, &viewer, "second", "posts").await;
+    let posts_again = search_all(&app, &viewer, "second", "posts").await;
+    assert_eq!(post_key(&posts), post_key(&posts_again));
+    let mut keys = post_key(&posts);
+    keys.sort();
+    let mut want = Vec::new();
+    for id in &books {
+        want.push(format!("{id}:1"));
+    }
+    want.sort();
+    assert_eq!(keys, want);
+    assert!(posts
+        .iter()
+        .all(|row| row["post"]["text"].as_str().unwrap().contains("second")));
+}
+
+#[tokio::test]
+async fn search_rejects_bad_queries_and_sanitizes_fts() {
+    let (app, _tmp) = app().await;
+    let token = register(&app, "matt", "password1").await;
+    let (status, book) = upload(&app, &token, "Book", "Writer", &common::epub(), None, false).await;
+    assert_eq!(status, StatusCode::OK, "{book}");
+
+    for q in ["", "   ", "\t"] {
+        let (status, body) = search(&app, Some(&token), q, "posts", None).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{q:?} {body}");
+        assert!(body["error"].as_str().unwrap().contains("Enter a search."));
+    }
+    let long = "a".repeat(101);
+    let (status, body) = search(&app, Some(&token), &long, "accounts", None).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    let error = body["error"].as_str().unwrap();
+    assert!(error.contains("100"), "{error}");
+    assert!(error.contains("asked 101"), "{error}");
+    let (status, body) = search(&app, Some(&token), &"a".repeat(100), "accounts", None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(body["items"].as_array().unwrap().is_empty());
+
+    for q in [
+        "\"",
+        "*",
+        "NEAR",
+        "-",
+        "(",
+        ")",
+        "\" * NEAR - ( )",
+        "first OR second",
+        "para*",
+    ] {
+        let (status, body) = search(&app, Some(&token), q, "posts", None).await;
+        assert_eq!(status, StatusCode::OK, "{q} {body}");
+        assert!(body["items"].is_array(), "{q} {body}");
+    }
+
+    let hits = search_all(&app, &token, "first para", "posts").await;
+    assert_eq!(hits.len(), 1, "{hits:?}");
+    assert!(hits[0]["post"]["text"]
+        .as_str()
+        .unwrap()
+        .to_ascii_lowercase()
+        .contains("first"));
+    assert!(hits[0]["post"]["text"]
+        .as_str()
+        .unwrap()
+        .to_ascii_lowercase()
+        .contains("para"));
+
+    let (status, body) = search(&app, Some(&token), "para", "posts", Some("%%%")).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body["error"].as_str().unwrap().contains("page token"));
+}
+
+#[tokio::test]
+async fn profile_hides_private_replies_and_pages_newest_first() {
+    let (app, _tmp) = app().await;
+    let matt = register(&app, "matt", "password1").await;
+    let ted = register(&app, "ted", "password1").await;
+    let (status, shared) = upload(&app, &matt, "Shared", "A", &common::epub(), None, false).await;
+    assert_eq!(status, StatusCode::OK, "{shared}");
+    let shared_id = shared["id"].as_str().unwrap();
+    share(&app, &matt, shared_id).await;
+    let (status, private) = upload(&app, &matt, "Private", "A", &common::epub(), None, false).await;
+    assert_eq!(status, StatusCode::OK, "{private}");
+    let private_id = private["id"].as_str().unwrap();
+
+    for i in 0..31 {
+        tokio::time::sleep(Duration::from_millis(5)).await;
+        let (status, body) = json_req(
+            &app,
+            "POST",
+            &format!("/v1/books/{shared_id}/comments/0"),
+            Some(&matt),
+            json!({ "text": format!("c{i}") }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+    }
+    tokio::time::sleep(Duration::from_millis(5)).await;
+    let (status, body) = json_req(
+        &app,
+        "POST",
+        &format!("/v1/books/{private_id}/comments/1"),
+        Some(&matt),
+        json!({ "text": "secret-reply" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    let (status, missing) = empty_req(&app, "GET", "/v1/users/nobody", Some(&ted)).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{missing}");
+    let (status, missing_posts) =
+        empty_req(&app, "GET", "/v1/users/nobody/posts", Some(&ted)).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{missing_posts}");
+    let (status, old_missing) =
+        empty_req(&app, "GET", "/v1/profiles/nobody/replies", Some(&ted)).await;
+    assert_eq!(status, StatusCode::OK, "{old_missing}");
+    assert_eq!(old_missing["username"], "nobody");
+    assert_eq!(old_missing["replies"], json!([]));
+
+    let (status, ted_view) = empty_req(&app, "GET", "/v1/users/matt", Some(&ted)).await;
+    assert_eq!(status, StatusCode::OK, "{ted_view}");
+    assert_eq!(ted_view["username"], "matt");
+    assert_eq!(ted_view["postCount"], 31);
+    assert_eq!(ted_view["mine"], false);
+    assert!(ted_view["joinedAt"].as_i64().unwrap() > 0);
+    assert!(ted_view.get("joined_at").is_none());
+    let (status, mine) = empty_req(&app, "GET", "/v1/users/Matt", Some(&matt)).await;
+    assert_eq!(status, StatusCode::OK, "{mine}");
+    assert_eq!(mine["postCount"], 32);
+    assert_eq!(mine["mine"], true);
+
+    let load = |token: String, cursor: Option<String>| {
+        let app = app.clone();
+        async move {
+            let path = match cursor {
+                Some(cursor) => format!("/v1/users/matt/posts?cursor={}", percent_encode(&cursor)),
+                None => "/v1/users/matt/posts".to_string(),
+            };
+            empty_req(&app, "GET", &path, Some(&token)).await
+        }
+    };
+    let mut ted_items = Vec::new();
+    let mut cursor = None;
+    for _ in 0..5 {
+        let (status, page) = load(ted.clone(), cursor.clone()).await;
+        assert_eq!(status, StatusCode::OK, "{page}");
+        assert!(page.get("nextCursor").is_some());
+        let items = page["items"].as_array().unwrap();
+        if page["nextCursor"].is_null() {
+            ted_items.extend(items.clone());
+            break;
+        }
+        assert_eq!(items.len(), 30, "{page}");
+        ted_items.extend(items.clone());
+        cursor = Some(page["nextCursor"].as_str().unwrap().to_string());
+    }
+    assert_eq!(ted_items.len(), 31);
+    let texts: Vec<&str> = ted_items
+        .iter()
+        .map(|row| row["comment"]["text"].as_str().unwrap())
+        .collect();
+    assert_eq!(texts[0], "c30");
+    assert_eq!(texts[30], "c0");
+    assert!(texts.iter().all(|text| *text != "secret-reply"));
+    for pair in ted_items.windows(2) {
+        assert!(
+            pair[0]["comment"]["createdAt"].as_i64().unwrap()
+                >= pair[1]["comment"]["createdAt"].as_i64().unwrap()
+        );
+    }
+    assert!(ted_items.iter().all(|row| {
+        row["book"]["id"] == shared_id
+            && row["post"]["id"] == "0"
+            && row["post"]["kind"] == "Heading"
+            && row["post"]["text"] == "Chapter I"
+            && row["comment"]["mine"] == false
+            && row["comment"]["username"] == "matt"
+            && row["comment"].get("created_at").is_none()
+    }));
+    let mut ids: Vec<&str> = ted_items
+        .iter()
+        .map(|row| row["comment"]["id"].as_str().unwrap())
+        .collect();
+    ids.sort();
+    ids.dedup();
+    assert_eq!(ids.len(), 31);
+
+    let (status, owner_page) = empty_req(&app, "GET", "/v1/users/matt/posts", Some(&matt)).await;
+    assert_eq!(status, StatusCode::OK, "{owner_page}");
+    let owner_texts: Vec<&str> = owner_page["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|row| row["comment"]["text"].as_str().unwrap())
+        .collect();
+    assert_eq!(owner_texts[0], "secret-reply");
+    assert_eq!(owner_page["items"][0]["book"]["id"], private_id);
+    assert_eq!(owner_page["items"][0]["post"]["id"], "1");
+    assert!(owner_page["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|row| row["comment"]["mine"] == true));
+
+    let (status, old) = empty_req(&app, "GET", "/v1/profiles/matt/replies", Some(&ted)).await;
+    assert_eq!(status, StatusCode::OK, "{old}");
+    assert_eq!(old["username"], "matt");
+    let old_replies = old["replies"].as_array().unwrap();
+    assert_eq!(old_replies.len(), 31);
+    assert!(old_replies.iter().all(|row| {
+        row["bookId"] == shared_id
+            && row["comment"]["text"] != "secret-reply"
+            && row.get("post").is_none()
+    }));
+
+    let (status, bad) = empty_req(&app, "GET", "/v1/users/matt/posts?cursor=%%%", Some(&ted)).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{bad}");
+}
+
+#[tokio::test]
+async fn migration_adds_search_on_an_existing_database() {
+    let tmp = TempDir::new().unwrap();
+    let pool = open_db(tmp.path()).await;
+    let migrator = sqlx::migrate!("./migrations");
+    let mut conn = pool.acquire().await.unwrap();
+    Migrate::ensure_migrations_table(&mut *conn).await.unwrap();
+    for migration in migrator.iter() {
+        if migration.version < 5 {
+            Migrate::apply(&mut *conn, migration).await.unwrap();
+        }
+    }
+    drop(conn);
+
+    sqlx::query(
+        "INSERT INTO users (id, username, username_norm, password_hash, created_at)
+         VALUES ('user', 'matt', 'matt', 'x', 1)",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO books (id, user_id, title, author, handle, imported_at)
+         VALUES ('book', 'user', 'Old', 'Author', 'author', 1)",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    assert!(
+        sqlx::query_scalar::<_, i64>("SELECT posts_indexed FROM books WHERE id = 'book'")
+            .fetch_one(&pool)
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        count(
+            &pool,
+            "SELECT COUNT(*) FROM sqlite_master WHERE name = 'posts'",
+            None
+        )
+        .await,
+        0
+    );
+
+    sqlx::migrate!("./migrations").run(&pool).await.unwrap();
+
+    assert_eq!(
+        count(
+            &pool,
+            "SELECT posts_indexed FROM books WHERE id = 'book'",
+            None
+        )
+        .await,
+        0
+    );
+    sqlx::query(
+        "INSERT INTO books (id, user_id, title, author, handle, imported_at)
+         VALUES ('new', 'user', 'New', 'Author', 'author', 2)",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        count(
+            &pool,
+            "SELECT posts_indexed FROM books WHERE id = 'new'",
+            None
+        )
+        .await,
+        0
+    );
+    let triggers: Vec<String> = sqlx::query_scalar(
+        "SELECT name FROM sqlite_master WHERE type = 'trigger' AND tbl_name = 'posts' ORDER BY name",
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        triggers,
+        vec!["posts_ad".to_string(), "posts_ai".to_string()]
+    );
+    assert_eq!(
+        count(
+            &pool,
+            "SELECT COUNT(*) FROM sqlite_master WHERE name = 'post_fts'",
+            None
+        )
+        .await,
+        1
+    );
+
+    sqlx::query(
+        "INSERT INTO posts (book_id, idx, kind, chapter, text)
+         VALUES ('book', 0, 'Body', 'Ch', 'secretword')",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        count(
+            &pool,
+            "SELECT COUNT(*) FROM post_fts WHERE post_fts MATCH 'secretword'",
+            None,
+        )
+        .await,
+        1
+    );
+    sqlx::query("DELETE FROM books WHERE id = 'book'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        count(
+            &pool,
+            "SELECT COUNT(*) FROM posts WHERE book_id = 'book'",
+            None
+        )
+        .await,
+        0
+    );
+    assert_eq!(
+        count(
+            &pool,
+            "SELECT COUNT(*) FROM post_fts WHERE post_fts MATCH 'secretword'",
+            None,
+        )
+        .await,
+        0
+    );
+}
+
+#[tokio::test]
+async fn backfill_indexes_unindexed_books_once() {
+    let tmp = TempDir::new().unwrap();
+    let pool = open_db(tmp.path()).await;
+    sqlx::migrate!("./migrations").run(&pool).await.unwrap();
+    sqlx::query(
+        "INSERT INTO users (id, username, username_norm, password_hash, created_at)
+         VALUES ('owner', 'owner', 'owner', 'x', 1)",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO sessions (token, user_id, created_at) VALUES ('backfill-token', 'owner', 1)",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO books
+         (id, user_id, title, author, handle, imported_at, post_count, progress_index, is_sample, shared, posts_indexed)
+         VALUES ('cached-book', 'owner', 'Cached', 'Author', 'author', 1, 1, 0, 0, 0, 0),
+                ('legacy-book', 'owner', 'Legacy', 'Author', 'author', 2, 0, 0, 0, 0, 0)",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    pool.close().await;
+
+    let cached = tmp.path().join("books").join("owner").join("cached-book");
+    let legacy = tmp.path().join("books").join("owner").join("legacy-book");
+    tokio::fs::create_dir_all(&cached).await.unwrap();
+    tokio::fs::create_dir_all(&legacy).await.unwrap();
+    let epub = common::epub();
+    tokio::fs::write(cached.join("book.epub"), &epub)
+        .await
+        .unwrap();
+    tokio::fs::write(legacy.join("book.epub"), &epub)
+        .await
+        .unwrap();
+    tokio::fs::write(
+        cached.join("posts.json"),
+        r#"{"posts":[{"id":"0","kind":"Body","text":"cacheonlyword","chapter":"Cache"}]}"#,
+    )
+    .await
+    .unwrap();
+
+    let config = Config {
+        listen: "127.0.0.1:0".into(),
+        data_dir: tmp.path().to_path_buf(),
+        web_dir: None,
+        allow_signup: true,
+        max_epub_bytes: 1024 * 1024,
+    };
+    let app = build(config.clone()).await.unwrap();
+    let pool = open_db(tmp.path()).await;
+    let start = std::time::Instant::now();
+    loop {
+        let pending = count(
+            &pool,
+            "SELECT COUNT(*) FROM books WHERE posts_indexed = 0",
+            None,
+        )
+        .await;
+        if pending == 0 {
+            break;
+        }
+        assert!(
+            start.elapsed() < Duration::from_secs(15),
+            "backfill did not finish"
+        );
+        tokio::time::sleep(Duration::from_millis(30)).await;
+    }
+
+    let token = "backfill-token";
+    let cached_hits = search_all(&app, token, "cacheonlyword", "posts").await;
+    assert_eq!(cached_hits.len(), 1, "{cached_hits:?}");
+    assert_eq!(cached_hits[0]["book"]["id"], "cached-book");
+    assert_eq!(cached_hits[0]["post"]["text"], "cacheonlyword");
+    let parsed = search_all(&app, token, "paragraph", "posts").await;
+    assert_eq!(parsed.len(), 2, "{parsed:?}");
+    assert!(parsed.iter().all(|row| row["book"]["id"] == "legacy-book"));
+    let legacy_json: Value =
+        serde_json::from_slice(&tokio::fs::read(legacy.join("posts.json")).await.unwrap()).unwrap();
+    assert!(legacy_json["posts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|post| post["text"].as_str().unwrap().contains("Last paragraph")));
+    assert_eq!(
+        count(
+            &pool,
+            "SELECT COUNT(*) FROM posts WHERE book_id = 'cached-book'",
+            None
+        )
+        .await,
+        1
+    );
+    assert_eq!(
+        count(
+            &pool,
+            "SELECT COUNT(*) FROM posts WHERE book_id = 'legacy-book'",
+            None
+        )
+        .await,
+        3
+    );
+
+    let signature: Vec<String> = sqlx::query_scalar(
+        "SELECT rowid || ':' || book_id || ':' || idx || ':' || text
+         FROM posts ORDER BY book_id, idx",
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    let cached_mtime = tokio::fs::metadata(cached.join("posts.json"))
+        .await
+        .unwrap()
+        .modified()
+        .unwrap();
+    let legacy_mtime = tokio::fs::metadata(legacy.join("posts.json"))
+        .await
+        .unwrap()
+        .modified()
+        .unwrap();
+
+    let third = tmp.path().join("books").join("owner").join("third-book");
+    tokio::fs::create_dir_all(&third).await.unwrap();
+    tokio::fs::write(third.join("book.epub"), &epub)
+        .await
+        .unwrap();
+    tokio::fs::write(
+        third.join("posts.json"),
+        r#"{"posts":[{"id":"0","kind":"Body","text":"thirdword","chapter":"Later"}]}"#,
+    )
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO books
+         (id, user_id, title, author, handle, imported_at, post_count, progress_index, is_sample, shared, posts_indexed)
+         VALUES ('third-book', 'owner', 'Third', 'Author', 'author', 3, 1, 0, 0, 0, 0)",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let app = build(config).await.unwrap();
+    let start = std::time::Instant::now();
+    loop {
+        let indexed = count(
+            &pool,
+            "SELECT posts_indexed FROM books WHERE id = 'third-book'",
+            None,
+        )
+        .await;
+        if indexed == 1 {
+            break;
+        }
+        assert!(
+            start.elapsed() < Duration::from_secs(15),
+            "second backfill did not index the new book"
+        );
+        tokio::time::sleep(Duration::from_millis(30)).await;
+    }
+    let third_hits = search_all(&app, token, "thirdword", "posts").await;
+    assert_eq!(third_hits.len(), 1);
+    assert_eq!(third_hits[0]["book"]["id"], "third-book");
+
+    let again: Vec<String> = sqlx::query_scalar(
+        "SELECT rowid || ':' || book_id || ':' || idx || ':' || text
+         FROM posts WHERE book_id != 'third-book' ORDER BY book_id, idx",
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(again, signature);
+    assert_eq!(
+        tokio::fs::metadata(cached.join("posts.json"))
+            .await
+            .unwrap()
+            .modified()
+            .unwrap(),
+        cached_mtime
+    );
+    assert_eq!(
+        tokio::fs::metadata(legacy.join("posts.json"))
+            .await
+            .unwrap()
+            .modified()
+            .unwrap(),
+        legacy_mtime
+    );
 }

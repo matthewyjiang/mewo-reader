@@ -77,6 +77,9 @@ Prefix `/v1`.
 - `POST /auth/login`
 - `POST /auth/logout` → 204
 - `GET /me` → `{ "username" }`
+- `GET /search?q=&type=accounts|books|posts&cursor=` → a page of 20. `q` is trimmed; empty is 400 `Enter a search.` More than 100 characters is 400 and names the limit and the asked length. `cursor` is the previous `nextCursor`. A bad cursor is 400
+- `GET /users/{username}` → `ProfileRecord`. Unknown username is 404. A username that fails the register rules is 400
+- `GET /users/{username}/posts?cursor=` → `ProfilePostsPage`, 30 replies, newest first. Unknown username is 404
 - `GET /library` → `{ "books": [ BookRecord ] }`
 - `POST /books` multipart. Required `epub`. Optional `cover`, `title`, `author`, `handle`, `isSample`
 - `GET /books/{id}`
@@ -91,15 +94,31 @@ Prefix `/v1`.
 - `GET /books/{id}/comments/{postId}` → `{ "comments": [ { "id", "username", "text", "createdAt", "mine" } ] }`
 - `POST /books/{id}/comments/{postId}` `{ "text" }`
 - `DELETE /books/{id}/comments/{postId}/{commentId}`
-- `GET /profiles/{username}/replies` → `{ "username", "replies": [ { "bookId", "postId", "comment" } ] }`, newest first. An unknown username is an empty list. Lines from a book you cannot see are omitted
+- `GET /profiles/{username}/replies` → `{ "username", "replies": [ { "bookId", "postId", "comment" } ] }`, newest first. An unknown username is an empty list. Lines from a book you cannot see are omitted. Shipped clients call this. `GET /users/{username}` is the newer profile and 404s an unknown username
 
 Book JSON: `id`, `title`, `author`, `handle`, `importedAt`, `postCount`, `progressIndex`, `isSample`, `mine`, `shared`, `ownerUsername`.
+
+Search JSON is one object. `type` is `accounts`, `books`, or `posts`. `nextCursor` is a string or null.
+
+`{ "type": "accounts", "items": [{ "username": "ada", "mine": false }], "nextCursor": null }`
+
+`{ "type": "books", "items": [BookRecord], "nextCursor": null }`
+
+`{ "type": "posts", "items": [{ "book": BookRecord, "post": { "id": "1", "kind": "Body", "text": "...", "chapter": "..." } }], "nextCursor": null }`
+
+Accounts match `username` with a case-insensitive substring. A prefix ranks before an infix, then shorter names. Books match title, author, handle, or the owner's username. A title prefix ranks first, then newer `importedAt`. Posts match the line or its chapter. Rank is FTS5 bm25, then newer books, then the post index. Private books are missing from book and post hits, and from both profile feeds, unless you own them. Sharing or the sample makes them visible without a reindex. `postCount` on a profile is how many of that account's replies sit on books you can see.
+
+`ProfileRecord` is `{ "username", "joinedAt", "postCount", "mine" }`. `joinedAt` is the account's `created_at` in milliseconds.
+
+`ProfilePostsPage` is `{ "items": [{ "book": BookRecord, "post": Post, "comment": CommentRecord }], "nextCursor" }`. `comment` is `{ "id", "username", "text", "createdAt", "mine" }`. `nextCursor` is opaque. Pass it back as `cursor`.
+
+Migration `005_search.sql` adds the `posts` table, the FTS5 index, and `books.posts_indexed`. Snapshot `/data` before deploying a build that includes it. Books already on disk are indexed in the background at startup.
 
 A new upload is private (`shared` false). Books already on the shelf when sharing shipped stay shared. Opening, downloading, or commenting on a book you cannot see is 404. Anyone who can see a book can move their own reading place, like a post, and comment.
 
 Uploads are parsed before they enter the shelf. Empty title or author uses OPF metadata, then `Untitled` / `Unknown`. An empty handle uses the phone slug rule: lowercase ASCII letters and digits, first 18, or `author`. A missing cover uses the EPUB cover when it fits the 4 MiB cover budget. The file on disk is named `cover.jpg`; the response content type comes from magic bytes (JPEG, PNG, GIF, or WebP). A bad EPUB is 400 `Could not read that EPUB: <reason>`.
 
-Posts live in each book's `posts.json`. IDs are sequential decimal index strings. Books uploaded before server parsing get their feed and `postCount` filled on the first `GET /books/{id}/posts`. Feed assembly is in `src/epub.rs` and `src/feed.rs`.
+Posts live in each book's `posts.json`, which is the body of `GET /books/{id}/posts`. The same feed is copied into the `posts` table for search. IDs are sequential decimal index strings. Upload writes the file and the rows together. Books uploaded before server parsing get their feed and `postCount` filled on the first `GET /books/{id}/posts`. A book from before migration 005 is indexed at startup from `posts.json` when that file exists, otherwise by parsing the EPUB. Feed assembly is in `src/epub.rs` and `src/feed.rs`.
 
 `isSample=true` keeps one sample. A second sample upload returns the first row.
 

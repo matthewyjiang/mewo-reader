@@ -7,8 +7,10 @@ use std::time::Duration;
 pub async fn connect(database_url: &str, data_dir: &Path) -> Result<SqlitePool, sqlx::Error> {
     tokio::fs::create_dir_all(data_dir)
         .await
-        .map_err(|err| sqlx::Error::Io(err))?;
+        .map_err(sqlx::Error::Io)?;
 
+    // Foreign keys stay on so deleting a book cascades to posts and that
+    // cascade fires the FTS delete trigger. The pragma is per connection.
     let options = SqliteConnectOptions::from_str(database_url)?
         .create_if_missing(true)
         .foreign_keys(true)
