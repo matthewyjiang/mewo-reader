@@ -153,7 +153,7 @@ final class HostedSearchModelTests: XCTestCase {
         XCTAssertEqual(remote.calls.map(\.type), [.books])
         try? await Task.sleep(nanoseconds: 400_000_000)
         XCTAssertEqual(remote.calls.count, 1)
-        remote.calls[0].resume(returning: SearchPage(type: .books, books: [
+        remote.calls[0].continuation.resume(returning: SearchPage(type: .books, books: [
             BookRecord(id: "b", title: "ab", author: "A", handle: "a", importedAt: 0)
         ]))
         await model.searchTask?.value
@@ -170,7 +170,7 @@ final class HostedSearchModelTests: XCTestCase {
             return XCTFail("search did not start")
         }
         remote.token = "token-b"
-        remote.calls[0].resume(returning: SearchPage(
+        remote.calls[0].continuation.resume(returning: SearchPage(
             type: .accounts,
             accounts: [AccountRecord(username: "ada", mine: false)]
         ))
@@ -187,7 +187,7 @@ final class HostedSearchModelTests: XCTestCase {
         guard await until(remote, { remote.calls.count == 1 }) else {
             return XCTFail("search did not start")
         }
-        remote.calls[0].resume(returning: SearchPage(
+        remote.calls[0].continuation.resume(returning: SearchPage(
             type: .accounts,
             accounts: [AccountRecord(username: "ada", mine: false)]
         ))
@@ -430,12 +430,12 @@ private final class FakeRemoteSearch: RemoteSearch {
     struct Call {
         var query: String
         var type: SearchTab
-        var resume: CheckedContinuation<SearchPage, Error>
+        var continuation: CheckedContinuation<SearchPage, Error>
     }
 
     func search(query: String, type: SearchTab, cursor: String?) async throws -> SearchPage {
         try await withCheckedThrowingContinuation { cont in
-            calls.append(Call(query: query, type: type, resume: cont))
+            calls.append(Call(query: query, type: type, continuation: cont))
             onCall?()
         }
     }
