@@ -79,6 +79,8 @@ const TAGS: &[&str] = &[
     "volume",
     "english",
     "eng",
+    "movie",
+    "tie",
 ];
 const ROMAN: &[(&str, &str)] = &[
     ("i", "1"),
@@ -105,19 +107,38 @@ const ROMAN: &[(&str, &str)] = &[
 
 impl Matcher {
     pub(crate) fn new(ctx: &WorkContext) -> Self {
-        let wanted: Vec<Vec<String>> = ctx
+        // A pre-colon fragment that is another of the author's books is not a
+        // name for this work. "Mistborn: Secret History" must not claim the
+        // sibling "Mistborn".
+        let titles: Vec<&String> = ctx
             .titles
             .iter()
-            .map(|title| norm(title))
+            .filter(|title| {
+                if !bare_precolon(title, &ctx.titles) {
+                    return true;
+                }
+                !precolon_names_a_sibling(title, &ctx.siblings)
+            })
+            .collect();
+        let wanted: Vec<Vec<String>> = titles
+            .iter()
+            .map(|title| norm_title(title))
             .filter(|tokens| !tokens.is_empty())
             .collect();
-        let wanted_sets: HashSet<Vec<String>> = wanted.iter().cloned().collect();
+        // Same work: the main title, the subtitle line, or an alternative.
+        // The pre-colon fragment is not one of those, so it cannot drop a sibling.
+        let identity: HashSet<Vec<String>> = titles
+            .iter()
+            .filter(|title| !bare_precolon(title, &ctx.titles))
+            .map(|title| norm_words(title))
+            .filter(|tokens| !tokens.is_empty())
+            .collect();
         let siblings = ctx
             .siblings
             .iter()
             .filter_map(|title| {
-                let tokens = norm(title);
-                if tokens.is_empty() || wanted_sets.contains(&tokens) {
+                let tokens = norm_words(title);
+                if tokens.is_empty() || identity.contains(&tokens) {
                     None
                 } else {
                     Some((title.clone(), tokens))
@@ -126,29 +147,17 @@ impl Matcher {
             .collect::<Vec<_>>();
         let mut authors = Vec::new();
         for author in &ctx.authors {
-            for token in norm(author) {
+            for token in norm_words(author) {
                 if !authors.iter().any(|have: &String| have == &token) {
                     authors.push(token);
                 }
             }
         }
         let mut keep_numbers = HashSet::new();
-        for tokens in wanted
-            .iter()
-            .chain(siblings.iter().map(|(_, tokens)| tokens))
-        {
+        for tokens in &wanted {
             for token in tokens {
                 if digits(token) {
                     keep_numbers.insert(token.clone());
-                }
-            }
-        }
-        // A sibling that normalized to a wanted title was dropped above, but a
-        // number that lives only on that duplicate still belongs to a title.
-        for title in &ctx.siblings {
-            for token in norm(title) {
-                if digits(&token) {
-                    keep_numbers.insert(token);
                 }
             }
         }
@@ -246,7 +255,7 @@ impl Matcher {
     }
 
     fn clean(&self, text: &str) -> (Vec<String>, bool) {
-        let tokens = norm(text);
+        let tokens = self.norm_release(text);
         let author_seen = tokens
             .iter()
             .any(|token| self.authors.iter().any(|author| eq(token, author)));
@@ -256,30 +265,64 @@ impl Matcher {
                 if digits(token) && !self.keep_numbers.contains(token) {
                     return false;
                 }
-                !self.authors.iter().any(|author| eq(token, author))
+                let author = self.authors.iter().any(|author| eq(token, author));
+                if author && self.in_wanted(token) {
+                    return true;
+                }
+                !author
             })
             .collect();
         (release, author_seen)
     }
+
+    /// An author token that is part of the title stays. "Malcolm X" is the book.
+    fn in_wanted(&self, token: &str) -> bool {
+        self.wanted
+            .iter()
+            .any(|option| option.iter().any(|have| eq(token, have)))
+    }
+
+    fn norm_release(&self, text: &str) -> Vec<String> {
+        let folded: String = text.chars().filter_map(fold).collect();
+        let mut out = Vec::new();
+        for token in folded.split_whitespace() {
+            if token.is_empty() || STOP.contains(&token) || ordinal(token) {
+                continue;
+            }
+            // A tag word that is part of a wanted title is the title, not a tag.
+            if TAGS.contains(&token) && !self.has_token(token) {
+                continue;
+            }
+            let token = fold_roman(token);
+            if out.iter().any(|have: &String| have == &token) {
+                continue;
+            }
+            out.push(token);
+        }
+        out
+    }
 }
 
 pub(crate) fn verify_opf(matcher: &Matcher, ctx: &WorkContext, meta: &OpfMeta) -> Opf {
-    let confirmed = meta
-        .identifiers
-        .iter()
-        .any(|raw| isbn13s(raw).iter().any(|isbn| ctx.isbns.contains(isbn)));
-    if confirmed {
-        return Opf::Confirmed;
-    }
     if let Some(language) = meta
         .language
         .as_deref()
         .map(str::trim)
         .filter(|s| !s.is_empty())
     {
-        if !language.to_ascii_lowercase().starts_with("en") {
+        let lower = language.to_ascii_lowercase();
+        // `und` is what Calibre writes when it has no language. `mul` and
+        // `zxx` are "multiple" and "no linguistic content".
+        if !matches!(lower.as_str(), "und" | "mul" | "zxx") && !lower.starts_with("en") {
             return Opf::Mismatch(format!("Downloaded book is in {language}"));
         }
+    }
+    let confirmed = meta
+        .identifiers
+        .iter()
+        .any(|raw| isbn13s(raw).iter().any(|isbn| ctx.isbns.contains(isbn)));
+    if confirmed {
+        return Opf::Confirmed;
     }
     let mut text = String::new();
     for part in meta.titles.iter().chain(meta.creators.iter()) {
@@ -295,13 +338,23 @@ pub(crate) fn verify_opf(matcher: &Matcher, ctx: &WorkContext, meta: &OpfMeta) -
     }
 }
 
-/// ASCII-fold, split on non-alphanumerics, drop stopwords and edition tags,
-/// drop ordinals (`40th`), fold roman numerals i–xx, and dedupe in order.
+/// Title text: stopwords, ordinals, and roman numerals, then number words.
+/// Edition tags stay, so "The Collector" and "The Illustrated Man" survive.
 pub(crate) fn norm(text: &str) -> Vec<String> {
+    fold_number_words(norm_words(text))
+}
+
+fn norm_title(text: &str) -> Vec<String> {
+    norm(text)
+}
+
+/// Same as [`norm`] without the number-word fold. Sibling identity uses this
+/// so "Mistborn" does not have to share a digit form with the requested title.
+fn norm_words(text: &str) -> Vec<String> {
     let folded: String = text.chars().filter_map(fold).collect();
     let mut out = Vec::new();
     for token in folded.split_whitespace() {
-        if token.is_empty() || STOP.contains(&token) || TAGS.contains(&token) || ordinal(token) {
+        if token.is_empty() || STOP.contains(&token) || ordinal(token) {
             continue;
         }
         let token = fold_roman(token);
@@ -311,6 +364,154 @@ pub(crate) fn norm(text: &str) -> Vec<String> {
         out.push(token);
     }
     out
+}
+
+/// Drop siblings that normalize to the main title, `title: subtitle`, or an
+/// alternative title. A pre-colon fragment is not in `identity`.
+pub(crate) fn without_this_work(siblings: Vec<String>, identity: &[String]) -> Vec<String> {
+    let forms: HashSet<Vec<String>> = identity
+        .iter()
+        .map(|title| norm_words(title))
+        .filter(|tokens| !tokens.is_empty())
+        .collect();
+    siblings
+        .into_iter()
+        .filter(|title| {
+            let tokens = norm_words(title);
+            !tokens.is_empty() && !forms.contains(&tokens)
+        })
+        .collect()
+}
+
+/// The pre-colon fragment names one of the author's other works.
+pub(crate) fn precolon_names_a_sibling(head: &str, siblings: &[String]) -> bool {
+    let tokens = norm_words(head);
+    !tokens.is_empty() && siblings.iter().any(|title| norm_words(title) == tokens)
+}
+
+fn bare_precolon(title: &str, titles: &[String]) -> bool {
+    let title = title.trim();
+    titles.iter().any(|other| {
+        let Some((head, tail)) = other.split_once(':') else {
+            return false;
+        };
+        head.trim() == title && !tail.trim().is_empty() && other.trim() != title
+    })
+}
+
+fn fold_number_words(tokens: Vec<String>) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < tokens.len() {
+        if let Some((value, next)) = parse_number(&tokens, i) {
+            let text = value.to_string();
+            if out.iter().any(|have: &String| have == &text) {
+                i = next;
+                continue;
+            }
+            out.push(text);
+            i = next;
+        } else {
+            let token = tokens[i].clone();
+            if out.iter().all(|have: &String| have != &token) {
+                out.push(token);
+            }
+            i += 1;
+        }
+    }
+    out
+}
+
+fn small_number(word: &str) -> Option<u32> {
+    Some(match word {
+        "zero" => 0,
+        "one" => 1,
+        "two" => 2,
+        "three" => 3,
+        "four" => 4,
+        "five" => 5,
+        "six" => 6,
+        "seven" => 7,
+        "eight" => 8,
+        "nine" => 9,
+        "ten" => 10,
+        "eleven" => 11,
+        "twelve" => 12,
+        "thirteen" => 13,
+        "fourteen" => 14,
+        "fifteen" => 15,
+        "sixteen" => 16,
+        "seventeen" => 17,
+        "eighteen" => 18,
+        "nineteen" => 19,
+        "twenty" => 20,
+        "thirty" => 30,
+        "forty" => 40,
+        "fifty" => 50,
+        "sixty" => 60,
+        "seventy" => 70,
+        "eighty" => 80,
+        "ninety" => 90,
+        _ => return None,
+    })
+}
+
+fn parse_small(tokens: &[String], i: usize) -> Option<(u32, usize)> {
+    let value = small_number(tokens.get(i)?)?;
+    if (20..100).contains(&value) && value.is_multiple_of(10) {
+        if let Some(ones) = tokens.get(i + 1).and_then(|word| small_number(word)) {
+            if ones < 10 {
+                return Some((value + ones, i + 2));
+            }
+        }
+        return Some((value, i + 1));
+    }
+    if value < 20 {
+        return Some((value, i + 1));
+    }
+    None
+}
+
+/// "nineteen eighty-four" is 1984. A lone "four" is 4. Hundreds and thousands
+/// are the usual English grouping.
+fn parse_number(tokens: &[String], i: usize) -> Option<(u32, usize)> {
+    if tokens.get(i).map(String::as_str) == Some("hundred") {
+        return Some((100, i + 1));
+    }
+    if tokens.get(i).map(String::as_str) == Some("thousand") {
+        return Some((1000, i + 1));
+    }
+    let (first, mut j) = parse_small(tokens, i)?;
+    if tokens.get(j).map(String::as_str) == Some("hundred") {
+        let mut value = first.saturating_mul(100);
+        j += 1;
+        if let Some((rest, next)) = parse_small(tokens, j) {
+            if rest < 100 {
+                value = value.saturating_add(rest);
+                j = next;
+            }
+        }
+        return Some((value, j));
+    }
+    if tokens.get(j).map(String::as_str) == Some("thousand") {
+        let mut value = first.saturating_mul(1000);
+        j += 1;
+        if let Some((rest, next)) = parse_number(tokens, j) {
+            if rest < 1000 {
+                value = value.saturating_add(rest);
+                j = next;
+            }
+        }
+        return Some((value, j));
+    }
+    if (10..100).contains(&first) {
+        if let Some((second, next)) = parse_small(tokens, j) {
+            if second < 100 {
+                return Some((first.saturating_mul(100).saturating_add(second), next));
+            }
+        }
+    }
+    Some((first, j))
 }
 
 /// Every ISBN-10 or ISBN-13 in `raw`, as ISBN-13. Invalid check digits are
@@ -511,12 +712,18 @@ mod tests {
         (fit - expected).abs() < 0.001
     }
 
-    #[test]
-    fn failure_corpus_matches_the_author_s_other_works() {
-        let herbert = titles("herbert.json");
-        let sanderson = titles("sanderson.json");
-        let orwell = titles("orwell.json");
-        let cases = [
+    type Sample = (
+        &'static str,
+        &'static [&'static str],
+        &'static str,
+        &'static str,
+        Kind,
+        f32,
+        bool,
+    );
+
+    fn failure_cases() -> Vec<Sample> {
+        vec![
             (
                 "Dune",
                 &["Frank Herbert"][..],
@@ -635,6 +842,51 @@ mod tests {
                 false,
             ),
             (
+                "Dune",
+                &["Frank Herbert"][..],
+                "herbert",
+                "Frank Herbert - Dune 1",
+                Kind::Match,
+                1.0,
+                true,
+            ),
+            (
+                "Dune",
+                &["Frank Herbert"][..],
+                "herbert",
+                "Dune Book 1",
+                Kind::Match,
+                1.0,
+                false,
+            ),
+            (
+                "Dune",
+                &["Frank Herbert"][..],
+                "herbert",
+                "Dune - Book I",
+                Kind::Match,
+                1.0,
+                false,
+            ),
+            (
+                "Dune",
+                &["Frank Herbert"][..],
+                "herbert",
+                "Dune (Dune Chronicles #1)",
+                Kind::Match,
+                2.0 / 3.0,
+                false,
+            ),
+            (
+                "Dune",
+                &["Frank Herbert"][..],
+                "herbert",
+                "Dune (Movie Tie-In)",
+                Kind::Match,
+                1.0,
+                false,
+            ),
+            (
                 "Dune Messiah",
                 &["Frank Herbert"][..],
                 "herbert",
@@ -716,7 +968,7 @@ mod tests {
                 true,
             ),
             (
-                "1984",
+                "Nineteen Eighty-Four",
                 &["George Orwell"][..],
                 "orwell",
                 "George Orwell - 1984 (retail) (epub)",
@@ -725,7 +977,7 @@ mod tests {
                 true,
             ),
             (
-                "1984",
+                "Nineteen Eighty-Four",
                 &["George Orwell"][..],
                 "orwell",
                 "George Orwell - Animal Farm 1945 (epub)",
@@ -769,8 +1021,15 @@ mod tests {
                 2.0 / 3.0,
                 true,
             ),
-        ];
-        for (title, authors, fixture, release, kind, fit, author_seen) in cases {
+        ]
+    }
+
+    #[test]
+    fn failure_corpus_matches_the_author_s_other_works() {
+        let herbert = titles("herbert.json");
+        let sanderson = titles("sanderson.json");
+        let orwell = titles("orwell.json");
+        for (title, authors, fixture, release, kind, fit, author_seen) in failure_cases() {
             let siblings = match fixture {
                 "herbert" => herbert.clone(),
                 "sanderson" => sanderson.clone(),
@@ -808,27 +1067,47 @@ mod tests {
 
     #[test]
     fn tags_and_author_tokens_do_not_change_the_verdict() {
-        let matcher = Matcher::new(&ctx(
-            "Dune",
-            &["Frank Herbert"],
-            vec!["Chapterhouse Dune".into(), "Dune Messiah".into()],
-        ));
-        let samples = [
-            "Frank Herbert - Dune 01 - Special Edition",
-            "Frank Herbert - [Dune 06] - Chapterhouse Dune",
-            "Der Wustenplanet",
-        ];
-        for sample in samples {
-            let original = matcher.judge(sample);
-            for tag in ["retail", "epub", "scan", "deluxe", "v3", "40th", "edition"] {
-                let tagged = format!("{sample} {tag}");
+        let herbert = titles("herbert.json");
+        let sanderson = titles("sanderson.json");
+        let orwell = titles("orwell.json");
+        let cases = failure_cases();
+        for (title, authors, fixture, release, _, _, _) in cases {
+            let siblings = match fixture {
+                "herbert" => herbert.clone(),
+                "sanderson" => sanderson.clone(),
+                "orwell" => orwell.clone(),
+                "hemingway" => vec!["The Sun Also Rises".into()],
+                _ => Vec::new(),
+            };
+            let matcher = Matcher::new(&ctx(title, authors, siblings));
+            let original = matcher.judge(release);
+            for tag in TAGS.iter().copied().chain(["40th"]) {
+                let tagged = format!("{release} {tag}");
                 assert_eq!(matcher.judge(&tagged), original, "{tagged}");
             }
-            let with_author = format!("{sample} Herbert");
-            assert_eq!(matcher.judge(&with_author), original, "{with_author}");
+            for author in authors {
+                for token in norm_words(author) {
+                    let with_author = format!("{release} {token}");
+                    let updated = matcher.judge(&with_author);
+                    match (&original, &updated) {
+                        (
+                            Verdict::Match { fit, author_seen },
+                            Verdict::Match {
+                                fit: again,
+                                author_seen: seen,
+                            },
+                        ) => {
+                            assert!(near(*fit, *again), "{with_author}");
+                            if *author_seen {
+                                assert!(*seen, "{with_author}");
+                                assert_eq!(updated, original, "{with_author}");
+                            }
+                        }
+                        _ => assert_eq!(updated, original, "{with_author}"),
+                    }
+                }
+            }
         }
-        let already = matcher.judge("Frank Herbert - Dune");
-        assert_eq!(matcher.judge("Frank Herbert - Dune Herbert"), already);
     }
 
     #[test]
@@ -907,7 +1186,17 @@ mod tests {
         );
         assert_eq!(book.meta.identifiers.len(), 1);
         assert_eq!(book.meta.language.as_deref(), Some("de"));
-        assert_eq!(verify_opf(&matcher, &context, &book.meta), Opf::Confirmed);
+        assert_eq!(
+            verify_opf(&matcher, &context, &book.meta),
+            Opf::Mismatch("Downloaded book is in de".into())
+        );
+        let english = parsed(
+            "<dc:title>Chapterhouse Dune</dc:title><dc:creator>Frank Herbert</dc:creator><dc:identifier>urn:isbn:978-0-441-17271-9</dc:identifier><dc:language>en</dc:language>",
+        );
+        assert_eq!(
+            verify_opf(&matcher, &context, &english.meta),
+            Opf::Confirmed
+        );
     }
 
     #[test]
@@ -938,18 +1227,119 @@ mod tests {
             verify_opf(&matcher, &context, &english.meta),
             Opf::Confirmed
         );
+        for language in ["und", "mul", "zxx"] {
+            let missing = parsed(&format!(
+                "<dc:title>Dune</dc:title><dc:creator>Frank Herbert</dc:creator><dc:language>{language}</dc:language>"
+            ));
+            assert_eq!(
+                verify_opf(&matcher, &context, &missing.meta),
+                Opf::Confirmed,
+                "{language}"
+            );
+        }
     }
 
     #[test]
     fn direct_opf_meta_without_a_file_follows_the_same_order() {
         let context = dune_meta(Some("0441172717"));
         let matcher = Matcher::new(&context);
-        let meta = OpfMeta {
+        let german = OpfMeta {
             titles: vec!["Something else".into()],
             creators: vec![],
             identifiers: vec!["0-441-17271-7".into()],
             language: Some("de".into()),
         };
-        assert_eq!(verify_opf(&matcher, &context, &meta), Opf::Confirmed);
+        assert_eq!(
+            verify_opf(&matcher, &context, &german),
+            Opf::Mismatch("Downloaded book is in de".into())
+        );
+        let und = OpfMeta {
+            titles: vec!["Something else".into()],
+            creators: vec![],
+            identifiers: vec!["0-441-17271-7".into()],
+            language: Some("und".into()),
+        };
+        assert_eq!(verify_opf(&matcher, &context, &und), Opf::Confirmed);
+    }
+
+    #[test]
+    fn a_precolon_fragment_does_not_swallow_the_sibling() {
+        let context = WorkContext {
+            titles: vec!["Mistborn: Secret History".into(), "Mistborn".into()],
+            authors: vec!["Brandon Sanderson".into()],
+            isbns: HashSet::new(),
+            siblings: vec!["Mistborn".into(), "The Final Empire".into()],
+        };
+        let verdict = Matcher::new(&context).judge("Brandon Sanderson - Mistborn (retail) (epub)");
+        assert_eq!(verdict, Verdict::NotTitle);
+    }
+
+    #[test]
+    fn tag_words_in_a_title_are_kept() {
+        assert_eq!(norm("The Collector"), vec!["collector".to_string()]);
+        assert_eq!(
+            norm("The Illustrated Man"),
+            vec!["illustrated".to_string(), "man".to_string()]
+        );
+        let collector = Matcher::new(&ctx("The Collector", &["John Fowles"], vec![]));
+        assert!(matches!(
+            collector.judge("John Fowles - The Collector (epub)"),
+            Verdict::Match { fit, author_seen: true } if near(fit, 1.0)
+        ));
+        let illustrated = Matcher::new(&ctx(
+            "The Illustrated Man",
+            &["Ray Bradbury"],
+            vec!["The Martian Chronicles".into()],
+        ));
+        assert!(matches!(
+            illustrated.judge("Ray Bradbury - The Illustrated Man (retail) (epub)"),
+            Verdict::Match { fit, author_seen: true } if near(fit, 1.0)
+        ));
+    }
+
+    #[test]
+    fn an_author_token_inside_the_title_is_not_stripped() {
+        let malcolm = Matcher::new(&ctx(
+            "The Autobiography of Malcolm X",
+            &["Malcolm X"],
+            vec![],
+        ));
+        assert!(matches!(
+            malcolm.judge("Malcolm X - The Autobiography of Malcolm X (epub)"),
+            Verdict::Match { fit, author_seen: true } if near(fit, 1.0)
+        ));
+        let agatha = Matcher::new(&ctx(
+            "Agatha Christie: An Autobiography",
+            &["Agatha Christie"],
+            vec![],
+        ));
+        assert!(matches!(
+            agatha.judge("Agatha Christie - An Autobiography (epub)"),
+            Verdict::Match { fit, author_seen: true } if near(fit, 1.0)
+        ));
+    }
+
+    #[test]
+    fn nineteen_eighty_four_folds_to_digits() {
+        assert_eq!(norm("Nineteen Eighty-Four"), vec!["1984".to_string()]);
+        let matcher = Matcher::new(&ctx(
+            "Nineteen Eighty-Four",
+            &["George Orwell"],
+            titles("orwell.json"),
+        ));
+        assert!(matches!(
+            matcher.judge("George Orwell - 1984 (retail) (epub)"),
+            Verdict::Match { fit, author_seen: true } if near(fit, 1.0)
+        ));
+    }
+
+    #[test]
+    fn a_chronicles_epub_is_still_dune() {
+        let context = ctx("Dune", &["Frank Herbert"], titles("herbert.json"));
+        let matcher = Matcher::new(&context);
+        let book = parsed(
+            "<dc:title>Dune (Dune Chronicles, Book 1)</dc:title><dc:creator>Frank Herbert</dc:creator>",
+        );
+        assert_eq!(verify_opf(&matcher, &context, &book.meta), Opf::Confirmed);
     }
 }

@@ -78,6 +78,42 @@ impl Upstream {
             .await
     }
 
+    /// `GET /works/{id}.json` for a work key this process already accepted.
+    /// A redirect yields that response's work key, from the `Location` header
+    /// or a JSON `location`. One hop. The path is only `works/OL<digits>W.json`.
+    pub(crate) async fn work_location(
+        &self,
+        base: &Url,
+        work_key: &str,
+    ) -> Result<Option<String>, UpstreamError> {
+        let relative = work_json_path(work_key)?;
+        let url = base.join(&relative).map_err(|_| UpstreamError::Shape)?;
+        let response = self.client.get(url).send().await.map_err(map_err)?;
+        let status = response.status();
+        if status.is_redirection() {
+            let location = response
+                .headers()
+                .get(reqwest::header::LOCATION)
+                .and_then(|value| value.to_str().ok())
+                .unwrap_or("");
+            return Ok(work_key_from_location(location));
+        }
+        if !status.is_success() {
+            return Err(UpstreamError::Status(status.as_u16()));
+        }
+        let bytes = read_capped(response, 64 * 1024).await?;
+        let value: serde_json::Value =
+            serde_json::from_slice(&bytes).map_err(|_| UpstreamError::Shape)?;
+        let location = value
+            .get("location")
+            .and_then(|item| item.as_str())
+            .unwrap_or("");
+        if location.is_empty() {
+            return Ok(None);
+        }
+        Ok(work_key_from_location(location))
+    }
+
     async fn request_json<T: DeserializeOwned>(
         &self,
         base: &Url,
@@ -171,6 +207,41 @@ fn endpoint(base: &Url, path: &'static str) -> Result<Url, UpstreamError> {
     base.join(relative).map_err(|_| UpstreamError::Shape)
 }
 
+fn work_json_path(work_key: &str) -> Result<String, UpstreamError> {
+    let id = work_key
+        .strip_prefix("/works/")
+        .ok_or(UpstreamError::Shape)?;
+    if !work_id(id) {
+        return Err(UpstreamError::Shape);
+    }
+    Ok(format!("works/{id}.json"))
+}
+
+fn work_id(id: &str) -> bool {
+    let Some(rest) = id.strip_prefix("OL") else {
+        return false;
+    };
+    let Some(digits) = rest.strip_suffix('W') else {
+        return false;
+    };
+    !digits.is_empty() && digits.bytes().all(|byte| byte.is_ascii_digit())
+}
+
+fn work_key_from_location(location: &str) -> Option<String> {
+    let path = location.split(['?', '#']).next().unwrap_or(location).trim();
+    let start = path.find("/works/")?;
+    let rest = &path[start + "/works/".len()..];
+    let id = rest
+        .trim_end_matches(".json")
+        .split('/')
+        .next()
+        .unwrap_or("");
+    if !work_id(id) {
+        return None;
+    }
+    Some(format!("/works/{id}"))
+}
+
 async fn read_capped(
     mut response: reqwest::Response,
     cap: usize,
@@ -239,6 +310,21 @@ mod tests {
         let url = base_url("http://prowlarr.example/").unwrap();
         assert_eq!(url.as_str(), "http://prowlarr.example/");
         assert!(url.query().is_none());
+    }
+
+    #[test]
+    fn a_work_redirect_location_is_a_work_key() {
+        assert_eq!(
+            work_key_from_location("/works/OL893414W.json").as_deref(),
+            Some("/works/OL893414W")
+        );
+        assert_eq!(
+            work_key_from_location("https://openlibrary.org/works/OL893414W").as_deref(),
+            Some("/works/OL893414W")
+        );
+        assert!(work_key_from_location("/authors/OL79034A").is_none());
+        assert!(work_json_path("/works/../OL1W").is_err());
+        assert!(work_json_path("/works/OL893414W").is_ok());
     }
 
     #[test]

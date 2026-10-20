@@ -443,6 +443,33 @@ mod tests {
     }
 
     #[test]
+    fn not_foreign_beats_a_retail_release_and_fit_beats_grabs() {
+        let wanted = Wanted {
+            title: "Dune",
+            author: "Frank Herbert",
+        };
+        let max = 64 * 1024 * 1024;
+        let english = release("en", "Frank.Herbert.Dune.Saga.EPUB", 2_000_000, 0, &[7020]);
+        let german = release(
+            "de",
+            "Frank.Herbert.Dune.German.RETAIL.EPUB",
+            800_000,
+            20,
+            &[7020],
+        );
+        assert_eq!(
+            pick_of(&wanted, &[german, english], &[], max).unwrap().guid,
+            "en"
+        );
+        let exact = release("exact", "Frank.Herbert.Dune.EPUB", 2_000_000, 0, &[7020]);
+        let saga = release("saga", "Frank.Herbert.Dune.Saga.EPUB", 800_000, 20, &[7020]);
+        assert_eq!(
+            pick_of(&wanted, &[saga, exact], &[], max).unwrap().guid,
+            "exact"
+        );
+    }
+
+    #[test]
     fn author_seen_outranks_retail_and_grabs_cap_at_twenty() {
         let wanted = Wanted {
             title: "Dune",

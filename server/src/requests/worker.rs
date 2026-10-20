@@ -320,17 +320,7 @@ async fn requested(
     };
     let ctx = match openlibrary::work_context(state, &row.work_key).await {
         Ok(ctx) => ctx,
-        Err(err) => {
-            return hold(
-                &state.pool,
-                &row.id,
-                "requested",
-                "Open Library",
-                &err,
-                now_ms,
-            )
-            .await
-        }
+        Err(err) => return open_library_or_give_up(state, row, "requested", &err, now_ms).await,
     };
     let matcher = Matcher::new(&ctx);
     let releases = match clients.prowlarr.search(&pick::query(&wanted)).await {
@@ -541,17 +531,7 @@ async fn completed(
     };
     let ctx = match openlibrary::work_context(state, &row.work_key).await {
         Ok(ctx) => ctx,
-        Err(err) => {
-            return hold(
-                &state.pool,
-                &row.id,
-                "downloading",
-                "Open Library",
-                &err,
-                now_ms,
-            )
-            .await
-        }
+        Err(err) => return open_library_or_give_up(state, row, "downloading", &err, now_ms).await,
     };
     let matcher = Matcher::new(&ctx);
     let files = list_epubs(dir.clone()).await?;
@@ -677,6 +657,20 @@ async fn adopt(pool: &SqlitePool, id: &str, nzo: &str, now_ms: i64) -> Result<()
         id,
     );
     Ok(())
+}
+
+async fn open_library_or_give_up(
+    state: &AppState,
+    row: &Due,
+    from: &str,
+    err: &UpstreamError,
+    now_ms: i64,
+) -> Result<(), ApiError> {
+    let message = format!("Open Library: {err}");
+    if row.created_at < now_ms.saturating_sub(GIVE_UP_MS) {
+        return fail_from(&state.pool, &row.id, from, &message, now_ms).await;
+    }
+    hold(&state.pool, &row.id, from, "Open Library", err, now_ms).await
 }
 
 async fn hold(

@@ -2,7 +2,9 @@
 //! no contact email, so the gap stays at a second.
 
 use crate::requests::http::{base_url, UpstreamError};
-use crate::requests::matching::{isbn13s, WorkContext};
+use crate::requests::matching::{
+    isbn13s, precolon_names_a_sibling, without_this_work, WorkContext,
+};
 use crate::AppState;
 use serde::Deserialize;
 use std::collections::{HashMap, HashSet};
@@ -136,9 +138,8 @@ impl WorkCache {
 
     fn get(&self, key: &str) -> Option<WorkContext> {
         let mut entries = self.entries.lock().unwrap_or_else(|err| err.into_inner());
-        let stale = entries
-            .get(key)
-            .is_some_and(|(at, _)| at.elapsed() >= CACHE_FOR);
+        let now = Instant::now();
+        let stale = entries.get(key).is_some_and(|(at, _)| !fresh(*at, now));
         if stale {
             entries.remove(key);
             return None;
@@ -147,9 +148,19 @@ impl WorkCache {
     }
 
     fn insert(&self, key: &str, ctx: WorkContext) {
-        let mut entries = self.entries.lock().unwrap_or_else(|err| err.into_inner());
-        entries.insert(key.to_string(), (Instant::now(), ctx));
+        let now = Instant::now();
+        self.remember(key, ctx, now, now);
     }
+
+    fn remember(&self, key: &str, ctx: WorkContext, at: Instant, now: Instant) {
+        let mut entries = self.entries.lock().unwrap_or_else(|err| err.into_inner());
+        entries.retain(|_, (stored, _)| fresh(*stored, now));
+        entries.insert(key.to_string(), (at, ctx));
+    }
+}
+
+fn fresh(at: Instant, now: Instant) -> bool {
+    now.saturating_duration_since(at) < CACHE_FOR
 }
 
 async fn fetch_context(state: &AppState, work_key: &str) -> Result<WorkContext, UpstreamError> {
@@ -172,12 +183,39 @@ async fn fetch_context(state: &AppState, work_key: &str) -> Result<WorkContext, 
             2 * 1024 * 1024,
         )
         .await?;
-    let Some(doc) = body
+    let doc = match body
         .docs
         .into_iter()
         .find(|doc| !doc.title.trim().is_empty())
-    else {
-        return Err(UpstreamError::Shape);
+    {
+        Some(doc) => doc,
+        None => {
+            let Some(next) = merged_work(state, &base, work_key).await? else {
+                return Err(UpstreamError::Shape);
+            };
+            state.catalog_limit.pace().await;
+            let q = format!("key:{next}");
+            let body: Search<WorkDoc> = state
+                .upstream
+                .get_json(
+                    &base,
+                    "/search.json",
+                    &[
+                        ("q", q.as_str()),
+                        (
+                            "fields",
+                            "key,title,subtitle,alternative_title,author_key,author_name,isbn",
+                        ),
+                    ],
+                    &[],
+                    2 * 1024 * 1024,
+                )
+                .await?;
+            body.docs
+                .into_iter()
+                .find(|doc| !doc.title.trim().is_empty())
+                .ok_or(UpstreamError::Shape)?
+        }
     };
     let author_key = sibling_key(&doc);
     let siblings = if let Some(author_key) = author_key {
@@ -236,31 +274,52 @@ fn sibling_key(doc: &WorkDoc) -> Option<String> {
     Some(key.to_string())
 }
 
+/// One `/works/{id}.json`. A redirect's `location` is the canonical work key.
+/// Anything else is a miss; the caller does not walk a chain.
+async fn merged_work(
+    state: &AppState,
+    base: &reqwest::Url,
+    work_key: &str,
+) -> Result<Option<String>, UpstreamError> {
+    state.catalog_limit.pace().await;
+    let Some(next) = state.upstream.work_location(base, work_key).await? else {
+        return Ok(None);
+    };
+    if next == work_key {
+        return Ok(None);
+    }
+    Ok(Some(next))
+}
+
 fn assemble(doc: WorkDoc, siblings: Vec<String>) -> WorkContext {
     let title = doc.title.trim();
-    let mut titles = Vec::new();
-    let mut push = |value: &str| {
+    let mut primary = Vec::new();
+    let push = |list: &mut Vec<String>, value: &str| {
         let value = value.trim();
-        if value.is_empty() || titles.iter().any(|have: &String| have == value) {
+        if value.is_empty() || list.iter().any(|have: &String| have == value) {
             return;
         }
-        titles.push(value.to_string());
+        list.push(value.to_string());
     };
-    push(title);
+    push(&mut primary, title);
     if let Some(subtitle) = doc
         .subtitle
         .as_deref()
         .map(str::trim)
         .filter(|subtitle| !subtitle.is_empty())
     {
-        push(&format!("{title}: {subtitle}"));
+        push(&mut primary, &format!("{title}: {subtitle}"));
     }
     for alt in &doc.alternative_title {
-        push(alt);
+        push(&mut primary, alt);
     }
-    if let Some((head, _)) = title.split_once(':') {
-        push(head);
+    let mut titles = primary.clone();
+    if let Some((head, tail)) = title.split_once(':') {
+        if !tail.trim().is_empty() && !precolon_names_a_sibling(head, &siblings) {
+            push(&mut titles, head);
+        }
     }
+    let siblings = without_this_work(siblings, &primary);
     let mut isbns = HashSet::new();
     for raw in &doc.isbn {
         isbns.extend(isbn13s(raw));
@@ -402,5 +461,40 @@ mod tests {
         let raw = r#"{"title":"Dune","alternative_title":"Dune Messiah"}"#;
         let doc: WorkDoc = serde_json::from_str(raw).unwrap();
         assert_eq!(doc.alternative_title, vec!["Dune Messiah".to_string()]);
+    }
+
+    #[test]
+    fn a_precolon_fragment_that_names_a_sibling_is_not_a_title() {
+        let doc = WorkDoc {
+            title: "Mistborn: Secret History".into(),
+            subtitle: None,
+            alternative_title: vec![],
+            author_key: vec!["OL1A".into()],
+            author_name: vec!["Brandon Sanderson".into()],
+            isbn: vec![],
+        };
+        let ctx = assemble(doc, vec!["Mistborn".into(), "The Final Empire".into()]);
+        assert_eq!(ctx.titles, vec!["Mistborn: Secret History".to_string()]);
+        assert_eq!(
+            ctx.siblings,
+            vec!["Mistborn".to_string(), "The Final Empire".to_string()]
+        );
+    }
+
+    #[test]
+    fn the_cache_drops_entries_older_than_a_day() {
+        let cache = WorkCache::new();
+        let ctx = WorkContext {
+            titles: vec!["Dune".into()],
+            authors: vec![],
+            isbns: HashSet::new(),
+            siblings: vec![],
+        };
+        let then = Instant::now();
+        cache.remember("old", ctx.clone(), then, then);
+        let later = then + CACHE_FOR + Duration::from_secs(1);
+        cache.remember("new", ctx, later, later);
+        assert!(cache.get("old").is_none());
+        assert!(cache.get("new").is_some());
     }
 }
