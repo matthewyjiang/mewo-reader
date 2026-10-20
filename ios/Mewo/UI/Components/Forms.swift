@@ -92,6 +92,11 @@ struct LibrarySettings: View {
     @State private var password = ""
     @State private var busy = false
     @State private var error: String?
+    @State private var signups = InstanceSignupLoader()
+
+    private var signupTaskID: String {
+        "\(app.hostedSession.session.signedIn)|\(app.hostedSession.session.baseUrl)"
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -194,20 +199,39 @@ struct LibrarySettings: View {
                     }
                 }
                 .padding(.top, 12)
-                Button {
-                    mode = mode == .signIn ? .create : .signIn
-                    error = nil
-                } label: {
-                    Text(mode == .signIn ? "Create an account" : "Sign in instead")
-                        .font(MewoFont.regular(17))
-                        .foregroundStyle(mewo.accent)
-                        .frame(maxWidth: .infinity, minHeight: 40)
+                if mode == .create || showCreateAccount(signups.allowSignup) {
+                    Button {
+                        mode = mode == .signIn ? .create : .signIn
+                        error = nil
+                    } label: {
+                        Text(mode == .signIn ? "Create an account" : "Sign in instead")
+                            .font(MewoFont.regular(17))
+                            .foregroundStyle(mewo.accent)
+                            .frame(maxWidth: .infinity, minHeight: 40)
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(busy)
+                    .accessibilityIdentifier(mode == .signIn ? "hosted-create-account" : "hosted-sign-in-instead")
                 }
-                .buttonStyle(.plain)
-                .disabled(busy)
             }
         }
         .onAppear { username = app.hostedSession.session.username ?? "" }
+        .task(id: signupTaskID) {
+            guard !app.hostedSession.session.signedIn else {
+                signups.cancel()
+                return
+            }
+            let client = app.client
+            signups.noteUrl(app.hostedSession.session.baseUrl) { url in
+                try await client.instance(baseUrl: url)
+            }
+        }
+        .onDisappear { signups.cancel() }
+        .onChange(of: signups.allowSignup) { _, open in
+            if open == false, mode == .create {
+                mode = .signIn
+            }
+        }
     }
 
     private func outlined(_ label: String, text: Binding<String>, enabled: Bool, secret: Bool, id: String, error: String?) -> some View {

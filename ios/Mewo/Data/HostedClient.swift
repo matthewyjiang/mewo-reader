@@ -19,11 +19,15 @@ final class HostedClient: Sendable {
     let hooks = HostedClientHooks()
     private let session: URLSession
 
-    init() {
-        let config = URLSessionConfiguration.default
-        config.timeoutIntervalForRequest = 120
-        config.timeoutIntervalForResource = 180
-        session = URLSession(configuration: config)
+    init(session: URLSession? = nil) {
+        if let session {
+            self.session = session
+        } else {
+            let config = URLSessionConfiguration.default
+            config.timeoutIntervalForRequest = 120
+            config.timeoutIntervalForResource = 180
+            self.session = URLSession(configuration: config)
+        }
     }
 
     func register(baseUrl: String, username: String, password: String) async throws -> AuthResponse {
@@ -60,6 +64,18 @@ final class HostedClient: Sendable {
             throw HostedException(message: "Could not read the server response.")
         }
         return version
+    }
+
+    /// Public instance. No session token. `GET /v1/instance`.
+    func instance(baseUrl: String) async throws -> InstanceInfo {
+        let base = normalizeBaseUrl(baseUrl)
+        guard !base.isEmpty, let url = URL(string: base + "/v1/instance") else {
+            throw HostedException(message: "Set a server URL first.")
+        }
+        var request = URLRequest(url: url)
+        request.httpMethod = "GET"
+        request.timeoutInterval = 15
+        return try await decode(request)
     }
 
     func upload(
