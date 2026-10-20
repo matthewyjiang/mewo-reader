@@ -5,6 +5,7 @@
   import Post from '../components/Post.svelte';
   import UnderlineTabs from '../components/UnderlineTabs.svelte';
   import Avatar from '../components/Avatar.svelte';
+  import Cover from '../components/Cover.svelte';
   import type { BookRequest, CatalogWork, SearchKind } from '../lib/models';
   import { message } from '../lib/store.svelte';
   import { coverUrl, rowAction, stateLabel } from '../lib/requests';
@@ -178,7 +179,7 @@
     {@const action = rowAction(current)}
     <div class="book-row">
       <div class="book-link">
-        <Avatar name={work.author} src={coverUrl(work.coverId)} />
+        <Cover name={work.author} src={coverUrl(work.coverId)} />
         <div class="post-column">
           <div class="post-meta">
             <strong class="truncate">{work.title}</strong>

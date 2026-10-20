@@ -26,8 +26,10 @@ macro_rules! cas {
             > 0
     }};
 }
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 use tokio::sync::Notify;
 
@@ -46,7 +48,8 @@ const UNEXPECTED_FOLDER: &str = "Unexpected download folder.";
 const DOWNLOAD_TIMEOUT: &str = "Download timed out.";
 
 /// Lets a test stop the worker after the EPUB is staged and before `import`.
-/// Production leaves it disarmed: `wait` is one atomic load.
+/// Production never installs one. The map is keyed by `data_dir` so parallel
+/// tests do not share a gate.
 pub struct ImportGate {
     armed: AtomicBool,
     entered: Notify,
@@ -91,13 +94,61 @@ impl ImportGate {
     }
 }
 
+fn gates() -> &'static Mutex<HashMap<PathBuf, std::sync::Arc<ImportGate>>> {
+    static GATES: OnceLock<Mutex<HashMap<PathBuf, std::sync::Arc<ImportGate>>>> = OnceLock::new();
+    GATES.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Removes the gate for `data_dir` when dropped.
+pub struct ImportHold {
+    data_dir: PathBuf,
+}
+
+impl Drop for ImportHold {
+    fn drop(&mut self) {
+        let mut map = gates().lock().unwrap_or_else(|err| err.into_inner());
+        map.remove(&self.data_dir);
+    }
+}
+
+/// Installs a gate for this data directory. Tests arm it. Production does not
+/// call this, so the map stays empty.
+pub fn install(data_dir: &Path) -> (std::sync::Arc<ImportGate>, ImportHold) {
+    let gate = std::sync::Arc::new(ImportGate::new());
+    let mut map = gates().lock().unwrap_or_else(|err| err.into_inner());
+    map.insert(data_dir.to_path_buf(), gate.clone());
+    (
+        gate,
+        ImportHold {
+            data_dir: data_dir.to_path_buf(),
+        },
+    )
+}
+
+async fn wait_import(data_dir: &Path) {
+    let gate = {
+        let map = gates().lock().unwrap_or_else(|err| err.into_inner());
+        map.get(data_dir).cloned()
+    };
+    if let Some(gate) = gate {
+        gate.wait().await;
+    }
+}
+
 /// Loop: tick, then 30s or `worker.notify_one()` from create and retry.
-/// A tick error is logged. The loop does not end.
+/// A tick error or panic is logged. The loop does not end.
 pub fn spawn(state: AppState) {
     tokio::spawn(async move {
         loop {
-            if let Err(err) = tick(&state).await {
-                tracing::error!(error = %err, "book request tick failed");
+            let tick_state = state.clone();
+            match tokio::spawn(async move { tick(&tick_state).await }).await {
+                Ok(Ok(())) => {}
+                Ok(Err(err)) => {
+                    tracing::error!(error = %err, "book request tick failed");
+                }
+                Err(err) => {
+                    tracing::error!(error = %err, "book request tick panicked");
+                }
             }
             tokio::select! {
                 () = state.worker.notified() => {}
@@ -121,13 +172,29 @@ pub async fn tick_at(state: &AppState, now_ms: i64) -> Result<(), ApiError> {
     };
     let rows = due(&state.pool, now_ms).await?;
     for row in rows {
-        if let Err(err) = step(state, &ready, &row, now_ms).await {
-            tracing::error!(request_id = %row.id, error = %err, "book request step failed");
-        }
+        let request_id = row.id.clone();
+        let task_state = state.clone();
+        let task_ready = ready.clone();
+        let joined =
+            tokio::spawn(async move { step(&task_state, &task_ready, &row, now_ms).await }).await;
+        report_step(&request_id, joined);
     }
     Ok(())
 }
 
+fn report_step(request_id: &str, joined: Result<Result<(), ApiError>, tokio::task::JoinError>) {
+    match joined {
+        Ok(Ok(())) => {}
+        Ok(Err(err)) => {
+            tracing::error!(request_id = %request_id, error = %err, "book request step failed");
+        }
+        Err(err) => {
+            tracing::error!(request_id = %request_id, error = %err, "book request step panicked");
+        }
+    }
+}
+
+#[derive(Clone)]
 struct Ready {
     settings: Settings,
     prowlarr_key: String,
@@ -314,7 +381,16 @@ async fn downloading(
     now_ms: i64,
 ) -> Result<(), ApiError> {
     let Some(nzo) = row.download_id.clone() else {
-        return retry_or_fail(state, &clients.sab, row, "", &sab_error("missing"), now_ms).await;
+        return retry_or_fail(
+            state,
+            &clients.sab,
+            row,
+            "",
+            &sab_error("missing"),
+            None,
+            now_ms,
+        )
+        .await;
     };
     let job = match clients.sab.job(&nzo).await {
         Ok(job) => job,
@@ -330,7 +406,16 @@ async fn downloading(
             poll_or_time_out(state, &clients.sab, row, &nzo, row.progress, now_ms).await
         }
         Job::Failed { message } => {
-            retry_or_fail(state, &clients.sab, row, &nzo, &sab_error(&message), now_ms).await
+            retry_or_fail(
+                state,
+                &clients.sab,
+                row,
+                &nzo,
+                &sab_error(&message),
+                None,
+                now_ms,
+            )
+            .await
         }
         Job::Missing => {
             retry_or_fail(
@@ -339,6 +424,7 @@ async fn downloading(
                 row,
                 &nzo,
                 &sab_error("missing"),
+                None,
                 now_ms,
             )
             .await
@@ -431,16 +517,18 @@ async fn completed(
         title: &row.title,
         author: &row.author,
     };
-    let files = list_epubs(dir).await?;
+    let files = list_epubs(dir.clone()).await?;
     let Some(epub) = pick::choose_epub(&wanted, &files) else {
-        return retry_or_fail(state, sab, row, nzo, NO_EPUB, now_ms).await;
+        return retry_or_fail(state, sab, row, nzo, NO_EPUB, Some(&dir), now_ms).await;
     };
     let staged = match library::stage_file(state, &epub, ready.settings.max_epub_bytes).await {
         Ok(staged) => staged,
-        Err(err) => return retry_or_fail(state, sab, row, nzo, &err.to_string(), now_ms).await,
+        Err(err) => {
+            return retry_or_fail(state, sab, row, nzo, &err.to_string(), Some(&dir), now_ms).await
+        }
     };
     let existed = book_owned(&state.pool, &row.user_id, &row.id).await?;
-    state.import_gate.wait().await;
+    wait_import(&state.data_dir).await;
     let owner = Owner {
         user_id: &row.user_id,
         username: &row.username,
@@ -454,7 +542,9 @@ async fn completed(
     .await
     {
         Ok(book) => book,
-        Err(err) => return retry_or_fail(state, sab, row, nzo, &err.to_string(), now_ms).await,
+        Err(err) => {
+            return retry_or_fail(state, sab, row, nzo, &err.to_string(), Some(&dir), now_ms).await
+        }
     };
     let won = cas!(
         &state.pool,
@@ -473,6 +563,7 @@ async fn completed(
         }
         return Ok(());
     }
+    remove_download(&dir).await;
     discard(sab, nzo).await;
     Ok(())
 }
@@ -484,6 +575,7 @@ async fn retry_or_fail(
     row: &Due,
     nzo: &str,
     message: &str,
+    download: Option<&Path>,
     now_ms: i64,
 ) -> Result<(), ApiError> {
     if !nzo.is_empty() {
@@ -491,6 +583,9 @@ async fn retry_or_fail(
             tracing::error!(error = %err, "sab delete failed");
             return hold(&state.pool, &row.id, "downloading", "SABnzbd", &err, now_ms).await;
         }
+    }
+    if let Some(dir) = download {
+        remove_download(dir).await;
     }
     if row.attempts < MAX_ATTEMPTS {
         let _ = cas!(
@@ -532,8 +627,8 @@ async fn adopt(pool: &SqlitePool, id: &str, nzo: &str, now_ms: i64) -> Result<()
     let _ = cas!(
         pool,
         "UPDATE book_requests
-         SET state = 'downloading', download_id = ?, progress = 0, error = NULL,
-             next_check_at = ?, updated_at = ?
+         SET state = 'downloading', download_id = ?, attempts = attempts + 1,
+             progress = 0, error = NULL, next_check_at = ?, updated_at = ?
          WHERE id = ? AND state = 'requested'",
         nzo,
         now_ms.saturating_add(POLL_MS),
@@ -617,9 +712,27 @@ fn folder_ok(job: &str, folder: &str) -> bool {
     !digits.is_empty() && digits.bytes().all(|byte| byte.is_ascii_digit())
 }
 
+async fn remove_download(dir: &Path) {
+    let folder = dir
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("download");
+    if let Err(err) = tokio::fs::remove_dir_all(dir).await {
+        tracing::warn!(folder, error = %err, "could not remove download folder");
+    }
+}
+
 async fn confined(downloads: &Path, folder: &str) -> Option<PathBuf> {
+    if folder.is_empty() || folder.contains('/') || folder.contains('\\') || folder.contains('\0') {
+        return None;
+    }
+    let candidate = downloads.join(folder);
+    let meta = tokio::fs::symlink_metadata(&candidate).await.ok()?;
+    if meta.file_type().is_symlink() || !meta.is_dir() {
+        return None;
+    }
     let base = tokio::fs::canonicalize(downloads).await.ok()?;
-    let dir = tokio::fs::canonicalize(downloads.join(folder)).await.ok()?;
+    let dir = tokio::fs::canonicalize(&candidate).await.ok()?;
     if dir.starts_with(&base) {
         Some(dir)
     } else {
@@ -649,5 +762,19 @@ mod tests {
         assert!(!folder_ok(job, "mewo-abc.1a"));
         assert!(!folder_ok(job, "etc"));
         assert!(!folder_ok(job, "mewo-abcd"));
+    }
+
+    #[tokio::test]
+    async fn a_panicked_step_does_not_stop_the_next() {
+        let joined = tokio::spawn(async {
+            panic!("boom");
+            #[allow(unreachable_code)]
+            Ok::<(), ApiError>(())
+        })
+        .await;
+        assert!(joined.is_err());
+        report_step("req-1", joined);
+        let next = tokio::spawn(async { Ok::<(), ApiError>(()) }).await;
+        assert!(next.expect("next step ran").is_ok());
     }
 }

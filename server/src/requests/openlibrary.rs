@@ -1,4 +1,5 @@
-//! Open Library search. One in-flight request, 350 ms apart.
+//! Open Library search. One in-flight request, 1 s apart. The User-Agent has
+//! no contact email, so the gap stays at a second.
 
 use crate::requests::http::{base_url, UpstreamError};
 use crate::AppState;
@@ -6,7 +7,7 @@ use serde::Deserialize;
 use std::time::{Duration, Instant};
 use tokio::sync::{Mutex, Semaphore};
 
-const GAP: Duration = Duration::from_millis(350);
+const GAP: Duration = Duration::from_secs(1);
 const PAGE: i64 = 20;
 
 pub(crate) struct Limiter {

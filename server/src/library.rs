@@ -107,12 +107,26 @@ pub(crate) async fn import(
         }
     }
 
+    let fixed_id = matches!(id, NewId::Fixed(_));
     let id = match id {
         NewId::Random => Uuid::new_v4().to_string(),
         NewId::Fixed(id) => id,
     };
     let imported_at = now_ms();
     let dest = book_dir(&state.data_dir, owner.user_id, &id);
+    // A crash after the rename and before the books insert leaves the directory
+    // with no row. The next Fixed import clears it. A row for this id already
+    // returned above.
+    if fixed_id {
+        match tokio::fs::symlink_metadata(&dest).await {
+            Ok(meta) if meta.file_type().is_symlink() || meta.is_dir() => {
+                tokio::fs::remove_dir_all(&dest).await?;
+            }
+            Ok(_) => tokio::fs::remove_file(&dest).await?,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+            Err(err) => return Err(err.into()),
+        }
+    }
     tokio::fs::create_dir_all(dest.parent().ok_or(ApiError::Internal)?).await?;
     tokio::fs::rename(&staged.temp_dir, &dest).await?;
 

@@ -20,8 +20,13 @@
   let info = $state<ServerInfo | null>(null);
   let users = $state<AdminUser[] | null>(null);
   let mb = $state('');
-  let saving = $state(false);
   let generation = 0;
+  let pending: Promise<void> = Promise.resolve();
+  const queuedText: Record<string, string> = {};
+
+  function enqueue(run: () => Promise<void>): void {
+    pending = pending.then(run, run);
+  }
   let prowlarrUrl = $state('');
   let sabUrl = $state('');
   let category = $state('books');
@@ -69,6 +74,10 @@
       category = nextSettings.sabnzbdCategory || 'books';
       prowlarrKey = '';
       sabKey = '';
+      delete queuedText.prowlarrUrl;
+      delete queuedText.sabnzbdUrl;
+      delete queuedText.sabnzbdCategory;
+      delete queuedText.maxEpubBytes;
       status = 'ready';
       void loadRequestCount(nextSettings.requestsEnabled === true);
     } catch (error) {
@@ -94,73 +103,85 @@
     }
   }
 
-  async function saveText(
+  function saveText(
     key: 'prowlarrUrl' | 'sabnzbdUrl' | 'sabnzbdCategory',
     value: string,
-  ): Promise<void> {
-    if (!settings || saving) return;
-    const current = settings[key] ?? (key === 'sabnzbdCategory' ? 'books' : '');
+  ): void {
+    if (!settings) return;
+    const current = queuedText[key] ?? settings[key] ?? (key === 'sabnzbdCategory' ? 'books' : '');
     if (value === current) return;
-    saving = true;
-    try {
-      settings = await store.api.updateServerSettings({ [key]: value });
-    } catch (error) {
-      if (key === 'prowlarrUrl') prowlarrUrl = settings.prowlarrUrl ?? '';
-      if (key === 'sabnzbdUrl') sabUrl = settings.sabnzbdUrl ?? '';
-      if (key === 'sabnzbdCategory') category = settings.sabnzbdCategory || 'books';
-      store.notice = message(error);
-    } finally {
-      saving = false;
-    }
+    queuedText[key] = value;
+    enqueue(async () => {
+      if (!settings) return;
+      try {
+        settings = await store.api.updateServerSettings({ [key]: value });
+      } catch (error) {
+        if (key === 'prowlarrUrl' && prowlarrUrl === value) {
+          prowlarrUrl = settings.prowlarrUrl ?? '';
+          delete queuedText.prowlarrUrl;
+        }
+        if (key === 'sabnzbdUrl' && sabUrl === value) {
+          sabUrl = settings.sabnzbdUrl ?? '';
+          delete queuedText.sabnzbdUrl;
+        }
+        if (key === 'sabnzbdCategory' && category === value) {
+          category = settings.sabnzbdCategory || 'books';
+          delete queuedText.sabnzbdCategory;
+        }
+        store.notice = message(error);
+      }
+    });
   }
 
-  async function saveKey(which: 'prowlarrApiKey' | 'sabnzbdApiKey', value: string): Promise<void> {
+  function saveKey(which: 'prowlarrApiKey' | 'sabnzbdApiKey', value: string): void {
     const trimmed = value.trim();
-    if (!trimmed || !settings || saving) return;
-    saving = true;
-    try {
-      settings = await store.api.updateServerSettings({ [which]: trimmed });
-      if (which === 'prowlarrApiKey') prowlarrKey = '';
-      else sabKey = '';
-    } catch (error) {
-      store.notice = message(error);
-    } finally {
-      saving = false;
-    }
+    if (!trimmed || !settings) return;
+    enqueue(async () => {
+      try {
+        settings = await store.api.updateServerSettings({ [which]: trimmed });
+        if (which === 'prowlarrApiKey' && prowlarrKey.trim() === trimmed) prowlarrKey = '';
+        if (which === 'sabnzbdApiKey' && sabKey.trim() === trimmed) sabKey = '';
+      } catch (error) {
+        store.notice = message(error);
+      }
+    });
   }
 
-  async function clearKey(which: 'prowlarrApiKey' | 'sabnzbdApiKey'): Promise<void> {
+  function clearKey(which: 'prowlarrApiKey' | 'sabnzbdApiKey'): void {
     const draft = which === 'prowlarrApiKey' ? prowlarrKey : sabKey;
     if (draft) {
       if (which === 'prowlarrApiKey') prowlarrKey = '';
       else sabKey = '';
       return;
     }
-    if (!settings?.secrets?.[which] || saving) return;
-    saving = true;
-    try {
-      settings = await store.api.updateServerSettings({ [which]: null });
-    } catch (error) {
-      store.notice = message(error);
-    } finally {
-      saving = false;
-    }
+    if (!settings?.secrets?.[which]) return;
+    enqueue(async () => {
+      if (!settings?.secrets?.[which]) return;
+      try {
+        settings = await store.api.updateServerSettings({ [which]: null });
+      } catch (error) {
+        store.notice = message(error);
+      }
+    });
   }
 
-  async function setRequests(enabled: boolean): Promise<void> {
-    if (!settings || saving || enabled === (settings.requestsEnabled === true)) return;
+  function setRequests(enabled: boolean): void {
+    if (!settings || enabled === (settings.requestsEnabled === true)) return;
     const previous = settings;
     settings = { ...settings, requestsEnabled: enabled };
-    saving = true;
-    try {
-      settings = await store.api.updateServerSettings({ requestsEnabled: enabled });
-      void loadRequestCount(settings.requestsEnabled === true);
-    } catch (error) {
-      settings = previous;
-      store.notice = message(error);
-    } finally {
-      saving = false;
-    }
+    enqueue(async () => {
+      if (settings?.requestsEnabled !== enabled) return;
+      try {
+        const saved = await store.api.updateServerSettings({ requestsEnabled: enabled });
+        if (settings?.requestsEnabled === enabled) {
+          settings = saved;
+          void loadRequestCount(saved.requestsEnabled === true);
+        }
+      } catch (error) {
+        if (settings?.requestsEnabled === enabled) settings = previous;
+        store.notice = message(error);
+      }
+    });
   }
 
   async function testConnection(): Promise<void> {
@@ -182,26 +203,26 @@
     return name;
   }
 
-  async function setSignup(allow: boolean): Promise<void> {
-    if (!settings || saving || allow === settings.allowSignup) return;
+  function setSignup(allow: boolean): void {
+    if (!settings || allow === settings.allowSignup) return;
     const previous = settings;
     settings = { ...settings, allowSignup: allow };
-    saving = true;
-    try {
-      settings = await store.api.updateServerSettings({ allowSignup: allow });
-    } catch (error) {
-      settings = previous;
-      store.notice = message(error);
-    } finally {
-      saving = false;
-    }
+    enqueue(async () => {
+      if (settings?.allowSignup !== allow) return;
+      try {
+        const saved = await store.api.updateServerSettings({ allowSignup: allow });
+        if (settings?.allowSignup === allow) settings = saved;
+      } catch (error) {
+        if (settings?.allowSignup === allow) settings = previous;
+        store.notice = message(error);
+      }
+    });
   }
 
-  async function saveMb(): Promise<void> {
-    if (!settings || saving) return;
-    if (mb === mbField(settings.maxEpubBytes)) return;
+  function saveMb(): void {
+    if (!settings) return;
     const bytes = parseMb(mb);
-    if (bytes === null || bytes === settings.maxEpubBytes) {
+    if (bytes === null) {
       mb = mbField(settings.maxEpubBytes);
       return;
     }
@@ -211,16 +232,25 @@
       store.notice = range;
       return;
     }
-    saving = true;
-    try {
-      settings = await store.api.updateServerSettings({ maxEpubBytes: bytes });
-      mb = mbField(settings.maxEpubBytes);
-    } catch (error) {
-      mb = mbField(settings.maxEpubBytes);
-      store.notice = message(error);
-    } finally {
-      saving = false;
+    const baseline = queuedText.maxEpubBytes ?? String(settings.maxEpubBytes);
+    if (String(bytes) === baseline) {
+      mb = mbField(bytes);
+      return;
     }
+    queuedText.maxEpubBytes = String(bytes);
+    const typed = mb;
+    enqueue(async () => {
+      try {
+        settings = await store.api.updateServerSettings({ maxEpubBytes: bytes });
+        if (mb === typed) mb = mbField(settings.maxEpubBytes);
+      } catch (error) {
+        if (mb === typed) {
+          mb = mbField(settings.maxEpubBytes);
+          delete queuedText.maxEpubBytes;
+        }
+        store.notice = message(error);
+      }
+    });
   }
 
   async function toggleAdmin(user: AdminUser): Promise<void> {
@@ -268,7 +298,6 @@
       type="checkbox"
       role="switch"
       checked={settings.allowSignup}
-      disabled={saving}
       onchange={(event) => setSignup(event.currentTarget.checked)}
     />
   </label>
@@ -280,7 +309,6 @@
         inputmode="decimal"
         autocomplete="off"
         spellcheck="false"
-        disabled={saving}
         oninput={(event) => mb = event.currentTarget.value}
         onblur={() => saveMb()}
         onkeydown={(event) => {
@@ -300,33 +328,33 @@
       type="checkbox"
       role="switch"
       checked={settings.requestsEnabled === true}
-      disabled={saving}
       onchange={(event) => setRequests(event.currentTarget.checked)}
     />
   </label>
   <label class="settings-row text-row">
     <span>Prowlarr URL</span>
-    <input
-      class="text-field"
-      value={prowlarrUrl}
-      autocomplete="off"
-      spellcheck="false"
-      disabled={saving}
-      oninput={(event) => prowlarrUrl = event.currentTarget.value}
-      onblur={() => saveText('prowlarrUrl', prowlarrUrl.trim())}
-    />
+    <span class="field">
+      <input
+        class="text-field"
+        value={prowlarrUrl}
+        autocomplete="off"
+        spellcheck="false"
+        oninput={(event) => prowlarrUrl = event.currentTarget.value}
+        onblur={() => saveText('prowlarrUrl', prowlarrUrl.trim())}
+      />
+    </span>
   </label>
   <label class="settings-row text-row">
     <span>Prowlarr API key</span>
-    <span class="secret-wrap">
+    <span class="field">
       <input
         class="text-field"
+        class:with-clear={settings.secrets?.prowlarrApiKey || prowlarrKey}
         type="password"
         value={prowlarrKey}
         placeholder={settings.secrets?.prowlarrApiKey && !prowlarrKey ? 'Saved' : ''}
-        autocomplete="off"
+        autocomplete="new-password"
         spellcheck="false"
-        disabled={saving}
         oninput={(event) => prowlarrKey = event.currentTarget.value}
         onblur={() => saveKey('prowlarrApiKey', prowlarrKey)}
       />
@@ -345,27 +373,28 @@
   </label>
   <label class="settings-row text-row">
     <span>SABnzbd URL</span>
-    <input
-      class="text-field"
-      value={sabUrl}
-      autocomplete="off"
-      spellcheck="false"
-      disabled={saving}
-      oninput={(event) => sabUrl = event.currentTarget.value}
-      onblur={() => saveText('sabnzbdUrl', sabUrl.trim())}
-    />
+    <span class="field">
+      <input
+        class="text-field"
+        value={sabUrl}
+        autocomplete="off"
+        spellcheck="false"
+        oninput={(event) => sabUrl = event.currentTarget.value}
+        onblur={() => saveText('sabnzbdUrl', sabUrl.trim())}
+      />
+    </span>
   </label>
   <label class="settings-row text-row">
     <span>SABnzbd API key</span>
-    <span class="secret-wrap">
+    <span class="field">
       <input
         class="text-field"
+        class:with-clear={settings.secrets?.sabnzbdApiKey || sabKey}
         type="password"
         value={sabKey}
         placeholder={settings.secrets?.sabnzbdApiKey && !sabKey ? 'Saved' : ''}
-        autocomplete="off"
+        autocomplete="new-password"
         spellcheck="false"
-        disabled={saving}
         oninput={(event) => sabKey = event.currentTarget.value}
         onblur={() => saveKey('sabnzbdApiKey', sabKey)}
       />
@@ -384,22 +413,28 @@
   </label>
   <label class="settings-row text-row">
     <span>SABnzbd category</span>
-    <input
-      class="text-field"
-      value={category}
-      autocomplete="off"
-      spellcheck="false"
-      disabled={saving}
-      oninput={(event) => category = event.currentTarget.value}
-      onblur={() => saveText('sabnzbdCategory', category.trim())}
-    />
+    <span class="field">
+      <input
+        class="text-field"
+        value={category}
+        autocomplete="off"
+        spellcheck="false"
+        oninput={(event) => category = event.currentTarget.value}
+        onblur={() => saveText('sabnzbdCategory', category.trim())}
+      />
+    </span>
   </label>
   <div class="fact-row">
     <span>Downloads folder</span>
     <span>{settings.downloadsDir ?? 'Not set'}</span>
   </div>
-  <button class="settings-row" disabled={testing} onclick={() => testConnection()}>
-    {testing ? 'Testing…' : 'Test connection'}
+  <button class="settings-row" disabled={testing} aria-busy={testing} onclick={() => testConnection()}>
+    <span class="accent">{testing ? 'Testing…' : 'Test connection'}</span>
+    {#if testing}
+      <span class="spinner" aria-hidden="true"></span>
+    {:else}
+      <Icon name="chevron" />
+    {/if}
   </button>
   {#if checks}
     {#each checks as check (check.name)}
@@ -510,6 +545,13 @@
   white-space: nowrap;
 }
 
+.field {
+  position: relative;
+  flex: 1 1 8rem;
+  min-width: 0;
+  max-width: 16rem;
+}
+
 .text-field {
   width: 100%;
   min-width: 0;
@@ -523,26 +565,31 @@
   font-weight: 400;
 }
 
-.secret-wrap {
-  flex: 1 1 8rem;
-  min-width: 0;
-  max-width: 16rem;
-  display: flex;
-  align-items: center;
-  gap: 4px;
+.text-field.with-clear {
+  padding-right: 32px;
 }
 
-.text-row > .text-field,
-.secret-wrap .text-field {
-  flex: 1 1 8rem;
-  max-width: 16rem;
-}
-
-.secret-wrap .icon-button {
+.field .icon-button {
+  position: absolute;
+  top: 2px;
+  right: 0;
   width: 32px;
   height: 32px;
-  flex: 0 0 32px;
   color: var(--mute);
+}
+
+.accent {
+  color: var(--accent);
+}
+
+.settings-row:disabled {
+  opacity: 1;
+}
+
+.settings-row .spinner {
+  width: 18px;
+  height: 18px;
+  flex: 0 0 18px;
 }
 
 .epub-field input {

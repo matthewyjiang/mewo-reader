@@ -82,7 +82,9 @@ impl Sabnzbd<'_> {
         Ok(history_job(&slot))
     }
 
-    /// Queue delete or history delete, `del_files=1`. A missing job is `Ok`.
+    /// Queue delete and history delete. `archive=0` deletes a history row
+    /// instead of archiving it. `del_files=1` only removes an incomplete
+    /// folder; the worker deletes a completed one. A missing job is `Ok`.
     pub async fn delete(&self, nzo_id: &str) -> Result<(), UpstreamError> {
         self.delete_mode("queue", nzo_id).await?;
         self.delete_mode("history", nzo_id).await?;
@@ -131,6 +133,7 @@ impl Sabnzbd<'_> {
                 ("name", "delete"),
                 ("value", nzo_id),
                 ("del_files", "1"),
+                ("archive", "0"),
                 ("output", "json"),
                 ("apikey", self.key.as_str()),
             ])

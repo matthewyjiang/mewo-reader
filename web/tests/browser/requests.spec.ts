@@ -200,7 +200,8 @@ test('a saved key shows Saved, blur sends the key, and test connection lists thr
 });
 
 test('shots of catalog, requests, and the book requests group', async ({ browser }) => {
-  const dir = '/opt/cursor/artifacts/book-requests';
+  test.skip(!process.env.MEWO_SHOTS, 'set MEWO_SHOTS=1 to write request screenshots');
+  const dir = process.env.MEWO_SHOTS_DIR ?? 'test-results/book-requests';
   await mkdir(dir, { recursive: true });
   const shots: { theme: 'x_light' | 'x_lights_out'; width: number }[] = [];
   for (const theme of ['x_light', 'x_lights_out'] as const) {
@@ -220,10 +221,36 @@ test('shots of catalog, requests, and the book requests group', async ({ browser
     const page = await context.newPage();
     try {
       await install(page, { theme, requests: shelf });
+      await page.route('**/v1/catalog/search', (route) => route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          items: [
+            {
+              workKey: '/works/OL893415W',
+              title: 'Dune',
+              author: 'Frank Herbert',
+              year: 1965,
+              coverId: 11481354,
+              request: null,
+            },
+            {
+              workKey: '/works/OL45883W',
+              title: 'Neuromancer',
+              author: 'William Gibson',
+              year: 1984,
+              coverId: null,
+              request: null,
+            },
+          ],
+          nextPage: null,
+        }),
+      }));
       await page.goto('/search');
       await page.getByRole('tab', { name: 'Catalog' }).click();
       await page.getByPlaceholder('Search').fill('dune');
-      await expect(page.getByRole('button', { name: 'Request' })).toBeVisible();
+      await expect(page.getByRole('button', { name: 'Request' }).first()).toBeVisible();
+      await expect(page.getByText('Neuromancer')).toBeVisible();
       await page.screenshot({ path: `${dir}/catalog-${label}.png` });
       await page.goto('/settings/requests');
       await expect(page.getByText('Downloading 42%')).toBeVisible();

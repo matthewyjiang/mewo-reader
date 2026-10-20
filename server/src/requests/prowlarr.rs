@@ -4,10 +4,13 @@ use crate::requests::http::{same_origin, Upstream, UpstreamError};
 use crate::requests::pick::{Category, Release};
 use reqwest::Url;
 use serde::Deserialize;
+use serde_json::Value;
+use std::time::Duration;
 
 pub(crate) const EBOOK_CATEGORY: u32 = 7020;
 const SEARCH_CAP: usize = 8 * 1024 * 1024;
 const SMALL_CAP: usize = 1024 * 1024;
+const SEARCH_TIMEOUT: Duration = Duration::from_secs(90);
 
 pub(crate) struct Prowlarr<'a> {
     pub up: &'a Upstream,
@@ -16,27 +19,34 @@ pub(crate) struct Prowlarr<'a> {
 }
 
 impl Prowlarr<'_> {
-    /// `GET /api/v1/search?type=search&query=..&categories=7020&limit=100` (cap 8 MiB).
-    /// Keeps `protocol == usenet` only, and only rows whose `downloadUrl` has the
-    /// configured base's origin, so an indexer can't make SAB fetch an arbitrary URL.
+    /// `GET /api/v1/search?type=search&query=..&categories=7020&indexerIds=-1&limit=100`
+    /// (cap 8 MiB, 90s). `indexerIds=-1` is every usenet indexer. One malformed
+    /// element is skipped. Keeps `protocol == usenet` only, and only rows whose
+    /// `downloadUrl` has the configured base's origin, so an indexer can't make
+    /// SAB fetch an arbitrary URL.
     pub async fn search(&self, query: &str) -> Result<Vec<Release>, UpstreamError> {
-        let releases: Vec<Release> = self
+        let body: Value = self
             .up
-            .get_json(
+            .get_json_timeout(
                 &self.base,
                 "/api/v1/search",
                 &[
                     ("query", query),
                     ("type", "search"),
                     ("categories", "7020"),
+                    ("indexerIds", "-1"),
                     ("limit", "100"),
                 ],
                 &[("X-Api-Key", self.key.as_str())],
                 SEARCH_CAP,
+                SEARCH_TIMEOUT,
             )
             .await?;
+        let items = body.as_array().ok_or(UpstreamError::Shape)?;
+        let releases = items
+            .iter()
+            .filter_map(|item| serde_json::from_value::<Release>(item.clone()).ok());
         Ok(releases
-            .into_iter()
             .filter(|release| {
                 release.protocol.eq_ignore_ascii_case("usenet")
                     && release

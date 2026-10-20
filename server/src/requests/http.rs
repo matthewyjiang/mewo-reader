@@ -49,6 +49,8 @@ impl Upstream {
 
     /// GET `base` + a fixed path. `path` is `&'static str` so no caller can build
     /// a path from user data. The body is read up to `cap` bytes, then serde.
+    /// The client timeout is 20s. [`Self::get_json_timeout`] overrides that for
+    /// one call.
     pub(crate) async fn get_json<T: DeserializeOwned>(
         &self,
         base: &Url,
@@ -57,8 +59,39 @@ impl Upstream {
         headers: &[(&str, &str)],
         cap: usize,
     ) -> Result<T, UpstreamError> {
+        self.request_json(base, path, query, headers, cap, None)
+            .await
+    }
+
+    /// [`Self::get_json`] with its own total timeout. A per-request timeout
+    /// replaces the client's 20s, it does not add to it.
+    pub(crate) async fn get_json_timeout<T: DeserializeOwned>(
+        &self,
+        base: &Url,
+        path: &'static str,
+        query: &[(&str, &str)],
+        headers: &[(&str, &str)],
+        cap: usize,
+        timeout: Duration,
+    ) -> Result<T, UpstreamError> {
+        self.request_json(base, path, query, headers, cap, Some(timeout))
+            .await
+    }
+
+    async fn request_json<T: DeserializeOwned>(
+        &self,
+        base: &Url,
+        path: &'static str,
+        query: &[(&str, &str)],
+        headers: &[(&str, &str)],
+        cap: usize,
+        timeout: Option<Duration>,
+    ) -> Result<T, UpstreamError> {
         let url = endpoint(base, path)?;
         let mut request = self.client.get(url);
+        if let Some(timeout) = timeout {
+            request = request.timeout(timeout);
+        }
         if !query.is_empty() {
             request = request.query(query);
         }

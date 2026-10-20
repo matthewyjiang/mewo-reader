@@ -45,8 +45,6 @@ pub struct AppState {
     pub openlibrary_url: String,
     /// Wakes the request worker. Create and retry call `notify_one`.
     pub worker: Arc<Notify>,
-    /// Disarmed in production. Tests arm it to cancel between stage and import.
-    pub import_gate: Arc<requests::worker::ImportGate>,
     pub(crate) catalog_limit: Arc<requests::Limiter>,
 }
 
@@ -146,7 +144,6 @@ pub async fn prepare(config: Config) -> Result<AppState, sqlx::Error> {
         downloads_dir: config.downloads_dir,
         openlibrary_url: config.openlibrary_url,
         worker: Arc::new(Notify::new()),
-        import_gate: Arc::new(requests::worker::ImportGate::new()),
         catalog_limit: Arc::new(requests::Limiter::new()),
     })
 }

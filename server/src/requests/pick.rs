@@ -53,10 +53,15 @@ const LANGUAGES: &[&str] = &["german", "french", "spanish", "italian", "dutch"];
 const MARKERS: &[&str] = &["summary", "workbook", "sampler"];
 
 /// The search string sent to Prowlarr: `<title without subtitle> <author surname>`.
+/// A missing Open Library author is the word `Unknown` and is left off.
 pub(crate) fn query(w: &Wanted) -> String {
     let title = w.title.split(':').next().unwrap_or(w.title);
     let title = title.split_whitespace().collect::<Vec<_>>().join(" ");
-    let surname = w.author.split_whitespace().last().unwrap_or("");
+    let surname = if w.author.trim().eq_ignore_ascii_case("unknown") {
+        ""
+    } else {
+        w.author.split_whitespace().last().unwrap_or("")
+    };
     match (title.is_empty(), surname.is_empty()) {
         (true, true) => String::new(),
         (true, false) => surname.to_string(),
@@ -73,6 +78,9 @@ pub(crate) fn pick<'r>(
     max_bytes: u64,
 ) -> Option<&'r Release> {
     let want = significant(w.title);
+    if want.is_empty() {
+        return None;
+    }
     let work_tokens = token_set(w.title);
     let mut best: Option<(i64, i64, u64, &str, usize)> = None;
     for (index, release) in releases.iter().enumerate() {
@@ -195,8 +203,8 @@ fn acceptable(
     if release.size < MIN_RELEASE || release.size > cap {
         return false;
     }
-    if !want.is_empty()
-        && want
+    if want.is_empty()
+        || want
             .iter()
             .any(|token| !tokens.iter().any(|have| have == token))
     {
@@ -270,7 +278,7 @@ fn token_set(title: &str) -> HashSet<String> {
 }
 
 fn tokens(value: &str) -> Vec<String> {
-    let folded: String = value.chars().map(fold).collect();
+    let folded: String = value.chars().filter_map(fold).collect();
     folded
         .split_whitespace()
         .filter(|token| !token.is_empty())
@@ -294,8 +302,8 @@ fn is_symlink(path: &std::path::Path) -> bool {
         .unwrap_or(false)
 }
 
-fn fold(c: char) -> char {
-    match c {
+fn fold(c: char) -> Option<char> {
+    let kept = match c {
         'A'..='Z' => c.to_ascii_lowercase(),
         'a'..='z' | '0'..='9' => c,
         'à' | 'á' | 'â' | 'ä' | 'ã' | 'å' | 'ā' | 'À' | 'Á' | 'Â' | 'Ä' | 'Ã' | 'Å' | 'Ā' => {
@@ -311,8 +319,10 @@ fn fold(c: char) -> char {
         'ñ' | 'Ñ' => 'n',
         'ý' | 'ÿ' | 'Ý' => 'y',
         'ß' => 's',
+        '\'' | '\u{2019}' => return None,
         _ => ' ',
-    }
+    };
+    Some(kept)
 }
 
 #[cfg(test)]
@@ -468,6 +478,82 @@ mod tests {
             }),
             "The Teller of Small Fortunes Leong"
         );
+        assert_eq!(
+            query(&Wanted {
+                title: "Dune",
+                author: "Unknown",
+            }),
+            "Dune"
+        );
+        assert_eq!(
+            query(&Wanted {
+                title: "Dune",
+                author: "unknown",
+            }),
+            "Dune"
+        );
+    }
+
+    #[test]
+    fn apostrophe_joins_the_word_and_a_title_without_latin_tokens_is_skipped() {
+        let max = 200 * 1024 * 1024;
+        let enders = release("e", "Orson.Scott.Card.Enders.Game.EPUB", 80_000, 1, &[7020]);
+        assert_eq!(
+            pick(
+                &Wanted {
+                    title: "Ender's Game",
+                    author: "Orson Scott Card",
+                },
+                &[enders.clone()],
+                &[],
+                max,
+            )
+            .unwrap()
+            .guid,
+            "e"
+        );
+        assert_eq!(
+            pick(
+                &Wanted {
+                    title: "Ender’s Game",
+                    author: "Orson Scott Card",
+                },
+                &[enders],
+                &[],
+                max,
+            )
+            .unwrap()
+            .guid,
+            "e"
+        );
+        let cjk = release("c", "Liu.Cixin.Three.Body.EPUB", 80_000, 1, &[7020]);
+        assert!(pick(
+            &Wanted {
+                title: "三体",
+                author: "刘慈欣",
+            },
+            &[cjk],
+            &[],
+            max,
+        )
+        .is_none());
+        let cyrillic = release(
+            "k",
+            "Dostoevsky.Prestuplenie.i.nakazanie.EPUB",
+            80_000,
+            1,
+            &[7020],
+        );
+        assert!(pick(
+            &Wanted {
+                title: "Преступление и наказание",
+                author: "Фёдор Достоевский",
+            },
+            &[cyrillic],
+            &[],
+            max,
+        )
+        .is_none());
     }
 
     #[test]

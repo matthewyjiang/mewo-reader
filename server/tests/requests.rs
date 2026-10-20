@@ -16,6 +16,7 @@ use serde_json::{json, Value};
 use sqlx::migrate::Migrate;
 use sqlx::SqlitePool;
 use std::collections::HashMap;
+use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -110,6 +111,7 @@ struct Prowl {
     origin: String,
     key_ok: bool,
     queries: Vec<String>,
+    indexer_ids: Vec<String>,
     releases: Vec<Value>,
     redirect: bool,
     huge: bool,
@@ -119,12 +121,10 @@ struct Prowl {
 
 impl Prowl {
     fn canned(origin: &str) -> Vec<Value> {
-        vec![release(
-            origin,
-            "g1",
-            "Frank.Herbert.Dune.1965.RETAIL.EPUB",
-            10,
-        )]
+        vec![
+            json!({ "guid": 1, "title": "not a release" }),
+            release(origin, "g1", "Frank.Herbert.Dune.1965.RETAIL.EPUB", 10),
+        ]
     }
 }
 
@@ -201,6 +201,9 @@ async fn prowlarr_search(
     guard
         .queries
         .push(query.get("query").cloned().unwrap_or_default());
+    guard
+        .indexer_ids
+        .push(query.get("indexerIds").cloned().unwrap_or_default());
     if guard.redirect {
         return Ok(axum::response::Response::builder()
             .status(StatusCode::FOUND)
@@ -229,6 +232,9 @@ struct Sab {
     jobs: Vec<SabJob>,
     adds: Vec<SabAdd>,
     deletes: Vec<String>,
+    /// The `archive` query value of each delete. Real SAB leaves completed
+    /// files on disk either way.
+    archives: Vec<String>,
     status_code: u16,
     next_id: u64,
 }
@@ -268,8 +274,14 @@ async fn sab_api(
     let mode = query.get("mode").map(String::as_str).unwrap_or("");
     if query.get("name").map(String::as_str) == Some("delete") {
         let nzo = query.get("value").cloned().unwrap_or_default();
+        let archive = query.get("archive").cloned().unwrap_or_default();
         guard.deletes.push(nzo.clone());
-        guard.jobs.retain(|job| job.nzo != nzo);
+        guard.archives.push(archive.clone());
+        // archive=0 removes the history row. Anything else archives it and
+        // leaves it visible. Files on disk are never touched.
+        if archive == "0" {
+            guard.jobs.retain(|job| job.nzo != nzo);
+        }
         return Ok(Json(json!({ "status": true })));
     }
     match mode {
@@ -517,6 +529,10 @@ async fn request_happy_path() {
     assert_eq!(nzbname, format!("mewo-{id}"));
     assert_eq!(cat, "books");
     assert!(url.contains("/nzb/g1"), "{url}");
+    assert_eq!(
+        world.prowlarr.lock().await.indexer_ids,
+        vec!["-1".to_string()]
+    );
     let row = stored(&world.state.pool, &id).await;
     assert_eq!(row.state, "downloading");
     assert_eq!(row.download_id.as_deref(), Some(nzo.as_str()));
@@ -539,7 +555,14 @@ async fn request_happy_path() {
     let row = stored(&world.state.pool, &id).await;
     assert_eq!(row.state, "imported");
     assert_eq!(row.book_id.as_deref(), Some(id.as_str()));
-    assert!(world.sab.lock().await.deletes.contains(&nzo));
+    assert!(
+        !world.downloads.path().join(format!("mewo-{id}")).exists(),
+        "mewo removes the completed folder; SAB delete does not"
+    );
+    let sab = world.sab.lock().await;
+    assert!(sab.deletes.contains(&nzo));
+    assert!(!sab.archives.is_empty());
+    assert!(sab.archives.iter().all(|value| value == "0"));
 
     let (status, library) = empty_req(&world.app, "GET", "/v1/library", Some(&world.token)).await;
     assert_eq!(status, StatusCode::OK, "{library}");
@@ -652,6 +675,7 @@ async fn no_epub_or_bad_epub_retries() {
     let row = stored(&world.state.pool, &id).await;
     assert_eq!(row.state, "requested");
     assert_eq!(row.error.as_deref(), Some("No EPUB in the download."));
+    assert!(!world.downloads.path().join(format!("mewo-{id}")).exists());
 
     worker::tick_at(&world.state, now).await.unwrap();
     complete_with(&world, &id, "book.epub", b"this is text").await;
@@ -667,6 +691,7 @@ async fn no_epub_or_bad_epub_retries() {
         "{:?}",
         row.error
     );
+    assert!(!world.downloads.path().join(format!("mewo-{id}")).exists());
 
     let (status, body) = json_req(
         &world.app,
@@ -757,7 +782,7 @@ async fn crash_after_addurl_is_idempotent() {
     let row = stored(&world.state.pool, &id).await;
     assert_eq!(row.state, "downloading");
     assert_eq!(row.download_id.as_deref(), Some("already"));
-    assert_eq!(row.attempts, 0);
+    assert_eq!(row.attempts, 1);
 }
 
 #[tokio::test]
@@ -796,6 +821,125 @@ async fn crash_after_import_is_idempotent() {
 }
 
 #[tokio::test]
+async fn a_stale_book_dir_is_replaced_on_import() {
+    let world = world().await;
+    world.prowlarr.lock().await.key_ok = true;
+    let created = ask(&world, "/works/OL12W").await;
+    let id = created["id"].as_str().unwrap().to_string();
+    let now = created["createdAt"].as_i64().unwrap();
+    worker::tick_at(&world.state, now).await.unwrap();
+    let nzo = world.sab.lock().await.adds[0].nzo.clone();
+    finish_job(&world, &nzo, &format!("/data/mewo-{id}")).await;
+    write_epub(
+        &world.downloads.path().join(format!("mewo-{id}")),
+        "Dune.epub",
+        &common::epub(),
+    );
+    let dest = world
+        .state
+        .data_dir
+        .join("books")
+        .join(&world.user_id)
+        .join(&id);
+    std::fs::create_dir_all(&dest).unwrap();
+    std::fs::write(dest.join("stale.txt"), b"old").unwrap();
+    worker::tick_at(&world.state, now + POLL).await.unwrap();
+    let row = stored(&world.state.pool, &id).await;
+    assert_eq!(row.state, "imported");
+    assert!(!dest.join("stale.txt").exists());
+    assert!(dest.join("book.epub").is_file());
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn a_read_only_download_folder_stays_imported() {
+    let world = world().await;
+    world.prowlarr.lock().await.key_ok = true;
+    let created = ask(&world, "/works/OL13W").await;
+    let id = created["id"].as_str().unwrap().to_string();
+    let now = created["createdAt"].as_i64().unwrap();
+    worker::tick_at(&world.state, now).await.unwrap();
+    let nzo = world.sab.lock().await.adds[0].nzo.clone();
+    finish_job(&world, &nzo, &format!("/data/mewo-{id}")).await;
+    let folder = world.downloads.path().join(format!("mewo-{id}"));
+    write_epub(&folder, "Dune.epub", &common::epub());
+    let mut perms = std::fs::metadata(&folder).unwrap().permissions();
+    perms.set_mode(0o555);
+    std::fs::set_permissions(&folder, perms).unwrap();
+    let _restore = ModeGuard(&folder);
+
+    let buf = Arc::new(Mutex::new(Vec::<u8>::new()));
+    let writer = buf.clone();
+    let subscriber = tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::WARN)
+        .with_ansi(false)
+        .with_writer(move || LogBuf(writer.clone()))
+        .finish();
+    let _guard = tracing::subscriber::set_default(subscriber);
+    worker::tick_at(&world.state, now + POLL).await.unwrap();
+    drop(_guard);
+
+    let row = stored(&world.state.pool, &id).await;
+    assert_eq!(row.state, "imported");
+    assert!(folder.join("Dune.epub").is_file());
+    let logs = String::from_utf8(buf.lock().await.clone()).unwrap();
+    assert!(
+        logs.contains(&format!("mewo-{id}")) && logs.contains("could not remove download folder"),
+        "{logs}"
+    );
+}
+
+struct ModeGuard<'a>(&'a Path);
+
+impl Drop for ModeGuard<'_> {
+    fn drop(&mut self) {
+        if let Ok(meta) = std::fs::metadata(self.0) {
+            let mut perms = meta.permissions();
+            perms.set_mode(0o755);
+            let _ = std::fs::set_permissions(self.0, perms);
+        }
+    }
+}
+
+#[tokio::test]
+async fn catalog_upstream_failure_is_502() {
+    let data = TempDir::new().unwrap();
+    let origin = serve(Router::new().route(
+        "/search.json",
+        get(|| async { StatusCode::INTERNAL_SERVER_ERROR }),
+    ))
+    .await;
+    let state = prepare(Config {
+        listen: "127.0.0.1:0".into(),
+        data_dir: data.path().to_path_buf(),
+        web_dir: None,
+        allow_signup: true,
+        max_epub_bytes: 64 * 1024 * 1024,
+        downloads_dir: None,
+        openlibrary_url: origin,
+    })
+    .await
+    .unwrap();
+    let app = router(state.clone());
+    let token = register(&app, "matt", "password1").await;
+    grant(&state.pool, "matt").await;
+    let (status, body) = json_req(
+        &app,
+        "PATCH",
+        "/v1/admin/settings",
+        Some(&token),
+        json!({ "requestsEnabled": true }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (status, body) = empty_req(&app, "GET", "/v1/catalog/search?q=dune", Some(&token)).await;
+    assert_eq!(status, StatusCode::BAD_GATEWAY, "{body}");
+    assert_eq!(body["error"], "HTTP 500");
+    let (status, body) = empty_req(&app, "GET", "/v1/catalog/search?q=", Some(&token)).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert_eq!(body["error"], "Enter a search.");
+}
+
+#[tokio::test]
 async fn cancel_races_worker() {
     let world = world().await;
     world.prowlarr.lock().await.key_ok = true;
@@ -810,12 +954,13 @@ async fn cancel_races_worker() {
         "Dune.epub",
         &common::epub(),
     );
-    world.state.import_gate.arm();
+    let (gate, _hold) = worker::install(&world.state.data_dir);
+    gate.arm();
     let state = world.state.clone();
     let tick = tokio::spawn(async move {
         worker::tick_at(&state, now + POLL).await.unwrap();
     });
-    tokio::time::timeout(Duration::from_secs(5), world.state.import_gate.entered())
+    tokio::time::timeout(Duration::from_secs(5), gate.entered())
         .await
         .expect("worker reached the import gate");
     let (status, body) = empty_req(
@@ -826,7 +971,7 @@ async fn cancel_races_worker() {
     )
     .await;
     assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
-    world.state.import_gate.go();
+    gate.go();
     tick.await.unwrap();
     let row = stored(&world.state.pool, &id).await;
     assert_eq!(row.state, "canceled");

@@ -162,7 +162,7 @@ async fn catalog_search(
     let page = query.page.max(1);
     let (works, next_page) = openlibrary::search(&state, q, page)
         .await
-        .map_err(|err| ApiError::BadRequest(err.to_string()))?;
+        .map_err(|err| ApiError::BadGateway(err.to_string()))?;
     let mine = mine_by_work(&state.pool, &authed.user_id).await?;
     let items = works
         .into_iter()
