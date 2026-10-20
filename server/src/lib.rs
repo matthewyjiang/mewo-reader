@@ -1,4 +1,6 @@
+pub mod admin;
 pub mod auth;
+pub mod cli;
 pub mod config;
 pub mod db;
 pub mod epub;
@@ -7,6 +9,7 @@ pub mod feed;
 pub mod models;
 pub mod routes;
 mod search;
+pub mod settings;
 pub mod version;
 mod visibility;
 
@@ -14,10 +17,10 @@ mod visibility;
 #[path = "../tests/common/mod.rs"]
 mod test_epub;
 
-use crate::config::{request_body_limit, Config};
+use crate::config::{request_body_limit, Config, MAX_EPUB_BYTES_CEILING};
 use axum::extract::DefaultBodyLimit;
 use axum::routing::{any, get, post, put};
-use axum::Router;
+use axum::{Extension, Router};
 use sqlx::SqlitePool;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -34,15 +37,15 @@ pub struct AppState {
     /// Serializes legacy cache fills and search backfill for one book.
     /// Normal reads and uploads do not take this lock.
     pub lazy_parse_lock: Arc<Mutex<()>>,
-    pub allow_signup: bool,
-    pub max_epub_bytes: u64,
 }
 
 pub fn router(state: AppState) -> Router {
-    let body_limit = request_body_limit(state.max_epub_bytes);
+    let body_limit = request_body_limit(MAX_EPUB_BYTES_CEILING);
     let web_dir = state.web_dir.clone().filter(|dir| dir.is_dir());
     let api = Router::new()
         .route("/v1/version", get(routes::version))
+        .route("/v1/instance", get(routes::instance))
+        .merge(admin::router())
         .route("/v1/auth/register", post(routes::register))
         .route("/v1/auth/login", post(routes::login))
         .route("/v1/auth/logout", post(routes::logout))
@@ -87,6 +90,8 @@ pub fn router(state: AppState) -> Router {
         .route("/v1", any(api_not_found))
         .route("/v1/", any(api_not_found))
         .route("/v1/{*path}", any(api_not_found))
+        // `admin::require_admin` reads this. axum's `from_fn` cannot see `State`.
+        .layer(Extension(state.clone()))
         .layer(DefaultBodyLimit::max(body_limit))
         .layer(TraceLayer::new_for_http())
         .with_state(state);
@@ -110,13 +115,12 @@ pub async fn build(config: Config) -> Result<Router, sqlx::Error> {
         .map_err(sqlx::Error::Io)?;
     let data_dir = config.data_dir.canonicalize().map_err(sqlx::Error::Io)?;
     let pool = db::connect(&config.database_url(), &data_dir).await?;
+    settings::seed(&pool, &config).await?;
     let state = AppState {
         pool,
         data_dir,
         web_dir: config.web_dir,
         lazy_parse_lock: Arc::new(Mutex::new(())),
-        allow_signup: config.allow_signup,
-        max_epub_bytes: config.max_epub_bytes,
     };
     let backfill = state.clone();
     tokio::spawn(async move {

@@ -53,12 +53,12 @@ Runtime:
 - `MEWO_DATA_DIR` — default `data`
 - `MEWO_WEB_DIR` — unset means API only. An existing directory is served as static files, with `index.html` for other non-API paths. Relative paths are relative to the process working directory. Unknown `/v1/...` routes stay a JSON 404. From `server/`, a local web build is `MEWO_WEB_DIR=../web/dist`. The image sets `/srv/web`
 - `MEWO_DATABASE_URL` — default `sqlite://<data>/mewo.db?mode=rwc`. SQLite only
-- `MEWO_ALLOW_SIGNUP` — default on when unset. A set value is on only for `1`, `true`, `yes`, or `on` (any case). Use `false` when the server faces the internet
-- `MEWO_MAX_EPUB_BYTES` — default `67108864` (64 MiB)
+- `MEWO_ALLOW_SIGNUP` — first-boot seed only. Default on when unset. A set value is on only for `1`, `true`, `yes`, or `on` (any case). After the settings row exists, the database wins. A set variable that disagrees with the row logs one warning and is ignored
+- `MEWO_MAX_EPUB_BYTES` — first-boot seed only. Default `67108864` (64 MiB). After the settings row exists, the database wins, with the same warning. The panel accepts `1048576` to `1073741824` (1 MiB to 1 GiB)
 
 Compile-time, via `build.rs`: `MEWO_VERSION`, `MEWO_COMMIT`. See [Version and release](../README.md#version-and-release).
 
-Parsing reads at most `MAX_EPUB_TEXT_BYTES` (32 MiB) of inflated XML/XHTML per book (`src/epub.rs`). A cover is at most 4 MiB. The HTTP body limit is the EPUB cap plus 4 MiB plus 64 KiB of form fields. Over budget is a 400 or 413 that names the budget, the limit, and the asked size.
+Parsing reads at most `MAX_EPUB_TEXT_BYTES` (32 MiB) of inflated XML/XHTML per book (`src/epub.rs`). A cover is at most 4 MiB. The HTTP body limit is fixed at 1 GiB plus 4 MiB plus 64 KiB of form fields. The live EPUB cap is the settings value, checked while the upload streams. Over that cap is 413 `EPUB too large: asked N bytes, limit is N bytes`.
 
 ## Auth
 
@@ -66,17 +66,57 @@ Username and password. Argon2 hashes. Opaque bearer tokens. A session lasts unti
 
 `POST /v1/auth/register` and `POST /v1/auth/login` take `{ "username", "password" }` and return `{ "token", "username" }`. Username is 3 to 32 characters, letters, digits, underscore, unique case-insensitively. Password is 8 to 256 characters.
 
-`GET /v1/version` is public. Static web files are public. Every other `/v1` route needs `Authorization: Bearer <token>`.
+`GET /v1/version` and `GET /v1/instance` are public. Static web files are public. Every other `/v1` route needs `Authorization: Bearer <token>`, except `POST /v1/auth/register` and `POST /v1/auth/login`.
+
+## Admin
+
+`users.is_admin` is a boolean. Existing accounts stay non-admins. The CLI grants the first one. The control panel is web-only.
+
+With no arguments, `mewo-server` serves, same as today. Admin commands are the same binary and the same database (`MEWO_DATA_DIR`, default `./data`):
+
+```bash
+mewo-server admin list
+mewo-server admin grant <username>
+mewo-server admin revoke <username>
+mewo-server admin create <username>
+```
+
+`grant` and `revoke` are idempotent and exit 0. `grant` prints `<username> is an admin.` `revoke` prints `<username> is not an admin.` An unknown account exits 1 with `No account named <username>.` A bad command prints usage on stderr and exits 2. A database error exits 2.
+
+`list` prints one account per line, ordered by `created_at`. An admin line is the name padded to 8 columns, a space, then `admin`:
+
+```text
+matt     admin
+ada
+```
+
+`create` inserts an admin even when signups are off. The password comes from stdin, never from argv or the environment. On a terminal it prompts with no echo. A pipe reads one line.
+
+```bash
+kubectl -n mewo exec deploy/mewo-server -- mewo-server admin list
+kubectl -n mewo exec deploy/mewo-server -- mewo-server admin grant matt
+kubectl -n mewo exec -it deploy/mewo-server -- mewo-server admin create matt
+```
+
+Migration `006_admin.sql` adds `users.is_admin` (default 0) and the `settings` table. Snapshot `/data` before deploying it. The previous binary ignores the extra column and table, but sqlx will not start on a database whose migration it does not know, so a rollback restores that snapshot.
 
 ## Routes
 
 Prefix `/v1`.
 
 - `GET /version` → `{ "version", "commit" }`. `commit` is a string or null. Public
+- `GET /instance` → `{ "allowSignup" }`. Public. Read live from the settings row. A future `name` is one more field
 - `POST /auth/register`
 - `POST /auth/login`
 - `POST /auth/logout` → 204
-- `GET /me` → `{ "username" }`
+- `GET /me` → `{ "username", "isAdmin" }`
+- `GET /admin/settings` → `{ "allowSignup", "maxEpubBytes" }`. Admin
+- `PATCH /admin/settings` JSON object of keys to change. Returns the full settings. An empty object is 200 and changes nothing. An unknown key, a wrong type, or an out-of-range value is 400 and names the key. `maxEpubBytes` is `1048576` to `1073741824`
+- `GET /admin/users` → `{ "items": [ { "username", "joinedAt", "isAdmin", "books", "mine" } ] }`. Ordered by `created_at`. `mine` is true only on the caller. Admin
+- `PATCH /admin/users/{username}` `{ "isAdmin" }` → that row. Unknown username is 404. Your own username is 409 `You can't change your own admin access.` Idempotent. Admin
+- `GET /admin/server` → `{ "users", "books", "comments", "reposts", "storageBytes" }`. `storageBytes` is `mewo.db`, `mewo.db-wal`, and `books/`. Admin
+
+Every `/admin` route is 401 without a token and 403 `Admins only.` for a signed-in account that is not an admin. A revoke applies on the next request.
 - `GET /search?q=&type=accounts|books|posts&cursor=` → a page of 20. `q` is trimmed; empty is 400 `Enter a search.` More than 100 characters is 400 and names the limit and the asked length. `cursor` is the previous `nextCursor`. A bad cursor is 400
 - `GET /users/{username}` → `ProfileRecord`. Unknown username is 404. A username that fails the register rules is 400
 - `GET /users/{username}/posts?cursor=` → `ProfilePostsPage`, 30 replies, newest first. Unknown username is 404

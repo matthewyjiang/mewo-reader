@@ -79,6 +79,12 @@
     Library
     <Icon name="chevron" />
   </button>
+  {#if store.me?.isAdmin}
+    <button class="settings-row" onclick={() => router.go('/settings/server')}>
+      Server
+      <Icon name="chevron" />
+    </button>
+  {/if}
   <button class="settings-row" onclick={() => router.go('/settings/about')}>
     About
     <Icon name="chevron" />

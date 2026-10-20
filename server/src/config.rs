@@ -5,6 +5,13 @@ use std::path::PathBuf;
 /// 64 MiB leaves room for a heavy illustrated novel and still rejects a dump.
 pub const DEFAULT_MAX_EPUB_BYTES: u64 = 64 * 1024 * 1024;
 
+/// Lowest EPUB cap an admin can save.
+pub const MIN_EPUB_BYTES: u64 = 1024 * 1024;
+
+/// The HTTP body limit is fixed at router build. The admin-set EPUB cap is
+/// enforced per upload in `write_limited`, and this is the most it can be.
+pub const MAX_EPUB_BYTES_CEILING: u64 = 1024 * 1024 * 1024;
+
 /// Phone writes cover JPEGs at 85% quality. 4 MiB is above a large page scan
 /// and still a hard stop if someone posts a dump as "cover".
 pub const MAX_COVER_BYTES: u64 = 4 * 1024 * 1024;
@@ -24,7 +31,11 @@ pub struct Config {
     pub data_dir: PathBuf,
     /// Unset means API only. Docker sets this to /srv/web.
     pub web_dir: Option<PathBuf>,
+    /// First-boot seed. Unset env means signups are on. After the settings row
+    /// exists, the database wins and a set `MEWO_ALLOW_SIGNUP` is ignored.
     pub allow_signup: bool,
+    /// First-boot seed for the upload cap. After the settings row exists, the
+    /// database wins and a set `MEWO_MAX_EPUB_BYTES` is ignored.
     pub max_epub_bytes: u64,
 }
 

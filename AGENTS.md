@@ -42,6 +42,8 @@ Do not add a tool, assistant, or generated-by line to a commit message or a pull
 
 Try to implement new features and behavior changes on all clients, so the clients stay in parity.
 
+The server admin panel is web-only.
+
 ## Before a pull request
 
 Run the tests and a build for the components you changed before opening the pull request.

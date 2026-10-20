@@ -72,8 +72,48 @@ pub struct AuthResponse {
 }
 
 #[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct MeResponse {
     pub username: String,
+    pub is_admin: bool,
+}
+
+/// Public `GET /v1/instance`. A future `name` is one more field.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InstanceInfo {
+    pub allow_signup: bool,
+}
+
+#[derive(Debug, Serialize)]
+pub struct AdminUsers {
+    pub items: Vec<AdminUser>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AdminUser {
+    pub username: String,
+    pub joined_at: i64,
+    pub is_admin: bool,
+    pub books: i64,
+    pub mine: bool,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PatchUser {
+    pub is_admin: bool,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ServerInfo {
+    pub users: i64,
+    pub books: i64,
+    pub comments: i64,
+    pub reposts: i64,
+    pub storage_bytes: u64,
 }
 
 #[derive(Debug, Deserialize)]

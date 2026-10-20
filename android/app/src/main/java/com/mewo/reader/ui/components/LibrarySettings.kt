@@ -16,6 +16,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -31,9 +32,15 @@ import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import com.mewo.reader.data.BackendKind
+import com.mewo.reader.data.HostedClient
 import com.mewo.reader.ui.LocalBackend
 import com.mewo.reader.ui.LocalHostedAuth
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+
+/** null (still loading, or the call failed) keeps the create link. */
+internal fun showCreateAccount(allowSignup: Boolean?): Boolean = allowSignup != false
 
 private val usernamePattern = Regex("^[A-Za-z0-9_]{3,32}$")
 private const val USERNAME_RULE = "3–32 characters: letters, digits, underscore."
@@ -46,6 +53,7 @@ private enum class AuthMode { SignIn, Create }
 fun LibrarySettings(
     modifier: Modifier = Modifier,
     startOnCreate: Boolean = false,
+    signupsOpen: Boolean? = null,
 ) {
     val backend = LocalBackend.current
     val hosted = LocalHostedAuth.current
@@ -63,16 +71,36 @@ fun LibrarySettings(
             )
         }
         if (backend.kind == BackendKind.Hosted) {
-            HostedAccountForm(startOnCreate = startOnCreate)
+            HostedAccountForm(startOnCreate = startOnCreate, signupsOpen = signupsOpen)
         }
     }
 }
 
 @Composable
-private fun HostedAccountForm(startOnCreate: Boolean) {
+private fun HostedAccountForm(
+    startOnCreate: Boolean,
+    signupsOpen: Boolean?,
+) {
     val hosted = LocalHostedAuth.current
     val scope = rememberCoroutineScope()
     var mode by remember { mutableStateOf(if (startOnCreate) AuthMode.Create else AuthMode.SignIn) }
+    // A caller-supplied value (screenshots) skips the network. Otherwise null until the fetch.
+    var allowSignup by remember { mutableStateOf(signupsOpen) }
+    val baseUrl = hosted.session.baseUrl
+    if (signupsOpen == null && !hosted.session.signedIn) {
+        LaunchedEffect(baseUrl) {
+            allowSignup = null
+            val url = hosted.session.normalizedUrl() ?: return@LaunchedEffect
+            allowSignup = runCatching {
+                withContext(Dispatchers.IO) {
+                    HostedClient().instance(url).allowSignup
+                }
+            }.getOrNull()
+        }
+    }
+    if (allowSignup == false && mode == AuthMode.Create) {
+        mode = AuthMode.SignIn
+    }
     var username by remember { mutableStateOf(hosted.session.username.orEmpty()) }
     var password by remember { mutableStateOf("") }
     var busy by remember { mutableStateOf(false) }
@@ -208,22 +236,24 @@ private fun HostedAccountForm(startOnCreate: Boolean) {
                     }
                 },
             )
-            Box(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .heightIn(min = 40.dp)
-                    .clickable(enabled = !busy, role = Role.Button) {
-                        mode = if (mode == AuthMode.SignIn) AuthMode.Create else AuthMode.SignIn
-                        error = null
-                    },
-                contentAlignment = Alignment.Center,
-            ) {
-                Text(
-                    text = if (mode == AuthMode.SignIn) "Create an account" else "Sign in instead",
-                    color = MaterialTheme.colorScheme.primary,
-                    style = MaterialTheme.typography.bodyLarge,
-                    textAlign = TextAlign.Center,
-                )
+            if (mode == AuthMode.Create || showCreateAccount(allowSignup)) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .heightIn(min = 40.dp)
+                        .clickable(enabled = !busy, role = Role.Button) {
+                            mode = if (mode == AuthMode.SignIn) AuthMode.Create else AuthMode.SignIn
+                            error = null
+                        },
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Text(
+                        text = if (mode == AuthMode.SignIn) "Create an account" else "Sign in instead",
+                        color = MaterialTheme.colorScheme.primary,
+                        style = MaterialTheme.typography.bodyLarge,
+                        textAlign = TextAlign.Center,
+                    )
+                }
             }
         }
     }

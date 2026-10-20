@@ -15,6 +15,7 @@
   import Profile from './screens/Profile.svelte';
   import Reader from './screens/Reader.svelte';
   import Search from './screens/Search.svelte';
+  import Server from './screens/Server.svelte';
   import Settings from './screens/Settings.svelte';
   import { chrome } from './lib/chrome.svelte';
   import type { BookRecord, FeedPost, PostHit } from './lib/models';
@@ -66,6 +67,7 @@
       '/': 'Home', '/search': 'Search', '/likes': 'Likes', '/settings': 'Settings',
       '/settings/display': 'Display', '/settings/account': 'Account',
       '/settings/library': 'Library', '/settings/about': 'About',
+      '/settings/server': 'Server', '/settings/server/users': 'Users',
     };
     return titles[path] ?? 'Mewo';
   }
@@ -112,6 +114,7 @@
         shelfPromise = undefined;
         return;
       }
+      void store.loadMe();
       void ensureShelf(token);
     });
   });
@@ -386,6 +389,8 @@
                 onprofile={openProfile}
                 oncount={(count) => profileCount = count}
               />
+            {:else if path === '/settings/server' || path === '/settings/server/users'}
+              <Server {path} scroller={main} onprofile={openProfile} />
             {:else if settings}
               <Settings
                 {path}

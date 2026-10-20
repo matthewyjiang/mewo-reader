@@ -136,12 +136,17 @@ class SurfaceScreenshots {
 
     @Test
     fun signIn() = shoot("sign-in", signedIn = false) {
-        SettingsLibraryPage(onBack = {})
+        SettingsLibraryPage(onBack = {}, signupsOpen = true)
+    }
+
+    @Test
+    fun signInSignupsOff() = shoot("sign-in-closed", signedIn = false) {
+        SettingsLibraryPage(onBack = {}, signupsOpen = false)
     }
 
     @Test
     fun createAccount() = shoot("create-account", signedIn = false) {
-        SettingsLibraryPage(onBack = {}, startOnCreate = true)
+        SettingsLibraryPage(onBack = {}, startOnCreate = true, signupsOpen = true)
     }
 
     @Test

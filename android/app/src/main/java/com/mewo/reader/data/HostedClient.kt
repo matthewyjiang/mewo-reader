@@ -51,6 +51,12 @@ data class ServerVersion(
     val commit: String? = null,
 )
 
+/** Public `GET /v1/instance`. A future `name` is one more field. */
+@Serializable
+data class InstanceInfo(
+    val allowSignup: Boolean = true,
+)
+
 open class HostedClient(
     private val http: OkHttpClient = OkHttpClient.Builder()
         .connectTimeout(30, TimeUnit.SECONDS)
@@ -86,6 +92,15 @@ open class HostedClient(
             throw HostedException("Set a server URL first.")
         }
         val req = Request.Builder().url("$base/v1/version").get().build()
+        return http.newCall(req).execute().use { it.decode() }
+    }
+
+    /** No session. The route is public. Read live so a signup toggle shows up immediately. */
+    fun instance(baseUrl: String): InstanceInfo {
+        val base = normalizeBaseUrl(baseUrl).ifBlank {
+            throw HostedException("Set a server URL first.")
+        }
+        val req = Request.Builder().url("$base/v1/instance").get().build()
         return http.newCall(req).execute().use { it.decode() }
     }
 

@@ -1,7 +1,7 @@
 import type {
-  AuthResponse, BookRecord, CommentIndex, FeedPost, HomeFeedPage, PostComment,
-  ProfileBooks, ProfilePostsPage, ProfileRecord, ProfileRepostsPage, RepostState,
-  SearchKind, SearchPage,
+  AdminUser, AuthResponse, BookRecord, CommentIndex, FeedPost, HomeFeedPage, Me,
+  PostComment, ProfileBooks, ProfilePostsPage, ProfileRecord, ProfileRepostsPage,
+  RepostState, SearchKind, SearchPage, ServerInfo, ServerSettings,
 } from './models';
 
 export class ApiError extends Error {
@@ -68,8 +68,28 @@ export class HostedClient {
     await this.response('/auth/logout', { method: 'POST' });
   }
 
-  me(): Promise<{ username: string }> {
+  me(): Promise<Me> {
     return this.json('/me');
+  }
+
+  serverSettings(): Promise<ServerSettings> {
+    return this.json('/admin/settings');
+  }
+
+  updateServerSettings(patch: Partial<ServerSettings>): Promise<ServerSettings> {
+    return this.json('/admin/settings', 'PATCH', patch);
+  }
+
+  async adminUsers(): Promise<AdminUser[]> {
+    return (await this.json<{ items: AdminUser[] }>('/admin/users')).items;
+  }
+
+  setAdmin(username: string, isAdmin: boolean): Promise<AdminUser> {
+    return this.json(`/admin/users/${encodeURIComponent(username)}`, 'PATCH', { isAdmin });
+  }
+
+  serverInfo(): Promise<ServerInfo> {
+    return this.json('/admin/server');
   }
 
   async library(): Promise<BookRecord[]> {

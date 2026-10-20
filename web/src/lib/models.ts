@@ -113,6 +113,32 @@ export interface AuthResponse {
   username: string;
 }
 
+export interface Me {
+  username: string;
+  isAdmin: boolean;
+}
+
+export interface ServerSettings {
+  allowSignup: boolean;
+  maxEpubBytes: number;
+}
+
+export interface AdminUser {
+  username: string;
+  joinedAt: number;
+  isAdmin: boolean;
+  books: number;
+  mine: boolean;
+}
+
+export interface ServerInfo {
+  users: number;
+  books: number;
+  comments: number;
+  reposts: number;
+  storageBytes: number;
+}
+
 export interface PostHit {
   book: BookRecord;
   post: FeedPost;
