@@ -120,11 +120,26 @@ impl Matcher {
                 !precolon_names_a_sibling(title, &ctx.siblings)
             })
             .collect();
-        let wanted: Vec<Vec<String>> = titles
-            .iter()
-            .map(|title| norm_title(title))
-            .filter(|tokens| !tokens.is_empty())
-            .collect();
+        let mut wanted = Vec::new();
+        let mut keep_numbers = HashSet::new();
+        for title in &titles {
+            let words = norm(title);
+            if words.is_empty() {
+                continue;
+            }
+            // The word form stays a title option. The digit form is a second
+            // option when it differs, and it is where kept numbers come from.
+            let digits_form = fold_number_words(words.clone());
+            for token in &digits_form {
+                if digits(token) {
+                    keep_numbers.insert(token.clone());
+                }
+            }
+            if digits_form != words {
+                wanted.push(digits_form);
+            }
+            wanted.push(words);
+        }
         // Same work: the main title, the subtitle line, or an alternative.
         // The pre-colon fragment is not one of those, so it cannot drop a sibling.
         let identity: HashSet<Vec<String>> = titles
@@ -150,14 +165,6 @@ impl Matcher {
             for token in norm_words(author) {
                 if !authors.iter().any(|have: &String| have == &token) {
                     authors.push(token);
-                }
-            }
-        }
-        let mut keep_numbers = HashSet::new();
-        for tokens in &wanted {
-            for token in tokens {
-                if digits(token) {
-                    keep_numbers.insert(token.clone());
                 }
             }
         }
@@ -338,18 +345,15 @@ pub(crate) fn verify_opf(matcher: &Matcher, ctx: &WorkContext, meta: &OpfMeta) -
     }
 }
 
-/// Title text: stopwords, ordinals, and roman numerals, then number words.
-/// Edition tags stay, so "The Collector" and "The Illustrated Man" survive.
+/// Title text: stopwords, ordinals, and roman numerals. Number words stay
+/// words. Edition tags stay, so "The Collector" and "The Illustrated Man"
+/// survive. [`Matcher`] also keeps the digit form when it differs.
 pub(crate) fn norm(text: &str) -> Vec<String> {
-    fold_number_words(norm_words(text))
+    norm_words(text)
 }
 
-fn norm_title(text: &str) -> Vec<String> {
-    norm(text)
-}
-
-/// Same as [`norm`] without the number-word fold. Sibling identity uses this
-/// so "Mistborn" does not have to share a digit form with the requested title.
+/// Stopwords, ordinals, and roman numerals. Number words stay words. Sibling
+/// identity uses this so "Mistborn" does not have to share a digit form.
 fn norm_words(text: &str) -> Vec<String> {
     let folded: String = text.chars().filter_map(fold).collect();
     let mut out = Vec::new();
@@ -980,6 +984,114 @@ mod tests {
                 "Nineteen Eighty-Four",
                 &["George Orwell"][..],
                 "orwell",
+                "George Orwell - Nineteen Eighty-Four (epub)",
+                Kind::Match,
+                1.0,
+                true,
+            ),
+            (
+                "The Two Towers",
+                &["J.R.R. Tolkien"][..],
+                "",
+                "J.R.R. Tolkien - The Two Towers (epub)",
+                Kind::Match,
+                1.0,
+                true,
+            ),
+            (
+                "The Two Towers",
+                &["J.R.R. Tolkien"][..],
+                "",
+                "J.R.R. Tolkien - The 2 Towers (epub)",
+                Kind::Match,
+                1.0,
+                true,
+            ),
+            (
+                "One Hundred Years of Solitude",
+                &["Gabriel Garcia Marquez"][..],
+                "",
+                "Gabriel Garcia Marquez - One Hundred Years of Solitude (epub)",
+                Kind::Match,
+                1.0,
+                true,
+            ),
+            (
+                "One Hundred Years of Solitude",
+                &["Gabriel Garcia Marquez"][..],
+                "",
+                "Gabriel Garcia Marquez - 100 Years of Solitude (epub)",
+                Kind::Match,
+                1.0,
+                true,
+            ),
+            (
+                "The Three-Body Problem",
+                &["Liu Cixin"][..],
+                "",
+                "Liu Cixin - The Three-Body Problem (epub)",
+                Kind::Match,
+                1.0,
+                true,
+            ),
+            (
+                "The Three-Body Problem",
+                &["Liu Cixin"][..],
+                "",
+                "Liu Cixin - Three Body Problem (epub)",
+                Kind::Match,
+                1.0,
+                true,
+            ),
+            (
+                "The Three-Body Problem",
+                &["Liu Cixin"][..],
+                "",
+                "Liu Cixin - The 3-Body Problem (epub)",
+                Kind::Match,
+                1.0,
+                true,
+            ),
+            (
+                "Three Body Problem",
+                &["Liu Cixin"][..],
+                "",
+                "Liu Cixin - Three Body Problem (epub)",
+                Kind::Match,
+                1.0,
+                true,
+            ),
+            (
+                "Three Body Problem",
+                &["Liu Cixin"][..],
+                "",
+                "Liu Cixin - 3 Body Problem (epub)",
+                Kind::Match,
+                1.0,
+                true,
+            ),
+            (
+                "Slaughterhouse-Five",
+                &["Kurt Vonnegut"][..],
+                "",
+                "Kurt Vonnegut - Slaughterhouse-Five (epub)",
+                Kind::Match,
+                1.0,
+                true,
+            ),
+            (
+                "Slaughterhouse-Five",
+                &["Kurt Vonnegut"][..],
+                "",
+                "Kurt Vonnegut - Slaughterhouse 5 (epub)",
+                Kind::Match,
+                1.0,
+                true,
+            ),
+            (
+                "Nineteen Eighty-Four",
+                &["George Orwell"][..],
+                "orwell",
                 "George Orwell - Animal Farm 1945 (epub)",
                 Kind::NotTitle,
                 0.0,
@@ -1321,16 +1433,31 @@ mod tests {
 
     #[test]
     fn nineteen_eighty_four_folds_to_digits() {
-        assert_eq!(norm("Nineteen Eighty-Four"), vec!["1984".to_string()]);
+        assert_eq!(
+            norm("Nineteen Eighty-Four"),
+            vec![
+                "nineteen".to_string(),
+                "eighty".to_string(),
+                "four".to_string()
+            ]
+        );
         let matcher = Matcher::new(&ctx(
             "Nineteen Eighty-Four",
             &["George Orwell"],
             titles("orwell.json"),
         ));
-        assert!(matches!(
-            matcher.judge("George Orwell - 1984 (retail) (epub)"),
-            Verdict::Match { fit, author_seen: true } if near(fit, 1.0)
-        ));
+        for release in [
+            "George Orwell - Nineteen Eighty-Four (epub)",
+            "George Orwell - 1984 (retail) (epub)",
+        ] {
+            assert!(
+                matches!(
+                    matcher.judge(release),
+                    Verdict::Match { fit, author_seen: true } if near(fit, 1.0)
+                ),
+                "{release}"
+            );
+        }
     }
 
     #[test]

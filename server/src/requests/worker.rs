@@ -320,7 +320,9 @@ async fn requested(
     };
     let ctx = match openlibrary::work_context(state, &row.work_key).await {
         Ok(ctx) => ctx,
-        Err(err) => return open_library_or_give_up(state, row, "requested", &err, now_ms).await,
+        Err(err) => {
+            return open_library_or_give_up(state, row, "requested", &err, now_ms, None).await
+        }
     };
     let matcher = Matcher::new(&ctx);
     let releases = match clients.prowlarr.search(&pick::query(&wanted)).await {
@@ -531,7 +533,17 @@ async fn completed(
     };
     let ctx = match openlibrary::work_context(state, &row.work_key).await {
         Ok(ctx) => ctx,
-        Err(err) => return open_library_or_give_up(state, row, "downloading", &err, now_ms).await,
+        Err(err) => {
+            return open_library_or_give_up(
+                state,
+                row,
+                "downloading",
+                &err,
+                now_ms,
+                Some((sab, nzo, dir.as_path())),
+            )
+            .await
+        }
     };
     let matcher = Matcher::new(&ctx);
     let files = list_epubs(dir.clone()).await?;
@@ -665,9 +677,29 @@ async fn open_library_or_give_up(
     from: &str,
     err: &UpstreamError,
     now_ms: i64,
+    download: Option<(&Sabnzbd<'_>, &str, &Path)>,
 ) -> Result<(), ApiError> {
     let message = format!("Open Library: {err}");
     if row.created_at < now_ms.saturating_sub(GIVE_UP_MS) {
+        // Same cleanup as `retry_or_fail`: a failed download must not leave
+        // the SAB job or the completed folder behind.
+        if let Some((sab, nzo, dir)) = download {
+            if !nzo.is_empty() {
+                if let Err(delete_err) = sab.delete(nzo).await {
+                    tracing::error!(error = %delete_err, "sab delete failed");
+                    return hold(
+                        &state.pool,
+                        &row.id,
+                        "downloading",
+                        "SABnzbd",
+                        &delete_err,
+                        now_ms,
+                    )
+                    .await;
+                }
+            }
+            remove_download(dir).await;
+        }
         return fail_from(&state.pool, &row.id, from, &message, now_ms).await;
     }
     hold(&state.pool, &row.id, from, "Open Library", err, now_ms).await

@@ -1961,6 +1961,46 @@ async fn open_library_gives_up_after_fourteen_days() {
     let row = stored(&world.state.pool, id).await;
     assert_eq!(row.state, "failed");
     assert_eq!(row.error.as_deref(), Some("Open Library: HTTP 500"));
+    assert!(world.sab.lock().await.deletes.is_empty());
+
+    let created = ask(&world, "/works/OL41W").await;
+    let id = created["id"].as_str().unwrap().to_string();
+    let now = created["createdAt"].as_i64().unwrap();
+    world.sab.lock().await.jobs.push(SabJob {
+        nzo: "expired".into(),
+        name: format!("mewo-{id}"),
+        status: "Downloading".into(),
+        percent: 0,
+        storage: String::new(),
+        fail_message: String::new(),
+        in_queue: true,
+    });
+    worker::tick_at(&world.state, now).await.unwrap();
+    assert_eq!(
+        stored(&world.state.pool, &id).await.download_id.as_deref(),
+        Some("expired")
+    );
+    finish_job(&world, "expired", &format!("/data/mewo-{id}")).await;
+    write_epub(
+        &world.downloads.path().join(format!("mewo-{id}")),
+        "Dune.epub",
+        &common::epub(),
+    );
+    worker::tick_at(&world.state, now + 14 * DAY + 1)
+        .await
+        .unwrap();
+    let row = stored(&world.state.pool, &id).await;
+    assert_eq!(row.state, "failed");
+    assert_eq!(row.error.as_deref(), Some("Open Library: HTTP 500"));
+    assert!(row.download_id.is_none());
+    assert!(world
+        .sab
+        .lock()
+        .await
+        .deletes
+        .iter()
+        .any(|nzo| nzo == "expired"));
+    assert!(!world.downloads.path().join(format!("mewo-{id}")).exists());
 }
 
 #[tokio::test]
