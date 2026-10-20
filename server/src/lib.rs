@@ -6,7 +6,9 @@ pub mod db;
 pub mod epub;
 pub mod error;
 pub mod feed;
+mod library;
 pub mod models;
+pub mod requests;
 pub mod routes;
 mod search;
 pub mod settings;
@@ -24,7 +26,7 @@ use axum::{Extension, Router};
 use sqlx::SqlitePool;
 use std::path::PathBuf;
 use std::sync::Arc;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, Notify};
 use tower_http::compression::CompressionLayer;
 use tower_http::services::{ServeDir, ServeFile};
 use tower_http::trace::TraceLayer;
@@ -37,6 +39,15 @@ pub struct AppState {
     /// Serializes legacy cache fills and search backfill for one book.
     /// Normal reads and uploads do not take this lock.
     pub lazy_parse_lock: Arc<Mutex<()>>,
+    pub(crate) upstream: requests::http::Upstream,
+    /// `MEWO_DOWNLOADS_DIR`. Completed folders are read only from here.
+    pub downloads_dir: Option<PathBuf>,
+    pub openlibrary_url: String,
+    /// Wakes the request worker. Create and retry call `notify_one`.
+    pub worker: Arc<Notify>,
+    /// Disarmed in production. Tests arm it to cancel between stage and import.
+    pub import_gate: Arc<requests::worker::ImportGate>,
+    pub(crate) catalog_limit: Arc<requests::Limiter>,
 }
 
 pub fn router(state: AppState) -> Router {
@@ -45,6 +56,7 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/version", get(routes::version))
         .route("/v1/instance", get(routes::instance))
         .merge(admin::router())
+        .merge(requests::router())
         .route("/v1/auth/register", post(routes::register))
         .route("/v1/auth/login", post(routes::login))
         .route("/v1/auth/logout", post(routes::logout))
@@ -113,22 +125,38 @@ async fn api_not_found() -> error::ApiError {
     error::ApiError::NotFound
 }
 
-pub async fn build(config: Config) -> Result<Router, sqlx::Error> {
+/// Pool, migrations, and settings, without the background loops. Request tests
+/// call this and step [`requests::worker::tick`] themselves so the loop cannot
+/// race a tick.
+pub async fn prepare(config: Config) -> Result<AppState, sqlx::Error> {
     tokio::fs::create_dir_all(&config.data_dir)
         .await
         .map_err(sqlx::Error::Io)?;
     let data_dir = config.data_dir.canonicalize().map_err(sqlx::Error::Io)?;
     let pool = db::connect(&config.database_url(), &data_dir).await?;
     settings::seed(&pool, &config).await?;
-    let state = AppState {
+    let upstream = requests::http::Upstream::new()
+        .map_err(|message| sqlx::Error::Configuration(std::io::Error::other(message).into()))?;
+    Ok(AppState {
         pool,
         data_dir,
         web_dir: config.web_dir,
         lazy_parse_lock: Arc::new(Mutex::new(())),
-    };
+        upstream,
+        downloads_dir: config.downloads_dir,
+        openlibrary_url: config.openlibrary_url,
+        worker: Arc::new(Notify::new()),
+        import_gate: Arc::new(requests::worker::ImportGate::new()),
+        catalog_limit: Arc::new(requests::Limiter::new()),
+    })
+}
+
+pub async fn build(config: Config) -> Result<Router, sqlx::Error> {
+    let state = prepare(config).await?;
     let backfill = state.clone();
     tokio::spawn(async move {
         search::backfill(backfill).await;
     });
+    requests::worker::spawn(state.clone());
     Ok(router(state))
 }

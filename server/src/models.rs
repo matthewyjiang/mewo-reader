@@ -76,6 +76,8 @@ pub struct AuthResponse {
 pub struct MeResponse {
     pub username: String,
     pub is_admin: bool,
+    /// Catalog search and book requests are on. Every signed-in account.
+    pub can_request: bool,
 }
 
 /// Public `GET /v1/instance`. A future `name` is one more field.

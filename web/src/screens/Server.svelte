@@ -22,6 +22,14 @@
   let mb = $state('');
   let saving = $state(false);
   let generation = 0;
+  let prowlarrUrl = $state('');
+  let sabUrl = $state('');
+  let category = $state('books');
+  let prowlarrKey = $state('');
+  let sabKey = $state('');
+  let checks = $state<{ name: string; ok: boolean; detail: string }[] | null>(null);
+  let testing = $state(false);
+  let requestCount = $state<number | null>(null);
 
   function mbField(bytes: number): string {
     const value = bytesToMb(bytes);
@@ -56,7 +64,13 @@
       settings = nextSettings;
       info = nextInfo;
       mb = mbField(nextSettings.maxEpubBytes);
+      prowlarrUrl = nextSettings.prowlarrUrl ?? '';
+      sabUrl = nextSettings.sabnzbdUrl ?? '';
+      category = nextSettings.sabnzbdCategory || 'books';
+      prowlarrKey = '';
+      sabKey = '';
       status = 'ready';
+      void loadRequestCount(nextSettings.requestsEnabled === true);
     } catch (error) {
       if (ticket !== generation) return;
       if (error instanceof ApiError && error.status === 403) {
@@ -66,6 +80,106 @@
       store.notice = message(error);
       status = 'denied';
     }
+  }
+
+  async function loadRequestCount(enabled: boolean): Promise<void> {
+    if (!enabled) {
+      requestCount = 0;
+      return;
+    }
+    try {
+      requestCount = (await store.api.requests(true)).length;
+    } catch {
+      requestCount = null;
+    }
+  }
+
+  async function saveText(
+    key: 'prowlarrUrl' | 'sabnzbdUrl' | 'sabnzbdCategory',
+    value: string,
+  ): Promise<void> {
+    if (!settings || saving) return;
+    const current = settings[key] ?? (key === 'sabnzbdCategory' ? 'books' : '');
+    if (value === current) return;
+    saving = true;
+    try {
+      settings = await store.api.updateServerSettings({ [key]: value });
+    } catch (error) {
+      if (key === 'prowlarrUrl') prowlarrUrl = settings.prowlarrUrl ?? '';
+      if (key === 'sabnzbdUrl') sabUrl = settings.sabnzbdUrl ?? '';
+      if (key === 'sabnzbdCategory') category = settings.sabnzbdCategory || 'books';
+      store.notice = message(error);
+    } finally {
+      saving = false;
+    }
+  }
+
+  async function saveKey(which: 'prowlarrApiKey' | 'sabnzbdApiKey', value: string): Promise<void> {
+    const trimmed = value.trim();
+    if (!trimmed || !settings || saving) return;
+    saving = true;
+    try {
+      settings = await store.api.updateServerSettings({ [which]: trimmed });
+      if (which === 'prowlarrApiKey') prowlarrKey = '';
+      else sabKey = '';
+    } catch (error) {
+      store.notice = message(error);
+    } finally {
+      saving = false;
+    }
+  }
+
+  async function clearKey(which: 'prowlarrApiKey' | 'sabnzbdApiKey'): Promise<void> {
+    const draft = which === 'prowlarrApiKey' ? prowlarrKey : sabKey;
+    if (draft) {
+      if (which === 'prowlarrApiKey') prowlarrKey = '';
+      else sabKey = '';
+      return;
+    }
+    if (!settings?.secrets?.[which] || saving) return;
+    saving = true;
+    try {
+      settings = await store.api.updateServerSettings({ [which]: null });
+    } catch (error) {
+      store.notice = message(error);
+    } finally {
+      saving = false;
+    }
+  }
+
+  async function setRequests(enabled: boolean): Promise<void> {
+    if (!settings || saving || enabled === (settings.requestsEnabled === true)) return;
+    const previous = settings;
+    settings = { ...settings, requestsEnabled: enabled };
+    saving = true;
+    try {
+      settings = await store.api.updateServerSettings({ requestsEnabled: enabled });
+      void loadRequestCount(settings.requestsEnabled === true);
+    } catch (error) {
+      settings = previous;
+      store.notice = message(error);
+    } finally {
+      saving = false;
+    }
+  }
+
+  async function testConnection(): Promise<void> {
+    if (testing) return;
+    testing = true;
+    try {
+      checks = (await store.api.testRequests()).checks;
+    } catch (error) {
+      store.notice = message(error);
+    } finally {
+      testing = false;
+    }
+  }
+
+  function checkName(name: string): string {
+    if (name === 'prowlarr') return 'Prowlarr';
+    if (name === 'sabnzbd') return 'SABnzbd';
+    if (name === 'downloads') return 'Downloads folder';
+    return name;
   }
 
   async function setSignup(allow: boolean): Promise<void> {
@@ -179,6 +293,129 @@
       <span class="unit">MB</span>
     </span>
   </label>
+  <h2 class="section-label">Book requests</h2>
+  <label class="switch-row">
+    <span>Requests</span>
+    <input
+      type="checkbox"
+      role="switch"
+      checked={settings.requestsEnabled === true}
+      disabled={saving}
+      onchange={(event) => setRequests(event.currentTarget.checked)}
+    />
+  </label>
+  <label class="settings-row text-row">
+    <span>Prowlarr URL</span>
+    <input
+      class="text-field"
+      value={prowlarrUrl}
+      autocomplete="off"
+      spellcheck="false"
+      disabled={saving}
+      oninput={(event) => prowlarrUrl = event.currentTarget.value}
+      onblur={() => saveText('prowlarrUrl', prowlarrUrl.trim())}
+    />
+  </label>
+  <label class="settings-row text-row">
+    <span>Prowlarr API key</span>
+    <span class="secret-wrap">
+      <input
+        class="text-field"
+        type="password"
+        value={prowlarrKey}
+        placeholder={settings.secrets?.prowlarrApiKey && !prowlarrKey ? 'Saved' : ''}
+        autocomplete="off"
+        spellcheck="false"
+        disabled={saving}
+        oninput={(event) => prowlarrKey = event.currentTarget.value}
+        onblur={() => saveKey('prowlarrApiKey', prowlarrKey)}
+      />
+      {#if settings.secrets?.prowlarrApiKey || prowlarrKey}
+        <button
+          class="icon-button"
+          type="button"
+          aria-label="Clear Prowlarr API key"
+          onmousedown={(event) => event.preventDefault()}
+          onclick={() => clearKey('prowlarrApiKey')}
+        >
+          <Icon name="close" size={16} />
+        </button>
+      {/if}
+    </span>
+  </label>
+  <label class="settings-row text-row">
+    <span>SABnzbd URL</span>
+    <input
+      class="text-field"
+      value={sabUrl}
+      autocomplete="off"
+      spellcheck="false"
+      disabled={saving}
+      oninput={(event) => sabUrl = event.currentTarget.value}
+      onblur={() => saveText('sabnzbdUrl', sabUrl.trim())}
+    />
+  </label>
+  <label class="settings-row text-row">
+    <span>SABnzbd API key</span>
+    <span class="secret-wrap">
+      <input
+        class="text-field"
+        type="password"
+        value={sabKey}
+        placeholder={settings.secrets?.sabnzbdApiKey && !sabKey ? 'Saved' : ''}
+        autocomplete="off"
+        spellcheck="false"
+        disabled={saving}
+        oninput={(event) => sabKey = event.currentTarget.value}
+        onblur={() => saveKey('sabnzbdApiKey', sabKey)}
+      />
+      {#if settings.secrets?.sabnzbdApiKey || sabKey}
+        <button
+          class="icon-button"
+          type="button"
+          aria-label="Clear SABnzbd API key"
+          onmousedown={(event) => event.preventDefault()}
+          onclick={() => clearKey('sabnzbdApiKey')}
+        >
+          <Icon name="close" size={16} />
+        </button>
+      {/if}
+    </span>
+  </label>
+  <label class="settings-row text-row">
+    <span>SABnzbd category</span>
+    <input
+      class="text-field"
+      value={category}
+      autocomplete="off"
+      spellcheck="false"
+      disabled={saving}
+      oninput={(event) => category = event.currentTarget.value}
+      onblur={() => saveText('sabnzbdCategory', category.trim())}
+    />
+  </label>
+  <div class="fact-row">
+    <span>Downloads folder</span>
+    <span>{settings.downloadsDir ?? 'Not set'}</span>
+  </div>
+  <button class="settings-row" disabled={testing} onclick={() => testConnection()}>
+    {testing ? 'Testing…' : 'Test connection'}
+  </button>
+  {#if checks}
+    {#each checks as check (check.name)}
+      <div class="fact-row">
+        <span>{checkName(check.name)}</span>
+        <span class:error={!check.ok}>{check.detail}</span>
+      </div>
+    {/each}
+  {/if}
+  <button class="settings-row" onclick={() => router.go('/settings/requests?all=1')}>
+    <span>Requests</span>
+    <span class="row-trail">
+      {#if requestCount != null}<span class="count">{requestCount}</span>{/if}
+      <Icon name="chevron" />
+    </span>
+  </button>
   <button class="settings-row" onclick={() => router.go('/settings/server/users')}>
     <span>Users</span>
     <span class="row-trail">
@@ -263,6 +500,49 @@
   align-items: center;
   gap: 8px;
   font-weight: 400;
+}
+
+.text-row > span:first-child {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.text-field {
+  width: 100%;
+  min-width: 0;
+  height: 36px;
+  padding: 0 8px;
+  color: var(--ink);
+  background: var(--ground);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  font: inherit;
+  font-weight: 400;
+}
+
+.secret-wrap {
+  flex: 1 1 8rem;
+  min-width: 0;
+  max-width: 16rem;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.text-row > .text-field,
+.secret-wrap .text-field {
+  flex: 1 1 8rem;
+  max-width: 16rem;
+}
+
+.secret-wrap .icon-button {
+  width: 32px;
+  height: 32px;
+  flex: 0 0 32px;
+  color: var(--mute);
 }
 
 .epub-field input {

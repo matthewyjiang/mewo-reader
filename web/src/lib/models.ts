@@ -49,12 +49,40 @@ export interface AccountHit {
   mine: boolean;
 }
 
-export type SearchKind = 'accounts' | 'books' | 'posts';
+export type SearchKind = 'accounts' | 'books' | 'posts' | 'catalog';
+
+export type RequestStateName = 'requested' | 'downloading' | 'imported' | 'failed' | 'canceled';
+
+export interface BookRequest {
+  id: string;
+  workKey: string;
+  title: string;
+  author: string;
+  year: number | null;
+  coverId: number | null;
+  state: RequestStateName;
+  progress: number;
+  error: string | null;
+  bookId: string | null;
+  requester: string;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface CatalogWork {
+  workKey: string;
+  title: string;
+  author: string;
+  year: number | null;
+  coverId: number | null;
+  request: BookRequest | null;
+}
 
 export type SearchPage =
   | { type: 'accounts'; items: AccountHit[]; nextCursor: string | null }
   | { type: 'books'; items: BookRecord[]; nextCursor: string | null }
-  | { type: 'posts'; items: PostHit[]; nextCursor: string | null };
+  | { type: 'posts'; items: PostHit[]; nextCursor: string | null }
+  | { type: 'catalog'; items: CatalogWork[]; nextCursor: string | null };
 
 export interface ProfileRecord {
   username: string;
@@ -116,12 +144,25 @@ export interface AuthResponse {
 export interface Me {
   username: string;
   isAdmin: boolean;
+  canRequest: boolean;
 }
 
 export interface ServerSettings {
   allowSignup: boolean;
   maxEpubBytes: number;
+  requestsEnabled: boolean;
+  prowlarrUrl: string;
+  sabnzbdUrl: string;
+  sabnzbdCategory: string;
+  /** From `MEWO_DOWNLOADS_DIR`. Not a setting; PATCH rejects it. */
+  downloadsDir: string | null;
+  secrets: { prowlarrApiKey: boolean; sabnzbdApiKey: boolean };
 }
+
+export type SettingsPatch = Partial<Omit<ServerSettings, 'secrets' | 'downloadsDir'>> & {
+  prowlarrApiKey?: string | null;
+  sabnzbdApiKey?: string | null;
+};
 
 export interface AdminUser {
   username: string;

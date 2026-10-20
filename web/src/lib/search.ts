@@ -1,6 +1,7 @@
 import type { SearchKind, SearchPage } from './models';
 
 export const SEARCH_DEBOUNCE_MS = 250;
+export const CATALOG_DEBOUNCE_MS = 300;
 
 /** Nothing to ask yet. An empty field is this, not "No matches". */
 export interface SearchIdle {
@@ -71,6 +72,9 @@ export function concatPages(current: SearchPage, next: SearchPage): SearchPage {
   }
   if (current.type === 'posts' && next.type === 'posts') {
     return { type: 'posts', items: [...current.items, ...next.items], nextCursor: next.nextCursor };
+  }
+  if (current.type === 'catalog' && next.type === 'catalog') {
+    return { type: 'catalog', items: [...current.items, ...next.items], nextCursor: next.nextCursor };
   }
   return next;
 }
@@ -188,7 +192,7 @@ export class SearchModel {
       this.timer = undefined;
       if (generation !== this.generation) return;
       void this.run(generation, session, query, kind, cursor);
-    }, SEARCH_DEBOUNCE_MS);
+    }, kind === 'catalog' ? CATALOG_DEBOUNCE_MS : SEARCH_DEBOUNCE_MS);
   }
 
   private async run(

@@ -15,6 +15,7 @@
   import Profile from './screens/Profile.svelte';
   import Reader from './screens/Reader.svelte';
   import Search from './screens/Search.svelte';
+  import Requests from './screens/Requests.svelte';
   import Server from './screens/Server.svelte';
   import Settings from './screens/Settings.svelte';
   import { chrome } from './lib/chrome.svelte';
@@ -69,6 +70,7 @@
       '/settings/display': 'Display', '/settings/account': 'Account',
       '/settings/library': 'Library', '/settings/about': 'About',
       '/settings/server': 'Server', '/settings/server/users': 'Users',
+      '/settings/requests': 'Requests',
     };
     return titles[path] ?? 'Mewo';
   }
@@ -401,6 +403,8 @@
               />
             {:else if path === '/settings/server' || path === '/settings/server/users'}
               <Server {path} scroller={main} onprofile={openProfile} />
+            {:else if path === '/settings/requests'}
+              <Requests scroller={main} />
             {:else if settings}
               <Settings
                 {path}

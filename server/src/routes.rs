@@ -5,6 +5,7 @@ use crate::config::MAX_COVER_BYTES;
 use crate::db::now_ms;
 use crate::error::ApiError;
 use crate::feed::{slug, Post, Posts};
+use crate::library::{self, Staged};
 use crate::models::{
     ActorRecord, AuthRequest, AuthResponse, BookRecord, BookRow, CommentIndex, CommentRecord,
     CommentRow, CommentThread, FeedItem, FeedPage, InstanceInfo, LibrarySnapshot, LikeSet,
@@ -106,11 +107,16 @@ pub async fn logout(
     Ok(axum::http::StatusCode::NO_CONTENT)
 }
 
-pub async fn me(authed: Authed) -> Json<MeResponse> {
-    Json(MeResponse {
+pub async fn me(
+    State(state): State<AppState>,
+    authed: Authed,
+) -> Result<Json<MeResponse>, ApiError> {
+    let settings = crate::settings::load(&state.pool).await?;
+    Ok(Json(MeResponse {
         username: authed.username,
         is_admin: authed.is_admin,
-    })
+        can_request: crate::requests::can_request(&settings),
+    }))
 }
 
 pub async fn library(
@@ -137,80 +143,18 @@ pub async fn upload_book(
     authed: Authed,
     multipart: Multipart,
 ) -> Result<Json<BookRecord>, ApiError> {
-    let parsed = read_upload(&state, multipart).await?;
-    if parsed.is_sample {
-        if let Some(existing) = existing_sample(&state, &authed.user_id).await? {
-            let _ = tokio::fs::remove_dir_all(&parsed.temp_dir).await;
-            return Ok(Json(existing));
-        }
-    }
-    let id = Uuid::new_v4().to_string();
-    let imported_at = now_ms();
-    let dest = book_dir(&state.data_dir, &authed.user_id, &id);
-    tokio::fs::create_dir_all(dest.parent().ok_or(ApiError::Internal)?).await?;
-    // The complete EPUB, cover and posts cache become visible together.
-    tokio::fs::rename(&parsed.temp_dir, &dest).await?;
-
-    let inserted = sqlx::query(
-        "INSERT INTO books
-         (id, user_id, title, author, handle, imported_at, post_count, progress_index, is_sample)
-         VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?)",
+    let staged = read_upload(&state, multipart).await?;
+    let book = library::import(
+        &state,
+        &library::Owner {
+            user_id: &authed.user_id,
+            username: &authed.username,
+        },
+        library::NewId::Random,
+        staged,
     )
-    .bind(&id)
-    .bind(&authed.user_id)
-    .bind(&parsed.title)
-    .bind(&parsed.author)
-    .bind(&parsed.handle)
-    .bind(imported_at)
-    .bind(parsed.post_count)
-    .bind(if parsed.is_sample { 1 } else { 0 })
-    .execute(&state.pool)
-    .await;
-
-    match inserted {
-        Ok(_) => {}
-        Err(sqlx::Error::Database(err)) if err.is_unique_violation() && parsed.is_sample => {
-            let _ = tokio::fs::remove_dir_all(&dest).await;
-            let existing = existing_sample(&state, &authed.user_id)
-                .await?
-                .ok_or(ApiError::NotFound)?;
-            return Ok(Json(existing));
-        }
-        Err(err) => {
-            let _ = tokio::fs::remove_dir_all(&dest).await;
-            return Err(err.into());
-        }
-    }
-
-    sqlx::query("INSERT INTO book_progress (user_id, book_id, progress_index) VALUES (?, ?, 0)")
-        .bind(&authed.user_id)
-        .bind(&id)
-        .execute(&state.pool)
-        .await?;
-
-    if let Err(err) = search::store_feed(&state.pool, &dest, &id, &parsed.posts).await {
-        let _ = sqlx::query("DELETE FROM books WHERE id = ? AND user_id = ?")
-            .bind(&id)
-            .bind(&authed.user_id)
-            .execute(&state.pool)
-            .await;
-        let _ = tokio::fs::remove_dir_all(&dest).await;
-        return Err(err);
-    }
-
-    Ok(Json(BookRecord {
-        id,
-        title: parsed.title,
-        author: parsed.author,
-        handle: parsed.handle,
-        imported_at,
-        post_count: parsed.post_count,
-        progress_index: 0,
-        is_sample: parsed.is_sample,
-        mine: true,
-        shared: false,
-        owner_username: authed.username,
-    }))
+    .await?;
+    Ok(Json(book))
 }
 
 pub async fn get_book(
@@ -353,7 +297,7 @@ async fn fill_posts(
     if let Some(bytes) = search::read_posts(dir).await? {
         return Ok(bytes);
     }
-    let parsed = parse_epub(dir.join("book.epub")).await?;
+    let parsed = library::parse_epub(dir.join("book.epub")).await?;
     search::store_feed(
         &state.pool,
         dir,
@@ -363,16 +307,6 @@ async fn fill_posts(
         },
     )
     .await
-}
-
-async fn parse_epub(path: PathBuf) -> Result<crate::epub::ParsedEpub, ApiError> {
-    tokio::task::spawn_blocking(move || crate::epub::parse_file(&path, MAX_COVER_BYTES))
-        .await
-        .map_err(|err| {
-            tracing::error!(error = %err, "EPUB parser task failed");
-            ApiError::Internal
-        })?
-        .map_err(|reason| ApiError::BadRequest(format!("Could not read that EPUB: {reason}")))
 }
 
 pub async fn list_likes(
@@ -1298,17 +1232,6 @@ async fn visible_book(state: &AppState, user_id: &str, id: &str) -> Result<BookR
     row.ok_or(ApiError::NotFound)
 }
 
-async fn existing_sample(state: &AppState, user_id: &str) -> Result<Option<BookRecord>, ApiError> {
-    let row = sqlx::query_as::<_, BookRow>(&format!(
-        "{BOOK_SELECT} WHERE b.is_sample = 1 AND {BOOK_VISIBLE_TO} ORDER BY b.imported_at ASC LIMIT 1"
-    ))
-    .bind(user_id)
-    .bind(user_id)
-    .fetch_optional(&state.pool)
-    .await?;
-    Ok(row.map(|row| row.into_record(user_id)))
-}
-
 fn parse_post_id(post_id: &str) -> Result<String, ApiError> {
     if post_id.is_empty() {
         return Err(ApiError::BadRequest("Post id is required.".into()));
@@ -1408,17 +1331,7 @@ fn book_dir(data_dir: &std::path::Path, user_id: &str, book_id: &str) -> PathBuf
     data_dir.join("books").join(user_id).join(book_id)
 }
 
-struct ParsedUpload {
-    title: String,
-    author: String,
-    handle: String,
-    is_sample: bool,
-    post_count: i32,
-    posts: Posts,
-    temp_dir: PathBuf,
-}
-
-async fn read_upload(state: &AppState, mut multipart: Multipart) -> Result<ParsedUpload, ApiError> {
+async fn read_upload(state: &AppState, mut multipart: Multipart) -> Result<Staged, ApiError> {
     let max_epub_bytes = crate::settings::load(&state.pool).await?.max_epub_bytes;
     let temp_dir = state.data_dir.join("tmp").join(Uuid::new_v4().to_string());
     tokio::fs::create_dir_all(&temp_dir).await?;
@@ -1469,7 +1382,7 @@ async fn read_upload(state: &AppState, mut multipart: Multipart) -> Result<Parse
         return Err(ApiError::BadRequest("EPUB file is required.".into()));
     };
     let result = async {
-        let parsed = parse_epub(epub_path).await?;
+        let parsed = library::parse_epub(epub_path).await?;
         let title = title
             .filter(|s| !s.is_empty())
             .or(parsed.title)
@@ -1492,7 +1405,7 @@ async fn read_upload(state: &AppState, mut multipart: Multipart) -> Result<Parse
                 parsed.posts.len()
             ))
         })?;
-        Ok(ParsedUpload {
+        Ok(Staged {
             title,
             author,
             handle,
