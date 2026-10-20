@@ -30,3 +30,10 @@ SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
 CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
 OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
+# Outbound HTTP
+
+Book requests call Prowlarr, SABnzbd, and Open Library through reqwest 0.12
+built with rustls and webpki-roots (no native TLS stack). reqwest, rustls,
+and tokio are MIT OR Apache-2.0. webpki-roots is MPL-2.0. The runtime image
+does not install CA certificates; the webpki root set is compiled in.

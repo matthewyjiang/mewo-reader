@@ -226,6 +226,8 @@ mod tests {
             web_dir: None,
             allow_signup: false,
             max_epub_bytes: MIN_EPUB_BYTES,
+            downloads_dir: None,
+            openlibrary_url: "https://openlibrary.org".into(),
         }
     }
 

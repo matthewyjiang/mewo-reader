@@ -43,6 +43,12 @@ pub struct Config {
     /// First-boot seed for the upload cap. After the settings row exists, the
     /// database wins and a set `MEWO_MAX_EPUB_BYTES` is ignored.
     pub max_epub_bytes: u64,
+    /// Completed SABnzbd category folder. Unset means requests can be configured
+    /// but the worker will not import. Not a setting: a panel field would be an
+    /// arbitrary-directory read.
+    pub downloads_dir: Option<PathBuf>,
+    /// Open Library origin. Tests point this at a local fake.
+    pub openlibrary_url: String,
 }
 
 impl Config {
@@ -58,6 +64,10 @@ impl Config {
             .and_then(|v| v.parse().ok())
             .unwrap_or(DEFAULT_MAX_EPUB_BYTES);
         let listen = std::env::var("MEWO_LISTEN").unwrap_or_else(|_| "0.0.0.0:8787".into());
+        let openlibrary_url = std::env::var("MEWO_OPENLIBRARY_URL")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| "https://openlibrary.org".into());
         Self {
             listen,
             data_dir,
@@ -66,6 +76,10 @@ impl Config {
                 .map(PathBuf::from),
             allow_signup,
             max_epub_bytes,
+            downloads_dir: std::env::var_os("MEWO_DOWNLOADS_DIR")
+                .filter(|v| !v.is_empty())
+                .map(PathBuf::from),
+            openlibrary_url,
         }
     }
 

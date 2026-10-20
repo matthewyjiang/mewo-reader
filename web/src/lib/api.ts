@@ -1,7 +1,8 @@
 import type {
-  AdminUser, AuthResponse, BookRecord, CommentIndex, FeedPost, HomeFeedPage, Me,
-  PostComment, ProfileBooks, ProfilePostsPage, ProfileRecord, ProfileRepostsPage,
-  RepostState, SearchKind, SearchPage, ServerInfo, ServerSettings,
+  AdminUser, AuthResponse, BookRecord, BookRequest, CatalogWork, CommentIndex, FeedPost,
+  HomeFeedPage, Me, PostComment, ProfileBooks, ProfilePostsPage, ProfileRecord,
+  ProfileRepostsPage, RepostState, SearchKind, SearchPage, ServerInfo, ServerSettings,
+  SettingsPatch,
 } from './models';
 
 export class ApiError extends Error {
@@ -76,7 +77,7 @@ export class HostedClient {
     return this.json('/admin/settings');
   }
 
-  updateServerSettings(patch: Partial<ServerSettings>): Promise<ServerSettings> {
+  updateServerSettings(patch: SettingsPatch): Promise<ServerSettings> {
     return this.json('/admin/settings', 'PATCH', patch);
   }
 
@@ -162,7 +163,12 @@ export class HostedClient {
     return (await this.json<{ comments: PostComment[] }>(path, 'DELETE')).comments;
   }
 
-  search(q: string, type: SearchKind, cursor?: string | null, signal?: AbortSignal): Promise<SearchPage> {
+  search(
+    q: string,
+    type: Exclude<SearchKind, 'catalog'>,
+    cursor?: string | null,
+    signal?: AbortSignal,
+  ): Promise<SearchPage> {
     const params = new URLSearchParams({ q, type });
     if (cursor) params.set('cursor', cursor);
     return this.json(`/search?${params}`, 'GET', undefined, signal);
@@ -186,6 +192,41 @@ export class HostedClient {
 
   userBooks(username: string, signal?: AbortSignal): Promise<ProfileBooks> {
     return this.json(this.userPath(username, '/books'), 'GET', undefined, signal);
+  }
+
+  catalog(
+    q: string,
+    page: number,
+    signal?: AbortSignal,
+  ): Promise<{ items: CatalogWork[]; nextPage: number | null }> {
+    const params = new URLSearchParams({ q, page: String(page) });
+    return this.json(`/catalog/search?${params}`, 'GET', undefined, signal);
+  }
+
+  requestBook(work: CatalogWork): Promise<BookRequest> {
+    return this.json('/requests', 'POST', {
+      workKey: work.workKey,
+      title: work.title,
+      author: work.author,
+      year: work.year,
+      coverId: work.coverId,
+    });
+  }
+
+  async requests(all = false): Promise<BookRequest[]> {
+    return (await this.json<{ items: BookRequest[] }>(`/requests${all ? '?all=1' : ''}`)).items;
+  }
+
+  async cancelRequest(id: string): Promise<void> {
+    await this.response(`/requests/${encodeURIComponent(id)}`, { method: 'DELETE' });
+  }
+
+  retryRequest(id: string): Promise<BookRequest> {
+    return this.json(`/requests/${encodeURIComponent(id)}/retry`, 'POST');
+  }
+
+  testRequests(): Promise<{ checks: { name: string; ok: boolean; detail: string }[] }> {
+    return this.json('/admin/requests/test', 'POST');
   }
 
   homeFeed(cursor?: string | null, signal?: AbortSignal): Promise<HomeFeedPage> {

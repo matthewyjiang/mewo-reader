@@ -2,12 +2,12 @@ use crate::auth::{check_password, hash_password, normalize_username, Authed};
 use crate::db::now_ms;
 use crate::error::ApiError;
 use crate::models::{AdminUser, AdminUsers, PatchUser, ServerInfo};
-use crate::settings::{self, Settings};
+use crate::settings::{self, AdminSettings};
 use crate::AppState;
 use axum::extract::{Extension, FromRequestParts, Path, Request, State};
 use axum::middleware::{self, Next};
 use axum::response::Response;
-use axum::routing::{get, patch};
+use axum::routing::{get, patch, post};
 use axum::Json;
 use axum::Router;
 use serde_json::Value;
@@ -40,6 +40,7 @@ pub(crate) fn router() -> Router<AppState> {
         .route("/v1/admin/users", get(list_users))
         .route("/v1/admin/users/{username}", patch(patch_user))
         .route("/v1/admin/server", get(server_info))
+        .route("/v1/admin/requests/test", post(test_requests))
         .route_layer(middleware::from_fn(require_admin))
 }
 
@@ -67,15 +68,18 @@ async fn require_admin(request: Request, next: Next) -> Result<Response, ApiErro
     Ok(next.run(Request::from_parts(parts, body)).await)
 }
 
-async fn get_settings(State(state): State<AppState>) -> Result<Json<Settings>, ApiError> {
-    Ok(Json(settings::load(&state.pool).await?))
+async fn get_settings(State(state): State<AppState>) -> Result<Json<AdminSettings>, ApiError> {
+    Ok(Json(with_downloads(
+        settings::load_admin(&state.pool).await?,
+        &state,
+    )))
 }
 
 async fn patch_settings(
     State(state): State<AppState>,
     Extension(admin): Extension<Admin>,
     body: Result<Json<Value>, axum::extract::rejection::JsonRejection>,
-) -> Result<Json<Settings>, ApiError> {
+) -> Result<Json<AdminSettings>, ApiError> {
     let Json(value) =
         body.map_err(|_| ApiError::BadRequest("Settings patch must be a JSON object.".into()))?;
     let Some(patch) = value.as_object().cloned() else {
@@ -83,9 +87,24 @@ async fn patch_settings(
             "Settings patch must be a JSON object.".into(),
         ));
     };
-    Ok(Json(
+    Ok(Json(with_downloads(
         settings::update(&state.pool, patch, &admin.user_id).await?,
-    ))
+        &state,
+    )))
+}
+
+fn with_downloads(mut view: AdminSettings, state: &AppState) -> AdminSettings {
+    view.downloads_dir = state
+        .downloads_dir
+        .as_ref()
+        .map(|path| path.display().to_string());
+    view
+}
+
+async fn test_requests(
+    State(state): State<AppState>,
+) -> Result<Json<crate::requests::Checks>, ApiError> {
+    crate::requests::test_connection(&state).await
 }
 
 async fn list_users(

@@ -55,6 +55,8 @@ Runtime:
 - `MEWO_DATABASE_URL` — default `sqlite://<data>/mewo.db?mode=rwc`. SQLite only
 - `MEWO_ALLOW_SIGNUP` — first-boot seed only. Default on when unset. A set value is on only for `1`, `true`, `yes`, or `on` (any case). After the settings row exists, the database wins. A set variable that disagrees with the row logs one warning and is ignored
 - `MEWO_MAX_EPUB_BYTES` — first-boot seed only. Default `67108864` (64 MiB). A seed outside 1 MiB to 1 GiB is clamped into that range, with one warning that names the variable. After the settings row exists, the database wins. A set variable that disagrees with the row logs one warning and is ignored. The panel accepts 1 to 1024 MB
+- `MEWO_DOWNLOADS_DIR` — completed SABnzbd folders are read only from here. Unset means a request can be created but the worker will not import. The path is not a setting: `GET /v1/admin/settings` reports it as `downloadsDir` (or null), and `PATCH` rejects that key. A folder is imported only when its canonical path stays inside this directory and its name is `mewo-<request id>` or `mewo-<request id>.<n>`
+- `MEWO_OPENLIBRARY_URL` — catalog search base. Default `https://openlibrary.org`. Empty is the same as unset
 
 Compile-time, via `build.rs`: `MEWO_VERSION`, `MEWO_COMMIT`. See [Version and release](../README.md#version-and-release).
 
@@ -100,6 +102,18 @@ kubectl -n mewo exec -it deploy/mewo-server -- mewo-server admin create matt
 
 Migration `006_admin.sql` adds `users.is_admin` (default 0) and the `settings` table. Snapshot `/data` before deploying it. The previous binary ignores the extra column and table, but sqlx will not start on a database whose migration it does not know, so a rollback restores that snapshot.
 
+Migration `007_requests.sql` adds `book_requests` and `settings.secrets` (default `{}`). Snapshot `/data` before deploying it, same as 006.
+
+## Requests
+
+Settings > Server has a Book requests group. It stays off until an admin sets the Prowlarr URL, the SABnzbd URL, both API keys, and turns Requests on. `MEWO_DOWNLOADS_DIR` has to be set or completed jobs are not imported. Catalog search then shows on Search, and Settings > Requests lists the signed-in account's requests.
+
+A request searches Prowlarr for usenet releases in ebook category 7020 (`indexerIds=-1`, 90 second timeout). Other upstream calls keep a 20 second timeout. Prowlarr's grab endpoint is never called. The chosen NZB URL is sent to SABnzbd `addurl` with `nzbname=mewo-<request id>` and the configured category (`books` by default). When that job completes, the folder under `MEWO_DOWNLOADS_DIR` named `mewo-<id>` or `mewo-<id>.<n>` is imported as a private book (`shared` false) whose id is the request id. mewo then deletes that folder. SABnzbd history delete is sent with `archive=0`; `del_files=1` does not remove a completed download. The catalog title and author win over the EPUB's own metadata. Catalog search calls Open Library at most once a second.
+
+Each account can have 5 active requests (`requested` or `downloading`), and one active request per Open Library work. No release for 14 days, or three failed downloads, marks the request failed. Retry is for failed or canceled requests. Cancel removes the SABnzbd job when there is one.
+
+API keys live in `settings.secrets`, not in the settings document. `GET` never returns them. `PATCH` accepts `prowlarrApiKey` and `sabnzbdApiKey` as a string of at most 256 characters, or `null` to clear.
+
 ## Routes
 
 Prefix `/v1`.
@@ -109,9 +123,18 @@ Prefix `/v1`.
 - `POST /auth/register`
 - `POST /auth/login`
 - `POST /auth/logout` → 204
-- `GET /me` → `{ "username", "isAdmin" }`
-- `GET /admin/settings` → `{ "allowSignup", "maxEpubBytes" }`. Admin
-- `PATCH /admin/settings` JSON object of keys to change. Returns the full settings. An empty object is 200 and changes nothing. An unknown key, a wrong type, or an out-of-range value is 400 and names the key. `maxEpubBytes` must be 1 to 1024 MB (`maxEpubBytes must be 1 to 1024 MB.`)
+- `GET /me` → `{ "username", "isAdmin", "canRequest" }`. `canRequest` is true when book requests are enabled
+- `GET /admin/settings` → `{ "allowSignup", "maxEpubBytes", "requestsEnabled", "prowlarrUrl", "sabnzbdUrl", "sabnzbdCategory", "downloadsDir", "secrets": { "prowlarrApiKey", "sabnzbdApiKey" } }`. The secret fields are booleans (set or not). `downloadsDir` is the `MEWO_DOWNLOADS_DIR` path, or null. Admin
+- `PATCH /admin/settings` JSON object of keys to change. Returns the full settings. An empty object is 200 and changes nothing. An unknown key, a wrong type, or an out-of-range value is 400 and names the key. `maxEpubBytes` must be 1 to 1024 MB (`maxEpubBytes must be 1 to 1024 MB.`). `prowlarrApiKey` and `sabnzbdApiKey` are a string or `null` and are not echoed back. `downloadsDir` is rejected
+- `GET /catalog/search?q=&page=` → `{ "items": [ { "workKey", "title", "author", "year", "coverId", "request" } ], "nextPage" }`. `request` is a book request or null. Empty `q` is 400 `Enter a search.` Page size is 20. 403 `Requests are off.` when requests are disabled. An Open Library failure is 502
+- `POST /requests` `{ "workKey", "title", "author", "year", "coverId" }` → the book request, 201, or 200 when this account already has an active request for that work. 409 `You have 5 requests in progress.` `workKey` must start with `/works/`. 403 when requests are off
+- `GET /requests?all=` → `{ "items": [ BookRequest ] }`, newest first. `all=1` is admins only, otherwise 403 `Admins only.` 403 when requests are off
+- `DELETE /requests/{id}` → 204. Owner or admin. Anyone else is 404. An imported request is 409 `That book is on your shelf.`
+- `POST /requests/{id}/retry` → the book request. Failed or canceled only; otherwise 409 `Only a failed or canceled request can be retried.`
+- `POST /admin/requests/test` → `{ "checks": [ { "name": "prowlarr" | "sabnzbd" | "downloads", "ok", "detail" } ] }`. 200 even when a check fails. Admin, including while requests are off
+
+A book request is `{ "id", "workKey", "title", "author", "year", "coverId", "state", "progress", "error", "bookId", "requester", "createdAt", "updatedAt" }`. `state` is `requested`, `downloading`, `imported`, `failed`, or `canceled`.
+
 - `GET /admin/users` → `{ "items": [ { "username", "joinedAt", "isAdmin", "books", "mine" } ] }`. Ordered by `created_at`. `mine` is true only on the caller. Admin
 - `PATCH /admin/users/{username}` `{ "isAdmin" }` → that row. Unknown username is 404. Your own username is 409 `You can't change your own admin access.` A body that is not a JSON object (wrong type, unknown field, or non-JSON) is 400 `User patch must be a JSON object.` Idempotent. Admin
 - `GET /admin/server` → `{ "users", "books", "comments", "reposts", "storageBytes" }`. `storageBytes` is `mewo.db`, `mewo.db-wal`, and `books/`. Admin

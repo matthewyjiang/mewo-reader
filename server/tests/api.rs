@@ -24,6 +24,8 @@ async fn app_with(allow_signup: bool, max_epub_bytes: u64) -> (axum::Router, Tem
         web_dir: None,
         allow_signup,
         max_epub_bytes,
+        downloads_dir: None,
+        openlibrary_url: "https://openlibrary.org".into(),
     };
     let router = build(config).await.unwrap();
     (router, tmp)
@@ -118,6 +120,8 @@ fn config_at(path: &Path, allow_signup: bool, max_epub_bytes: u64) -> Config {
         web_dir: None,
         allow_signup,
         max_epub_bytes,
+        downloads_dir: None,
+        openlibrary_url: "https://openlibrary.org".into(),
     }
 }
 
@@ -902,6 +906,8 @@ async fn static_history_fallback_does_not_swallow_unknown_api_routes() {
         web_dir: Some(web),
         allow_signup: true,
         max_epub_bytes: 1024 * 1024,
+        downloads_dir: None,
+        openlibrary_url: "https://openlibrary.org".into(),
     })
     .await
     .unwrap();
@@ -2183,6 +2189,8 @@ async fn backfill_indexes_unindexed_books_once() {
         web_dir: None,
         allow_signup: true,
         max_epub_bytes: 1024 * 1024,
+        downloads_dir: None,
+        openlibrary_url: "https://openlibrary.org".into(),
     };
     let app = build(config.clone()).await.unwrap();
     let pool = open_db(tmp.path()).await;
@@ -3061,6 +3069,8 @@ async fn backfill_lets_writers_through() {
         web_dir: None,
         allow_signup: true,
         max_epub_bytes: 1024 * 1024,
+        downloads_dir: None,
+        openlibrary_url: "https://openlibrary.org".into(),
     };
     let app = build(config).await.unwrap();
     let pool = open_db(tmp.path()).await;
@@ -3330,6 +3340,8 @@ async fn backfill_skips_an_unreadable_epub_after_recording_it() {
         web_dir: None,
         allow_signup: true,
         max_epub_bytes: 1024 * 1024,
+        downloads_dir: None,
+        openlibrary_url: "https://openlibrary.org".into(),
     };
     let _app = build(config.clone()).await.unwrap();
     let pool = open_db(tmp.path()).await;
@@ -3535,6 +3547,7 @@ async fn admin_routes_require_admin() {
             Some(json!({ "isAdmin": false })),
         ),
         ("GET", "/v1/admin/server", None),
+        ("POST", "/v1/admin/requests/test", None),
     ];
     for (method, path, body) in cases {
         let (status, response) = match &body {

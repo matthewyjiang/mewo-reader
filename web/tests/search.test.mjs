@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { SearchModel, SEARCH_DEBOUNCE_MS, showNoMatches } from '../src/lib/search.ts';
+import { CATALOG_DEBOUNCE_MS, SearchModel, SEARCH_DEBOUNCE_MS, showNoMatches } from '../src/lib/search.ts';
 
 function deferred() {
   let resolve;
@@ -9,7 +9,7 @@ function deferred() {
   return { promise, resolve, reject };
 }
 
-function harness(session = 'token') {
+function harness(session = 'token', kind = 'accounts') {
   const timers = [];
   const calls = [];
   let pending = deferred();
@@ -30,7 +30,7 @@ function harness(session = 'token') {
       if (index >= 0) timers.splice(index, 1);
     },
     session,
-    'accounts',
+    kind,
   );
   return {
     model,
@@ -39,7 +39,7 @@ function harness(session = 'token') {
     replace() { pending = deferred(); },
     fire() {
       const id = timers.shift();
-      assert.equal(id.ms, SEARCH_DEBOUNCE_MS);
+      assert.equal(id.ms, kind === 'catalog' ? CATALOG_DEBOUNCE_MS : SEARCH_DEBOUNCE_MS);
       id.fn();
     },
     settle(page) {
@@ -116,4 +116,14 @@ test('an error keeps the previous page and retry asks again', async () => {
   await settle({ type: 'accounts', items: [{ username: 'bea', mine: false }], nextCursor: null });
   assert.equal(model.state.phase.status, 'loaded');
   assert.equal(model.state.phase.page.items[0].username, 'bea');
+});
+
+test('catalog search waits 300ms and the other tabs stay at 250ms', () => {
+  const accounts = harness();
+  accounts.model.setQuery('ada');
+  assert.equal(accounts.timers[0].ms, SEARCH_DEBOUNCE_MS);
+  const catalog = harness('token', 'catalog');
+  catalog.model.setQuery('dune');
+  assert.equal(catalog.timers[0].ms, CATALOG_DEBOUNCE_MS);
+  assert.equal(CATALOG_DEBOUNCE_MS, 300);
 });

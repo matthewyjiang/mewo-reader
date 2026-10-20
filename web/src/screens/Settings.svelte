@@ -79,6 +79,12 @@
     Library
     <Icon name="chevron" />
   </button>
+  {#if store.me?.canRequest}
+    <button class="settings-row" onclick={() => router.go('/settings/requests')}>
+      Requests
+      <Icon name="chevron" />
+    </button>
+  {/if}
   {#if store.me?.isAdmin}
     <button class="settings-row" onclick={() => router.go('/settings/server')}>
       Server

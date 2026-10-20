@@ -4,7 +4,7 @@ use crate::error::ApiError;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use sqlx::SqlitePool;
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 
 /// Server-wide settings an admin edits from the web app. This struct is the
 /// only list of settings. JSON keys, defaults, validation and the PATCH
@@ -19,6 +19,64 @@ pub struct Settings {
     pub allow_signup: bool,
     #[serde(default = "default_max_epub_bytes")]
     pub max_epub_bytes: u64,
+    /// Master switch for catalog search and requests. Default false.
+    #[serde(default = "default_requests_enabled")]
+    pub requests_enabled: bool,
+    /// "" = not configured. http/https only, no userinfo/query/fragment, ≤ 512 chars.
+    #[serde(default = "default_url")]
+    pub prowlarr_url: String,
+    #[serde(default = "default_url")]
+    pub sabnzbd_url: String,
+    /// SAB category; its folder under complete_dir must be the MEWO_DOWNLOADS_DIR mount.
+    #[serde(default = "default_sabnzbd_category")]
+    pub sabnzbd_category: String,
+}
+
+fn default_requests_enabled() -> bool {
+    false
+}
+
+fn default_url() -> String {
+    String::new()
+}
+
+fn default_sabnzbd_category() -> String {
+    "books".into()
+}
+
+/// Credentials an admin can set but never read back. The variants are the only
+/// list of secret keys: PATCH accepts their camelCase names, GET reports
+/// `secrets: { name: is_set }`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Secret {
+    ProwlarrApiKey,
+    SabnzbdApiKey,
+}
+
+impl Secret {
+    pub const ALL: [Secret; 2] = [Secret::ProwlarrApiKey, Secret::SabnzbdApiKey];
+
+    pub fn key(self) -> &'static str {
+        match self {
+            Secret::ProwlarrApiKey => "prowlarrApiKey",
+            Secret::SabnzbdApiKey => "sabnzbdApiKey",
+        }
+    }
+}
+
+/// Wire type for GET/PATCH /v1/admin/settings. Settings flattened, plus which
+/// secrets are set. No secret value is reachable from this type.
+///
+/// `downloads_dir` is the `MEWO_DOWNLOADS_DIR` path. It is not stored and PATCH
+/// rejects it: a writable path would let an admin point the importer at any
+/// directory. The handler fills it in after load/update.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AdminSettings {
+    #[serde(flatten)]
+    pub settings: Settings,
+    pub secrets: BTreeMap<&'static str, bool>,
+    pub downloads_dir: Option<String>,
 }
 
 fn default_allow_signup() -> bool {
@@ -34,6 +92,10 @@ impl Default for Settings {
         Self {
             allow_signup: default_allow_signup(),
             max_epub_bytes: default_max_epub_bytes(),
+            requests_enabled: default_requests_enabled(),
+            prowlarr_url: default_url(),
+            sabnzbd_url: default_url(),
+            sabnzbd_category: default_sabnzbd_category(),
         }
     }
 }
@@ -44,6 +106,7 @@ impl Settings {
         Self {
             allow_signup: config.allow_signup,
             max_epub_bytes: config.max_epub_bytes,
+            ..Self::default()
         }
     }
 
@@ -53,7 +116,41 @@ impl Settings {
         if self.max_epub_bytes < MIN_EPUB_BYTES || self.max_epub_bytes > MAX_EPUB_BYTES_CEILING {
             return Err(ApiError::BadRequest(max_epub_message()));
         }
+        check_base("prowlarrUrl", &self.prowlarr_url)?;
+        check_base("sabnzbdUrl", &self.sabnzbd_url)?;
+        check_category(&self.sabnzbd_category)?;
         Ok(())
+    }
+}
+
+fn check_base(key: &str, raw: &str) -> Result<(), ApiError> {
+    if raw.is_empty() {
+        return Ok(());
+    }
+    if raw.chars().count() > 512 {
+        return Err(ApiError::BadRequest(format!(
+            "{key} must be 512 characters or fewer."
+        )));
+    }
+    if crate::requests::http::base_url(raw).is_err() {
+        return Err(ApiError::BadRequest(format!(
+            "{key} must be an http or https URL."
+        )));
+    }
+    Ok(())
+}
+
+fn check_category(raw: &str) -> Result<(), ApiError> {
+    let ok = (1..=32).contains(&raw.len())
+        && raw
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_' || b == b'-');
+    if ok {
+        Ok(())
+    } else {
+        Err(ApiError::BadRequest(
+            "sabnzbdCategory must be 1 to 32 of a-z, 0-9, \"_\" or \"-\".".into(),
+        ))
     }
 }
 
@@ -81,7 +178,7 @@ pub async fn seed(pool: &SqlitePool, config: &Config) -> Result<(), sqlx::Error>
     let raw = Settings::seed(config);
     let seeded = Settings {
         max_epub_bytes: clamp_epub_bytes(raw.max_epub_bytes),
-        ..raw
+        ..raw.clone()
     };
     let doc = serde_json::to_string(&seeded).map_err(json_error)?;
     let inserted = sqlx::query(
@@ -138,14 +235,12 @@ pub async fn load(pool: &SqlitePool) -> Result<Settings, ApiError> {
     }
 }
 
-/// JSON merge patch over the stored doc, applied in one transaction:
-///   1. reject keys not in `serde_json::to_value(Settings::default())` → 400
-///   2. merge into the current doc, deserialize (type errors → 400 naming the key)
-///   3. validate → 400
-///   4. UPDATE settings SET doc, updated_at, updated_by WHERE id = 1
-///
-/// Returns the saved Settings. An empty patch is a no-op that still returns the
-/// current settings (with an out-of-range max read as clamped, and not written).
+/// JSON merge patch over the stored doc and the secrets column, in one
+/// transaction. Settings keys merge into `doc` as before. Secret keys (a string
+/// of at most 256 characters, or null to clear) merge into `secrets`. An unknown
+/// key is 400 and names neither set. An empty patch is a no-op that still
+/// returns the current settings (an out-of-range max is clamped in the response
+/// and not written).
 ///
 /// `BEGIN IMMEDIATE` takes the write lock up front. A deferred transaction can
 /// lose the upgrade to a concurrent CLI write and surface as 500.
@@ -153,25 +248,158 @@ pub async fn update(
     pool: &SqlitePool,
     patch: Map<String, Value>,
     by_user_id: &str,
-) -> Result<Settings, ApiError> {
+) -> Result<AdminSettings, ApiError> {
     let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
     let doc: String = sqlx::query_scalar("SELECT doc FROM settings WHERE id = 1")
+        .fetch_one(&mut *tx)
+        .await?;
+    let secrets_raw: String = sqlx::query_scalar("SELECT secrets FROM settings WHERE id = 1")
         .fetch_one(&mut *tx)
         .await?;
     if patch.is_empty() {
         let mut settings = decode_settings(&doc)?;
         settings.max_epub_bytes = clamp_epub_bytes(settings.max_epub_bytes);
-        return Ok(settings);
+        return Ok(admin_settings(settings, &secrets_raw));
     }
-    let (settings, next) = apply_patch(&doc, &patch)?;
-    sqlx::query("UPDATE settings SET doc = ?, updated_at = ?, updated_by = ? WHERE id = 1")
-        .bind(&next)
+    let (doc_patch, secret_patch) = split_patch(&patch)?;
+    let (settings, next_doc) = if doc_patch.is_empty() {
+        let mut settings = decode_settings(&doc)?;
+        settings.max_epub_bytes = clamp_epub_bytes(settings.max_epub_bytes);
+        (settings, None)
+    } else {
+        let (settings, next) = apply_patch(&doc, &doc_patch)?;
+        (settings, Some(next))
+    };
+    let next_secrets = apply_secrets(&secrets_raw, &secret_patch)?;
+    if next_doc.is_some() || !secret_patch.is_empty() {
+        sqlx::query(
+            "UPDATE settings
+             SET doc = COALESCE(?, doc), secrets = ?, updated_at = ?, updated_by = ?
+             WHERE id = 1",
+        )
+        .bind(next_doc.as_deref())
+        .bind(&next_secrets)
         .bind(now_ms())
         .bind(by_user_id)
         .execute(&mut *tx)
         .await?;
+    }
     tx.commit().await?;
-    Ok(settings)
+    Ok(admin_settings(settings, &next_secrets))
+}
+
+/// The admin wire view. `downloads_dir` is left empty; the route fills it from
+/// the process env so this column never becomes a setting.
+pub async fn load_admin(pool: &SqlitePool) -> Result<AdminSettings, ApiError> {
+    let row =
+        sqlx::query_as::<_, (String, String)>("SELECT doc, secrets FROM settings WHERE id = 1")
+            .fetch_optional(pool)
+            .await?;
+    let Some((doc, secrets_raw)) = row else {
+        return Ok(admin_settings(Settings::default(), "{}"));
+    };
+    let mut settings = decode_settings(&doc)?;
+    settings.max_epub_bytes = clamp_epub_bytes(settings.max_epub_bytes);
+    Ok(admin_settings(settings, &secrets_raw))
+}
+
+/// For the worker and the test route only. `None` means not set.
+pub(crate) async fn secret(pool: &SqlitePool, which: Secret) -> Result<Option<String>, ApiError> {
+    let raw: Option<String> = sqlx::query_scalar("SELECT secrets FROM settings WHERE id = 1")
+        .fetch_optional(pool)
+        .await?;
+    let Some(raw) = raw else {
+        return Ok(None);
+    };
+    Ok(secret_value(&raw, which))
+}
+
+fn admin_settings(settings: Settings, secrets_raw: &str) -> AdminSettings {
+    AdminSettings {
+        settings,
+        secrets: secret_flags(secrets_raw),
+        downloads_dir: None,
+    }
+}
+
+fn secret_flags(raw: &str) -> BTreeMap<&'static str, bool> {
+    Secret::ALL
+        .into_iter()
+        .map(|secret| {
+            let set = secret_value(raw, secret).is_some();
+            (secret.key(), set)
+        })
+        .collect()
+}
+
+fn secret_value(raw: &str, which: Secret) -> Option<String> {
+    let Ok(value) = serde_json::from_str::<Map<String, Value>>(raw) else {
+        return None;
+    };
+    value
+        .get(which.key())
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+}
+
+type PatchMaps = (Map<String, Value>, Map<String, Value>);
+
+fn split_patch(patch: &Map<String, Value>) -> Result<PatchMaps, ApiError> {
+    let known = known_keys()?;
+    let mut doc = Map::new();
+    let mut secrets = Map::new();
+    for (key, value) in patch {
+        if Secret::ALL.iter().any(|secret| secret.key() == key) {
+            secrets.insert(key.clone(), value.clone());
+        } else if known.contains(key) {
+            doc.insert(key.clone(), value.clone());
+        } else {
+            return Err(ApiError::BadRequest(format!("Unknown setting \"{key}\".")));
+        }
+    }
+    Ok((doc, secrets))
+}
+
+fn apply_secrets(raw: &str, patch: &Map<String, Value>) -> Result<String, ApiError> {
+    let mut stored: Map<String, Value> = if raw.trim().is_empty() {
+        Map::new()
+    } else {
+        serde_json::from_str(raw).map_err(|err| {
+            tracing::error!(error = %err, "settings secrets are not json");
+            ApiError::Internal
+        })?
+    };
+    for (key, value) in patch {
+        match value {
+            Value::Null => {
+                stored.remove(key);
+            }
+            Value::String(text) => {
+                let text = text.trim();
+                if text.chars().count() > 256 {
+                    return Err(ApiError::BadRequest(format!("{key} is too long.")));
+                }
+                if text.is_empty() {
+                    stored.remove(key);
+                } else {
+                    stored.insert(key.clone(), Value::String(text.to_string()));
+                }
+            }
+            _ => {
+                return Err(ApiError::BadRequest(format!("{key} is the wrong type.")));
+            }
+        }
+    }
+    // Drop anything that is not a known secret string, so a bad row can't grow.
+    stored.retain(|key, value| {
+        Secret::ALL.iter().any(|secret| secret.key() == key) && value.is_string()
+    });
+    serde_json::to_string(&stored).map_err(|err| {
+        tracing::error!(error = %err, "settings secrets could not be encoded");
+        ApiError::Internal
+    })
 }
 
 fn apply_patch(doc: &str, patch: &Map<String, Value>) -> Result<(Settings, String), ApiError> {
@@ -307,10 +535,12 @@ mod tests {
         let stored = Settings {
             allow_signup: true,
             max_epub_bytes: DEFAULT_MAX_EPUB_BYTES,
+            ..Settings::default()
         };
         let seeded = Settings {
             allow_signup: false,
             max_epub_bytes: 32 * 1024 * 1024,
+            ..Settings::default()
         };
         assert!(ignored_env_lines(&stored, &stored, true, true).is_empty());
         assert_eq!(
@@ -327,7 +557,7 @@ mod tests {
         assert!(ignored_env_lines(&stored, &seeded, false, false).is_empty());
         let huge = Settings {
             max_epub_bytes: 5 * 1024 * 1024 * 1024,
-            ..stored
+            ..stored.clone()
         };
         assert_eq!(
             ignored_env_lines(&stored, &huge, false, true),
@@ -346,6 +576,8 @@ mod tests {
             web_dir: None,
             allow_signup: false,
             max_epub_bytes: 5_000_000,
+            downloads_dir: None,
+            openlibrary_url: "https://openlibrary.org".into(),
         };
         seed(&pool, &config).await.unwrap();
         let first: String = sqlx::query_scalar("SELECT doc FROM settings WHERE id = 1")
@@ -384,6 +616,8 @@ mod tests {
             web_dir: None,
             allow_signup: true,
             max_epub_bytes,
+            downloads_dir: None,
+            openlibrary_url: "https://openlibrary.org".into(),
         }
     }
 
@@ -444,8 +678,8 @@ mod tests {
         let mut signup = Map::new();
         signup.insert("allowSignup".to_string(), Value::Bool(false));
         let saved = update(&pool, signup, "user").await.unwrap();
-        assert!(!saved.allow_signup);
-        assert_eq!(saved.max_epub_bytes, MIN_EPUB_BYTES);
+        assert!(!saved.settings.allow_signup);
+        assert_eq!(saved.settings.max_epub_bytes, MIN_EPUB_BYTES);
         let healed: String = sqlx::query_scalar("SELECT doc FROM settings WHERE id = 1")
             .fetch_one(&pool)
             .await
@@ -472,7 +706,7 @@ mod tests {
         assert!(unchanged.contains("\"maxEpubBytes\":0"), "{unchanged}");
 
         let empty = update(&pool, Map::new(), "user").await.unwrap();
-        assert_eq!(empty.max_epub_bytes, MIN_EPUB_BYTES);
+        assert_eq!(empty.settings.max_epub_bytes, MIN_EPUB_BYTES);
         let after_empty: String = sqlx::query_scalar("SELECT doc FROM settings WHERE id = 1")
             .fetch_one(&pool)
             .await

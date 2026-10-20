@@ -19,6 +19,8 @@ pub enum ApiError {
     PayloadTooLarge { asked: u64, limit: u64 },
     #[error("Request body is too large.")]
     RequestTooLarge,
+    #[error("{0}")]
+    BadGateway(String),
     #[error("Internal error.")]
     Internal,
 }
@@ -62,6 +64,7 @@ impl IntoResponse for ApiError {
             ApiError::PayloadTooLarge { .. } | ApiError::RequestTooLarge => {
                 StatusCode::PAYLOAD_TOO_LARGE
             }
+            ApiError::BadGateway(_) => StatusCode::BAD_GATEWAY,
             ApiError::Internal => StatusCode::INTERNAL_SERVER_ERROR,
         };
         let body = Json(ErrorBody {
