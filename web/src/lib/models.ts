@@ -147,6 +147,11 @@ export interface Me {
   canRequest: boolean;
 }
 
+export interface SupportedLanguage {
+  code: string;
+  name: string;
+}
+
 export interface ServerSettings {
   allowSignup: boolean;
   maxEpubBytes: number;
@@ -154,12 +159,17 @@ export interface ServerSettings {
   prowlarrUrl: string;
   sabnzbdUrl: string;
   sabnzbdCategory: string;
+  languages: string[];
+  /** Fixed list the server knows. Not a setting; PATCH rejects it. */
+  supportedLanguages: SupportedLanguage[];
   /** From `MEWO_DOWNLOADS_DIR`. Not a setting; PATCH rejects it. */
   downloadsDir: string | null;
   secrets: { prowlarrApiKey: boolean; sabnzbdApiKey: boolean };
 }
 
-export type SettingsPatch = Partial<Omit<ServerSettings, 'secrets' | 'downloadsDir'>> & {
+export type SettingsPatch = Partial<
+  Omit<ServerSettings, 'secrets' | 'downloadsDir' | 'supportedLanguages'>
+> & {
   prowlarrApiKey?: string | null;
   sabnzbdApiKey?: string | null;
 };

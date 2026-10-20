@@ -12,7 +12,15 @@ const info = {
 function freshState() {
   return {
     meFails: 0,
-    settings: { allowSignup: true, maxEpubBytes: 64 * 1024 * 1024 },
+    settings: {
+      allowSignup: true,
+      maxEpubBytes: 64 * 1024 * 1024,
+      languages: ['en'],
+      supportedLanguages: [
+        { code: 'en', name: 'English' },
+        { code: 'de', name: 'German' },
+      ],
+    },
     ada: {
       username: 'ada',
       joinedAt: 1_609_459_200_000,
@@ -98,6 +106,46 @@ async function answer(
   }
   return json({});
 }
+
+test('book languages open, save German, and keep the last language', async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await install(page);
+  await page.goto('/settings/server');
+  await expect(page.getByText('Requests only download books in these languages.')).toBeVisible();
+  const field = page.getByRole('button', { name: 'Book languages' });
+  await expect(field).toHaveAttribute('aria-expanded', 'false');
+  await field.click();
+  const list = page.getByRole('listbox', { name: 'Book languages' });
+  await expect(list).toHaveAttribute('aria-multiselectable', 'true');
+  const english = page.getByRole('option', { name: 'English' });
+  const german = page.getByRole('option', { name: 'German' });
+  await expect(english).toHaveAttribute('aria-selected', 'true');
+  await expect(german).toHaveAttribute('aria-selected', 'false');
+  const add = page.waitForRequest((request) =>
+    request.method() === 'PATCH' && request.url().includes('/v1/admin/settings'));
+  await german.click();
+  expect((await add).postDataJSON()).toEqual({ languages: ['en', 'de'] });
+  await expect(list).toBeVisible();
+  await expect(field).toContainText('English, German');
+  await page.keyboard.press('Escape');
+  await expect(list).toHaveCount(0);
+  await page.reload();
+  await expect(field).toContainText('English, German');
+  await field.click();
+  await expect(german).toHaveAttribute('aria-selected', 'true');
+  const remove = page.waitForRequest((request) =>
+    request.method() === 'PATCH' && request.url().includes('/v1/admin/settings'));
+  await german.click();
+  expect((await remove).postDataJSON()).toEqual({ languages: ['en'] });
+  let locked = false;
+  page.on('request', (request) => {
+    if (request.method() === 'PATCH') locked = true;
+  });
+  await english.click();
+  await expect(english).toHaveAttribute('aria-selected', 'true');
+  await expect(field).toContainText('English');
+  expect(locked).toBe(false);
+});
 
 test('an admin can open Server and the signups toggle patches', async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 });

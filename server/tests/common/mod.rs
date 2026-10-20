@@ -27,6 +27,20 @@ pub fn epub() -> Vec<u8> {
 
 const CHAPTER: &str = "<html><body><h1>I</h1><p>First&nbsp; paragraph &amp; second.</p><p>Last paragraph.</p></body></html>";
 
+/// Minimal EPUB3 whose package metadata is `metadata` (already-escaped XML).
+#[allow(dead_code)] // used by epub/matching unit tests and requests.rs, not api.rs
+pub fn with_metadata(metadata: &str) -> Vec<u8> {
+    let opf = format!(
+        r#"<package xmlns="http://www.idpf.org/2007/opf" xmlns:dc="http://purl.org/dc/elements/1.1/" version="3.0"><metadata>{metadata}</metadata><manifest><item id="chapter" href="chapter.xhtml" media-type="application/xhtml+xml"/></manifest><spine><itemref idref="chapter"/></spine></package>"#
+    );
+    zip_files(&[
+        ("mimetype", b"application/epub+zip"),
+        ("META-INF/container.xml", br#"<container xmlns="urn:oasis:names:tc:opendocument:xmlns:container" version="1.0"><rootfiles><rootfile full-path="OPS/package.opf" media-type="application/oebps-package+xml"/></rootfiles></container>"#),
+        ("OPS/package.opf", opf.as_bytes()),
+        ("OPS/chapter.xhtml", b"<html><body><p>Hello.</p></body></html>"),
+    ])
+}
+
 /// EPUB3 fixture whose chapter document is `chapter`.
 #[allow(dead_code)] // used by src/epub.rs unit tests, not tests/api.rs
 pub fn with_chapter(chapter: &str) -> Vec<u8> {

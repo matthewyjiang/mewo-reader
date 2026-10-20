@@ -13,6 +13,17 @@ pub struct ParsedEpub {
     pub author: Option<String>,
     pub cover: Option<Vec<u8>>,
     pub posts: Vec<Post>,
+    pub(crate) meta: OpfMeta,
+}
+
+/// Package metadata the request worker checks after a download. Titles and
+/// creators keep every `dc:` value, not just the first.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct OpfMeta {
+    pub titles: Vec<String>,
+    pub creators: Vec<String>,
+    pub identifiers: Vec<String>,
+    pub language: Option<String>,
 }
 
 struct Item {
@@ -54,15 +65,20 @@ pub fn parse<R: Read + Seek>(reader: R, max_cover_bytes: u64) -> Result<ParsedEp
         .descendants()
         .find(|n| n.has_tag_name("metadata"))
         .ok_or("Missing package metadata")?;
-    let dc_value = |name| {
+    let dc_values = |name| {
         metadata
             .descendants()
             .filter(|n| n.has_tag_name(("http://purl.org/dc/elements/1.1/", name)))
             .map(node_text)
-            .find(|v| !v.is_empty())
+            .filter(|value| !value.is_empty())
+            .collect::<Vec<_>>()
     };
-    let title = dc_value("title");
-    let author = dc_value("creator");
+    let titles = dc_values("title");
+    let creators = dc_values("creator");
+    let identifiers = dc_values("identifier");
+    let language = dc_values("language").into_iter().next();
+    let title = titles.first().cloned();
+    let author = creators.first().cloned();
     let manifest_node = opf
         .descendants()
         .find(|n| n.has_tag_name("manifest"))
@@ -191,6 +207,12 @@ pub fn parse<R: Read + Seek>(reader: R, max_cover_bytes: u64) -> Result<ParsedEp
         author,
         cover,
         posts,
+        meta: OpfMeta {
+            titles,
+            creators,
+            identifiers,
+            language,
+        },
     })
 }
 
@@ -574,6 +596,10 @@ mod tests {
         let book = parse(Cursor::new(test_epub::epub()), 1024).unwrap();
         assert_eq!(book.title.as_deref(), Some("Fixture Book"));
         assert_eq!(book.author.as_deref(), Some("Jane A. Writer"));
+        assert_eq!(book.meta.titles, vec!["Fixture Book".to_string()]);
+        assert_eq!(book.meta.creators, vec!["Jane A. Writer".to_string()]);
+        assert!(book.meta.identifiers.is_empty());
+        assert!(book.meta.language.is_none());
         assert_eq!(
             book.cover.as_deref(),
             Some(b"\x89PNG\r\n\x1a\nfixture".as_slice())

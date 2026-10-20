@@ -23,6 +23,22 @@ function bookRequest(over: Record<string, unknown> = {}) {
   };
 }
 
+const supportedLanguages = [
+  { code: 'en', name: 'English' },
+  { code: 'es', name: 'Spanish' },
+  { code: 'fr', name: 'French' },
+  { code: 'de', name: 'German' },
+  { code: 'it', name: 'Italian' },
+  { code: 'pt', name: 'Portuguese' },
+  { code: 'nl', name: 'Dutch' },
+  { code: 'sv', name: 'Swedish' },
+  { code: 'pl', name: 'Polish' },
+  { code: 'ru', name: 'Russian' },
+  { code: 'ja', name: 'Japanese' },
+  { code: 'zh', name: 'Chinese' },
+  { code: 'ko', name: 'Korean' },
+];
+
 function freshState() {
   return {
     canRequest: true,
@@ -34,6 +50,8 @@ function freshState() {
       prowlarrUrl: 'http://prowlarr.media.svc.cluster.local:9696',
       sabnzbdUrl: 'http://sabnzbd.media.svc.cluster.local:8080',
       sabnzbdCategory: 'books',
+      languages: ['en'],
+      supportedLanguages,
       downloadsDir: '/downloads',
       secrets: { prowlarrApiKey: true, sabnzbdApiKey: false },
     },
@@ -130,7 +148,7 @@ async function answer(route: Route, state: ReturnType<typeof freshState>) {
     if ('sabnzbdApiKey' in patch) {
       state.settings.secrets.sabnzbdApiKey = typeof patch.sabnzbdApiKey === 'string' && patch.sabnzbdApiKey.length > 0;
     }
-    for (const key of ['allowSignup', 'maxEpubBytes', 'requestsEnabled', 'prowlarrUrl', 'sabnzbdUrl', 'sabnzbdCategory'] as const) {
+    for (const key of ['allowSignup', 'maxEpubBytes', 'requestsEnabled', 'prowlarrUrl', 'sabnzbdUrl', 'sabnzbdCategory', 'languages'] as const) {
       if (key in patch) (state.settings as Record<string, unknown>)[key] = patch[key];
     }
     return json(state.settings);
@@ -195,6 +213,57 @@ test('the Requests page shows Downloading 42% and cancel works', async ({ page }
   await page.getByRole('button', { name: 'Cancel' }).click();
   await expect(page.getByText('Canceled')).toBeVisible();
   await expect(page.getByRole('button', { name: 'Retry' })).toBeVisible();
+});
+
+test('book languages save through the settings patch and the last one stays on', async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await install(page);
+  await page.goto('/settings/server');
+  await expect(page.getByText('Requests only download books in these languages.')).toBeVisible();
+  const field = page.getByRole('button', { name: 'Book languages' });
+  await expect(field).toHaveAttribute('aria-haspopup', 'listbox');
+  await expect(field).toHaveAttribute('aria-expanded', 'false');
+  await expect(field).toContainText('English');
+  await field.click();
+  const list = page.getByRole('listbox', { name: 'Book languages' });
+  await expect(list).toBeVisible();
+  await expect(field).toHaveAttribute('aria-expanded', 'true');
+  const english = page.getByRole('option', { name: 'English' });
+  const german = page.getByRole('option', { name: 'German' });
+  await expect(english).toHaveAttribute('aria-selected', 'true');
+  await expect(german).toHaveAttribute('aria-selected', 'false');
+  await expect(english).toBeFocused();
+  const add = page.waitForRequest((request) =>
+    request.method() === 'PATCH' && request.url().includes('/v1/admin/settings'));
+  await page.keyboard.press('ArrowDown');
+  await page.keyboard.press('ArrowDown');
+  await page.keyboard.press('ArrowDown');
+  await expect(german).toBeFocused();
+  await page.keyboard.press('Enter');
+  expect((await add).postDataJSON()).toEqual({ languages: ['en', 'de'] });
+  await expect(list).toBeVisible();
+  await expect(english).toHaveAttribute('aria-selected', 'true');
+  await expect(german).toHaveAttribute('aria-selected', 'true');
+  await expect(field).toContainText('English, German');
+  await page.keyboard.press('Escape');
+  await expect(list).toHaveCount(0);
+  await page.reload();
+  await expect(field).toContainText('English, German');
+  await field.click();
+  await expect(german).toHaveAttribute('aria-selected', 'true');
+  const remove = page.waitForRequest((request) =>
+    request.method() === 'PATCH' && request.url().includes('/v1/admin/settings'));
+  await german.click();
+  expect((await remove).postDataJSON()).toEqual({ languages: ['en'] });
+  await expect(list).toBeVisible();
+  await expect(german).toHaveAttribute('aria-selected', 'false');
+  let locked = false;
+  page.on('request', (request) => {
+    if (request.method() === 'PATCH') locked = true;
+  });
+  await english.click();
+  await expect(english).toHaveAttribute('aria-selected', 'true');
+  expect(locked).toBe(false);
 });
 
 test('a saved key shows Saved, blur sends the key, and test connection lists three checks', async ({ page }) => {

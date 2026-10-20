@@ -3770,6 +3770,74 @@ async fn settings_patch_validation() {
 }
 
 #[tokio::test]
+async fn languages_patch_round_trips() {
+    let (app, tmp) = app().await;
+    let token = register(&app, "matt", "password1").await;
+    grant(tmp.path(), "matt").await;
+    let (status, body) = empty_req(&app, "GET", "/v1/admin/settings", Some(&token)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["languages"], json!(["en"]));
+    let codes: Vec<&str> = body["supportedLanguages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|item| item["code"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        codes,
+        ["en", "es", "fr", "de", "it", "pt", "nl", "sv", "pl", "ru", "ja", "zh", "ko"]
+    );
+    assert_eq!(body["supportedLanguages"][3]["name"], "German");
+
+    let (status, body) = json_req(
+        &app,
+        "PATCH",
+        "/v1/admin/settings",
+        Some(&token),
+        json!({ "languages": ["en", "de"] }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["languages"], json!(["en", "de"]));
+    assert_eq!(body["supportedLanguages"][0]["code"], "en");
+    let doc = settings_doc(tmp.path()).await;
+    assert!(doc.contains("\"languages\":[\"en\",\"de\"]"), "{doc}");
+    assert!(!doc.contains("supportedLanguages"), "{doc}");
+
+    let (status, again) = empty_req(&app, "GET", "/v1/admin/settings", Some(&token)).await;
+    assert_eq!(status, StatusCode::OK, "{again}");
+    assert_eq!(again["languages"], json!(["en", "de"]));
+
+    let (status, rejected) = json_req(
+        &app,
+        "PATCH",
+        "/v1/admin/settings",
+        Some(&token),
+        json!({ "supportedLanguages": [{ "code": "fr", "name": "French" }] }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{rejected}");
+    assert_eq!(rejected["error"], "Unknown setting \"supportedLanguages\".");
+    assert_eq!(settings_doc(tmp.path()).await, doc);
+
+    let (status, rejected) = json_req(
+        &app,
+        "PATCH",
+        "/v1/admin/settings",
+        Some(&token),
+        json!({ "languages": [] }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{rejected}");
+    let max = codes.len();
+    assert_eq!(
+        rejected["error"],
+        format!("languages must list 1 to {max} supported language codes.")
+    );
+    assert_eq!(settings_doc(tmp.path()).await, doc);
+}
+
+#[tokio::test]
 async fn settings_doc_forward_compatible() {
     let (app, tmp) = app().await;
     let token = register(&app, "matt", "password1").await;

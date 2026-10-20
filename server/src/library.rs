@@ -26,6 +26,7 @@ pub(crate) struct Staged {
     pub post_count: i32,
     pub posts: Posts,
     pub temp_dir: PathBuf,
+    pub meta: crate::epub::OpfMeta,
 }
 
 impl Staged {
@@ -242,7 +243,15 @@ async fn staged_from_epub(
     if let Some(cover) = parsed.cover {
         tokio::fs::write(temp_dir.join("cover.jpg"), cover).await?;
     }
-    finish(temp_dir, title, author, is_sample, parsed.posts).await
+    finish(
+        temp_dir,
+        title,
+        author,
+        is_sample,
+        parsed.posts,
+        parsed.meta,
+    )
+    .await
 }
 
 async fn finish(
@@ -251,6 +260,7 @@ async fn finish(
     author: String,
     is_sample: bool,
     posts: Vec<crate::feed::Post>,
+    meta: crate::epub::OpfMeta,
 ) -> Result<Staged, ApiError> {
     let post_count = i32::try_from(posts.len()).map_err(|_| {
         ApiError::BadRequest(format!(
@@ -266,6 +276,7 @@ async fn finish(
         post_count,
         posts: Posts { posts },
         temp_dir,
+        meta,
     })
 }
 

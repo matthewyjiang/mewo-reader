@@ -36,6 +36,7 @@ struct World {
     downloads: TempDir,
     prowlarr: Arc<Mutex<Prowl>>,
     sab: Arc<Mutex<Sab>>,
+    catalog: Arc<Mutex<Catalog>>,
     token: String,
     user_id: String,
 }
@@ -45,9 +46,10 @@ async fn world() -> World {
     let data = TempDir::new().unwrap();
     let prowlarr = Arc::new(Mutex::new(Prowl::default()));
     let sab = Arc::new(Mutex::new(Sab::default()));
+    let catalog = Arc::new(Mutex::new(Catalog::default()));
     let prowlarr_url = serve(prowlarr_router(prowlarr.clone())).await;
     let sab_url = serve(sab_router(sab.clone())).await;
-    let library_url = serve(library_router()).await;
+    let library_url = serve(library_router(catalog.clone())).await;
     prowlarr.lock().await.origin = prowlarr_url.clone();
     let state = prepare(Config {
         listen: "127.0.0.1:0".into(),
@@ -93,6 +95,7 @@ async fn world() -> World {
         downloads,
         prowlarr,
         sab,
+        catalog,
         token,
         user_id,
     }
@@ -348,27 +351,114 @@ async fn sab_api(
     }
 }
 
-fn library_router() -> Router {
-    Router::new().route(
-        "/search.json",
-        get(|Query(query): Query<HashMap<String, String>>| async move {
-            let page: i64 = query
-                .get("page")
-                .and_then(|page| page.parse().ok())
-                .unwrap_or(1);
-            Json(json!({
-                "numFound": 1,
-                "docs": [{
-                    "key": "/works/OL893415W",
-                    "title": "Dune",
-                    "author_name": ["Frank Herbert"],
-                    "first_publish_year": 1965,
-                    "cover_i": 11481354
-                }],
-                "page": page
-            }))
-        }),
-    )
+#[derive(Default)]
+struct Catalog {
+    status: u16,
+    hits: Vec<String>,
+    author_key: String,
+    siblings: Vec<String>,
+    isbns: Vec<String>,
+    /// Search for this work key returns no docs. `GET /works/{id}.json` redirects
+    /// at the second key.
+    merged: Option<(String, String)>,
+}
+
+fn library_router(state: Arc<Mutex<Catalog>>) -> Router {
+    Router::new()
+        .route("/search.json", get(library_search))
+        .route("/works/{id}", get(library_work))
+        .with_state(state)
+}
+
+async fn library_search(
+    State(state): State<Arc<Mutex<Catalog>>>,
+    Query(query): Query<HashMap<String, String>>,
+) -> Result<Json<Value>, StatusCode> {
+    let mut guard = state.lock().await;
+    if guard.status != 0 {
+        return Err(StatusCode::from_u16(guard.status).unwrap());
+    }
+    let hit = if let Some(author) = query.get("author_key") {
+        format!("author_key={author}")
+    } else if let Some(q) = query.get("q") {
+        format!("q={q}")
+    } else {
+        "other".into()
+    };
+    guard.hits.push(hit);
+    if let Some((from, _)) = &guard.merged {
+        if query.get("q").is_some_and(|q| q == &format!("key:{from}")) {
+            return Ok(Json(json!({ "numFound": 0, "docs": [] })));
+        }
+    }
+    if query.contains_key("author_key") {
+        let docs: Vec<Value> = guard
+            .siblings
+            .iter()
+            .map(|title| json!({ "title": title }))
+            .collect();
+        return Ok(Json(json!({ "numFound": docs.len(), "docs": docs })));
+    }
+    if query.get("q").is_some_and(|q| q.starts_with("key:")) && !guard.author_key.is_empty() {
+        let key = query["q"].trim_start_matches("key:").to_string();
+        let author_key = guard.author_key.clone();
+        let isbns = guard.isbns.clone();
+        return Ok(Json(json!({
+            "numFound": 1,
+            "docs": [{
+                "key": key,
+                "title": "Dune",
+                "author_key": [author_key],
+                "author_name": ["Frank Herbert"],
+                "isbn": isbns
+            }]
+        })));
+    }
+    let page: i64 = query
+        .get("page")
+        .and_then(|page| page.parse().ok())
+        .unwrap_or(1);
+    Ok(Json(json!({
+        "numFound": 1,
+        "docs": [{
+            "key": "/works/OL893414W",
+            "title": "Dune",
+            "author_name": ["Frank Herbert"],
+            "first_publish_year": 1965,
+            "cover_i": 11481354
+        }],
+        "page": page
+    })))
+}
+
+async fn library_work(
+    State(state): State<Arc<Mutex<Catalog>>>,
+    id: axum::extract::Path<String>,
+) -> axum::response::Response {
+    let mut guard = state.lock().await;
+    let key = format!("/works/{}", id.trim_end_matches(".json"));
+    guard.hits.push(format!("work={key}"));
+    if guard.status != 0 {
+        return axum::response::Response::builder()
+            .status(StatusCode::from_u16(guard.status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR))
+            .body(Body::empty())
+            .unwrap();
+    }
+    if let Some((from, to)) = &guard.merged {
+        if key == *from {
+            let to = to.clone();
+            return axum::response::Response::builder()
+                .status(StatusCode::FOUND)
+                .header(header::LOCATION, format!("{to}.json"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(format!(r#"{{"location":"{to}"}}"#)))
+                .unwrap();
+        }
+    }
+    axum::response::Response::builder()
+        .status(StatusCode::NOT_FOUND)
+        .body(Body::empty())
+        .unwrap()
 }
 
 async fn register(app: &axum::Router, username: &str, password: &str) -> String {
@@ -528,11 +618,11 @@ async fn request_happy_path() {
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{page}");
-    assert_eq!(page["items"][0]["workKey"], "/works/OL893415W");
+    assert_eq!(page["items"][0]["workKey"], "/works/OL893414W");
     assert_eq!(page["items"][0]["title"], "Dune");
     assert!(page["items"][0]["request"].is_null());
 
-    let created = ask(&world, "/works/OL893415W").await;
+    let created = ask(&world, "/works/OL893414W").await;
     let id = created["id"].as_str().unwrap().to_string();
     let now = created["createdAt"].as_i64().unwrap();
     worker::tick_at(&world.state, now).await.unwrap();
@@ -602,7 +692,7 @@ async fn request_happy_path() {
 #[tokio::test]
 async fn no_release_waits_then_fails() {
     let world = world().await;
-    let created = ask(&world, "/works/OL893415W").await;
+    let created = ask(&world, "/works/OL893414W").await;
     let id = created["id"].as_str().unwrap();
     let now = created["createdAt"].as_i64().unwrap();
     worker::tick_at(&world.state, now).await.unwrap();
@@ -1191,7 +1281,7 @@ async fn retry_counts_toward_the_active_cap() {
 #[tokio::test]
 async fn deleting_an_imported_book_lets_you_request_it_again() {
     let world = world().await;
-    let id = bring_in(&world, "/works/OL893415W").await;
+    let id = bring_in(&world, "/works/OL893414W").await;
     let (status, body) = empty_req(
         &world.app,
         "DELETE",
@@ -1244,7 +1334,7 @@ async fn deleting_an_imported_book_lets_you_request_it_again() {
         "/v1/requests",
         Some(&world.token),
         json!({
-            "workKey": "/works/OL893415W",
+            "workKey": "/works/OL893414W",
             "title": "Dune",
             "author": "Frank Herbert"
         }),
@@ -1628,6 +1718,317 @@ async fn migration_007_adds_empty_secrets() {
     assert_eq!(body["prowlarrUrl"], "");
     assert_eq!(body["sabnzbdUrl"], "");
     assert_eq!(body["sabnzbdCategory"], "books");
+    assert_eq!(body["languages"], json!(["en"]));
     assert!(body["downloadsDir"].is_null());
     assert!(body.get("prowlarrApiKey").is_none());
+}
+
+#[tokio::test]
+async fn chapterhouse_is_not_grabbed() {
+    let world = world().await;
+    {
+        let mut catalog = world.catalog.lock().await;
+        catalog.author_key = "OL79034A".into();
+        catalog.siblings = vec!["Dune".into(), "Chapterhouse Dune".into()];
+    }
+    {
+        let mut prowl = world.prowlarr.lock().await;
+        prowl.key_ok = true;
+        prowl.releases = vec![release(
+            &prowl.origin,
+            "ch",
+            "Frank Herbert - [Dune 06] - Chapterhouse Dune (retail) (epub)",
+            10,
+        )];
+    }
+    let created = ask(&world, "/works/OL893414W").await;
+    let id = created["id"].as_str().unwrap();
+    let now = created["createdAt"].as_i64().unwrap();
+    worker::tick_at(&world.state, now).await.unwrap();
+    let row = stored(&world.state.pool, id).await;
+    assert_eq!(row.state, "requested");
+    assert_eq!(row.attempts, 0);
+    assert_eq!(
+        row.error.as_deref(),
+        Some("No matching release (closest: Chapterhouse Dune, a different book)")
+    );
+    assert!(world.sab.lock().await.adds.is_empty());
+}
+
+#[tokio::test]
+async fn a_wrong_opf_retries_the_next_guid() {
+    let world = world().await;
+    {
+        let mut catalog = world.catalog.lock().await;
+        catalog.author_key = "OL79034A".into();
+        catalog.siblings = vec!["Dune".into(), "Chapterhouse Dune".into()];
+    }
+    {
+        let mut prowl = world.prowlarr.lock().await;
+        prowl.releases = vec![
+            release(
+                &prowl.origin,
+                "first",
+                "Frank Herbert - Dune RETAIL EPUB",
+                5,
+            ),
+            release(&prowl.origin, "second", "Frank Herbert - Dune EPUB", 1),
+            release(&prowl.origin, "third", "Frank Herbert - Dune epub", 0),
+        ];
+    }
+    let created = ask(&world, "/works/OL893414W").await;
+    let id = created["id"].as_str().unwrap().to_string();
+    let now = created["createdAt"].as_i64().unwrap();
+    worker::tick_at(&world.state, now).await.unwrap();
+    assert_eq!(stored(&world.state.pool, &id).await.attempts, 1);
+    let epub = common::with_metadata(
+        "<dc:title>Chapterhouse Dune</dc:title><dc:creator>Frank Herbert</dc:creator>",
+    );
+    complete_with(&world, &id, "Dune.epub", &epub).await;
+    worker::tick_at(&world.state, now + POLL).await.unwrap();
+    let row = stored(&world.state.pool, &id).await;
+    assert_eq!(row.state, "requested");
+    assert_eq!(
+        row.error.as_deref(),
+        Some("Downloaded book is Chapterhouse Dune")
+    );
+    assert!(row.tried_guids.contains("first"));
+    assert!(!row.tried_guids.contains("second"));
+    nothing_imported(&world, &id).await;
+
+    worker::tick_at(&world.state, now + POLL).await.unwrap();
+    let row = stored(&world.state.pool, &id).await;
+    assert_eq!(row.state, "downloading");
+    assert_eq!(row.attempts, 2);
+    assert!(row.tried_guids.contains("second"));
+    let urls: Vec<String> = world
+        .sab
+        .lock()
+        .await
+        .adds
+        .iter()
+        .map(|add| add.name.clone())
+        .collect();
+    assert_eq!(urls.len(), 2);
+    assert!(urls[1].contains("/nzb/second"), "{urls:?}");
+
+    complete_with(&world, &id, "Dune.epub", &epub).await;
+    worker::tick_at(&world.state, now + POLL * 2).await.unwrap();
+    let row = stored(&world.state.pool, &id).await;
+    assert_eq!(row.state, "requested");
+    assert_eq!(row.attempts, 2);
+    nothing_imported(&world, &id).await;
+
+    worker::tick_at(&world.state, now + POLL * 2).await.unwrap();
+    let row = stored(&world.state.pool, &id).await;
+    assert_eq!(row.state, "downloading");
+    assert_eq!(row.attempts, 3);
+    assert!(row.tried_guids.contains("third"));
+
+    complete_with(&world, &id, "Dune.epub", &epub).await;
+    worker::tick_at(&world.state, now + POLL * 3).await.unwrap();
+    let row = stored(&world.state.pool, &id).await;
+    assert_eq!(row.state, "failed");
+    assert_eq!(
+        row.error.as_deref(),
+        Some("Downloaded book is Chapterhouse Dune")
+    );
+    nothing_imported(&world, &id).await;
+}
+
+async fn nothing_imported(world: &World, id: &str) {
+    let books: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM books")
+        .fetch_one(&world.state.pool)
+        .await
+        .unwrap();
+    assert_eq!(books, 0);
+    assert!(stored(&world.state.pool, id).await.book_id.is_none());
+    assert!(!world.downloads.path().join(format!("mewo-{id}")).exists());
+    let tmp = world.state.data_dir.join("tmp");
+    if tmp.exists() {
+        assert!(
+            std::fs::read_dir(&tmp).unwrap().next().is_none(),
+            "tmp left behind"
+        );
+    }
+}
+
+#[tokio::test]
+async fn open_library_down_holds_then_recovers() {
+    let world = world().await;
+    world.catalog.lock().await.status = 500;
+    world.prowlarr.lock().await.key_ok = true;
+    let created = ask(&world, "/works/OL893414W").await;
+    let id = created["id"].as_str().unwrap().to_string();
+    let now = created["createdAt"].as_i64().unwrap();
+    worker::tick_at(&world.state, now).await.unwrap();
+    let row = stored(&world.state.pool, &id).await;
+    assert_eq!(row.state, "requested");
+    assert_eq!(row.error.as_deref(), Some("Open Library: HTTP 500"));
+    assert_eq!(row.next_check_at, now + 5 * 60 * 1000);
+    assert!(world.sab.lock().await.adds.is_empty());
+
+    world.catalog.lock().await.status = 0;
+    worker::tick_at(&world.state, now + 5 * 60 * 1000)
+        .await
+        .unwrap();
+    let row = stored(&world.state.pool, &id).await;
+    assert_eq!(row.state, "downloading");
+    assert_eq!(row.attempts, 1);
+    assert_eq!(world.sab.lock().await.adds.len(), 1);
+}
+
+#[tokio::test]
+async fn open_library_down_at_completed_keeps_the_job() {
+    let world = world().await;
+    let created = ask(&world, "/works/OL40W").await;
+    let id = created["id"].as_str().unwrap().to_string();
+    let now = created["createdAt"].as_i64().unwrap();
+    world.sab.lock().await.jobs.push(SabJob {
+        nzo: "kept".into(),
+        name: format!("mewo-{id}"),
+        status: "Downloading".into(),
+        percent: 0,
+        storage: String::new(),
+        fail_message: String::new(),
+        in_queue: true,
+    });
+    worker::tick_at(&world.state, now).await.unwrap();
+    let row = stored(&world.state.pool, &id).await;
+    assert_eq!(row.state, "downloading");
+    assert_eq!(row.download_id.as_deref(), Some("kept"));
+    assert!(world.catalog.lock().await.hits.is_empty());
+
+    finish_job(&world, "kept", &format!("/data/mewo-{id}")).await;
+    write_epub(
+        &world.downloads.path().join(format!("mewo-{id}")),
+        "Dune.epub",
+        &common::epub(),
+    );
+    world.catalog.lock().await.status = 500;
+    worker::tick_at(&world.state, now + POLL).await.unwrap();
+    let row = stored(&world.state.pool, &id).await;
+    assert_eq!(row.state, "downloading");
+    assert_eq!(row.error.as_deref(), Some("Open Library: HTTP 500"));
+    assert!(!world
+        .sab
+        .lock()
+        .await
+        .deletes
+        .iter()
+        .any(|nzo| nzo == "kept"));
+    assert!(world.downloads.path().join(format!("mewo-{id}")).exists());
+}
+
+#[tokio::test]
+async fn a_merged_work_follows_the_live_key() {
+    let world = world().await;
+    {
+        let mut catalog = world.catalog.lock().await;
+        catalog.merged = Some(("/works/OL893415W".into(), "/works/OL893414W".into()));
+        catalog.author_key = "OL79034A".into();
+        catalog.siblings = vec!["Chapterhouse Dune".into()];
+    }
+    world.prowlarr.lock().await.key_ok = true;
+    let created = ask(&world, "/works/OL893415W").await;
+    let id = created["id"].as_str().unwrap();
+    let now = created["createdAt"].as_i64().unwrap();
+    worker::tick_at(&world.state, now).await.unwrap();
+    let row = stored(&world.state.pool, id).await;
+    assert_eq!(row.state, "downloading", "{:?}", row.error);
+    assert_eq!(row.attempts, 1);
+    let hits = world.catalog.lock().await.hits.clone();
+    assert_eq!(
+        hits,
+        vec![
+            "q=key:/works/OL893415W".to_string(),
+            "work=/works/OL893415W".to_string(),
+            "q=key:/works/OL893414W".to_string(),
+            "author_key=OL79034A".to_string(),
+        ]
+    );
+}
+
+#[tokio::test]
+async fn open_library_gives_up_after_fourteen_days() {
+    let world = world().await;
+    world.catalog.lock().await.status = 500;
+    let created = ask(&world, "/works/OL893414W").await;
+    let id = created["id"].as_str().unwrap();
+    let now = created["createdAt"].as_i64().unwrap();
+    worker::tick_at(&world.state, now + 14 * DAY + 1)
+        .await
+        .unwrap();
+    let row = stored(&world.state.pool, id).await;
+    assert_eq!(row.state, "failed");
+    assert_eq!(row.error.as_deref(), Some("Open Library: HTTP 500"));
+    assert!(world.sab.lock().await.deletes.is_empty());
+
+    let created = ask(&world, "/works/OL41W").await;
+    let id = created["id"].as_str().unwrap().to_string();
+    let now = created["createdAt"].as_i64().unwrap();
+    world.sab.lock().await.jobs.push(SabJob {
+        nzo: "expired".into(),
+        name: format!("mewo-{id}"),
+        status: "Downloading".into(),
+        percent: 0,
+        storage: String::new(),
+        fail_message: String::new(),
+        in_queue: true,
+    });
+    worker::tick_at(&world.state, now).await.unwrap();
+    assert_eq!(
+        stored(&world.state.pool, &id).await.download_id.as_deref(),
+        Some("expired")
+    );
+    finish_job(&world, "expired", &format!("/data/mewo-{id}")).await;
+    write_epub(
+        &world.downloads.path().join(format!("mewo-{id}")),
+        "Dune.epub",
+        &common::epub(),
+    );
+    worker::tick_at(&world.state, now + 14 * DAY + 1)
+        .await
+        .unwrap();
+    let row = stored(&world.state.pool, &id).await;
+    assert_eq!(row.state, "failed");
+    assert_eq!(row.error.as_deref(), Some("Open Library: HTTP 500"));
+    assert!(row.download_id.is_none());
+    assert!(world
+        .sab
+        .lock()
+        .await
+        .deletes
+        .iter()
+        .any(|nzo| nzo == "expired"));
+    assert!(!world.downloads.path().join(format!("mewo-{id}")).exists());
+}
+
+#[tokio::test]
+async fn one_open_library_pair_per_request() {
+    let world = world().await;
+    {
+        let mut catalog = world.catalog.lock().await;
+        catalog.author_key = "OL79034A".into();
+        catalog.siblings = vec!["Dune".into(), "Dune Messiah".into()];
+    }
+    let created = ask(&world, "/works/OL893414W").await;
+    let id = created["id"].as_str().unwrap();
+    let now = created["createdAt"].as_i64().unwrap();
+    worker::tick_at(&world.state, now).await.unwrap();
+    worker::tick_at(&world.state, now + SIX_HOURS)
+        .await
+        .unwrap();
+    let hits = world.catalog.lock().await.hits.clone();
+    assert_eq!(
+        hits,
+        vec![
+            "q=key:/works/OL893414W".to_string(),
+            "author_key=OL79034A".to_string(),
+        ]
+    );
+    let row = stored(&world.state.pool, id).await;
+    assert_eq!(row.state, "requested");
+    assert_eq!(row.error.as_deref(), Some("No release yet."));
+    assert!(world.sab.lock().await.adds.is_empty());
 }
