@@ -234,6 +234,31 @@ struct AuthResponse: Codable, Sendable {
     var username: String
 }
 
+/// Public `GET /v1/instance`. A future `name` is one more field.
+struct InstanceInfo: Codable, Equatable, Sendable {
+    var allowSignup: Bool
+
+    init(allowSignup: Bool = true) {
+        self.allowSignup = allowSignup
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case allowSignup
+    }
+}
+
+extension InstanceInfo {
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        allowSignup = try container.decodeIfPresent(Bool.self, forKey: .allowSignup) ?? true
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(allowSignup, forKey: .allowSignup)
+    }
+}
+
 struct HostedErrorBody: Codable, Sendable {
     var error: String = ""
 }
@@ -292,6 +317,11 @@ func usernameFieldError(_ value: String) -> String? {
 func passwordFieldError(_ value: String) -> String? {
     if value.isEmpty || value.count >= 8 { return nil }
     return passwordRule
+}
+
+/// nil (still loading, or the call failed) keeps the create link.
+func showCreateAccount(_ allowSignup: Bool?) -> Bool {
+    allowSignup != false
 }
 
 func hostedAuthReady(username: String, password: String, baseUrl: String) -> Bool {

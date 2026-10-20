@@ -27,6 +27,7 @@
 		4F744DD8DCE299549B68601D /* Models.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4413717A616851102DC7326F /* Models.swift */; };
 		511D3281B181E6738E0BB9F9 /* FeedLoad.swift in Sources */ = {isa = PBXBuildFile; fileRef = ABE83ABF6089B80D33D61631 /* FeedLoad.swift */; };
 		581583C61BFE96E765BE7B7B /* SearchScreen.swift in Sources */ = {isa = PBXBuildFile; fileRef = 970FA89A3AAD94F94309DAFE /* SearchScreen.swift */; };
+		5A80AAF009BC56BFE542140A /* InstanceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 39C454FFB450F2340B4B8D3C /* InstanceTests.swift */; };
 		5C4397838BF236B2F0050192 /* HostedSessionStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 04D41FEA962E2855408B8222 /* HostedSessionStore.swift */; };
 		5D686069D54338BF81FDBD71 /* HomeScreen.swift in Sources */ = {isa = PBXBuildFile; fileRef = DBF32BA7D773E2C479816B96 /* HomeScreen.swift */; };
 		60E574DB0C2B9EED9BAAAD63 /* LocalIdentity.swift in Sources */ = {isa = PBXBuildFile; fileRef = CF102DFB037B91B3520D5624 /* LocalIdentity.swift */; };
@@ -54,6 +55,7 @@
 		D150E4202923954C5521F4D8 /* UnderlineTabs.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5774AFDB800D02C4C43DAA03 /* UnderlineTabs.swift */; };
 		DD931482001A225BEDC8D12E /* Chapters.swift in Sources */ = {isa = PBXBuildFile; fileRef = 078011F30AFF7C862CC84EA2 /* Chapters.swift */; };
 		DEEBA4AEB0A2810678AE75A8 /* BrandShapes.swift in Sources */ = {isa = PBXBuildFile; fileRef = AD30442210FA84820F34AFFA /* BrandShapes.swift */; };
+		DEEFEFEDBB9EEBA2998E7971 /* InstanceSignup.swift in Sources */ = {isa = PBXBuildFile; fileRef = E29B281F5796BE6657772F68 /* InstanceSignup.swift */; };
 		E0F74D644333270B1757BA06 /* ServerVersionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3D87F12CDE5E408DF754A500 /* ServerVersionTests.swift */; };
 		E7216998677F2FC0AA95904D /* ReadiumShared in Frameworks */ = {isa = PBXBuildFile; productRef = 986EE18389766F7F9A0A073C /* ReadiumShared */; };
 		E947D6F44A53440535E00535 /* LocalLibraryStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = A87BC9915B9BC9822A230626 /* LocalLibraryStore.swift */; };
@@ -99,6 +101,7 @@
 		2BA5FDBC274BF117C398912D /* FeedExtractor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FeedExtractor.swift; sourceTree = "<group>"; };
 		3146D6D0E35B33644B944D83 /* SocialRows.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SocialRows.swift; sourceTree = "<group>"; };
 		31A3D4FF88DE8A3E4113E80E /* OnboardingScreen.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OnboardingScreen.swift; sourceTree = "<group>"; };
+		39C454FFB450F2340B4B8D3C /* InstanceTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = InstanceTests.swift; sourceTree = "<group>"; };
 		3D87F12CDE5E408DF754A500 /* ServerVersionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ServerVersionTests.swift; sourceTree = "<group>"; };
 		404AC86C65664DDDBD207B14 /* HostedClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HostedClient.swift; sourceTree = "<group>"; };
 		4413717A616851102DC7326F /* Models.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Models.swift; sourceTree = "<group>"; };
@@ -139,6 +142,7 @@
 		DBF32BA7D773E2C479816B96 /* HomeScreen.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HomeScreen.swift; sourceTree = "<group>"; };
 		DD3458C195D8CB450E09C030 /* LibraryStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LibraryStore.swift; sourceTree = "<group>"; };
 		DF0D3BC3A891755D9AC55253 /* LikesScreen.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LikesScreen.swift; sourceTree = "<group>"; };
+		E29B281F5796BE6657772F68 /* InstanceSignup.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = InstanceSignup.swift; sourceTree = "<group>"; };
 		ED562555052DC0650FBC08AF /* atkinson_hyperlegible_bold.ttf */ = {isa = PBXFileReference; lastKnownFileType = file; path = atkinson_hyperlegible_bold.ttf; sourceTree = "<group>"; };
 		EF749AA45452D84DFBA4D233 /* SocialTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SocialTests.swift; sourceTree = "<group>"; };
 		EF7D5E18C99DDD9FB7E68FA4 /* FeedStartTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FeedStartTests.swift; sourceTree = "<group>"; };
@@ -348,6 +352,7 @@
 				404AC86C65664DDDBD207B14 /* HostedClient.swift */,
 				708CE92D42A175108892E3FD /* HostedLibraryStore.swift */,
 				04D41FEA962E2855408B8222 /* HostedSessionStore.swift */,
+				E29B281F5796BE6657772F68 /* InstanceSignup.swift */,
 				7E4122143733BF3C0E670FC4 /* JSONFiles.swift */,
 				C72FEE25BCAF45B0E834EF44 /* Keychain.swift */,
 				1A7084DDB87996BA0246C106 /* LibraryLoad.swift */,
@@ -367,6 +372,7 @@
 			children = (
 				EF7D5E18C99DDD9FB7E68FA4 /* FeedStartTests.swift */,
 				5E989FAAB543D3DE92C11934 /* HostedLibraryRefreshTests.swift */,
+				39C454FFB450F2340B4B8D3C /* InstanceTests.swift */,
 				FEBEE7DFBD4419285C292FF9 /* LibraryLoadTests.swift */,
 				F4CBBF3A9D6EA36AEEE81A94 /* SearchTests.swift */,
 				3D87F12CDE5E408DF754A500 /* ServerVersionTests.swift */,
@@ -530,6 +536,7 @@
 			files = (
 				F5951F6394A0F8940EE096EA /* FeedStartTests.swift in Sources */,
 				F02477313DE71DC95BCB6E49 /* HostedLibraryRefreshTests.swift in Sources */,
+				5A80AAF009BC56BFE542140A /* InstanceTests.swift in Sources */,
 				A60184DA1736762ED619BB78 /* LibraryLoadTests.swift in Sources */,
 				FD6146041A51B9D4497E0921 /* SearchTests.swift in Sources */,
 				E0F74D644333270B1757BA06 /* ServerVersionTests.swift in Sources */,
@@ -559,6 +566,7 @@
 				F0AC78A999A10B4743D26556 /* HostedClient.swift in Sources */,
 				116D7C4D5A8CC7F9236A5498 /* HostedLibraryStore.swift in Sources */,
 				5C4397838BF236B2F0050192 /* HostedSessionStore.swift in Sources */,
+				DEEFEFEDBB9EEBA2998E7971 /* InstanceSignup.swift in Sources */,
 				21AC49C554877DA111643827 /* JSONFiles.swift in Sources */,
 				665DA70D7778CFAA26318FB1 /* Keychain.swift in Sources */,
 				07B118A4AED2425D933B94DF /* LibraryLoad.swift in Sources */,
