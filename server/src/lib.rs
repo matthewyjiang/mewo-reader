@@ -46,6 +46,8 @@ pub struct AppState {
     /// Wakes the request worker. Create and retry call `notify_one`.
     pub worker: Arc<Notify>,
     pub(crate) catalog_limit: Arc<requests::Limiter>,
+    pub passwords: auth::Passwords,
+    pub throttle: auth::Throttle,
 }
 
 pub fn router(state: AppState) -> Router {
@@ -135,6 +137,8 @@ pub async fn prepare(config: Config) -> Result<AppState, sqlx::Error> {
     settings::seed(&pool, &config).await?;
     let upstream = requests::http::Upstream::new()
         .map_err(|message| sqlx::Error::Configuration(std::io::Error::other(message).into()))?;
+    let passwords = auth::Passwords::new(&config.auth);
+    let throttle = auth::Throttle::new(&config.auth);
     Ok(AppState {
         pool,
         data_dir,
@@ -145,11 +149,14 @@ pub async fn prepare(config: Config) -> Result<AppState, sqlx::Error> {
         openlibrary_url: config.openlibrary_url,
         worker: Arc::new(Notify::new()),
         catalog_limit: Arc::new(requests::Limiter::new()),
+        passwords,
+        throttle,
     })
 }
 
 pub async fn build(config: Config) -> Result<Router, sqlx::Error> {
     let state = prepare(config).await?;
+    state.passwords.warm().await;
     let backfill = state.clone();
     tokio::spawn(async move {
         search::backfill(backfill).await;

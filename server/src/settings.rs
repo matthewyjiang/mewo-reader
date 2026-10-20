@@ -500,6 +500,7 @@ fn json_error(err: impl std::error::Error + Send + Sync + 'static) -> sqlx::Erro
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::AuthConfig;
 
     #[test]
     fn bounds_message_names_the_key() {
@@ -578,6 +579,7 @@ mod tests {
             max_epub_bytes: 5_000_000,
             downloads_dir: None,
             openlibrary_url: "https://openlibrary.org".into(),
+            auth: AuthConfig::default(),
         };
         seed(&pool, &config).await.unwrap();
         let first: String = sqlx::query_scalar("SELECT doc FROM settings WHERE id = 1")
@@ -618,6 +620,7 @@ mod tests {
             max_epub_bytes,
             downloads_dir: None,
             openlibrary_url: "https://openlibrary.org".into(),
+            auth: AuthConfig::default(),
         }
     }
 

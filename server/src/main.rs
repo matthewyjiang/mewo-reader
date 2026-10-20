@@ -36,10 +36,20 @@ async fn main() {
 
 async fn serve(config: Config) {
     let listen = config.listen.clone();
+    tracing::info!(
+        "auth: trusted_proxy_hops={}, password ops={}",
+        config.auth.trusted_proxy_hops,
+        config.auth.max_concurrent
+    );
     let app = build(config).await.expect("database");
     let listener = tokio::net::TcpListener::bind(&listen)
         .await
         .unwrap_or_else(|err| panic!("bind {listen}: {err}"));
     tracing::info!("listening on {listen}");
-    axum::serve(listener, app).await.expect("serve");
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
+    .await
+    .expect("serve");
 }

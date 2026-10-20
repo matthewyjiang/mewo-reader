@@ -1,9 +1,11 @@
+pub mod passwords;
+pub mod throttle;
+
+pub use passwords::{PasswordStats, Passwords};
+pub use throttle::{ClientIp, Throttle};
+
 use crate::error::ApiError;
 use crate::AppState;
-use argon2::password_hash::{
-    rand_core::OsRng, PasswordHash, PasswordHasher, PasswordVerifier, SaltString,
-};
-use argon2::Argon2;
 use axum::extract::FromRequestParts;
 use axum::http::request::Parts;
 use rand::RngCore;
@@ -15,27 +17,6 @@ pub struct Authed {
     pub username: String,
     pub token: String,
     pub is_admin: bool,
-}
-
-pub fn hash_password(password: &str) -> Result<String, ApiError> {
-    let salt = SaltString::generate(&mut OsRng);
-    Argon2::default()
-        .hash_password(password.as_bytes(), &salt)
-        .map(|hash| hash.to_string())
-        .map_err(|err| {
-            tracing::error!(error = %err, "password hash failed");
-            ApiError::Internal
-        })
-}
-
-pub fn verify_password(password: &str, hash: &str) -> Result<bool, ApiError> {
-    let parsed = PasswordHash::new(hash).map_err(|err| {
-        tracing::error!(error = %err, "stored hash is not parseable");
-        ApiError::Internal
-    })?;
-    Ok(Argon2::default()
-        .verify_password(password.as_bytes(), &parsed)
-        .is_ok())
 }
 
 pub fn new_token() -> String {
