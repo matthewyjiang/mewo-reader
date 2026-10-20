@@ -1718,6 +1718,7 @@ async fn migration_007_adds_empty_secrets() {
     assert_eq!(body["prowlarrUrl"], "");
     assert_eq!(body["sabnzbdUrl"], "");
     assert_eq!(body["sabnzbdCategory"], "books");
+    assert_eq!(body["languages"], json!(["en"]));
     assert!(body["downloadsDir"].is_null());
     assert!(body.get("prowlarrApiKey").is_none());
 }

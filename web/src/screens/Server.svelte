@@ -165,6 +165,30 @@
     });
   }
 
+  function sameList(left: string[], right: string[]): boolean {
+    return left.length === right.length && left.every((code, index) => code === right[index]);
+  }
+
+  function toggleLanguage(code: string): void {
+    if (!settings) return;
+    const current = settings.languages;
+    const on = current.includes(code);
+    if (on && current.length === 1) return;
+    const next = on ? current.filter((item) => item !== code) : [...current, code];
+    const previous = settings;
+    settings = { ...settings, languages: next };
+    enqueue(async () => {
+      if (!settings || !sameList(settings.languages, next)) return;
+      try {
+        const saved = await store.api.updateServerSettings({ languages: next });
+        if (settings && sameList(settings.languages, next)) settings = saved;
+      } catch (error) {
+        if (settings && sameList(settings.languages, next)) settings = previous;
+        store.notice = message(error);
+      }
+    });
+  }
+
   function setRequests(enabled: boolean): void {
     if (!settings || enabled === (settings.requestsEnabled === true)) return;
     const previous = settings;
@@ -424,6 +448,24 @@
       />
     </span>
   </label>
+  <div class="language-row">
+    <span>Book languages</span>
+    <p class="language-hint">Requests only download books in these languages.</p>
+    <div class="language-choices" role="group" aria-label="Book languages">
+      {#each settings.supportedLanguages as language (language.code)}
+        {@const on = settings.languages.includes(language.code)}
+        <label class="language-choice" class:on>
+          <input
+            type="checkbox"
+            checked={on}
+            disabled={on && settings.languages.length === 1}
+            onchange={() => toggleLanguage(language.code)}
+          />
+          {language.name}
+        </label>
+      {/each}
+    </div>
+  </div>
   <div class="fact-row">
     <span>Downloads folder</span>
     <span>{settings.downloadsDir ?? 'Not set'}</span>
@@ -608,6 +650,61 @@
   color: var(--mute);
   font-size: .9375rem;
   font-weight: 400;
+}
+
+.language-row {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 12px 16px;
+  border-bottom: .6px solid var(--line);
+}
+
+.language-row > span {
+  font-weight: 700;
+  font-size: 1.0625rem;
+}
+
+.language-hint {
+  color: var(--mute);
+  font-size: .8125rem;
+  font-weight: 400;
+  line-height: 1.3;
+}
+
+.language-choices {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.language-choice {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 32px;
+  padding: 0 10px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: var(--ground);
+  font-weight: 400;
+  font-size: .9375rem;
+  cursor: pointer;
+}
+
+.language-choice.on {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.language-choice input {
+  margin: 0;
+  accent-color: var(--accent);
+}
+
+.language-choice:has(input:disabled) {
+  cursor: default;
 }
 
 .fact-row {

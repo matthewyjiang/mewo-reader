@@ -310,17 +310,21 @@ impl Matcher {
     }
 }
 
-pub(crate) fn verify_opf(matcher: &Matcher, ctx: &WorkContext, meta: &OpfMeta) -> Opf {
+pub(crate) fn verify_opf(
+    matcher: &Matcher,
+    ctx: &WorkContext,
+    meta: &OpfMeta,
+    languages: &[String],
+) -> Opf {
     if let Some(language) = meta
         .language
         .as_deref()
         .map(str::trim)
         .filter(|s| !s.is_empty())
     {
-        let lower = language.to_ascii_lowercase();
-        // `und` is what Calibre writes when it has no language. `mul` and
-        // `zxx` are "multiple" and "no linguistic content".
-        if !matches!(lower.as_str(), "und" | "mul" | "zxx") && !lower.starts_with("en") {
+        // Language before ISBN: a matching ISBN in an unaccepted language is
+        // still a mismatch. `und` / `mul` / `zxx` are no language.
+        if !super::languages::accepts(languages, language) {
             return Opf::Mismatch(format!("Downloaded book is in {language}"));
         }
     }
@@ -1273,6 +1277,10 @@ mod tests {
         assert!(isbn13s("9780441172718").is_empty());
     }
 
+    fn codes(list: &[&str]) -> Vec<String> {
+        list.iter().copied().map(str::to_string).collect()
+    }
+
     fn dune_meta(isbn: Option<&str>) -> WorkContext {
         let mut context = ctx(
             "Dune",
@@ -1298,15 +1306,16 @@ mod tests {
         );
         assert_eq!(book.meta.identifiers.len(), 1);
         assert_eq!(book.meta.language.as_deref(), Some("de"));
+        let languages = codes(&["en"]);
         assert_eq!(
-            verify_opf(&matcher, &context, &book.meta),
+            verify_opf(&matcher, &context, &book.meta, &languages),
             Opf::Mismatch("Downloaded book is in de".into())
         );
         let english = parsed(
             "<dc:title>Chapterhouse Dune</dc:title><dc:creator>Frank Herbert</dc:creator><dc:identifier>urn:isbn:978-0-441-17271-9</dc:identifier><dc:language>en</dc:language>",
         );
         assert_eq!(
-            verify_opf(&matcher, &context, &english.meta),
+            verify_opf(&matcher, &context, &english.meta, &languages),
             Opf::Confirmed
         );
     }
@@ -1315,28 +1324,32 @@ mod tests {
     fn opf_sibling_title_language_and_junk_title() {
         let context = dune_meta(None);
         let matcher = Matcher::new(&context);
+        let languages = codes(&["en"]);
         let sibling =
             parsed("<dc:title>Chapterhouse Dune</dc:title><dc:creator>Frank Herbert</dc:creator>");
         assert_eq!(
-            verify_opf(&matcher, &context, &sibling.meta),
+            verify_opf(&matcher, &context, &sibling.meta, &languages),
             Opf::Mismatch("Downloaded book is Chapterhouse Dune".into())
         );
         let junk =
             parsed("<dc:title>Microsoft Word - doc1</dc:title><dc:creator>User</dc:creator>");
         assert_eq!(junk.meta.titles, vec!["Microsoft Word - doc1".to_string()]);
-        assert_eq!(verify_opf(&matcher, &context, &junk.meta), Opf::Unknown);
+        assert_eq!(
+            verify_opf(&matcher, &context, &junk.meta, &languages),
+            Opf::Unknown
+        );
         let german = parsed(
             "<dc:title>Dune</dc:title><dc:creator>Frank Herbert</dc:creator><dc:language>de</dc:language>",
         );
         assert_eq!(
-            verify_opf(&matcher, &context, &german.meta),
+            verify_opf(&matcher, &context, &german.meta, &languages),
             Opf::Mismatch("Downloaded book is in de".into())
         );
         let english = parsed(
             "<dc:title>Dune</dc:title><dc:creator>Frank Herbert</dc:creator><dc:language>en-US</dc:language>",
         );
         assert_eq!(
-            verify_opf(&matcher, &context, &english.meta),
+            verify_opf(&matcher, &context, &english.meta, &languages),
             Opf::Confirmed
         );
         for language in ["und", "mul", "zxx"] {
@@ -1344,7 +1357,7 @@ mod tests {
                 "<dc:title>Dune</dc:title><dc:creator>Frank Herbert</dc:creator><dc:language>{language}</dc:language>"
             ));
             assert_eq!(
-                verify_opf(&matcher, &context, &missing.meta),
+                verify_opf(&matcher, &context, &missing.meta, &languages),
                 Opf::Confirmed,
                 "{language}"
             );
@@ -1361,8 +1374,9 @@ mod tests {
             identifiers: vec!["0-441-17271-7".into()],
             language: Some("de".into()),
         };
+        let languages = codes(&["en"]);
         assert_eq!(
-            verify_opf(&matcher, &context, &german),
+            verify_opf(&matcher, &context, &german, &languages),
             Opf::Mismatch("Downloaded book is in de".into())
         );
         let und = OpfMeta {
@@ -1371,7 +1385,56 @@ mod tests {
             identifiers: vec!["0-441-17271-7".into()],
             language: Some("und".into()),
         };
-        assert_eq!(verify_opf(&matcher, &context, &und), Opf::Confirmed);
+        assert_eq!(
+            verify_opf(&matcher, &context, &und, &languages),
+            Opf::Confirmed
+        );
+    }
+
+    #[test]
+    fn accepted_languages_decide_the_opf_check() {
+        let context = dune_meta(Some("9780441172719"));
+        let matcher = Matcher::new(&context);
+        let meta = |language: &str| OpfMeta {
+            titles: vec!["Chapterhouse Dune".into()],
+            creators: vec!["Frank Herbert".into()],
+            identifiers: vec!["9780441172719".into()],
+            language: Some(language.into()),
+        };
+        let both = codes(&["en", "de"]);
+        assert_eq!(
+            verify_opf(&matcher, &context, &meta("de"), &both),
+            Opf::Confirmed
+        );
+        assert_eq!(
+            verify_opf(&matcher, &context, &meta("ger"), &both),
+            Opf::Confirmed
+        );
+        assert_eq!(
+            verify_opf(&matcher, &context, &meta("de-DE"), &both),
+            Opf::Confirmed
+        );
+        assert_eq!(
+            verify_opf(&matcher, &context, &meta("fr"), &both),
+            Opf::Mismatch("Downloaded book is in fr".into())
+        );
+        let english = codes(&["en"]);
+        assert_eq!(
+            verify_opf(&matcher, &context, &meta("de"), &english),
+            Opf::Mismatch("Downloaded book is in de".into())
+        );
+        assert_eq!(
+            verify_opf(&matcher, &context, &meta("en-US"), &english),
+            Opf::Confirmed
+        );
+        assert_eq!(
+            verify_opf(&matcher, &context, &meta("en_GB"), &english),
+            Opf::Confirmed
+        );
+        assert_eq!(
+            verify_opf(&matcher, &context, &meta("eng"), &english),
+            Opf::Confirmed
+        );
     }
 
     #[test]
@@ -1467,6 +1530,9 @@ mod tests {
         let book = parsed(
             "<dc:title>Dune (Dune Chronicles, Book 1)</dc:title><dc:creator>Frank Herbert</dc:creator>",
         );
-        assert_eq!(verify_opf(&matcher, &context, &book.meta), Opf::Confirmed);
+        assert_eq!(
+            verify_opf(&matcher, &context, &book.meta, &codes(&["en"])),
+            Opf::Confirmed
+        );
     }
 }

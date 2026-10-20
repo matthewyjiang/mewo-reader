@@ -12,7 +12,15 @@ const info = {
 function freshState() {
   return {
     meFails: 0,
-    settings: { allowSignup: true, maxEpubBytes: 64 * 1024 * 1024 },
+    settings: {
+      allowSignup: true,
+      maxEpubBytes: 64 * 1024 * 1024,
+      languages: ['en'],
+      supportedLanguages: [
+        { code: 'en', name: 'English' },
+        { code: 'de', name: 'German' },
+      ],
+    },
     ada: {
       username: 'ada',
       joinedAt: 1_609_459_200_000,

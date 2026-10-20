@@ -291,7 +291,17 @@ async fn step(state: &AppState, ready: &Ready, row: &Due, now_ms: i64) -> Result
         }
     };
     match row.state.as_str() {
-        "requested" => requested(state, &clients, row, ready.settings.max_epub_bytes, now_ms).await,
+        "requested" => {
+            requested(
+                state,
+                &clients,
+                row,
+                ready.settings.max_epub_bytes,
+                &ready.settings.languages,
+                now_ms,
+            )
+            .await
+        }
         "downloading" => downloading(state, ready, &clients, row, now_ms).await,
         _ => Ok(()),
     }
@@ -302,6 +312,7 @@ async fn requested(
     clients: &Clients<'_>,
     row: &Due,
     max_bytes: u64,
+    languages: &[String],
     now_ms: i64,
 ) -> Result<(), ApiError> {
     let job = job_name(&row.id);
@@ -330,7 +341,7 @@ async fn requested(
         Err(err) => return hold(&state.pool, &row.id, "requested", "Prowlarr", &err, now_ms).await,
     };
     let tried = guids(&row.tried_guids);
-    let choice = pick::pick(&matcher, &releases, &tried, max_bytes);
+    let choice = pick::pick(&matcher, &releases, &tried, max_bytes, languages);
     let Some(release) = choice.release else {
         let gave_up = row.created_at < now_ms.saturating_sub(GIVE_UP_MS);
         let message = match choice.closest {
@@ -556,7 +567,9 @@ async fn completed(
             return retry_or_fail(state, sab, row, nzo, &err.to_string(), Some(&dir), now_ms).await
         }
     };
-    if let matching::Opf::Mismatch(message) = matching::verify_opf(&matcher, &ctx, &staged.meta) {
+    if let matching::Opf::Mismatch(message) =
+        matching::verify_opf(&matcher, &ctx, &staged.meta, &ready.settings.languages)
+    {
         let _ = tokio::fs::remove_dir_all(&staged.temp_dir).await;
         return retry_or_fail(state, sab, row, nzo, &message, Some(&dir), now_ms).await;
     }

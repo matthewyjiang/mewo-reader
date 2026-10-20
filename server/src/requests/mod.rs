@@ -2,6 +2,7 @@
 //!
 //! Prowlarr and SABnzbd stay inside the worker. Handlers only see [`BookRequest`].
 
+pub(crate) mod languages;
 mod matching;
 mod openlibrary;
 mod pick;

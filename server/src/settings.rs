@@ -30,6 +30,9 @@ pub struct Settings {
     /// SAB category; its folder under complete_dir must be the MEWO_DOWNLOADS_DIR mount.
     #[serde(default = "default_sabnzbd_category")]
     pub sabnzbd_category: String,
+    /// ISO 639-1 codes of books requests may download. Default English.
+    #[serde(default = "default_languages")]
+    pub languages: Vec<String>,
 }
 
 fn default_requests_enabled() -> bool {
@@ -42,6 +45,10 @@ fn default_url() -> String {
 
 fn default_sabnzbd_category() -> String {
     "books".into()
+}
+
+fn default_languages() -> Vec<String> {
+    crate::requests::languages::default_codes()
 }
 
 /// Credentials an admin can set but never read back. The variants are the only
@@ -70,6 +77,9 @@ impl Secret {
 /// `downloads_dir` is the `MEWO_DOWNLOADS_DIR` path. It is not stored and PATCH
 /// rejects it: a writable path would let an admin point the importer at any
 /// directory. The handler fills it in after load/update.
+///
+/// `supported_languages` is the fixed list the settings screen shows. It is not
+/// stored and PATCH rejects it, same as `downloads_dir`.
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AdminSettings {
@@ -77,6 +87,15 @@ pub struct AdminSettings {
     pub settings: Settings,
     pub secrets: BTreeMap<&'static str, bool>,
     pub downloads_dir: Option<String>,
+    pub supported_languages: Vec<SupportedLanguage>,
+}
+
+/// One entry of [`AdminSettings::supported_languages`].
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SupportedLanguage {
+    pub code: &'static str,
+    pub name: &'static str,
 }
 
 fn default_allow_signup() -> bool {
@@ -96,6 +115,7 @@ impl Default for Settings {
             prowlarr_url: default_url(),
             sabnzbd_url: default_url(),
             sabnzbd_category: default_sabnzbd_category(),
+            languages: default_languages(),
         }
     }
 }
@@ -119,6 +139,7 @@ impl Settings {
         check_base("prowlarrUrl", &self.prowlarr_url)?;
         check_base("sabnzbdUrl", &self.sabnzbd_url)?;
         check_category(&self.sabnzbd_category)?;
+        check_languages(&self.languages)?;
         Ok(())
     }
 }
@@ -150,6 +171,21 @@ fn check_category(raw: &str) -> Result<(), ApiError> {
     } else {
         Err(ApiError::BadRequest(
             "sabnzbdCategory must be 1 to 32 of a-z, 0-9, \"_\" or \"-\".".into(),
+        ))
+    }
+}
+
+fn check_languages(languages: &[String]) -> Result<(), ApiError> {
+    let mut seen = HashSet::new();
+    let ok = (1..=10).contains(&languages.len())
+        && languages
+            .iter()
+            .all(|code| crate::requests::languages::is_code(code) && seen.insert(code.as_str()));
+    if ok {
+        Ok(())
+    } else {
+        Err(ApiError::BadRequest(
+            "languages must list 1 to 10 supported language codes.".into(),
         ))
     }
 }
@@ -319,6 +355,13 @@ fn admin_settings(settings: Settings, secrets_raw: &str) -> AdminSettings {
         settings,
         secrets: secret_flags(secrets_raw),
         downloads_dir: None,
+        supported_languages: crate::requests::languages::LANGUAGES
+            .iter()
+            .map(|language| SupportedLanguage {
+                code: language.code,
+                name: language.name,
+            })
+            .collect(),
     }
 }
 
@@ -710,10 +753,56 @@ mod tests {
 
         let empty = update(&pool, Map::new(), "user").await.unwrap();
         assert_eq!(empty.settings.max_epub_bytes, MIN_EPUB_BYTES);
+        assert_eq!(empty.settings.languages, vec!["en".to_string()]);
         let after_empty: String = sqlx::query_scalar("SELECT doc FROM settings WHERE id = 1")
             .fetch_one(&pool)
             .await
             .unwrap();
         assert_eq!(after_empty, unchanged);
+    }
+
+    #[test]
+    fn languages_default_to_english_and_old_json_does_too() {
+        assert_eq!(Settings::default().languages, vec!["en".to_string()]);
+        let old = decode_settings(
+            r#"{"allowSignup":true,"maxEpubBytes":67108864,"requestsEnabled":false,"prowlarrUrl":"","sabnzbdUrl":"","sabnzbdCategory":"books"}"#,
+        )
+        .unwrap();
+        assert_eq!(old.languages, vec!["en".to_string()]);
+        assert_eq!(
+            decode_settings("{}").unwrap().languages,
+            vec!["en".to_string()]
+        );
+    }
+
+    #[test]
+    fn languages_must_be_one_to_ten_distinct_codes() {
+        let message = "languages must list 1 to 10 supported language codes.";
+        let eleven: Vec<String> = crate::requests::languages::LANGUAGES
+            .iter()
+            .take(11)
+            .map(|language| language.code.to_string())
+            .collect();
+        let rejected = [
+            Vec::new(),
+            vec!["xx".into()],
+            vec!["EN".into()],
+            vec!["eng".into()],
+            vec!["en".into(), "en".into()],
+            vec!["en".into(), "de".into(), "en".into()],
+            eleven,
+        ];
+        for languages in rejected {
+            let settings = Settings {
+                languages,
+                ..Settings::default()
+            };
+            assert_eq!(settings.validate().unwrap_err().to_string(), message);
+        }
+        let ok = Settings {
+            languages: vec!["de".into(), "en".into()],
+            ..Settings::default()
+        };
+        assert!(ok.validate().is_ok());
     }
 }

@@ -47,7 +47,6 @@ const BAD_FORMAT: &[&str] = &[
     "m4b",
     "audiobook",
 ];
-const LANGUAGES: &[&str] = &["german", "french", "spanish", "italian", "dutch"];
 const MARKERS: &[&str] = &[
     "summary",
     "workbook",
@@ -87,6 +86,7 @@ pub(crate) fn pick<'r>(
     releases: &'r [Release],
     tried: &[String],
     max_bytes: u64,
+    languages: &[String],
 ) -> Choice<'r> {
     let mut best: Option<Rank<'r>> = None;
     let mut closest: Option<(f32, String)> = None;
@@ -103,7 +103,7 @@ pub(crate) fn pick<'r>(
             Verdict::Match { fit, author_seen } => {
                 let rank = Rank {
                     author_seen,
-                    not_foreign: !foreign(&tokens),
+                    not_foreign: !foreign(&tokens, languages),
                     retail: tokens.iter().any(|token| token == "retail"),
                     fit,
                     grabs: release.grabs.unwrap_or(0).min(20),
@@ -268,10 +268,10 @@ fn gates(release: &Release, tokens: &[String], matcher: &Matcher, max_bytes: u64
     true
 }
 
-fn foreign(tokens: &[String]) -> bool {
+fn foreign(tokens: &[String], languages: &[String]) -> bool {
     tokens
         .iter()
-        .any(|token| LANGUAGES.contains(&token.as_str()))
+        .any(|token| super::languages::foreign_word(token, languages))
 }
 
 fn tokens(value: &str) -> Vec<String> {
@@ -318,6 +318,10 @@ mod tests {
     use crate::requests::matching::WorkContext;
     use std::collections::HashSet;
 
+    fn codes(list: &[&str]) -> Vec<String> {
+        list.iter().copied().map(str::to_string).collect()
+    }
+
     fn matcher_for(w: &Wanted) -> Matcher {
         Matcher::new(&WorkContext {
             titles: vec![w.title.to_string()],
@@ -333,7 +337,7 @@ mod tests {
         tried: &[String],
         max: u64,
     ) -> Option<&'a Release> {
-        pick(&matcher_for(w), releases, tried, max).release
+        pick(&matcher_for(w), releases, tried, max, &codes(&["en"])).release
     }
 
     fn release(guid: &str, title: &str, size: u64, grabs: i64, categories: &[i64]) -> Release {
@@ -422,7 +426,7 @@ mod tests {
             &[7020],
         );
         let releases = [chapterhouse];
-        let choice = pick(&matcher, &releases, &[], max);
+        let choice = pick(&matcher, &releases, &[], max, &codes(&["en"]));
         assert!(choice.release.is_none());
         assert_eq!(choice.closest.as_deref(), Some("Chapterhouse Dune"));
 
@@ -466,6 +470,46 @@ mod tests {
         assert_eq!(
             pick_of(&wanted, &[saga, exact], &[], max).unwrap().guid,
             "exact"
+        );
+    }
+
+    #[test]
+    fn an_accepted_language_is_not_ranked_foreign() {
+        let wanted = Wanted {
+            title: "Dune",
+            author: "Frank Herbert",
+        };
+        let max = 64 * 1024 * 1024;
+        let english = release("en", "Frank.Herbert.Dune.Saga.EPUB", 2_000_000, 0, &[7020]);
+        let german = release(
+            "de",
+            "Frank.Herbert.Dune.German.RETAIL.EPUB",
+            800_000,
+            20,
+            &[7020],
+        );
+        let matcher = matcher_for(&wanted);
+        let both = codes(&["en", "de"]);
+        assert_eq!(
+            pick(
+                &matcher,
+                &[german.clone(), english.clone()],
+                &[],
+                max,
+                &both
+            )
+            .release
+            .unwrap()
+            .guid,
+            "de"
+        );
+        let only = codes(&["en"]);
+        assert_eq!(
+            pick(&matcher, &[german, english], &[], max, &only)
+                .release
+                .unwrap()
+                .guid,
+            "en"
         );
     }
 

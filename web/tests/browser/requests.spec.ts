@@ -23,6 +23,22 @@ function bookRequest(over: Record<string, unknown> = {}) {
   };
 }
 
+const supportedLanguages = [
+  { code: 'en', name: 'English' },
+  { code: 'es', name: 'Spanish' },
+  { code: 'fr', name: 'French' },
+  { code: 'de', name: 'German' },
+  { code: 'it', name: 'Italian' },
+  { code: 'pt', name: 'Portuguese' },
+  { code: 'nl', name: 'Dutch' },
+  { code: 'sv', name: 'Swedish' },
+  { code: 'pl', name: 'Polish' },
+  { code: 'ru', name: 'Russian' },
+  { code: 'ja', name: 'Japanese' },
+  { code: 'zh', name: 'Chinese' },
+  { code: 'ko', name: 'Korean' },
+];
+
 function freshState() {
   return {
     canRequest: true,
@@ -34,6 +50,8 @@ function freshState() {
       prowlarrUrl: 'http://prowlarr.media.svc.cluster.local:9696',
       sabnzbdUrl: 'http://sabnzbd.media.svc.cluster.local:8080',
       sabnzbdCategory: 'books',
+      languages: ['en'],
+      supportedLanguages,
       downloadsDir: '/downloads',
       secrets: { prowlarrApiKey: true, sabnzbdApiKey: false },
     },
@@ -130,7 +148,7 @@ async function answer(route: Route, state: ReturnType<typeof freshState>) {
     if ('sabnzbdApiKey' in patch) {
       state.settings.secrets.sabnzbdApiKey = typeof patch.sabnzbdApiKey === 'string' && patch.sabnzbdApiKey.length > 0;
     }
-    for (const key of ['allowSignup', 'maxEpubBytes', 'requestsEnabled', 'prowlarrUrl', 'sabnzbdUrl', 'sabnzbdCategory'] as const) {
+    for (const key of ['allowSignup', 'maxEpubBytes', 'requestsEnabled', 'prowlarrUrl', 'sabnzbdUrl', 'sabnzbdCategory', 'languages'] as const) {
       if (key in patch) (state.settings as Record<string, unknown>)[key] = patch[key];
     }
     return json(state.settings);
@@ -195,6 +213,30 @@ test('the Requests page shows Downloading 42% and cancel works', async ({ page }
   await page.getByRole('button', { name: 'Cancel' }).click();
   await expect(page.getByText('Canceled')).toBeVisible();
   await expect(page.getByRole('button', { name: 'Retry' })).toBeVisible();
+});
+
+test('book languages save through the settings patch and the last one stays on', async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await install(page);
+  await page.goto('/settings/server');
+  await expect(page.getByText('Requests only download books in these languages.')).toBeVisible();
+  const english = page.getByRole('checkbox', { name: 'English' });
+  const german = page.getByRole('checkbox', { name: 'German' });
+  await expect(english).toBeChecked();
+  await expect(english).toBeDisabled();
+  await expect(german).not.toBeChecked();
+  const add = page.waitForRequest((request) =>
+    request.method() === 'PATCH' && request.url().includes('/v1/admin/settings'));
+  await german.check();
+  expect((await add).postDataJSON()).toEqual({ languages: ['en', 'de'] });
+  await expect(german).toBeChecked();
+  await expect(english).toBeEnabled();
+  const remove = page.waitForRequest((request) =>
+    request.method() === 'PATCH' && request.url().includes('/v1/admin/settings'));
+  await german.uncheck();
+  expect((await remove).postDataJSON()).toEqual({ languages: ['en'] });
+  await expect(english).toBeDisabled();
+  await expect(german).not.toBeChecked();
 });
 
 test('a saved key shows Saved, blur sends the key, and test connection lists three checks', async ({ page }) => {
