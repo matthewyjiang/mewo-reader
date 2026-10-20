@@ -221,8 +221,10 @@
 
   function saveMb(): void {
     if (!settings) return;
+    const shown = queuedText.maxEpubBytes ?? mbField(settings.maxEpubBytes);
+    if (mb === shown) return;
     const bytes = parseMb(mb);
-    if (bytes === null) {
+    if (bytes === null || (!queuedText.maxEpubBytes && bytes === settings.maxEpubBytes)) {
       mb = mbField(settings.maxEpubBytes);
       return;
     }
@@ -232,17 +234,15 @@
       store.notice = range;
       return;
     }
-    const baseline = queuedText.maxEpubBytes ?? String(settings.maxEpubBytes);
-    if (String(bytes) === baseline) {
-      mb = mbField(bytes);
-      return;
-    }
-    queuedText.maxEpubBytes = String(bytes);
     const typed = mb;
+    queuedText.maxEpubBytes = typed;
     enqueue(async () => {
       try {
         settings = await store.api.updateServerSettings({ maxEpubBytes: bytes });
-        if (mb === typed) mb = mbField(settings.maxEpubBytes);
+        if (mb === typed && settings) {
+          mb = mbField(settings.maxEpubBytes);
+          queuedText.maxEpubBytes = mb;
+        }
       } catch (error) {
         if (mb === typed && settings) {
           mb = mbField(settings.maxEpubBytes);
@@ -547,8 +547,8 @@
 
 .field {
   position: relative;
-  flex: 1 1 8rem;
-  min-width: 0;
+  flex: 0 0 auto;
+  width: min(16rem, 50%);
   max-width: 16rem;
 }
 

@@ -41,6 +41,14 @@ function freshState() {
     },
     requests: [bookRequest()],
     catalogRequest: null as ReturnType<typeof bookRequest> | null,
+    catalog: null as null | {
+      workKey: string;
+      title: string;
+      author: string;
+      year: number | null;
+      coverId: number | null;
+      request: ReturnType<typeof bookRequest> | null;
+    }[],
   };
 }
 
@@ -90,7 +98,7 @@ async function answer(route: Route, state: ReturnType<typeof freshState>) {
   if (path === '/v1/feed') return json({ items: [], nextCursor: null });
   if (path === '/v1/catalog/search') {
     return json({
-      items: [{
+      items: state.catalog ?? [{
         workKey: '/works/OL893415W',
         title: 'Dune',
         author: 'Frank Herbert',
@@ -220,32 +228,25 @@ test('shots of catalog, requests, and the book requests group', async ({ browser
     });
     const page = await context.newPage();
     try {
-      await install(page, { theme, requests: shelf });
-      await page.route('**/v1/catalog/search', (route) => route.fulfill({
-        status: 200,
-        contentType: 'application/json',
-        body: JSON.stringify({
-          items: [
-            {
-              workKey: '/works/OL893415W',
-              title: 'Dune',
-              author: 'Frank Herbert',
-              year: 1965,
-              coverId: 11481354,
-              request: null,
-            },
-            {
-              workKey: '/works/OL45883W',
-              title: 'Neuromancer',
-              author: 'William Gibson',
-              year: 1984,
-              coverId: null,
-              request: null,
-            },
-          ],
-          nextPage: null,
-        }),
-      }));
+      const state = await install(page, { theme, requests: shelf });
+      state.catalog = [
+        {
+          workKey: '/works/OL893415W',
+          title: 'Dune',
+          author: 'Frank Herbert',
+          year: 1965,
+          coverId: 11481354,
+          request: null,
+        },
+        {
+          workKey: '/works/OL45883W',
+          title: 'Neuromancer',
+          author: 'William Gibson',
+          year: 1984,
+          coverId: null,
+          request: null,
+        },
+      ];
       await page.goto('/search');
       await page.getByRole('tab', { name: 'Catalog' }).click();
       await page.getByPlaceholder('Search').fill('dune');
