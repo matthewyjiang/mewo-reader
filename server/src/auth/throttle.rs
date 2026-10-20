@@ -163,69 +163,76 @@ impl FromRequestParts<AppState> for ClientIp {
             .map(|info| info.0.ip())
             .unwrap_or(IpAddr::V4(Ipv4Addr::UNSPECIFIED));
         let hops = state.throttle.trusted_proxy_hops();
-        Ok(resolve_client_ip(peer, hops, &forwarded_for(parts)))
+        let entries = forwarded_entries(parts);
+        Ok(resolve_client_ip(peer, hops, &entries))
     }
 }
 
 /// `hops == 0` ignores `X-Forwarded-For`. Each trusted proxy appends the peer
 /// it saw, so the n-th entry from the right is the client a chain of n proxies
-/// observed. Entries a client forges sit further left. When the header is
-/// shorter than `hops`, the leftmost address that parsed is as close as this
-/// process can get. When nothing parsed, the request shares [`ClientIp::Unknown`].
-fn resolve_client_ip(peer: IpAddr, hops: u8, forwarded: &[IpAddr]) -> ClientIp {
+/// observed. Entries a client forges sit further left. Every comma-separated
+/// slot counts, including ones that are not addresses. Only the selected slot
+/// is parsed. When the header is shorter than `hops`, that slot is the
+/// leftmost one. If it is not an address, the request shares [`ClientIp::Unknown`].
+fn resolve_client_ip(peer: IpAddr, hops: u8, forwarded: &[impl AsRef<[u8]>]) -> ClientIp {
     if hops == 0 {
         return ClientIp::Addr(peer);
     }
     let n = usize::from(hops);
-    let candidate = if forwarded.len() >= n {
-        forwarded.get(forwarded.len() - n).copied()
+    let selected = if forwarded.len() >= n {
+        forwarded.get(forwarded.len() - n)
     } else {
-        forwarded.first().copied()
+        forwarded.first()
     };
-    if forwarded.len() < n && candidate.is_some() {
+    if forwarded.len() < n && selected.is_some() {
         tracing::debug!(
             hops,
             entries = forwarded.len(),
             "X-Forwarded-For is shorter than trusted_proxy_hops; using the leftmost address"
         );
     }
-    match candidate {
+    match selected.and_then(|entry| parse_forwarded_entry(entry.as_ref())) {
         Some(ip) => ClientIp::Addr(ip),
         None => {
             tracing::debug!(
                 hops,
-                "X-Forwarded-For has no usable address; charging the shared unknown key"
+                "X-Forwarded-For entry is missing or unusable; charging the shared unknown key"
             );
             ClientIp::Unknown
         }
     }
 }
 
-fn forwarded_for(parts: &Parts) -> Vec<IpAddr> {
+fn forwarded_entries(parts: &Parts) -> Vec<Vec<u8>> {
     let mut out = Vec::new();
     for value in parts.headers.get_all("x-forwarded-for") {
-        out.extend(parse_forwarded_value(value.as_bytes()));
+        out.extend(
+            split_forwarded(value.as_bytes())
+                .into_iter()
+                .map(|part| part.to_vec()),
+        );
     }
     out
 }
 
-/// Split on `,` and keep only the entries that parse. One bad byte used to
-/// drop the whole header, because `HeaderValue::to_str` rejects non-UTF-8.
-fn parse_forwarded_value(bytes: &[u8]) -> Vec<IpAddr> {
-    let mut out = Vec::new();
-    for part in bytes.split(|byte| *byte == b',') {
-        let part = trim_ascii(part);
-        if part.is_empty() {
-            continue;
-        }
-        let Ok(text) = std::str::from_utf8(part) else {
-            continue;
-        };
-        if let Ok(ip) = text.parse() {
-            out.push(ip);
-        }
+fn split_forwarded(bytes: &[u8]) -> Vec<&[u8]> {
+    bytes.split(|byte| *byte == b',').map(trim_ascii).collect()
+}
+
+/// Bare IPv4/IPv6, `ip:port`, `[ipv6]`, or `[ipv6]:port`. Anything else,
+/// including a neighboring entry, is not this slot.
+fn parse_forwarded_entry(bytes: &[u8]) -> Option<IpAddr> {
+    let text = std::str::from_utf8(trim_ascii(bytes)).ok()?;
+    if text.is_empty() {
+        return None;
     }
-    out
+    if let Ok(ip) = text.parse::<IpAddr>() {
+        return Some(ip);
+    }
+    if let Ok(addr) = text.parse::<SocketAddr>() {
+        return Some(addr.ip());
+    }
+    text.strip_prefix('[')?.strip_suffix(']')?.parse().ok()
 }
 
 fn trim_ascii(bytes: &[u8]) -> &[u8] {
@@ -622,30 +629,70 @@ mod tests {
     fn forwarded_for_hops_and_a_short_header() {
         let peer = ip("10.42.0.9");
         assert_eq!(
-            resolve_client_ip(peer, 0, &[ip("1.1.1.1"), ip("8.8.8.8")]),
+            resolve_header(peer, 0, b"1.1.1.1, 8.8.8.8"),
             ClientIp::Addr(peer)
         );
         assert_eq!(
-            resolve_client_ip(peer, 1, &[ip("1.1.1.1"), ip("203.0.113.9")]),
+            resolve_header(peer, 1, b"1.1.1.1, 203.0.113.9"),
             ClientIp::Addr(ip("203.0.113.9"))
         );
         assert_eq!(
-            resolve_client_ip(peer, 2, &[ip("203.0.113.9"), ip("203.0.113.10")]),
+            resolve_header(peer, 2, b"203.0.113.9, 203.0.113.10"),
             ClientIp::Addr(ip("203.0.113.9"))
         );
         assert_eq!(
-            resolve_client_ip(peer, 2, &[ip("1.1.1.1")]),
+            resolve_header(peer, 2, b"1.1.1.1"),
             ClientIp::Addr(ip("1.1.1.1"))
         );
-        assert_eq!(resolve_client_ip(peer, 1, &[]), ClientIp::Unknown);
-        assert_eq!(resolve_client_ip(peer, 2, &[]), ClientIp::Unknown);
-
-        let parsed = parse_forwarded_value(b"\xff, 203.0.113.9, 162.158.1.1");
-        assert_eq!(parsed, vec![ip("203.0.113.9"), ip("162.158.1.1")]);
         assert_eq!(
-            resolve_client_ip(peer, 1, &parsed),
+            resolve_client_ip(peer, 1, &[] as &[&[u8]]),
+            ClientIp::Unknown
+        );
+        assert_eq!(
+            resolve_client_ip(peer, 2, &[] as &[&[u8]]),
+            ClientIp::Unknown
+        );
+
+        assert_eq!(
+            resolve_header(peer, 2, b"evil, unknown, 162.158.1.1"),
+            ClientIp::Unknown
+        );
+        assert_eq!(
+            resolve_header(peer, 2, b"203.0.113.9:1234, 162.158.1.1"),
+            ClientIp::Addr(ip("203.0.113.9"))
+        );
+        let v6 = resolve_header(peer, 2, b"[2001:db8::1]:443, 162.158.1.1");
+        assert_eq!(v6, ClientIp::Addr(ip("2001:db8::1")));
+        assert_eq!(
+            resolve_header(peer, 1, b"\xff, 203.0.113.9, 162.158.1.1"),
             ClientIp::Addr(ip("162.158.1.1"))
         );
-        assert!(parse_forwarded_value(b"\xff, not-an-ip").is_empty());
+        assert_eq!(resolve_header(peer, 1, b"\xff"), ClientIp::Unknown);
+        assert_eq!(
+            resolve_header(peer, 1, b"\xff, not-an-ip"),
+            ClientIp::Unknown
+        );
+
+        let mut cfg = auth_cfg(1, 100);
+        cfg.trusted_proxy_hops = 2;
+        let throttle = Throttle::new(&cfg);
+        let unknown = resolve_header(peer, 2, b"evil, unknown, 162.158.1.1");
+        assert!(throttle.login(unknown, "a").is_ok());
+        assert!(throttle.login(unknown, "b").is_err());
+        assert!(throttle
+            .login(ClientIp::Addr(ip("162.158.1.1")), "c")
+            .is_ok());
+        assert!(throttle.login(v6, "d").is_ok());
+        assert!(throttle
+            .login(ClientIp::Addr(ip("2001:db8::ffff")), "e")
+            .is_err());
+        assert!(throttle
+            .login(ClientIp::Addr(ip("2001:db8:0:1::1")), "f")
+            .is_ok());
+    }
+
+    fn resolve_header(peer: IpAddr, hops: u8, header: &[u8]) -> ClientIp {
+        let entries = split_forwarded(header);
+        resolve_client_ip(peer, hops, &entries)
     }
 }

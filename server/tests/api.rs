@@ -4537,6 +4537,87 @@ async fn a_non_ascii_forwarded_for_is_still_ip_limited() {
 }
 
 #[tokio::test]
+async fn an_unparseable_hop_does_not_slide_to_a_neighbor() {
+    let mut auth = roomy_auth();
+    auth.login_ip = rate(1, 60);
+    auth.login_user = rate(100, 60);
+    auth.trusted_proxy_hops = 2;
+    let (_state, app, _tmp) = auth_app(auth).await;
+    let (status, _, body) = post_auth(
+        &app,
+        "/v1/auth/login",
+        "10.42.0.8",
+        Some("evil, unknown, 162.158.1.1"),
+        "matt",
+        "wrongpass",
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "{body}");
+    let (status, headers, body) = post_auth(
+        &app,
+        "/v1/auth/login",
+        "10.42.0.9",
+        Some("1.2.3.4, unknown, 162.158.1.1"),
+        "ada",
+        "wrongpass",
+    )
+    .await;
+    assert_limited(status, &headers, &body);
+
+    let (status, _, body) = post_auth(
+        &app,
+        "/v1/auth/login",
+        "10.42.0.8",
+        Some("203.0.113.9:1234, 162.158.1.1"),
+        "bea",
+        "wrongpass",
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "{body}");
+    let (status, headers, body) = post_auth(
+        &app,
+        "/v1/auth/login",
+        "10.42.0.8",
+        Some("203.0.113.9:9, 8.8.8.8"),
+        "cyd",
+        "wrongpass",
+    )
+    .await;
+    assert_limited(status, &headers, &body);
+
+    let (status, _, body) = post_auth(
+        &app,
+        "/v1/auth/login",
+        "10.42.0.8",
+        Some("[2001:db8::1]:443, 162.158.1.1"),
+        "dee",
+        "wrongpass",
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "{body}");
+    let (status, headers, body) = post_auth(
+        &app,
+        "/v1/auth/login",
+        "10.42.0.8",
+        Some("[2001:db8::ffff]:443, 162.158.1.1"),
+        "fay",
+        "wrongpass",
+    )
+    .await;
+    assert_limited(status, &headers, &body);
+    let (status, _, body) = post_auth(
+        &app,
+        "/v1/auth/login",
+        "10.42.0.8",
+        Some("[2001:db8:0:1::1]:443, 162.158.1.1"),
+        "gus",
+        "wrongpass",
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "{body}");
+}
+
+#[tokio::test]
 async fn a_busy_password_service_does_not_spend_the_attempt() {
     let mut auth = roomy_auth();
     auth.max_concurrent = 0;
