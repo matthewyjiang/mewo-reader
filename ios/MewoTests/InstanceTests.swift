@@ -92,7 +92,8 @@ final class InstanceSignupTests: XCTestCase {
         await loader.settle()
         XCTAssertNil(loader.allowSignup)
         XCTAssertTrue(showCreateAccount(loader.allowSignup))
-        XCTAssertEqual(await seen.urls(), [])
+        let urls = await seen.urls()
+        XCTAssertEqual(urls, [])
     }
 
     func testNewerUrlCancelsTheOlderWait() async {
@@ -110,10 +111,12 @@ final class InstanceSignupTests: XCTestCase {
         await gate.untilWaiting(1)
         loader.noteUrl("http://new.example")
         await gate.untilWaiting(2)
-        XCTAssertEqual(await seen.urls(), [])
+        let before = await seen.urls()
+        XCTAssertEqual(before, [])
         await gate.release()
         await loader.settle()
-        XCTAssertEqual(await seen.urls(), ["http://new.example"])
+        let after = await seen.urls()
+        XCTAssertEqual(after, ["http://new.example"])
         XCTAssertEqual(loader.allowSignup, true)
     }
 
@@ -141,7 +144,8 @@ final class InstanceSignupTests: XCTestCase {
         try? await Task.sleep(nanoseconds: 30_000_000)
         XCTAssertEqual(loader.allowSignup, true)
         XCTAssertTrue(showCreateAccount(loader.allowSignup))
-        XCTAssertTrue(await cancelled.get())
+        let oldWasCancelled = await cancelled.get()
+        XCTAssertTrue(oldWasCancelled)
     }
 
     private func respond(_ loader: InstanceSignupLoader, status: Int, body: String) async {
@@ -189,10 +193,10 @@ private struct InstanceHTTPSession {
 
 private actor SignupGate {
     private var arrived: Set<String> = []
-    private var arriveWaiters: [String: [CheckedContinuation<Void, Never>]] = []
-    private var parked: [String: CheckedContinuation<Void, Never>] = []
+    private var arriveWaiters: [String: [CheckedContinuation<Void, Never>]] = [:]
+    private var parked: [String: CheckedContinuation<Void, Never>] = [:]
     private var finished: Set<String> = []
-    private var finishWaiters: [String: [CheckedContinuation<Void, Never>]] = []
+    private var finishWaiters: [String: [CheckedContinuation<Void, Never>]] = [:]
 
     func enter(_ url: String) async {
         await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
@@ -205,7 +209,9 @@ private actor SignupGate {
     func untilArrived(_ url: String) async {
         if arrived.contains(url) { return }
         await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
-            arriveWaiters[url, default: []].append(cont)
+            var pending = arriveWaiters[url] ?? []
+            pending.append(cont)
+            arriveWaiters[url] = pending
         }
     }
 
@@ -221,7 +227,9 @@ private actor SignupGate {
     func untilFinished(_ url: String) async {
         if finished.contains(url) { return }
         await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
-            finishWaiters[url, default: []].append(cont)
+            var pending = finishWaiters[url] ?? []
+            pending.append(cont)
+            finishWaiters[url] = pending
         }
     }
 }
