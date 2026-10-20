@@ -44,5 +44,6 @@ test('rowAction is request, pending, open, or retry', () => {
 test('coverUrl points at the Open Library cover CDN', () => {
   assert.equal(coverUrl(null), null);
   assert.equal(coverUrl(-1), null);
-  assert.equal(coverUrl(11481354), 'https://covers.openlibrary.org/b/id/11481354-M.jpg');
+  assert.equal(coverUrl(11481354), 'https://covers.openlibrary.org/b/id/11481354-M.jpg?default=false');
+  assert.equal(coverUrl(0), 'https://covers.openlibrary.org/b/id/0-M.jpg?default=false');
 });

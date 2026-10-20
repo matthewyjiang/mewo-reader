@@ -19,8 +19,9 @@ export function rowAction(request: BookRequest | null): 'request' | 'pending' | 
   return 'retry';
 }
 
-/** Open Library cover CDN. Not proxied. */
+/** Open Library cover CDN, medium JPEG. `default=false` makes a missing cover
+ * 404 instead of a 1×1 GIF. Not proxied. */
 export function coverUrl(coverId: number | null): string | null {
   if (coverId == null || coverId < 0) return null;
-  return `https://covers.openlibrary.org/b/id/${coverId}-M.jpg`;
+  return `https://covers.openlibrary.org/b/id/${coverId}-M.jpg?default=false`;
 }

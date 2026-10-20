@@ -1,10 +1,8 @@
 import { expect, test, type Page, type Route } from '@playwright/test';
+import { readFileSync } from 'node:fs';
 import { mkdir } from 'node:fs/promises';
 
-const COVER = Buffer.from(
-  'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==',
-  'base64',
-);
+const COVER = readFileSync(new URL('../fixtures/cover.jpg', import.meta.url));
 
 function bookRequest(over: Record<string, unknown> = {}) {
   return {
@@ -59,6 +57,7 @@ async function install(
     admin?: boolean;
     theme?: 'x_light' | 'x_lights_out';
     requests?: ReturnType<typeof bookRequest>[];
+    coverFails?: boolean;
   } = {},
 ) {
   const theme = options.theme ?? 'x_light';
@@ -73,11 +72,10 @@ async function install(
   state.admin = options.admin ?? true;
   if (!state.canRequest) state.settings.requestsEnabled = false;
   if (options.requests) state.requests = options.requests;
-  await page.route('**/covers.openlibrary.org/**', (route) => route.fulfill({
-    status: 200,
-    contentType: 'image/png',
-    body: COVER,
-  }));
+  await page.route('**/covers.openlibrary.org/**', (route) => {
+    if (options.coverFails) return route.fulfill({ status: 404, body: '' });
+    return route.fulfill({ status: 200, contentType: 'image/jpeg', body: COVER });
+  });
   await page.route('**/v1/**', (route) => answer(route, state));
   return state;
 }
@@ -162,6 +160,18 @@ test('the Catalog tab is hidden without canRequest', async ({ page }) => {
   await page.goto('/settings');
   await expect(page.getByRole('button', { name: 'Library' })).toBeVisible();
   await expect(page.getByRole('button', { name: 'Requests', exact: true })).toHaveCount(0);
+});
+
+test('a broken cover shows the title letter', async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await install(page, { coverFails: true });
+  await page.goto('/search');
+  await page.getByRole('tab', { name: 'Catalog' }).click();
+  await page.getByPlaceholder('Search').fill('dune');
+  const cover = page.locator('.book-cover');
+  await expect(cover).toBeVisible();
+  await expect(cover).toHaveText('D');
+  await expect(cover.locator('img')).toHaveCount(0);
 });
 
 test('Request flips the icon', async ({ page }) => {
@@ -251,6 +261,8 @@ test('shots of catalog, requests, and the book requests group', async ({ browser
       await page.getByRole('tab', { name: 'Catalog' }).click();
       await page.getByPlaceholder('Search').fill('dune');
       await expect(page.getByRole('button', { name: 'Request' }).first()).toBeVisible();
+      await expect(page.locator('.book-cover img')).toBeVisible();
+      await expect(page.locator('.book-cover').nth(1)).toHaveText('N');
       await expect(page.getByText('Neuromancer')).toBeVisible();
       await page.screenshot({ path: `${dir}/catalog-${label}.png` });
       await page.goto('/settings/requests');
