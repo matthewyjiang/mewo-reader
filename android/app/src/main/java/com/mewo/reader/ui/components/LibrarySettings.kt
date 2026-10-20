@@ -35,7 +35,9 @@ import com.mewo.reader.data.BackendKind
 import com.mewo.reader.data.HostedClient
 import com.mewo.reader.ui.LocalBackend
 import com.mewo.reader.ui.LocalHostedAuth
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
@@ -87,19 +89,23 @@ private fun HostedAccountForm(
     // A caller-supplied value (screenshots) skips the network. Otherwise null until the fetch.
     var allowSignup by remember { mutableStateOf(signupsOpen) }
     val baseUrl = hosted.session.baseUrl
+    val client = remember { HostedClient() }
     if (signupsOpen == null && !hosted.session.signedIn) {
         LaunchedEffect(baseUrl) {
             allowSignup = null
             val url = hosted.session.normalizedUrl() ?: return@LaunchedEffect
-            allowSignup = runCatching {
-                withContext(Dispatchers.IO) {
-                    HostedClient().instance(url).allowSignup
-                }
-            }.getOrNull()
+            delay(400)
+            allowSignup = try {
+                withContext(Dispatchers.IO) { client.instance(url).allowSignup }
+            } catch (err: CancellationException) {
+                throw err
+            } catch (_: Exception) {
+                null
+            }
         }
     }
-    if (allowSignup == false && mode == AuthMode.Create) {
-        mode = AuthMode.SignIn
+    LaunchedEffect(allowSignup) {
+        if (allowSignup == false && mode == AuthMode.Create) mode = AuthMode.SignIn
     }
     var username by remember { mutableStateOf(hosted.session.username.orEmpty()) }
     var password by remember { mutableStateOf("") }
