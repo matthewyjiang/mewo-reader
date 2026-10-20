@@ -244,7 +244,7 @@
         settings = await store.api.updateServerSettings({ maxEpubBytes: bytes });
         if (mb === typed) mb = mbField(settings.maxEpubBytes);
       } catch (error) {
-        if (mb === typed) {
+        if (mb === typed && settings) {
           mb = mbField(settings.maxEpubBytes);
           delete queuedText.maxEpubBytes;
         }

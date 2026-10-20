@@ -867,12 +867,12 @@ async fn a_read_only_download_folder_stays_imported() {
     std::fs::set_permissions(&folder, perms).unwrap();
     let _restore = ModeGuard(&folder);
 
-    let buf = Arc::new(Mutex::new(Vec::<u8>::new()));
+    let buf = Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
     let writer = buf.clone();
     let subscriber = tracing_subscriber::fmt()
         .with_max_level(tracing::Level::WARN)
         .with_ansi(false)
-        .with_writer(move || LogBuf(writer.clone()))
+        .with_writer(move || StdLog(writer.clone()))
         .finish();
     let _guard = tracing::subscriber::set_default(subscriber);
     worker::tick_at(&world.state, now + POLL).await.unwrap();
@@ -881,7 +881,7 @@ async fn a_read_only_download_folder_stays_imported() {
     let row = stored(&world.state.pool, &id).await;
     assert_eq!(row.state, "imported");
     assert!(folder.join("Dune.epub").is_file());
-    let logs = String::from_utf8(buf.lock().await.clone()).unwrap();
+    let logs = String::from_utf8(buf.lock().unwrap().clone()).unwrap();
     assert!(
         logs.contains(&format!("mewo-{id}")) && logs.contains("could not remove download folder"),
         "{logs}"
@@ -1169,6 +1169,18 @@ async fn secrets_are_write_only() {
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(body["secrets"]["prowlarrApiKey"], false);
     assert!(!body.to_string().contains(sentinel));
+}
+
+struct StdLog(Arc<std::sync::Mutex<Vec<u8>>>);
+
+impl std::io::Write for StdLog {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().expect("log").extend_from_slice(buf);
+        Ok(buf.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
 }
 
 struct LogBuf(Arc<Mutex<Vec<u8>>>);
