@@ -1,6 +1,4 @@
-use crate::auth::{
-    check_password, hash_password, new_token, normalize_username, verify_password, Authed,
-};
+use crate::auth::{check_password, new_token, normalize_username, Authed, ClientIp};
 use crate::config::MAX_COVER_BYTES;
 use crate::db::now_ms;
 use crate::error::ApiError;
@@ -41,15 +39,32 @@ pub async fn instance(State(state): State<AppState>) -> Result<Json<InstanceInfo
 
 pub async fn register(
     State(state): State<AppState>,
+    ip: ClientIp,
     Json(body): Json<AuthRequest>,
 ) -> Result<Json<AuthResponse>, ApiError> {
+    let (username, norm) = normalize_username(&body.username)?;
+    check_password(&body.password)?;
+    let attempt = state.throttle.register(ip, &norm)?;
     let settings = crate::settings::load(&state.pool).await?;
     if !settings.allow_signup {
         return Err(ApiError::Forbidden("Signups are off.".into()));
     }
-    let (username, norm) = normalize_username(&body.username)?;
-    check_password(&body.password)?;
-    let password_hash = hash_password(&body.password)?;
+    // A taken name is rejected before Argon2. The UNIQUE index still decides a race.
+    let taken = sqlx::query("SELECT id FROM users WHERE username_norm = ?")
+        .bind(&norm)
+        .fetch_optional(&state.pool)
+        .await?;
+    if taken.is_some() {
+        return Err(ApiError::Conflict("That username is taken.".into()));
+    }
+    let password_hash = match state.passwords.hash(&body.password).await {
+        Ok(hash) => hash,
+        Err(ApiError::Busy) => {
+            attempt.abandon();
+            return Err(ApiError::Busy);
+        }
+        Err(err) => return Err(err),
+    };
     let id = Uuid::new_v4().to_string();
     let created_at = now_ms();
     let inserted = sqlx::query(
@@ -76,22 +91,34 @@ pub async fn register(
 
 pub async fn login(
     State(state): State<AppState>,
+    ip: ClientIp,
     Json(body): Json<AuthRequest>,
 ) -> Result<Json<AuthResponse>, ApiError> {
     let (_, norm) = normalize_username(&body.username)?;
     check_password(&body.password)?;
+    let attempt = state.throttle.login(ip, &norm)?;
     let row = sqlx::query_as::<_, (String, String, String)>(
         "SELECT id, username, password_hash FROM users WHERE username_norm = ?",
     )
     .bind(&norm)
     .fetch_optional(&state.pool)
     .await?;
-    let Some((id, username, password_hash)) = row else {
+    let ok = match state
+        .passwords
+        .verify_login(&body.password, row.as_ref().map(|row| row.2.as_str()))
+        .await
+    {
+        Ok(ok) => ok,
+        Err(ApiError::Busy) => {
+            attempt.abandon();
+            return Err(ApiError::Busy);
+        }
+        Err(err) => return Err(err),
+    };
+    let Some((id, username, _)) = row.filter(|_| ok) else {
         return Err(ApiError::Unauthorized("Wrong username or password.".into()));
     };
-    if !verify_password(&body.password, &password_hash)? {
-        return Err(ApiError::Unauthorized("Wrong username or password.".into()));
-    }
+    attempt.succeeded();
     let token = issue_session(&state, &id).await?;
     Ok(Json(AuthResponse { token, username }))
 }

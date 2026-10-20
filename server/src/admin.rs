@@ -1,4 +1,4 @@
-use crate::auth::{check_password, hash_password, normalize_username, Authed};
+use crate::auth::{check_password, normalize_username, Authed, Passwords};
 use crate::db::now_ms;
 use crate::error::ApiError;
 use crate::models::{AdminUser, AdminUsers, PatchUser, ServerInfo};
@@ -194,17 +194,24 @@ pub(crate) async fn set_admin(
     Ok(AdminChange::Changed)
 }
 
-/// Creates an account with `is_admin = 1`, using the same `normalize_username`,
-/// `check_password` and `hash_password` as register. Ignores the signup setting.
-/// A taken name → Conflict.
+/// Creates an account with `is_admin = 1`. Ignores the signup setting.
+/// A taken name is [`ApiError::Conflict`] and does not hash.
 pub(crate) async fn create_admin(
     pool: &SqlitePool,
+    passwords: &Passwords,
     username: &str,
     password: &str,
 ) -> Result<(), ApiError> {
     let (username, norm) = normalize_username(username)?;
     check_password(password)?;
-    let password_hash = hash_password(password)?;
+    let taken = sqlx::query("SELECT id FROM users WHERE username_norm = ?")
+        .bind(&norm)
+        .fetch_optional(pool)
+        .await?;
+    if taken.is_some() {
+        return Err(ApiError::Conflict("That username is taken.".into()));
+    }
+    let password_hash = passwords.hash(password).await?;
     let id = Uuid::new_v4().to_string();
     let inserted = sqlx::query(
         "INSERT INTO users (id, username, username_norm, password_hash, created_at, is_admin)

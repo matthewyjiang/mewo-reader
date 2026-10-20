@@ -1,13 +1,16 @@
 use axum::body::{Body, Bytes};
+use axum::extract::ConnectInfo;
 use axum::http::{header, Request, StatusCode};
 use http_body_util::BodyExt;
 use mewo_server::build;
 use mewo_server::cli::{self, AdminCommand};
-use mewo_server::config::{Config, MIN_EPUB_BYTES};
+use mewo_server::config::{AuthConfig, Config, Rate, MIN_EPUB_BYTES};
+use mewo_server::{prepare, router};
 use serde_json::{json, Value};
 use sqlx::migrate::Migrate;
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use sqlx::SqlitePool;
+use std::net::{IpAddr, SocketAddr};
 use std::path::Path;
 use std::str::FromStr;
 use std::time::Duration;
@@ -26,6 +29,7 @@ async fn app_with(allow_signup: bool, max_epub_bytes: u64) -> (axum::Router, Tem
         max_epub_bytes,
         downloads_dir: None,
         openlibrary_url: "https://openlibrary.org".into(),
+        auth: roomy_auth(),
     };
     let router = build(config).await.unwrap();
     (router, tmp)
@@ -122,6 +126,27 @@ fn config_at(path: &Path, allow_signup: bool, max_epub_bytes: u64) -> Config {
         max_epub_bytes,
         downloads_dir: None,
         openlibrary_url: "https://openlibrary.org".into(),
+        auth: roomy_auth(),
+    }
+}
+
+/// Existing suites register dozens of accounts from one process. The default
+/// per-IP burst would turn those into 429s. Auth tests build a tighter config.
+fn roomy_auth() -> AuthConfig {
+    let every = Duration::from_secs(1);
+    let rate = Rate {
+        burst: 10_000,
+        every,
+    };
+    AuthConfig {
+        max_concurrent: 2,
+        queue_wait: Duration::from_secs(30),
+        login_ip: rate,
+        login_user: rate,
+        register_ip: rate,
+        register_user: rate,
+        max_keys: 10_000,
+        trusted_proxy_hops: 0,
     }
 }
 
@@ -908,6 +933,7 @@ async fn static_history_fallback_does_not_swallow_unknown_api_routes() {
         max_epub_bytes: 1024 * 1024,
         downloads_dir: None,
         openlibrary_url: "https://openlibrary.org".into(),
+        auth: roomy_auth(),
     })
     .await
     .unwrap();
@@ -2191,6 +2217,7 @@ async fn backfill_indexes_unindexed_books_once() {
         max_epub_bytes: 1024 * 1024,
         downloads_dir: None,
         openlibrary_url: "https://openlibrary.org".into(),
+        auth: roomy_auth(),
     };
     let app = build(config.clone()).await.unwrap();
     let pool = open_db(tmp.path()).await;
@@ -3071,6 +3098,7 @@ async fn backfill_lets_writers_through() {
         max_epub_bytes: 1024 * 1024,
         downloads_dir: None,
         openlibrary_url: "https://openlibrary.org".into(),
+        auth: roomy_auth(),
     };
     let app = build(config).await.unwrap();
     let pool = open_db(tmp.path()).await;
@@ -3342,6 +3370,7 @@ async fn backfill_skips_an_unreadable_epub_after_recording_it() {
         max_epub_bytes: 1024 * 1024,
         downloads_dir: None,
         openlibrary_url: "https://openlibrary.org".into(),
+        auth: roomy_auth(),
     };
     let _app = build(config.clone()).await.unwrap();
     let pool = open_db(tmp.path()).await;
@@ -3972,4 +4001,749 @@ async fn migration_006_existing_users_not_admin() {
     let value: Value = serde_json::from_str(&doc).unwrap();
     assert_eq!(value["allowSignup"], false);
     assert_eq!(value["maxEpubBytes"], 32 * 1024 * 1024);
+}
+
+async fn auth_app(auth: AuthConfig) -> (mewo_server::AppState, axum::Router, TempDir) {
+    let tmp = TempDir::new().unwrap();
+    let state = prepare(Config {
+        listen: "127.0.0.1:0".into(),
+        data_dir: tmp.path().to_path_buf(),
+        web_dir: None,
+        allow_signup: true,
+        max_epub_bytes: 1024 * 1024,
+        downloads_dir: None,
+        openlibrary_url: "https://openlibrary.org".into(),
+        auth,
+    })
+    .await
+    .unwrap();
+    state.passwords.warm().await;
+    let app = router(state.clone());
+    (state, app, tmp)
+}
+
+fn rate(burst: u32, every_secs: u64) -> Rate {
+    Rate {
+        burst,
+        every: Duration::from_secs(every_secs),
+    }
+}
+
+fn with_ip(mut req: Request<Body>, ip: &str) -> Request<Body> {
+    let addr = SocketAddr::new(ip.parse::<IpAddr>().unwrap(), 9);
+    req.extensions_mut().insert(ConnectInfo(addr));
+    req
+}
+
+async fn call(
+    app: &axum::Router,
+    req: Request<Body>,
+) -> (StatusCode, axum::http::HeaderMap, Bytes) {
+    let response = app.clone().oneshot(req).await.unwrap();
+    let status = response.status();
+    let headers = response.headers().clone();
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    (status, headers, body)
+}
+
+async fn post_auth(
+    app: &axum::Router,
+    path: &str,
+    ip: &str,
+    forwarded: Option<&str>,
+    username: &str,
+    password: &str,
+) -> (StatusCode, axum::http::HeaderMap, Value) {
+    let mut builder = Request::builder()
+        .method("POST")
+        .uri(path)
+        .header(header::CONTENT_TYPE, "application/json");
+    if let Some(forwarded) = forwarded {
+        builder = builder.header("x-forwarded-for", forwarded);
+    }
+    let req = builder
+        .body(Body::from(
+            json!({ "username": username, "password": password }).to_string(),
+        ))
+        .unwrap();
+    let (status, headers, bytes) = call(app, with_ip(req, ip)).await;
+    let value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+    (status, headers, value)
+}
+
+async fn post_auth_raw(
+    app: &axum::Router,
+    path: &str,
+    ip: &str,
+    forwarded: &[u8],
+    username: &str,
+    password: &str,
+) -> (StatusCode, axum::http::HeaderMap, Value) {
+    let value = axum::http::HeaderValue::from_bytes(forwarded).unwrap();
+    let req = Request::builder()
+        .method("POST")
+        .uri(path)
+        .header(header::CONTENT_TYPE, "application/json")
+        .header("x-forwarded-for", value)
+        .body(Body::from(
+            json!({ "username": username, "password": password }).to_string(),
+        ))
+        .unwrap();
+    let (status, headers, bytes) = call(app, with_ip(req, ip)).await;
+    let value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+    (status, headers, value)
+}
+
+fn assert_limited(status: StatusCode, headers: &axum::http::HeaderMap, body: &Value) {
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS, "{body}");
+    let header = headers
+        .get(header::RETRY_AFTER)
+        .expect("Retry-After")
+        .to_str()
+        .unwrap();
+    let secs: u64 = header.parse().unwrap();
+    assert!(secs >= 1, "{header}");
+    assert_eq!(
+        body["error"],
+        format!("Too many attempts. Try again in {secs} seconds.")
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn at_most_two_password_ops_run_at_once() {
+    let (state, app, _tmp) = auth_app(roomy_auth()).await;
+    let start = std::sync::Arc::new(tokio::sync::Barrier::new(12));
+    let mut handles = Vec::new();
+    for i in 0..12 {
+        let app = app.clone();
+        let start = std::sync::Arc::clone(&start);
+        handles.push(tokio::spawn(async move {
+            start.wait().await;
+            json_req(
+                &app,
+                "POST",
+                "/v1/auth/register",
+                None,
+                json!({ "username": format!("user{i:02}"), "password": "password1" }),
+            )
+            .await
+        }));
+    }
+    for handle in handles {
+        let (status, body) = handle.await.unwrap();
+        assert_eq!(status, StatusCode::OK, "{body}");
+    }
+    let stats = state.passwords.stats();
+    assert_eq!(stats.peak_in_flight, 2);
+    assert_eq!(stats.hashes, 12);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_full_password_queue_returns_503() {
+    let mut auth = roomy_auth();
+    auth.queue_wait = Duration::from_millis(1);
+    let (state, app, _tmp) = auth_app(auth).await;
+    let start = std::sync::Arc::new(tokio::sync::Barrier::new(8));
+    let mut handles = Vec::new();
+    for i in 0..8 {
+        let app = app.clone();
+        let start = std::sync::Arc::clone(&start);
+        handles.push(tokio::spawn(async move {
+            start.wait().await;
+            post_auth(
+                &app,
+                "/v1/auth/register",
+                "203.0.113.7",
+                None,
+                &format!("busy{i:02}"),
+                "password1",
+            )
+            .await
+        }));
+    }
+    let mut saw_ok = false;
+    let mut saw_busy = false;
+    for handle in handles {
+        let (status, headers, body) = handle.await.unwrap();
+        match status {
+            StatusCode::OK => saw_ok = true,
+            StatusCode::SERVICE_UNAVAILABLE => {
+                saw_busy = true;
+                assert_eq!(
+                    headers.get(header::RETRY_AFTER).unwrap().to_str().unwrap(),
+                    "1"
+                );
+                assert_eq!(body["error"], "Server is busy. Try again in a moment.");
+            }
+            other => panic!("{other} {body}"),
+        }
+    }
+    assert!(saw_ok, "a permit should still serve a register");
+    assert!(saw_busy, "the queue wait should reject someone");
+    assert!(state.passwords.stats().peak_in_flight <= 2);
+}
+
+#[tokio::test]
+async fn a_public_ip_is_throttled_after_its_burst() {
+    let mut auth = roomy_auth();
+    auth.login_ip = rate(3, 30);
+    auth.login_user = rate(100, 60);
+    let (_state, app, _tmp) = auth_app(auth).await;
+    let (status, _, body) = post_auth(
+        &app,
+        "/v1/auth/register",
+        "1.1.1.1",
+        None,
+        "matt",
+        "password1",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    for n in 0..3 {
+        let (status, _, body) =
+            post_auth(&app, "/v1/auth/login", "1.1.1.1", None, "matt", "wrongpass").await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED, "{n} {body}");
+    }
+    let (status, headers, body) =
+        post_auth(&app, "/v1/auth/login", "1.1.1.1", None, "matt", "wrongpass").await;
+    assert_limited(status, &headers, &body);
+    let (status, _, body) =
+        post_auth(&app, "/v1/auth/login", "8.8.8.8", None, "matt", "wrongpass").await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "{body}");
+}
+
+#[tokio::test]
+async fn login_username_limit_holds_across_ips_and_a_success_refunds_it() {
+    let mut auth = roomy_auth();
+    auth.login_user = rate(2, 60);
+    auth.login_ip = rate(100, 30);
+    let (_state, app, _tmp) = auth_app(auth).await;
+    let (status, _, body) = post_auth(
+        &app,
+        "/v1/auth/register",
+        "203.0.113.4",
+        None,
+        "matt",
+        "password1",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    for (n, ip) in ["1.1.1.1", "8.8.8.8"].into_iter().enumerate() {
+        let (status, _, body) =
+            post_auth(&app, "/v1/auth/login", ip, None, "matt", "wrongpass").await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED, "{n} {body}");
+    }
+    let (status, headers, body) =
+        post_auth(&app, "/v1/auth/login", "9.9.9.9", None, "matt", "wrongpass").await;
+    assert_limited(status, &headers, &body);
+    let (status, headers, body) =
+        post_auth(&app, "/v1/auth/login", "1.0.0.1", None, "matt", "password1").await;
+    assert_limited(status, &headers, &body);
+
+    let mut auth = roomy_auth();
+    auth.login_user = rate(2, 60);
+    let (_state, app, _tmp) = auth_app(auth).await;
+    let (status, _, body) = post_auth(
+        &app,
+        "/v1/auth/register",
+        "203.0.113.4",
+        None,
+        "matt",
+        "password1",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    for n in 0..5 {
+        let (status, _, body) = post_auth(
+            &app,
+            "/v1/auth/login",
+            "203.0.113.4",
+            None,
+            "matt",
+            "password1",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{n} {body}");
+        assert_eq!(body["username"], "matt");
+        let token = body["token"].as_str().expect("token");
+        assert!(!token.is_empty());
+        let (status, me) = empty_req(&app, "GET", "/v1/me", Some(token)).await;
+        assert_eq!(status, StatusCode::OK, "{me}");
+        assert_eq!(me["username"], "matt");
+    }
+}
+
+#[tokio::test]
+async fn register_ip_limit_returns_429() {
+    let mut auth = roomy_auth();
+    auth.register_ip = rate(2, 600);
+    let (_state, app, _tmp) = auth_app(auth).await;
+    for (n, name) in ["ada", "bea"].into_iter().enumerate() {
+        let (status, _, body) = post_auth(
+            &app,
+            "/v1/auth/register",
+            "203.0.113.7",
+            None,
+            name,
+            "password1",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{n} {body}");
+    }
+    let (status, headers, body) = post_auth(
+        &app,
+        "/v1/auth/register",
+        "203.0.113.7",
+        None,
+        "cyd",
+        "password1",
+    )
+    .await;
+    assert_limited(status, &headers, &body);
+}
+
+#[tokio::test]
+async fn forwarded_for_is_ignored_at_zero_hops_and_used_at_one() {
+    let mut auth = roomy_auth();
+    auth.login_ip = rate(1, 60);
+    auth.login_user = rate(100, 60);
+    auth.trusted_proxy_hops = 0;
+    let (_state, app, _tmp) = auth_app(auth).await;
+    let (status, _, body) = post_auth(
+        &app,
+        "/v1/auth/login",
+        "9.9.9.9",
+        Some("1.1.1.1"),
+        "matt",
+        "wrongpass",
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "{body}");
+    let (status, headers, body) = post_auth(
+        &app,
+        "/v1/auth/login",
+        "9.9.9.9",
+        Some("8.8.8.8"),
+        "ada",
+        "wrongpass",
+    )
+    .await;
+    assert_limited(status, &headers, &body);
+
+    let mut auth = roomy_auth();
+    auth.login_ip = rate(1, 60);
+    auth.login_user = rate(100, 60);
+    auth.trusted_proxy_hops = 1;
+    let (_state, app, _tmp) = auth_app(auth).await;
+    let (status, _, body) = post_auth(
+        &app,
+        "/v1/auth/login",
+        "9.9.9.9",
+        Some("1.1.1.1, 203.0.113.9"),
+        "matt",
+        "wrongpass",
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "{body}");
+    let (status, _, body) = post_auth(
+        &app,
+        "/v1/auth/login",
+        "9.9.9.9",
+        Some("1.1.1.1, 203.0.113.10"),
+        "ada",
+        "wrongpass",
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "{body}");
+    let (status, headers, body) = post_auth(
+        &app,
+        "/v1/auth/login",
+        "9.9.9.9",
+        Some("1.1.1.1, 203.0.113.9"),
+        "bea",
+        "wrongpass",
+    )
+    .await;
+    assert_limited(status, &headers, &body);
+    let (status, _, body) = post_auth(
+        &app,
+        "/v1/auth/login",
+        "9.9.9.9",
+        Some("not-an-ip"),
+        "cyd",
+        "wrongpass",
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "{body}");
+    let (status, headers, body) = post_auth(
+        &app,
+        "/v1/auth/login",
+        "9.9.9.9",
+        Some("also-bad"),
+        "dee",
+        "wrongpass",
+    )
+    .await;
+    assert_limited(status, &headers, &body);
+}
+
+#[tokio::test]
+async fn a_short_forwarded_for_uses_the_leftmost_address() {
+    let mut auth = roomy_auth();
+    auth.login_ip = rate(1, 60);
+    auth.login_user = rate(100, 60);
+    auth.trusted_proxy_hops = 2;
+    let (_state, app, _tmp) = auth_app(auth).await;
+    let (status, _, body) = post_auth(
+        &app,
+        "/v1/auth/login",
+        "9.9.9.9",
+        Some("1.1.1.1"),
+        "matt",
+        "wrongpass",
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "{body}");
+    let (status, _, body) = post_auth(
+        &app,
+        "/v1/auth/login",
+        "9.9.9.9",
+        Some("8.8.8.8"),
+        "ada",
+        "wrongpass",
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "{body}");
+    let (status, headers, body) = post_auth(
+        &app,
+        "/v1/auth/login",
+        "9.9.9.9",
+        Some("1.1.1.1"),
+        "bea",
+        "wrongpass",
+    )
+    .await;
+    assert_limited(status, &headers, &body);
+    let (status, _, body) =
+        post_auth(&app, "/v1/auth/login", "9.9.9.9", None, "cyd", "wrongpass").await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "{body}");
+    let (status, headers, body) =
+        post_auth(&app, "/v1/auth/login", "9.9.9.9", None, "dee", "wrongpass").await;
+    assert_limited(status, &headers, &body);
+}
+
+#[tokio::test]
+async fn private_peer_skips_the_ip_limit_but_not_the_username() {
+    let mut auth = roomy_auth();
+    auth.trusted_proxy_hops = 0;
+    auth.login_ip = rate(1, 60);
+    auth.login_user = rate(2, 60);
+    let (_state, app, _tmp) = auth_app(auth).await;
+    for name in ["matt", "ada"] {
+        let (status, _, body) = post_auth(
+            &app,
+            "/v1/auth/register",
+            "10.42.1.5",
+            None,
+            name,
+            "password1",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{name} {body}");
+    }
+    for n in 0..2 {
+        let (status, _, body) = post_auth(
+            &app,
+            "/v1/auth/login",
+            "10.42.1.5",
+            Some("1.1.1.1"),
+            "matt",
+            "wrongpass",
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED, "{n} {body}");
+    }
+    let (status, headers, body) = post_auth(
+        &app,
+        "/v1/auth/login",
+        "10.42.1.5",
+        Some("8.8.8.8"),
+        "matt",
+        "wrongpass",
+    )
+    .await;
+    assert_limited(status, &headers, &body);
+    let (status, _, body) = post_auth(
+        &app,
+        "/v1/auth/login",
+        "10.42.1.5",
+        None,
+        "ada",
+        "wrongpass",
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "{body}");
+}
+
+#[tokio::test]
+async fn a_non_ascii_forwarded_for_is_still_ip_limited() {
+    let mut auth = roomy_auth();
+    auth.login_ip = rate(1, 60);
+    auth.login_user = rate(100, 60);
+    auth.trusted_proxy_hops = 1;
+    let (_state, app, _tmp) = auth_app(auth).await;
+    let header = b"\xff, 203.0.113.9, 162.158.1.1";
+    let (status, _, body) = post_auth_raw(
+        &app,
+        "/v1/auth/login",
+        "10.42.0.8",
+        header,
+        "matt",
+        "wrongpass",
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "{body}");
+    let (status, headers, body) = post_auth_raw(
+        &app,
+        "/v1/auth/login",
+        "10.42.0.8",
+        header,
+        "ada",
+        "wrongpass",
+    )
+    .await;
+    assert_limited(status, &headers, &body);
+
+    let (status, _, body) = post_auth_raw(
+        &app,
+        "/v1/auth/login",
+        "10.42.0.8",
+        b"\xff",
+        "bea",
+        "wrongpass",
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "{body}");
+    let (status, headers, body) = post_auth_raw(
+        &app,
+        "/v1/auth/login",
+        "10.42.0.9",
+        b"\xff, not-an-ip",
+        "cyd",
+        "wrongpass",
+    )
+    .await;
+    assert_limited(status, &headers, &body);
+}
+
+#[tokio::test]
+async fn an_unparseable_hop_does_not_slide_to_a_neighbor() {
+    let mut auth = roomy_auth();
+    auth.login_ip = rate(1, 60);
+    auth.login_user = rate(100, 60);
+    auth.trusted_proxy_hops = 2;
+    let (_state, app, _tmp) = auth_app(auth).await;
+    let (status, _, body) = post_auth(
+        &app,
+        "/v1/auth/login",
+        "10.42.0.8",
+        Some("evil, unknown, 162.158.1.1"),
+        "matt",
+        "wrongpass",
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "{body}");
+    let (status, headers, body) = post_auth(
+        &app,
+        "/v1/auth/login",
+        "10.42.0.9",
+        Some("1.2.3.4, unknown, 162.158.1.1"),
+        "ada",
+        "wrongpass",
+    )
+    .await;
+    assert_limited(status, &headers, &body);
+
+    let (status, _, body) = post_auth(
+        &app,
+        "/v1/auth/login",
+        "10.42.0.8",
+        Some("203.0.113.9:1234, 162.158.1.1"),
+        "bea",
+        "wrongpass",
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "{body}");
+    let (status, headers, body) = post_auth(
+        &app,
+        "/v1/auth/login",
+        "10.42.0.8",
+        Some("203.0.113.9:9, 8.8.8.8"),
+        "cyd",
+        "wrongpass",
+    )
+    .await;
+    assert_limited(status, &headers, &body);
+
+    let (status, _, body) = post_auth(
+        &app,
+        "/v1/auth/login",
+        "10.42.0.8",
+        Some("[2001:db8::1]:443, 162.158.1.1"),
+        "dee",
+        "wrongpass",
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "{body}");
+    let (status, headers, body) = post_auth(
+        &app,
+        "/v1/auth/login",
+        "10.42.0.8",
+        Some("[2001:db8::ffff]:443, 162.158.1.1"),
+        "fay",
+        "wrongpass",
+    )
+    .await;
+    assert_limited(status, &headers, &body);
+    let (status, _, body) = post_auth(
+        &app,
+        "/v1/auth/login",
+        "10.42.0.8",
+        Some("[2001:db8:0:1::1]:443, 162.158.1.1"),
+        "gus",
+        "wrongpass",
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "{body}");
+}
+
+#[tokio::test]
+async fn a_busy_password_service_does_not_spend_the_attempt() {
+    let mut auth = roomy_auth();
+    auth.max_concurrent = 0;
+    auth.queue_wait = Duration::from_millis(1);
+    auth.login_ip = rate(1, 60);
+    auth.login_user = rate(1, 60);
+    auth.register_ip = rate(1, 600);
+    auth.register_user = rate(1, 600);
+    let (state, app, _tmp) = auth_app(auth).await;
+    for n in 0..3 {
+        let (status, headers, body) = post_auth(
+            &app,
+            "/v1/auth/login",
+            "203.0.113.9",
+            None,
+            "matt",
+            "password1",
+        )
+        .await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{n} {body}");
+        assert_eq!(
+            headers.get(header::RETRY_AFTER).unwrap().to_str().unwrap(),
+            "1"
+        );
+    }
+    for n in 0..3 {
+        let (status, _, body) = post_auth(
+            &app,
+            "/v1/auth/register",
+            "203.0.113.9",
+            None,
+            "matt",
+            "password1",
+        )
+        .await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{n} {body}");
+    }
+    let stats = state.passwords.stats();
+    assert_eq!(stats.hashes, 0);
+    assert_eq!(stats.verifies, 0);
+}
+
+#[tokio::test]
+async fn a_missing_user_still_verifies_and_a_taken_name_does_not_hash() {
+    let (state, app, _tmp) = auth_app(roomy_auth()).await;
+    let (status, _, body) = post_auth(
+        &app,
+        "/v1/auth/login",
+        "203.0.113.7",
+        None,
+        "nobody",
+        "password1",
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "{body}");
+    let stats = state.passwords.stats();
+    assert_eq!(stats.verifies, 1);
+    assert_eq!(stats.dummy_verifies, 1);
+    assert_eq!(stats.hashes, 0);
+
+    let (status, _, body) = post_auth(
+        &app,
+        "/v1/auth/register",
+        "203.0.113.7",
+        None,
+        "matt",
+        "password1",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (status, _, body) = post_auth(
+        &app,
+        "/v1/auth/login",
+        "203.0.113.8",
+        None,
+        "matt",
+        "wrongpass",
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "{body}");
+    let stats = state.passwords.stats();
+    assert_eq!(stats.verifies, 2);
+    assert_eq!(stats.dummy_verifies, 1);
+    assert_eq!(stats.hashes, 1);
+
+    let hashes = state.passwords.stats().hashes;
+    let (status, _, body) = post_auth(
+        &app,
+        "/v1/auth/register",
+        "203.0.113.7",
+        None,
+        "MATT",
+        "password1",
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_eq!(body["error"], "That username is taken.");
+    assert_eq!(state.passwords.stats().hashes, hashes);
+
+    let left = app.clone();
+    let right = app.clone();
+    let (first, second) = tokio::join!(
+        post_auth(
+            &left,
+            "/v1/auth/register",
+            "203.0.113.7",
+            None,
+            "ada",
+            "password1"
+        ),
+        post_auth(
+            &right,
+            "/v1/auth/register",
+            "203.0.113.8",
+            None,
+            "ada",
+            "password1"
+        ),
+    );
+    let mut statuses = [first.0, second.0];
+    statuses.sort();
+    assert_eq!(
+        statuses,
+        [StatusCode::OK, StatusCode::CONFLICT],
+        "{} {}",
+        first.2,
+        second.2
+    );
 }

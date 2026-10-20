@@ -9,7 +9,7 @@ use axum::response::IntoResponse;
 use axum::routing::get;
 use axum::{Json, Router};
 use http_body_util::BodyExt;
-use mewo_server::config::{Config, MIN_EPUB_BYTES};
+use mewo_server::config::{AuthConfig, Config, MIN_EPUB_BYTES};
 use mewo_server::requests::worker;
 use mewo_server::{prepare, router, AppState};
 use serde_json::{json, Value};
@@ -57,6 +57,7 @@ async fn world() -> World {
         max_epub_bytes: 64 * 1024 * 1024,
         downloads_dir: Some(downloads.path().to_path_buf()),
         openlibrary_url: library_url,
+        auth: AuthConfig::default(),
     })
     .await
     .unwrap();
@@ -1016,6 +1017,7 @@ async fn catalog_upstream_failure_is_502() {
         max_epub_bytes: 64 * 1024 * 1024,
         downloads_dir: None,
         openlibrary_url: origin,
+        auth: AuthConfig::default(),
     })
     .await
     .unwrap();
@@ -1264,6 +1266,7 @@ async fn permissions() {
         max_epub_bytes: 64 * 1024 * 1024,
         downloads_dir: None,
         openlibrary_url: "https://openlibrary.org".into(),
+        auth: AuthConfig::default(),
     })
     .await
     .unwrap();
@@ -1555,6 +1558,7 @@ async fn test_connection_reports() {
         max_epub_bytes: 64 * 1024 * 1024,
         downloads_dir: None,
         openlibrary_url: "https://openlibrary.org".into(),
+        auth: AuthConfig::default(),
     })
     .await
     .unwrap();
@@ -1606,6 +1610,7 @@ async fn migration_007_adds_empty_secrets() {
         max_epub_bytes: 64 * 1024 * 1024,
         downloads_dir: None,
         openlibrary_url: "https://openlibrary.org".into(),
+        auth: AuthConfig::default(),
     })
     .await
     .unwrap();

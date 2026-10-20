@@ -162,7 +162,8 @@ async fn create(
     err: &mut dyn Write,
 ) -> Result<i32, io::Error> {
     let password = read_password(stdin)?;
-    match admin::create_admin(pool, name, &password).await {
+    let passwords = crate::auth::Passwords::new(&crate::config::AuthConfig::default());
+    match admin::create_admin(pool, &passwords, name, &password).await {
         Ok(()) => {
             writeln!(out, "{name} is an admin.")?;
             Ok(0)
@@ -204,8 +205,10 @@ fn read_password(stdin: &mut dyn LineIn) -> io::Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::auth::Passwords;
     use crate::build;
-    use crate::config::{Config, MIN_EPUB_BYTES};
+    use crate::config::{AuthConfig, Config, MIN_EPUB_BYTES};
+    use crate::error::ApiError;
     use axum::body::Body;
     use axum::http::{header, Request, StatusCode};
     use http_body_util::BodyExt;
@@ -228,6 +231,7 @@ mod tests {
             max_epub_bytes: MIN_EPUB_BYTES,
             downloads_dir: None,
             openlibrary_url: "https://openlibrary.org".into(),
+            auth: AuthConfig::default(),
         }
     }
 
@@ -408,6 +412,39 @@ mod tests {
         let bytes = response.into_body().collect().await.unwrap().to_bytes();
         let me: Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(me["isAdmin"], true);
+    }
+
+    #[tokio::test]
+    async fn create_on_a_taken_name_does_not_hash() {
+        let tmp = TempDir::new().unwrap();
+        let (code, _, err) = cli(
+            tmp.path(),
+            AdminCommand::Create("matt".into()),
+            "password1\n",
+        )
+        .await;
+        assert_eq!(code, 0, "{err}");
+
+        let passwords = Passwords::new(&AuthConfig::default());
+        let url = format!("sqlite://{}?mode=rwc", tmp.path().join("mewo.db").display());
+        let pool = crate::db::connect(&url, tmp.path()).await.unwrap();
+        let err = admin::create_admin(&pool, &passwords, "MATT", "password1")
+            .await
+            .unwrap_err();
+        match err {
+            ApiError::Conflict(message) => assert_eq!(message, "That username is taken."),
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(passwords.stats().hashes, 0);
+
+        let (code, _, err) = cli(
+            tmp.path(),
+            AdminCommand::Create("Matt".into()),
+            "password1\n",
+        )
+        .await;
+        assert_eq!(code, 1);
+        assert_eq!(err, "That username is taken.\n");
     }
 
     #[tokio::test]

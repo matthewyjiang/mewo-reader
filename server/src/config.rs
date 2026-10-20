@@ -1,4 +1,5 @@
 use std::path::PathBuf;
+use std::time::Duration;
 
 /// Bundled sample.epub is 2_886 bytes. Gutenberg War and Peace (epub3.images)
 /// is 1_824_099. Illustrated Pride and Prejudice (epub3.images) is 24_835_578.
@@ -49,6 +50,57 @@ pub struct Config {
     pub downloads_dir: Option<PathBuf>,
     /// Open Library origin. Tests point this at a local fake.
     pub openlibrary_url: String,
+    /// Password hashing cap and auth rate limits. Limits are code constants.
+    /// `trusted_proxy_hops` is `MEWO_TRUSTED_PROXY_HOPS`.
+    pub auth: AuthConfig,
+}
+
+/// How many attempts a bucket holds, and how often one token comes back.
+#[derive(Clone, Copy, Debug)]
+pub struct Rate {
+    pub burst: u32,
+    pub every: Duration,
+}
+
+/// Argon2 concurrency and the auth throttles. Tests build their own.
+#[derive(Clone, Copy, Debug)]
+pub struct AuthConfig {
+    pub max_concurrent: usize,
+    pub queue_wait: Duration,
+    pub login_ip: Rate,
+    pub login_user: Rate,
+    pub register_ip: Rate,
+    pub register_user: Rate,
+    pub max_keys: usize,
+    /// `MEWO_TRUSTED_PROXY_HOPS`. `0` ignores `X-Forwarded-For`.
+    pub trusted_proxy_hops: u8,
+}
+
+impl Default for AuthConfig {
+    fn default() -> Self {
+        Self {
+            max_concurrent: 2,
+            queue_wait: Duration::from_secs(1),
+            login_ip: Rate {
+                burst: 10,
+                every: Duration::from_secs(30),
+            },
+            login_user: Rate {
+                burst: 5,
+                every: Duration::from_secs(60),
+            },
+            register_ip: Rate {
+                burst: 5,
+                every: Duration::from_secs(10 * 60),
+            },
+            register_user: Rate {
+                burst: 3,
+                every: Duration::from_secs(10 * 60),
+            },
+            max_keys: 100_000,
+            trusted_proxy_hops: 0,
+        }
+    }
 }
 
 impl Config {
@@ -68,6 +120,10 @@ impl Config {
             .ok()
             .filter(|value| !value.trim().is_empty())
             .unwrap_or_else(|| "https://openlibrary.org".into());
+        let auth = AuthConfig {
+            trusted_proxy_hops: trusted_proxy_hops(),
+            ..AuthConfig::default()
+        };
         Self {
             listen,
             data_dir,
@@ -80,6 +136,7 @@ impl Config {
                 .filter(|v| !v.is_empty())
                 .map(PathBuf::from),
             openlibrary_url,
+            auth,
         }
     }
 
@@ -89,5 +146,20 @@ impl Config {
         }
         let db = self.data_dir.join("mewo.db");
         format!("sqlite://{}?mode=rwc", db.display())
+    }
+}
+
+fn trusted_proxy_hops() -> u8 {
+    let Ok(value) = std::env::var("MEWO_TRUSTED_PROXY_HOPS") else {
+        return 0;
+    };
+    match value.parse::<u8>() {
+        Ok(hops) => hops,
+        Err(_) => {
+            tracing::warn!(
+                "MEWO_TRUSTED_PROXY_HOPS={value} is not a number from 0 to 255; using 0"
+            );
+            0
+        }
     }
 }
