@@ -782,6 +782,86 @@ async fn folder_confinement() {
 }
 
 #[tokio::test]
+async fn completed_reads_a_folder_or_a_single_file() {
+    let world = world().await;
+    world.prowlarr.lock().await.key_ok = true;
+    let file = "Frank Herbert - Dune (epub).epub";
+    for (work, single) in [("/works/OL30W", false), ("/works/OL31W", true)] {
+        let created = ask(&world, work).await;
+        let id = created["id"].as_str().unwrap().to_string();
+        let now = created["createdAt"].as_i64().unwrap();
+        worker::tick_at(&world.state, now).await.unwrap();
+        let nzo = world.sab.lock().await.adds.last().unwrap().nzo.clone();
+        let folder_name = format!("mewo-{id}");
+        write_epub(
+            &world.downloads.path().join(&folder_name),
+            file,
+            &common::epub(),
+        );
+        let storage = if single {
+            format!("/data/downloads/usenet/complete/books/{folder_name}/{file}")
+        } else {
+            format!("/data/downloads/usenet/complete/books/{folder_name}")
+        };
+        finish_job(&world, &nzo, &storage).await;
+        worker::tick_at(&world.state, now + POLL).await.unwrap();
+        let row = stored(&world.state.pool, &id).await;
+        assert_eq!(row.state, "imported", "{work} {:?}", row.error);
+        assert_eq!(row.book_id.as_deref(), Some(id.as_str()));
+    }
+}
+
+#[tokio::test]
+async fn completed_rejects_a_foreign_storage_path() {
+    let world = world().await;
+    world.prowlarr.lock().await.key_ok = true;
+    let outside = TempDir::new().unwrap();
+    let file = "Frank Herbert - Dune (epub).epub";
+
+    let created = ask(&world, "/works/OL32W").await;
+    let id = created["id"].as_str().unwrap().to_string();
+    let now = created["createdAt"].as_i64().unwrap();
+    worker::tick_at(&world.state, now).await.unwrap();
+    let nzo = world.sab.lock().await.adds.last().unwrap().nzo.clone();
+    let outside_dir = outside.path().join(format!("mewo-{id}"));
+    write_epub(&outside_dir, file, &common::epub());
+    finish_job(&world, &nzo, outside_dir.join(file).to_str().unwrap()).await;
+    worker::tick_at(&world.state, now + POLL).await.unwrap();
+    let row = stored(&world.state.pool, &id).await;
+    assert_eq!(row.state, "failed");
+    assert_eq!(row.error.as_deref(), Some("Unexpected download folder."));
+    assert!(row.book_id.is_none());
+
+    let created = ask(&world, "/works/OL33W").await;
+    let id = created["id"].as_str().unwrap().to_string();
+    let now = created["createdAt"].as_i64().unwrap();
+    worker::tick_at(&world.state, now).await.unwrap();
+    let nzo = world.sab.lock().await.adds.last().unwrap().nzo.clone();
+    write_epub(
+        &world.downloads.path().join("mewo-other"),
+        file,
+        &common::epub(),
+    );
+    finish_job(
+        &world,
+        &nzo,
+        &format!("/data/downloads/usenet/complete/books/mewo-other/{file}"),
+    )
+    .await;
+    worker::tick_at(&world.state, now + POLL).await.unwrap();
+    let row = stored(&world.state.pool, &id).await;
+    assert_eq!(row.state, "failed");
+    assert_eq!(row.error.as_deref(), Some("Unexpected download folder."));
+    assert!(row.book_id.is_none());
+
+    let books: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM books")
+        .fetch_one(&world.state.pool)
+        .await
+        .unwrap();
+    assert_eq!(books, 0);
+}
+
+#[tokio::test]
 async fn crash_after_addurl_is_idempotent() {
     let world = world().await;
     world.prowlarr.lock().await.key_ok = true;

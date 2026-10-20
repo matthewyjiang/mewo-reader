@@ -51,6 +51,19 @@ const BAD_FORMAT: &[&str] = &[
 ];
 const LANGUAGES: &[&str] = &["german", "french", "spanish", "italian", "dutch"];
 const MARKERS: &[&str] = &["summary", "workbook", "sampler"];
+/// Extra words that are not a different book. `a`/`an`/`the`/`of` also live in [`STOP`].
+const EDITION: &[&str] = &[
+    "a",
+    "an",
+    "the",
+    "of",
+    "edition",
+    "deluxe",
+    "anniversary",
+    "illustrated",
+    "unabridged",
+    "novel",
+];
 
 /// The search string sent to Prowlarr: `<title without subtitle> <author surname>`.
 /// A missing Open Library author is the word `Unknown` and is left off.
@@ -88,7 +101,7 @@ pub(crate) fn pick<'r>(
             continue;
         }
         let tokens = tokens(&release.title);
-        if !acceptable(release, &tokens, &want, &work_tokens, max_bytes) {
+        if !acceptable(w, release, &tokens, &want, &work_tokens, max_bytes) {
             continue;
         }
         let score = score(w, release, &tokens);
@@ -183,6 +196,7 @@ fn walk(dir: &std::path::Path, depth: u32, out: &mut Vec<(PathBuf, u64)>) {
 }
 
 fn acceptable(
+    w: &Wanted,
     release: &Release,
     tokens: &[String],
     want: &[String],
@@ -208,6 +222,9 @@ fn acceptable(
             .iter()
             .any(|token| !tokens.iter().any(|have| have == token))
     {
+        return false;
+    }
+    if !title_fits(w, &release.title) {
         return false;
     }
     let has_epub = tokens.iter().any(|token| token == "epub");
@@ -271,6 +288,195 @@ fn significant(title: &str) -> Vec<String> {
         .into_iter()
         .filter(|token| !STOP.contains(&token.as_str()))
         .collect()
+}
+
+/// Title segment of a release name: author, `[series]` / `(retail)` groups,
+/// format words, years, and volume numbers removed. The remaining words have to
+/// be the requested title. Extra words are allowed only after `:` or ` - `
+/// once that title is complete. Edition words are ignored. A catalog subtitle
+/// (`Title: Subtitle`) matches as well.
+fn title_fits(w: &Wanted, release_title: &str) -> bool {
+    let wanted_tokens: HashSet<String> = tokens(w.title).into_iter().collect();
+    let author: HashSet<String> = tokens(w.author).into_iter().collect();
+    let parts = release_parts(release_title)
+        .into_iter()
+        .map(|words| {
+            words
+                .into_iter()
+                .filter(|word| !dropped(word, &author, &wanted_tokens))
+                .collect::<Vec<_>>()
+        })
+        .filter(|words| !words.is_empty())
+        .collect::<Vec<_>>();
+    let main = significant(w.title);
+    if parts.first().is_some_and(|head| same_words(head, &main)) {
+        return true;
+    }
+    if w.title.contains(':') {
+        let full = tokens(w.title);
+        let all = parts.into_iter().flatten().collect::<Vec<_>>();
+        return same_words(&all, &full);
+    }
+    false
+}
+
+fn same_words(release: &[String], wanted: &[String]) -> bool {
+    if wanted.is_empty() || wanted.iter().all(|word| STOP.contains(&word.as_str())) {
+        return false;
+    }
+    let wanted_set: HashSet<&str> = wanted.iter().map(String::as_str).collect();
+    let release: Vec<&str> = release
+        .iter()
+        .map(String::as_str)
+        .filter(|word| !ignorable(word, &wanted_set))
+        .collect();
+    let wanted: Vec<&str> = wanted
+        .iter()
+        .map(String::as_str)
+        .filter(|word| !STOP.contains(word))
+        .collect();
+    !wanted.is_empty() && release == wanted
+}
+
+fn ignorable(word: &str, wanted: &HashSet<&str>) -> bool {
+    if STOP.contains(&word) {
+        return true;
+    }
+    EDITION.contains(&word) && !wanted.contains(word)
+}
+
+fn dropped(token: &str, author: &HashSet<String>, wanted: &HashSet<String>) -> bool {
+    if wanted.contains(token) {
+        return false;
+    }
+    author.contains(token)
+        || is_format(token)
+        || LANGUAGES.contains(&token)
+        || is_year_or_volume(token)
+}
+
+fn is_format(token: &str) -> bool {
+    matches!(token, "epub" | "ebook" | "retail" | "azw" | "azw4" | "kf8")
+        || BAD_FORMAT.contains(&token)
+}
+
+fn is_year_or_volume(token: &str) -> bool {
+    if token.chars().all(|c| c.is_ascii_digit()) {
+        return true;
+    }
+    let rest = token
+        .strip_prefix("volume")
+        .or_else(|| token.strip_prefix("vol"))
+        .or_else(|| token.strip_prefix("book"))
+        .or_else(|| token.strip_prefix("part"))
+        .or_else(|| token.strip_prefix('v'));
+    rest.is_some_and(|rest| !rest.is_empty() && rest.chars().all(|c| c.is_ascii_digit()))
+}
+
+/// Pieces of a release name split on a subtitle separator (`:` or ` - `,
+/// including the `_` / `.` spellings scene names use).
+fn release_parts(title: &str) -> Vec<Vec<String>> {
+    let cleaned = strip_trailing_group(&strip_groups(title));
+    let chars: Vec<char> = cleaned.chars().collect();
+    let mut parts: Vec<Vec<String>> = vec![Vec::new()];
+    let mut word = String::new();
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        if c == '_' && chars.get(i + 1) == Some(&'_') {
+            push_word(&mut parts, &mut word);
+            while chars.get(i) == Some(&'_') {
+                i += 1;
+            }
+            parts.push(Vec::new());
+            continue;
+        }
+        if c == ':' || separator_hyphen(&chars, i) {
+            push_word(&mut parts, &mut word);
+            parts.push(Vec::new());
+            i += 1;
+            continue;
+        }
+        if let Some(folded) = fold(c) {
+            if folded == ' ' {
+                push_word(&mut parts, &mut word);
+            } else {
+                word.push(folded);
+            }
+        }
+        i += 1;
+    }
+    push_word(&mut parts, &mut word);
+    parts
+}
+
+fn separator_hyphen(chars: &[char], index: usize) -> bool {
+    if chars.get(index) != Some(&'-') {
+        return false;
+    }
+    let prev = index == 0 || is_break(chars[index - 1]);
+    let next = index + 1 == chars.len() || is_break(chars[index + 1]);
+    prev && next
+}
+
+fn is_break(c: char) -> bool {
+    c.is_whitespace() || c == '.' || c == '_'
+}
+
+fn push_word(parts: &mut [Vec<String>], word: &mut String) {
+    if word.is_empty() {
+        return;
+    }
+    parts
+        .last_mut()
+        .expect("release always has a part")
+        .push(std::mem::take(word));
+}
+
+fn strip_groups(title: &str) -> String {
+    let mut out = String::new();
+    let mut depth = 0i32;
+    for c in title.chars() {
+        match c {
+            '[' | '(' => depth += 1,
+            ']' | ')' => {
+                if depth > 0 {
+                    depth -= 1;
+                    if depth == 0 {
+                        out.push(' ');
+                    }
+                }
+            }
+            _ if depth == 0 => out.push(c),
+            _ => {}
+        }
+    }
+    out
+}
+
+/// A trailing `-GROUP` (`eBook-CTO`) is the release group, not the title.
+fn strip_trailing_group(title: &str) -> String {
+    let Some(dash) = title.rfind('-') else {
+        return title.to_string();
+    };
+    if dash == 0 {
+        return title.to_string();
+    }
+    let prev = title[..dash].chars().next_back();
+    if prev.is_some_and(|c| c.is_whitespace() || c == '.' || c == '_') {
+        return title.to_string();
+    }
+    let group = &title[dash + 1..];
+    let group_ok = (2..=15).contains(&group.chars().count())
+        && group
+            .chars()
+            .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit())
+        && group.chars().any(|c| c.is_ascii_uppercase());
+    if group_ok {
+        title[..dash].to_string()
+    } else {
+        title.to_string()
+    }
 }
 
 fn token_set(title: &str) -> HashSet<String> {
@@ -406,6 +612,83 @@ mod tests {
         };
         let releases = [release("sum", "Summary of Dune EPUB", 800_000, 10, &[7020])];
         assert!(pick(&wanted, &releases, &[], 64 * 1024 * 1024).is_none());
+    }
+
+    #[test]
+    fn the_release_title_is_the_book_not_a_sibling() {
+        let max = 64 * 1024 * 1024;
+        // (wanted title, author, release, accepted)
+        let cases = [
+            (
+                "Dune",
+                "Frank Herbert",
+                "Frank Herbert - [Dune 06] - Chapterhouse Dune (retail) (epub)",
+                false,
+            ),
+            (
+                "Dune",
+                "Frank Herbert",
+                "Frank Herbert - Dune (retail) (epub)",
+                true,
+            ),
+            ("Dune", "Frank Herbert", "Dune Messiah", false),
+            ("Dune", "Frank Herbert", "Children of Dune", false),
+            ("Dune", "Frank Herbert", "Chapterhouse Dune", false),
+            (
+                "Sapiens",
+                "Yuval Noah Harari",
+                "Sapiens - A Brief History of Humankind",
+                true,
+            ),
+            ("Dune", "Frank Herbert", "Dune: Deluxe Edition", true),
+            (
+                "Dune",
+                "Frank Herbert",
+                "The Dune Deluxe Illustrated Edition",
+                true,
+            ),
+            (
+                "Sapiens: A Brief History of Humankind",
+                "Yuval Noah Harari",
+                "Sapiens A Brief History of Humankind",
+                true,
+            ),
+            (
+                "Sapiens: A Brief History of Humankind",
+                "Yuval Noah Harari",
+                "Yuval Noah Harari - Sapiens: A Brief History of Humankind (epub)",
+                true,
+            ),
+        ];
+        for (title, author, name, accept) in cases {
+            let wanted = Wanted { title, author };
+            let releases = [release("row", name, 800_000, 5, &[7020])];
+            let picked = pick(&wanted, &releases, &[], max);
+            assert_eq!(picked.is_some(), accept, "{name}");
+        }
+
+        let wanted = Wanted {
+            title: "Dune",
+            author: "Frank Herbert",
+        };
+        let chapterhouse = release(
+            "chapterhouse",
+            "Frank Herbert - [Dune 06] - Chapterhouse Dune (retail) (epub)",
+            800_000,
+            40,
+            &[7020],
+        );
+        let dune = release(
+            "dune",
+            "Frank Herbert - Dune (retail) (epub)",
+            800_000,
+            1,
+            &[7020],
+        );
+        assert_eq!(
+            pick(&wanted, &[chapterhouse, dune], &[], max).unwrap().guid,
+            "dune"
+        );
     }
 
     #[test]
