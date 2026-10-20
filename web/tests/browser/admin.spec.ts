@@ -37,6 +37,7 @@ async function install(
     theme?: 'x_light' | 'x_lights_out';
     signupError?: string;
     meFails?: number;
+    maxEpubBytes?: number;
   } = {},
 ) {
   const admin = options.admin ?? true;
@@ -49,6 +50,7 @@ async function install(
   }, theme);
   const state = freshState();
   state.meFails = options.meFails ?? 0;
+  if (options.maxEpubBytes !== undefined) state.settings.maxEpubBytes = options.maxEpubBytes;
   await page.route('**/v1/**', (route) => answer(route, admin, options.signupError, state));
 }
 
@@ -168,6 +170,22 @@ test('a failed /v1/me is retried and the Server row appears', async ({ page }) =
   await retried;
   await page.goBack();
   await expect(page.getByRole('button', { name: 'Server' })).toBeVisible();
+});
+
+test('blurring an unedited EPUB size does not patch', async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await install(page, { maxEpubBytes: 5_000_000 });
+  await page.goto('/settings/server');
+  const input = page.locator('.epub-field input');
+  await expect(input).toHaveValue('4.768');
+  const patch = page.waitForRequest(
+    (request) => request.method() === 'PATCH' && request.url().includes('/v1/admin/settings'),
+    { timeout: 1000 },
+  ).then(() => true, () => false);
+  await input.focus();
+  await input.blur();
+  expect(await patch).toBe(false);
+  await expect(input).toHaveValue('4.768');
 });
 
 test('/v1/me loads once per token', async ({ page }) => {

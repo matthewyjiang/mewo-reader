@@ -85,6 +85,7 @@
 
   async function saveMb(): Promise<void> {
     if (!settings || saving) return;
+    if (mb === mbField(settings.maxEpubBytes)) return;
     const bytes = parseMb(mb);
     if (bytes === null || bytes === settings.maxEpubBytes) {
       mb = mbField(settings.maxEpubBytes);
