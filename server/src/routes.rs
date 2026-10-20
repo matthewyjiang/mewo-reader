@@ -1445,6 +1445,7 @@ async fn read_upload(state: &AppState, mut multipart: Multipart) -> Result<Stage
                 posts: parsed.posts,
             },
             temp_dir: temp_dir.clone(),
+            meta: parsed.meta,
         })
     }
     .await;

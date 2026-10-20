@@ -48,6 +48,8 @@ pub struct AppState {
     pub(crate) catalog_limit: Arc<requests::Limiter>,
     pub passwords: auth::Passwords,
     pub throttle: auth::Throttle,
+    /// Open Library work context, 24h, keyed by work key. Not durable.
+    pub(crate) work_cache: Arc<requests::WorkCache>,
 }
 
 pub fn router(state: AppState) -> Router {
@@ -151,6 +153,7 @@ pub async fn prepare(config: Config) -> Result<AppState, sqlx::Error> {
         catalog_limit: Arc::new(requests::Limiter::new()),
         passwords,
         throttle,
+        work_cache: Arc::new(requests::WorkCache::new()),
     })
 }
 

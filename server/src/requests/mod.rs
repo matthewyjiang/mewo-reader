@@ -2,6 +2,7 @@
 //!
 //! Prowlarr and SABnzbd stay inside the worker. Handlers only see [`BookRequest`].
 
+mod matching;
 mod openlibrary;
 mod pick;
 mod prowlarr;
@@ -9,7 +10,7 @@ mod sabnzbd;
 pub mod worker;
 
 pub(crate) mod http;
-pub(crate) use openlibrary::Limiter;
+pub(crate) use openlibrary::{Limiter, WorkCache};
 
 use crate::auth::Authed;
 use crate::db::now_ms;

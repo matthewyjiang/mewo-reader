@@ -9,6 +9,8 @@ use crate::db::now_ms;
 use crate::error::ApiError;
 use crate::library::{self, NewId, Owner};
 use crate::requests::http::{base_url, UpstreamError};
+use crate::requests::matching::{self, Matcher};
+use crate::requests::openlibrary;
 use crate::requests::pick::{self, Wanted};
 use crate::requests::prowlarr::Prowlarr;
 use crate::requests::sabnzbd::{folder_matches, job_folder, Job, Sabnzbd};
@@ -232,6 +234,7 @@ struct Due {
     username: String,
     title: String,
     author: String,
+    work_key: String,
     state: String,
     download_id: Option<String>,
     tried_guids: String,
@@ -243,7 +246,7 @@ struct Due {
 
 async fn due(pool: &SqlitePool, now_ms: i64) -> Result<Vec<Due>, ApiError> {
     Ok(sqlx::query_as::<_, Due>(
-        "SELECT r.id, r.user_id, u.username, r.title, r.author, r.state,
+        "SELECT r.id, r.user_id, u.username, r.title, r.author, r.work_key, r.state,
                 r.download_id, r.tried_guids, r.attempts, r.progress,
                 r.created_at, r.updated_at
          FROM book_requests r
@@ -315,20 +318,42 @@ async fn requested(
         title: &row.title,
         author: &row.author,
     };
+    let ctx = match openlibrary::work_context(state, &row.work_key).await {
+        Ok(ctx) => ctx,
+        Err(err) => {
+            return hold(
+                &state.pool,
+                &row.id,
+                "requested",
+                "Open Library",
+                &err,
+                now_ms,
+            )
+            .await
+        }
+    };
+    let matcher = Matcher::new(&ctx);
     let releases = match clients.prowlarr.search(&pick::query(&wanted)).await {
         Ok(releases) => releases,
         Err(err) => return hold(&state.pool, &row.id, "requested", "Prowlarr", &err, now_ms).await,
     };
     let tried = guids(&row.tried_guids);
-    let Some(release) = pick::pick(&wanted, &releases, &tried, max_bytes) else {
-        if row.created_at < now_ms.saturating_sub(GIVE_UP_MS) {
-            return fail_from(&state.pool, &row.id, "requested", NO_RELEASE_FOUND, now_ms).await;
+    let choice = pick::pick(&matcher, &releases, &tried, max_bytes);
+    let Some(release) = choice.release else {
+        let gave_up = row.created_at < now_ms.saturating_sub(GIVE_UP_MS);
+        let message = match choice.closest {
+            Some(by) => format!("No matching release (closest: {by}, a different book)"),
+            None if gave_up => NO_RELEASE_FOUND.to_string(),
+            None => NO_RELEASE_YET.to_string(),
+        };
+        if gave_up {
+            return fail_from(&state.pool, &row.id, "requested", &message, now_ms).await;
         }
         return note(
             &state.pool,
             &row.id,
             "requested",
-            NO_RELEASE_YET,
+            &message,
             now_ms.saturating_add(RESEARCH_MS),
         )
         .await;
@@ -514,12 +539,23 @@ async fn completed(
         )
         .await;
     };
-    let wanted = Wanted {
-        title: &row.title,
-        author: &row.author,
+    let ctx = match openlibrary::work_context(state, &row.work_key).await {
+        Ok(ctx) => ctx,
+        Err(err) => {
+            return hold(
+                &state.pool,
+                &row.id,
+                "downloading",
+                "Open Library",
+                &err,
+                now_ms,
+            )
+            .await
+        }
     };
+    let matcher = Matcher::new(&ctx);
     let files = list_epubs(dir.clone()).await?;
-    let Some(epub) = pick::choose_epub(&wanted, &files) else {
+    let Some(epub) = pick::choose_epub(&matcher, &files) else {
         return retry_or_fail(state, sab, row, nzo, NO_EPUB, Some(&dir), now_ms).await;
     };
     let staged = match library::stage_file(state, &epub, ready.settings.max_epub_bytes).await {
@@ -528,6 +564,10 @@ async fn completed(
             return retry_or_fail(state, sab, row, nzo, &err.to_string(), Some(&dir), now_ms).await
         }
     };
+    if let matching::Opf::Mismatch(message) = matching::verify_opf(&matcher, &ctx, &staged.meta) {
+        let _ = tokio::fs::remove_dir_all(&staged.temp_dir).await;
+        return retry_or_fail(state, sab, row, nzo, &message, Some(&dir), now_ms).await;
+    }
     let existed = book_owned(&state.pool, &row.user_id, &row.id).await?;
     wait_import(&state.data_dir).await;
     let owner = Owner {

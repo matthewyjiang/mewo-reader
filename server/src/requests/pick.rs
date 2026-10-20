@@ -1,7 +1,8 @@
-//! Pure release scoring. No HTTP and no clock.
+//! Release gates and ranking. No HTTP and no clock. Title fit lives in
+//! [`super::matching`].
 
+use super::matching::{Matcher, Verdict};
 use serde::Deserialize;
-use std::collections::HashSet;
 use std::path::PathBuf;
 
 pub(crate) struct Wanted<'a> {
@@ -23,6 +24,7 @@ pub(crate) struct Release {
     pub grabs: Option<i64>,
     #[allow(dead_code)]
     pub seeders: Option<i64>,
+    #[allow(dead_code)]
     #[serde(default)]
     pub categories: Vec<Category>,
 }
@@ -34,11 +36,7 @@ pub(crate) struct Category {
 
 const MIN_RELEASE: u64 = 50 * 1024;
 const MAX_RELEASE: u64 = 200 * 1024 * 1024;
-const BIG_RELEASE: u64 = 50 * 1024 * 1024;
 
-const STOP: &[&str] = &[
-    "a", "an", "the", "of", "and", "or", "to", "in", "on", "for", "with", "by", "from",
-];
 const BAD_FORMAT: &[&str] = &[
     "pdf",
     "mobi",
@@ -50,7 +48,13 @@ const BAD_FORMAT: &[&str] = &[
     "audiobook",
 ];
 const LANGUAGES: &[&str] = &["german", "french", "spanish", "italian", "dutch"];
-const MARKERS: &[&str] = &["summary", "workbook", "sampler"];
+const MARKERS: &[&str] = &[
+    "summary",
+    "workbook",
+    "sampler",
+    "sparknotes",
+    "cliffsnotes",
+];
 
 /// The search string sent to Prowlarr: `<title without subtitle> <author surname>`.
 /// A missing Open Library author is the word `Unknown` and is left off.
@@ -70,54 +74,98 @@ pub(crate) fn query(w: &Wanted) -> String {
     }
 }
 
-/// Best release not in `tried`, or `None`.
+pub(crate) struct Choice<'a> {
+    pub release: Option<&'a Release>,
+    /// Set when nothing was acceptable and some release lost to another work.
+    pub closest: Option<String>,
+}
+
+/// Best release not in `tried`. `closest` is the sibling that beat the nearest
+/// miss, for the error text.
 pub(crate) fn pick<'r>(
-    w: &Wanted,
+    matcher: &Matcher,
     releases: &'r [Release],
     tried: &[String],
     max_bytes: u64,
-) -> Option<&'r Release> {
-    let want = significant(w.title);
-    if want.is_empty() {
-        return None;
-    }
-    let work_tokens = token_set(w.title);
-    let mut best: Option<(i64, i64, u64, &str, usize)> = None;
-    for (index, release) in releases.iter().enumerate() {
+) -> Choice<'r> {
+    let mut best: Option<Rank<'r>> = None;
+    let mut closest: Option<(f32, String)> = None;
+    for release in releases {
         if tried.iter().any(|guid| guid == &release.guid) {
             continue;
         }
         let tokens = tokens(&release.title);
-        if !acceptable(release, &tokens, &want, &work_tokens, max_bytes) {
+        if !gates(release, &tokens, matcher, max_bytes) {
             continue;
         }
-        let score = score(w, release, &tokens);
-        let grabs = release.grabs.unwrap_or(0);
-        let replace = match best {
-            None => true,
-            Some((best_score, best_grabs, best_size, best_guid, _)) => {
-                score > best_score
-                    || (score == best_score && grabs > best_grabs)
-                    || (score == best_score && grabs == best_grabs && release.size < best_size)
-                    || (score == best_score
-                        && grabs == best_grabs
-                        && release.size == best_size
-                        && release.guid.as_str() < best_guid)
+        let scored = matcher.score(&release.title);
+        match scored.verdict {
+            Verdict::Match { fit, author_seen } => {
+                let rank = Rank {
+                    author_seen,
+                    not_foreign: !foreign(&tokens),
+                    retail: tokens.iter().any(|token| token == "retail"),
+                    fit,
+                    grabs: release.grabs.unwrap_or(0).min(20),
+                    size: release.size,
+                    guid: release.guid.as_str(),
+                    release,
+                };
+                if best.as_ref().is_none_or(|have| rank.beats(have)) {
+                    best = Some(rank);
+                }
             }
-        };
-        if replace {
-            best = Some((score, grabs, release.size, release.guid.as_str(), index));
+            Verdict::Beaten { by } => {
+                if closest
+                    .as_ref()
+                    .is_none_or(|(fit, _)| scored.wanted_fit > *fit)
+                {
+                    closest = Some((scored.wanted_fit, by));
+                }
+            }
+            Verdict::NotTitle => {}
         }
     }
-    best.map(|(_, _, _, _, index)| &releases[index])
+    Choice {
+        closest: if best.is_some() {
+            None
+        } else {
+            closest.map(|(_, by)| by)
+        },
+        release: best.map(|rank| rank.release),
+    }
+}
+
+struct Rank<'a> {
+    author_seen: bool,
+    not_foreign: bool,
+    retail: bool,
+    fit: f32,
+    grabs: i64,
+    size: u64,
+    guid: &'a str,
+    release: &'a Release,
+}
+
+impl Rank<'_> {
+    fn beats(&self, other: &Rank<'_>) -> bool {
+        self.author_seen
+            .cmp(&other.author_seen)
+            .then(self.not_foreign.cmp(&other.not_foreign))
+            .then(self.retail.cmp(&other.retail))
+            .then(self.fit.total_cmp(&other.fit))
+            .then(self.grabs.cmp(&other.grabs))
+            .then(other.size.cmp(&self.size))
+            .then(other.guid.cmp(self.guid))
+            .is_gt()
+    }
 }
 
 /// Inside a completed job folder the worker passes regular files. This skips a
-/// symlink (it is not followed) and a name that is not `.epub`. Title-token
-/// overlap wins, then the larger file.
-pub(crate) fn choose_epub(w: &Wanted, files: &[(PathBuf, u64)]) -> Option<PathBuf> {
-    let want = significant(w.title);
-    let mut best: Option<(usize, u64, PathBuf)> = None;
+/// symlink (it is not followed) and a name that is not `.epub`. A name the
+/// matcher accepts wins on fit, then the larger file.
+pub(crate) fn choose_epub(matcher: &Matcher, files: &[(PathBuf, u64)]) -> Option<PathBuf> {
+    let mut best: Option<(f32, u64, PathBuf)> = None;
     for (path, size) in files {
         if is_symlink(path) {
             continue;
@@ -128,20 +176,20 @@ pub(crate) fn choose_epub(w: &Wanted, files: &[(PathBuf, u64)]) -> Option<PathBu
         if !name.to_ascii_lowercase().ends_with(".epub") {
             continue;
         }
-        let overlap = want
-            .iter()
-            .filter(|token| tokens(name).contains(token))
-            .count();
+        let fit = match matcher.judge(name) {
+            Verdict::Match { fit, .. } => fit,
+            Verdict::NotTitle | Verdict::Beaten { .. } => 0.0,
+        };
         let replace = match &best {
             None => true,
-            Some((best_overlap, best_size, best_path)) => {
-                overlap > *best_overlap
-                    || (overlap == *best_overlap && size > best_size)
-                    || (overlap == *best_overlap && size == best_size && path < best_path)
+            Some((best_fit, best_size, best_path)) => {
+                fit > *best_fit
+                    || (fit == *best_fit && size > best_size)
+                    || (fit == *best_fit && size == best_size && path < best_path)
             }
         };
         if replace {
-            best = Some((overlap, *size, path.clone()));
+            best = Some((fit, *size, path.clone()));
         }
     }
     best.map(|(_, _, path)| path)
@@ -182,13 +230,7 @@ fn walk(dir: &std::path::Path, depth: u32, out: &mut Vec<(PathBuf, u64)>) {
     }
 }
 
-fn acceptable(
-    release: &Release,
-    tokens: &[String],
-    want: &[String],
-    work_tokens: &HashSet<String>,
-    max_bytes: u64,
-) -> bool {
+fn gates(release: &Release, tokens: &[String], matcher: &Matcher, max_bytes: u64) -> bool {
     if !release.protocol.eq_ignore_ascii_case("usenet") {
         return false;
     }
@@ -203,13 +245,6 @@ fn acceptable(
     if release.size < MIN_RELEASE || release.size > cap {
         return false;
     }
-    if want.is_empty()
-        || want
-            .iter()
-            .any(|token| !tokens.iter().any(|have| have == token))
-    {
-        return false;
-    }
     let has_epub = tokens.iter().any(|token| token == "epub");
     if tokens
         .iter()
@@ -220,61 +255,23 @@ fn acceptable(
     }
     if MARKERS
         .iter()
-        .any(|marker| tokens.iter().any(|token| token == *marker) && !work_tokens.contains(*marker))
+        .any(|marker| tokens.iter().any(|token| token == *marker) && !matcher.has_token(marker))
     {
         return false;
     }
-    if has_phrase(tokens, "study", "guide")
-        && !(work_tokens.contains("study") && work_tokens.contains("guide"))
-    {
+    let study_guide = tokens
+        .windows(2)
+        .any(|pair| pair[0] == "study" && pair[1] == "guide");
+    if study_guide && !(matcher.has_token("study") && matcher.has_token("guide")) {
         return false;
     }
     true
 }
 
-fn score(w: &Wanted, release: &Release, tokens: &[String]) -> i64 {
-    let mut score = 0i64;
-    if tokens.iter().any(|token| token == "epub") {
-        score += 50;
-    }
-    let surname = surname(w.author);
-    if !surname.is_empty() && tokens.iter().any(|token| token == &surname) {
-        score += 20;
-    }
-    if tokens.iter().any(|token| token == "retail") {
-        score += 10;
-    }
-    if release
-        .categories
-        .iter()
-        .any(|category| category.id == 7020)
-    {
-        score += 5;
-    }
-    if tokens
+fn foreign(tokens: &[String]) -> bool {
+    tokens
         .iter()
         .any(|token| LANGUAGES.contains(&token.as_str()))
-    {
-        score -= 15;
-    }
-    let grabs = release.grabs.unwrap_or(0).clamp(0, 20);
-    score += grabs / 4;
-    if release.size > BIG_RELEASE {
-        score -= 10;
-    }
-    score
-}
-
-fn significant(title: &str) -> Vec<String> {
-    let main = title.split(':').next().unwrap_or(title);
-    tokens(main)
-        .into_iter()
-        .filter(|token| !STOP.contains(&token.as_str()))
-        .collect()
-}
-
-fn token_set(title: &str) -> HashSet<String> {
-    tokens(title).into_iter().collect()
 }
 
 fn tokens(value: &str) -> Vec<String> {
@@ -286,23 +283,13 @@ fn tokens(value: &str) -> Vec<String> {
         .collect()
 }
 
-fn surname(author: &str) -> String {
-    tokens(author).pop().unwrap_or_default()
-}
-
-fn has_phrase(tokens: &[String], left: &str, right: &str) -> bool {
-    tokens
-        .windows(2)
-        .any(|pair| pair[0] == left && pair[1] == right)
-}
-
 fn is_symlink(path: &std::path::Path) -> bool {
     std::fs::symlink_metadata(path)
         .map(|meta| meta.file_type().is_symlink())
         .unwrap_or(false)
 }
 
-fn fold(c: char) -> Option<char> {
+pub(crate) fn fold(c: char) -> Option<char> {
     let kept = match c {
         'A'..='Z' => c.to_ascii_lowercase(),
         'a'..='z' | '0'..='9' => c,
@@ -328,6 +315,26 @@ fn fold(c: char) -> Option<char> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::requests::matching::WorkContext;
+    use std::collections::HashSet;
+
+    fn matcher_for(w: &Wanted) -> Matcher {
+        Matcher::new(&WorkContext {
+            titles: vec![w.title.to_string()],
+            authors: vec![w.author.to_string()],
+            isbns: HashSet::new(),
+            siblings: Vec::new(),
+        })
+    }
+
+    fn pick_of<'a>(
+        w: &Wanted,
+        releases: &'a [Release],
+        tried: &[String],
+        max: u64,
+    ) -> Option<&'a Release> {
+        pick(&matcher_for(w), releases, tried, max).release
+    }
 
     fn release(guid: &str, title: &str, size: u64, grabs: i64, categories: &[i64]) -> Release {
         Release {
@@ -373,7 +380,7 @@ mod tests {
                 &[7020],
             ),
         ];
-        let picked = pick(&wanted, &releases, &[], 64 * 1024 * 1024).unwrap();
+        let picked = pick_of(&wanted, &releases, &[], 64 * 1024 * 1024).unwrap();
         assert_eq!(picked.guid, "epub");
     }
 
@@ -391,10 +398,68 @@ mod tests {
             &[7020],
         )];
         assert_eq!(
-            pick(&wanted, &releases, &[], 64 * 1024 * 1024)
+            pick_of(&wanted, &releases, &[], 64 * 1024 * 1024)
                 .unwrap()
                 .guid,
             "camus"
+        );
+    }
+
+    #[test]
+    fn chapterhouse_loses_to_the_sibling_and_guides_are_rejected() {
+        let max = 64 * 1024 * 1024;
+        let matcher = Matcher::new(&WorkContext {
+            titles: vec!["Dune".into()],
+            authors: vec!["Frank Herbert".into()],
+            isbns: HashSet::new(),
+            siblings: vec!["Dune".into(), "Chapterhouse Dune".into()],
+        });
+        let chapterhouse = release(
+            "ch",
+            "Frank Herbert - [Dune 06] - Chapterhouse Dune (retail) (epub)",
+            800_000,
+            10,
+            &[7020],
+        );
+        let releases = [chapterhouse];
+        let choice = pick(&matcher, &releases, &[], max);
+        assert!(choice.release.is_none());
+        assert_eq!(choice.closest.as_deref(), Some("Chapterhouse Dune"));
+
+        let wanted = Wanted {
+            title: "Dune",
+            author: "Frank Herbert",
+        };
+        let spark = release(
+            "spark",
+            "Dune (SparkNotes Literature Guide) epub",
+            800_000,
+            10,
+            &[7020],
+        );
+        let study = release("study", "Dune Study Guide epub", 800_000, 10, &[7020]);
+        let cliffs = release("cliffs", "Dune CliffsNotes epub", 800_000, 10, &[7020]);
+        assert!(pick_of(&wanted, &[spark, study, cliffs], &[], max).is_none());
+    }
+
+    #[test]
+    fn author_seen_outranks_retail_and_grabs_cap_at_twenty() {
+        let wanted = Wanted {
+            title: "Dune",
+            author: "Frank Herbert",
+        };
+        let max = 64 * 1024 * 1024;
+        let named = release("named", "Frank.Herbert.Dune.EPUB", 2_000_000, 0, &[7020]);
+        let retail = release("retail", "Dune.RETAIL.EPUB", 800_000, 20, &[7020]);
+        assert_eq!(
+            pick_of(&wanted, &[retail, named], &[], max).unwrap().guid,
+            "named"
+        );
+        let many = release("many", "Frank.Herbert.Dune.EPUB", 2_000_000, 100, &[7020]);
+        let fewer = release("fewer", "Frank.Herbert.Dune.EPUB", 800_000, 50, &[7020]);
+        assert_eq!(
+            pick_of(&wanted, &[many, fewer], &[], max).unwrap().guid,
+            "fewer"
         );
     }
 
@@ -405,7 +470,7 @@ mod tests {
             author: "Frank Herbert",
         };
         let releases = [release("sum", "Summary of Dune EPUB", 800_000, 10, &[7020])];
-        assert!(pick(&wanted, &releases, &[], 64 * 1024 * 1024).is_none());
+        assert!(pick_of(&wanted, &releases, &[], 64 * 1024 * 1024).is_none());
     }
 
     #[test]
@@ -422,7 +487,7 @@ mod tests {
             20,
             &[7020],
         );
-        assert!(pick(&wanted, &[over], &[], max).is_none());
+        assert!(pick_of(&wanted, &[over], &[], max).is_none());
         let capped = release(
             "cap",
             "Frank.Herbert.Dune.RETAIL.EPUB",
@@ -430,32 +495,32 @@ mod tests {
             20,
             &[7020],
         );
-        assert!(pick(&wanted, &[capped], &[], max).is_none());
+        assert!(pick_of(&wanted, &[capped], &[], max).is_none());
 
         let first = release("b", "Dune.Herbert.EPUB", 1_000_000, 4, &[7020]);
         let second = release("a", "Dune.Herbert.EPUB", 1_000_000, 4, &[7020]);
         let third = release("c", "Dune.Herbert.EPUB", 900_000, 4, &[7020]);
         let more = release("d", "Dune.Herbert.EPUB", 2_000_000, 8, &[7020]);
         assert_eq!(
-            pick(&wanted, &[first.clone(), second.clone()], &[], max)
+            pick_of(&wanted, &[first.clone(), second.clone()], &[], max)
                 .unwrap()
                 .guid,
             "a"
         );
         assert_eq!(
-            pick(&wanted, &[first.clone(), third.clone()], &[], max)
+            pick_of(&wanted, &[first.clone(), third.clone()], &[], max)
                 .unwrap()
                 .guid,
             "c"
         );
         assert_eq!(
-            pick(&wanted, &[first.clone(), more.clone()], &[], max)
+            pick_of(&wanted, &[first.clone(), more.clone()], &[], max)
                 .unwrap()
                 .guid,
             "d"
         );
         assert_eq!(
-            pick(&wanted, &[first, second], &["a".into()], max)
+            pick_of(&wanted, &[first, second], &["a".into()], max)
                 .unwrap()
                 .guid,
             "b"
@@ -499,7 +564,7 @@ mod tests {
         let max = 200 * 1024 * 1024;
         let enders = release("e", "Orson.Scott.Card.Enders.Game.EPUB", 80_000, 1, &[7020]);
         assert_eq!(
-            pick(
+            pick_of(
                 &Wanted {
                     title: "Ender's Game",
                     author: "Orson Scott Card",
@@ -513,7 +578,7 @@ mod tests {
             "e"
         );
         assert_eq!(
-            pick(
+            pick_of(
                 &Wanted {
                     title: "Ender’s Game",
                     author: "Orson Scott Card",
@@ -527,7 +592,7 @@ mod tests {
             "e"
         );
         let cjk = release("c", "Liu.Cixin.Three.Body.EPUB", 80_000, 1, &[7020]);
-        assert!(pick(
+        assert!(pick_of(
             &Wanted {
                 title: "三体",
                 author: "刘慈欣",
@@ -544,7 +609,7 @@ mod tests {
             1,
             &[7020],
         );
-        assert!(pick(
+        assert!(pick_of(
             &Wanted {
                 title: "Преступление и наказание",
                 author: "Фёдор Достоевский",
@@ -565,22 +630,30 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let other = dir.path().join("notes.pdf");
         std::fs::write(&other, b"x").unwrap();
-        assert!(choose_epub(&wanted, &[(other, 10)]).is_none());
+        assert!(choose_epub(&matcher_for(&wanted), &[(other, 10)]).is_none());
 
         let one = dir.path().join("Dune.epub");
         std::fs::write(&one, b"x").unwrap();
-        assert_eq!(choose_epub(&wanted, &[(one.clone(), 10)]).unwrap(), one);
+        assert_eq!(
+            choose_epub(&matcher_for(&wanted), &[(one.clone(), 10)]).unwrap(),
+            one
+        );
 
         let upper = dir.path().join("plain.EPUB");
         std::fs::write(&upper, b"xxxx").unwrap();
         let named = dir.path().join("Dune RETAIL.epub");
         std::fs::write(&named, b"x").unwrap();
-        let picked = choose_epub(&wanted, &[(upper.clone(), 100), (named.clone(), 10)]).unwrap();
+        let picked = choose_epub(
+            &matcher_for(&wanted),
+            &[(upper.clone(), 100), (named.clone(), 10)],
+        )
+        .unwrap();
         assert_eq!(picked, named);
 
         let link = dir.path().join("bigger.epub");
         std::os::unix::fs::symlink(&upper, &link).unwrap();
-        let picked = choose_epub(&wanted, &[(link, 999), (named.clone(), 10)]).unwrap();
+        let picked =
+            choose_epub(&matcher_for(&wanted), &[(link, 999), (named.clone(), 10)]).unwrap();
         assert_eq!(picked, named);
 
         let nested = dir.path().join("mewo");
