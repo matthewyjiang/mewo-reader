@@ -292,29 +292,54 @@ fn significant(title: &str) -> Vec<String> {
 
 struct Piece {
     words: Vec<String>,
-    /// `Series 01` / `vol2`. Never the book, and it splits subtitle runs.
+    /// A series index with another title segment after it (`Dune 03 - Children`).
+    /// The last numbered segment (`Dune 01`) is not a label; the index is stripped.
     label: bool,
 }
 
-/// Any ` - ` piece may be the book. A piece that carries a series index the
-/// title does not (`03`, `vol2`) is a label and is skipped. A catalog subtitle
-/// matches a run of consecutive unlabeled pieces, so a label in between does
-/// not glue the two sides together.
+/// Any ` - ` piece may be the book. A short index (`03`, `vol2`, `v2`) makes
+/// that piece a series label only when a real title segment follows it.
+/// Otherwise the index is dropped and the rest is matched. A catalog subtitle
+/// matches a run of consecutive unlabeled pieces.
 fn title_fits(w: &Wanted, release_title: &str) -> bool {
     let wanted_tokens: HashSet<String> = tokens(w.title).into_iter().collect();
     let author: HashSet<String> = tokens(w.author).into_iter().collect();
-    let pieces = release_parts(release_title)
+    let pending = release_parts(release_title)
         .into_iter()
         .filter_map(|words| {
             if words.is_empty() {
                 return None;
             }
-            let label = series_label(&words, &wanted_tokens);
+            let indexed = has_series_index(&words, &wanted_tokens);
             let words: Vec<String> = words
                 .into_iter()
                 .filter(|word| !dropped(word, &author, &wanted_tokens))
                 .collect();
-            if words.is_empty() && !label {
+            if words.is_empty() {
+                None
+            } else {
+                Some((words, indexed))
+            }
+        })
+        .collect::<Vec<_>>();
+    let title_after: Vec<bool> = pending
+        .iter()
+        .map(|(words, _)| words.iter().any(|word| title_word(word, &wanted_tokens)))
+        .collect();
+    let pieces = pending
+        .into_iter()
+        .enumerate()
+        .filter_map(|(index, (words, indexed))| {
+            let label = indexed && title_after[index + 1..].iter().any(|later| *later);
+            let words = if label {
+                words
+            } else {
+                words
+                    .into_iter()
+                    .filter(|word| !series_index(word) || wanted_tokens.contains(word))
+                    .collect()
+            };
+            if words.is_empty() {
                 None
             } else {
                 Some(Piece { words, label })
@@ -334,13 +359,27 @@ fn title_fits(w: &Wanted, release_title: &str) -> bool {
     false
 }
 
-fn series_label(words: &[String], wanted: &HashSet<String>) -> bool {
+fn has_series_index(words: &[String], wanted: &HashSet<String>) -> bool {
     words
         .iter()
         .any(|word| !wanted.contains(word) && series_index(word))
 }
 
-/// `1`..`999`, or `vol`/`volume`/`book`/`part` glued to a number. A 4-digit
+fn title_word(word: &str, wanted: &HashSet<String>) -> bool {
+    if wanted.contains(word) {
+        return !STOP.contains(&word);
+    }
+    !(STOP.contains(&word)
+        || EDITION.contains(&word)
+        || is_format(word)
+        || LANGUAGES.contains(&word)
+        || is_year(word)
+        || is_ordinal(word)
+        || is_bare_count(word)
+        || series_index(word))
+}
+
+/// `1`..`999`, or `vol`/`volume`/`book`/`part`/`v` glued to a number. A 4-digit
 /// year is noise, not an index.
 fn series_index(token: &str) -> bool {
     let digits = token.len();
@@ -351,7 +390,8 @@ fn series_index(token: &str) -> bool {
         .strip_prefix("volume")
         .or_else(|| token.strip_prefix("vol"))
         .or_else(|| token.strip_prefix("book"))
-        .or_else(|| token.strip_prefix("part"));
+        .or_else(|| token.strip_prefix("part"))
+        .or_else(|| token.strip_prefix('v'));
     rest.is_some_and(|rest| !rest.is_empty() && rest.chars().all(|c| c.is_ascii_digit()))
 }
 
@@ -703,6 +743,15 @@ mod tests {
                 "Frank Herbert - Dune (retail) (epub)",
                 true,
             ),
+            ("Dune", "Frank Herbert", "Dune 01 (retail)", true),
+            ("Dune", "Frank Herbert", "Frank Herbert - Dune 01", true),
+            (
+                "The Final Empire",
+                "Brandon Sanderson",
+                "Brandon Sanderson - The Final Empire 01",
+                true,
+            ),
+            ("Title", "Ann Leckie", "Title v2", true),
             ("Dune", "Frank Herbert", "Dune Messiah", false),
             ("Dune", "Frank Herbert", "Children of Dune", false),
             ("Dune", "Frank Herbert", "Chapterhouse Dune", false),
