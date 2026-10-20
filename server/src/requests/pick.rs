@@ -290,32 +290,99 @@ fn significant(title: &str) -> Vec<String> {
         .collect()
 }
 
-/// Title segment of a release name: author, `[series]` / `(retail)` groups,
-/// format words, years, and volume numbers removed. The remaining words have to
-/// be the requested title. Extra words are allowed only after `:` or ` - `
-/// once that title is complete. Edition words are ignored. A catalog subtitle
-/// (`Title: Subtitle`) matches as well.
+struct Piece {
+    words: Vec<String>,
+    /// `Series 01` / `vol2`. Never the book, and it splits subtitle runs.
+    label: bool,
+}
+
+/// Any ` - ` piece may be the book. A piece that carries a series index the
+/// title does not (`03`, `vol2`) is a label and is skipped. A catalog subtitle
+/// matches a run of consecutive unlabeled pieces, so a label in between does
+/// not glue the two sides together.
 fn title_fits(w: &Wanted, release_title: &str) -> bool {
     let wanted_tokens: HashSet<String> = tokens(w.title).into_iter().collect();
     let author: HashSet<String> = tokens(w.author).into_iter().collect();
-    let parts = release_parts(release_title)
+    let pieces = release_parts(release_title)
         .into_iter()
-        .map(|words| {
-            words
+        .filter_map(|words| {
+            if words.is_empty() {
+                return None;
+            }
+            let label = series_label(&words, &wanted_tokens);
+            let words: Vec<String> = words
                 .into_iter()
                 .filter(|word| !dropped(word, &author, &wanted_tokens))
-                .collect::<Vec<_>>()
+                .collect();
+            if words.is_empty() && !label {
+                None
+            } else {
+                Some(Piece { words, label })
+            }
         })
-        .filter(|words| !words.is_empty())
         .collect::<Vec<_>>();
     let main = significant(w.title);
-    if parts.first().is_some_and(|head| same_words(head, &main)) {
+    if pieces
+        .iter()
+        .any(|piece| !piece.label && same_words(&piece.words, &main))
+    {
         return true;
     }
     if w.title.contains(':') {
-        let full = tokens(w.title);
-        let all = parts.into_iter().flatten().collect::<Vec<_>>();
-        return same_words(&all, &full);
+        return subtitle_run(&pieces, &tokens(w.title));
+    }
+    false
+}
+
+fn series_label(words: &[String], wanted: &HashSet<String>) -> bool {
+    words
+        .iter()
+        .any(|word| !wanted.contains(word) && series_index(word))
+}
+
+/// `1`..`999`, or `vol`/`volume`/`book`/`part` glued to a number. A 4-digit
+/// year is noise, not an index.
+fn series_index(token: &str) -> bool {
+    let digits = token.len();
+    if (1..=3).contains(&digits) && token.chars().all(|c| c.is_ascii_digit()) {
+        return true;
+    }
+    let rest = token
+        .strip_prefix("volume")
+        .or_else(|| token.strip_prefix("vol"))
+        .or_else(|| token.strip_prefix("book"))
+        .or_else(|| token.strip_prefix("part"));
+    rest.is_some_and(|rest| !rest.is_empty() && rest.chars().all(|c| c.is_ascii_digit()))
+}
+
+fn subtitle_run(pieces: &[Piece], full: &[String]) -> bool {
+    let mut run: Vec<&[String]> = Vec::new();
+    for piece in pieces {
+        if piece.label {
+            if run_matches(&run, full) {
+                return true;
+            }
+            run.clear();
+            continue;
+        }
+        if !piece.words.is_empty() {
+            run.push(&piece.words);
+        }
+    }
+    run_matches(&run, full)
+}
+
+fn run_matches(run: &[&[String]], full: &[String]) -> bool {
+    for start in 0..run.len() {
+        for end in (start + 1)..=run.len() {
+            let words: Vec<String> = run[start..end]
+                .iter()
+                .flat_map(|part| part.iter().cloned())
+                .collect();
+            if same_words(&words, full) {
+                return true;
+            }
+        }
     }
     false
 }
@@ -352,7 +419,9 @@ fn dropped(token: &str, author: &HashSet<String>, wanted: &HashSet<String>) -> b
     author.contains(token)
         || is_format(token)
         || LANGUAGES.contains(&token)
-        || is_year_or_volume(token)
+        || is_year(token)
+        || is_ordinal(token)
+        || is_bare_count(token)
 }
 
 fn is_format(token: &str) -> bool {
@@ -360,17 +429,20 @@ fn is_format(token: &str) -> bool {
         || BAD_FORMAT.contains(&token)
 }
 
-fn is_year_or_volume(token: &str) -> bool {
-    if token.chars().all(|c| c.is_ascii_digit()) {
-        return true;
+fn is_year(token: &str) -> bool {
+    token.len() == 4 && token.chars().all(|c| c.is_ascii_digit())
+}
+
+fn is_ordinal(token: &str) -> bool {
+    let digits = token.chars().take_while(|c| c.is_ascii_digit()).count();
+    if digits == 0 || digits == token.len() {
+        return false;
     }
-    let rest = token
-        .strip_prefix("volume")
-        .or_else(|| token.strip_prefix("vol"))
-        .or_else(|| token.strip_prefix("book"))
-        .or_else(|| token.strip_prefix("part"))
-        .or_else(|| token.strip_prefix('v'));
-    rest.is_some_and(|rest| !rest.is_empty() && rest.chars().all(|c| c.is_ascii_digit()))
+    matches!(&token[digits..], "st" | "nd" | "rd" | "th")
+}
+
+fn is_bare_count(token: &str) -> bool {
+    matches!(token, "book" | "vol" | "volume" | "part")
 }
 
 /// Pieces of a release name split on a subtitle separator (`:` or ` - `,
@@ -658,6 +730,138 @@ mod tests {
                 "Yuval Noah Harari",
                 "Yuval Noah Harari - Sapiens: A Brief History of Humankind (epub)",
                 true,
+            ),
+            (
+                "Dune",
+                "Frank Herbert",
+                "Frank Herbert - Dune 03 - Children of Dune (epub)",
+                false,
+            ),
+            (
+                "Children of Dune",
+                "Frank Herbert",
+                "Frank Herbert - Dune 03 - Children of Dune (epub)",
+                true,
+            ),
+            (
+                "Dune",
+                "Frank Herbert",
+                "Frank Herbert - Dune 02 - Dune Messiah",
+                false,
+            ),
+            (
+                "Dune Messiah",
+                "Frank Herbert",
+                "Frank Herbert - Dune 02 - Dune Messiah",
+                true,
+            ),
+            (
+                "Pride and Prejudice",
+                "Unknown",
+                "Jane Austen - Pride and Prejudice (epub)",
+                true,
+            ),
+            (
+                "Good Omens",
+                "Terry Pratchett",
+                "Terry Pratchett & Neil Gaiman - Good Omens",
+                true,
+            ),
+            (
+                "Good Omens",
+                "Terry Pratchett",
+                "Neil Gaiman, Terry Pratchett - Good Omens",
+                true,
+            ),
+            (
+                "Crime and Punishment",
+                "Fyodor Dostoyevsky",
+                "Fyodor Dostoevsky - Crime and Punishment (epub)",
+                true,
+            ),
+            (
+                "The Hobbit",
+                "J. R. R. Tolkien",
+                "JRR Tolkien - The Hobbit (epub)",
+                true,
+            ),
+            (
+                "Solaris",
+                "Stanisław Lem",
+                "Stanislaw Lem - Solaris (epub)",
+                true,
+            ),
+            (
+                "Mistborn",
+                "Brandon Sanderson",
+                "Brandon Sanderson - Mistborn 01 - The Final Empire",
+                false,
+            ),
+            (
+                "The Final Empire",
+                "Brandon Sanderson",
+                "Brandon Sanderson - Mistborn 01 - The Final Empire",
+                true,
+            ),
+            (
+                "The Final Empire",
+                "Brandon Sanderson",
+                "Brandon Sanderson - Mistborn vol2 - The Final Empire",
+                true,
+            ),
+            (
+                "Harry Potter",
+                "J.K. Rowling",
+                "J.K. Rowling - Harry Potter 1 - Harry Potter and the Sorcerer's Stone",
+                false,
+            ),
+            (
+                "Harry Potter and the Sorcerer's Stone",
+                "J.K. Rowling",
+                "J.K. Rowling - Harry Potter 1 - Harry Potter and the Sorcerer's Stone",
+                true,
+            ),
+            (
+                "Remembrance of Earth's Past",
+                "Cixin Liu",
+                "Cixin Liu - Remembrance of Earth's Past 01 - The Three-Body Problem",
+                false,
+            ),
+            (
+                "The Three-Body Problem",
+                "Cixin Liu",
+                "Cixin Liu - Remembrance of Earth's Past 01 - The Three-Body Problem",
+                true,
+            ),
+            (
+                "Dune",
+                "Frank Herbert",
+                "Dune 40th Anniversary Edition",
+                true,
+            ),
+            (
+                "The Book Thief",
+                "Markus Zusak",
+                "Markus Zusak - The Book Thief (epub)",
+                true,
+            ),
+            (
+                "Dune",
+                "Frank Herbert",
+                "Frank Herbert - Dune vol (epub)",
+                true,
+            ),
+            (
+                "Sapiens: A Brief History of Humankind",
+                "Yuval Noah Harari",
+                "Notes - Sapiens Brief - History of Humankind - Appendix",
+                true,
+            ),
+            (
+                "Sapiens: A Brief History of Humankind",
+                "Yuval Noah Harari",
+                "Sapiens 01 - A Brief History of Humankind",
+                false,
             ),
         ];
         for (title, author, name, accept) in cases {
