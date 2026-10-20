@@ -4,6 +4,14 @@ export function bytesToMb(bytes: number): number {
   return bytes / MB;
 }
 
+export const EPUB_MB_ERROR = 'maxEpubBytes must be 1 to 1024 MB.';
+
+/** 1 to 1024 MB, matching the server. Anything else that parsed is this message. */
+export function epubMbError(bytes: number): string | null {
+  if (bytes >= MB && bytes <= 1024 * MB) return null;
+  return EPUB_MB_ERROR;
+}
+
 /** Whole or fractional megabytes. Empty, junk, and non-positive values are null. */
 export function parseMb(input: string): number | null {
   const trimmed = input.trim();

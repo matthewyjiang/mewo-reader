@@ -100,7 +100,7 @@ test('an admin can open Server and the signups toggle patches', async ({ page })
 
 test('a settings 400 shows the server message', async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 });
-  const error = 'maxEpubBytes must be 1048576 to 1073741824 (asked 10).';
+  const error = 'maxEpubBytes must be 1 to 1024 MB.';
   await install(page, { signupError: error });
   await page.goto('/settings/server');
   await page.getByRole('switch', { name: 'Signups' }).click();
@@ -113,13 +113,47 @@ test('your own admin toggle is disabled', async ({ page }) => {
   await install(page);
   await page.goto('/settings/server/users');
   const mine = page.getByRole('button', { name: 'ada admin' });
-  await expect(mine).toBeDisabled();
+  await expect(mine).toHaveAttribute('aria-disabled', 'true');
+  await expect(mine).not.toHaveAttribute('disabled');
   await expect(mine).toHaveAttribute('aria-pressed', 'true');
   const other = page.getByRole('button', { name: 'byron admin' });
   await expect(other).toBeEnabled();
   await expect(other).toHaveAttribute('aria-pressed', 'false');
   await page.getByRole('button', { name: '@byron' }).click();
   await expect(page).toHaveURL(/\/profiles\/byron$/);
+});
+
+test('an out-of-range EPUB size is rejected before the request', async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await install(page);
+  await page.goto('/settings/server');
+  const input = page.locator('.epub-field input');
+  await expect(input).toHaveValue('64');
+  let patched = false;
+  page.on('request', (request) => {
+    if (request.method() === 'PATCH') patched = true;
+  });
+  await input.fill('2000');
+  await input.press('Enter');
+  await expect(page.getByRole('status')).toContainText('maxEpubBytes must be 1 to 1024 MB.');
+  await expect(input).toHaveValue('64');
+  expect(patched).toBe(false);
+});
+
+test('/v1/me loads once per token', async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await install(page);
+  let me = 0;
+  page.on('request', (request) => {
+    if (new URL(request.url()).pathname === '/v1/me') me += 1;
+  });
+  await page.goto('/settings');
+  await expect(page.getByRole('button', { name: 'Server' })).toBeVisible();
+  await page.getByRole('button', { name: 'About' }).click();
+  await expect(page.getByRole('heading', { name: 'About' })).toBeVisible();
+  await page.goBack();
+  await expect(page.getByRole('button', { name: 'Server' })).toBeVisible();
+  expect(me).toBe(1);
 });
 
 test('a non-admin has no Server row and the panel is not found', async ({ page }) => {

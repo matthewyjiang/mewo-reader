@@ -42,6 +42,7 @@
   let query = $state('');
   let shelfToken = '';
   let shelfPromise: Promise<void> | undefined;
+  let meToken = '';
   let touchStart: { x: number; y: number } | null = null;
   let pullStart: { x: number; y: number; active: boolean } | null = null;
   let pull = $state(0);
@@ -92,6 +93,12 @@
     await shelfPromise;
   }
 
+  function ensureMe(token: string): void {
+    if (meToken === token) return;
+    meToken = token;
+    void store.loadMe();
+  }
+
   function refreshShelf(): void {
     shelfPromise = undefined;
     void store.load();
@@ -112,9 +119,10 @@
       if (!token) {
         shelfToken = '';
         shelfPromise = undefined;
+        meToken = '';
         return;
       }
-      void store.loadMe();
+      ensureMe(token);
       void ensureShelf(token);
     });
   });

@@ -6,7 +6,7 @@
   import type { AdminUser, ServerInfo, ServerSettings } from '../lib/models';
   import { router } from '../lib/router.svelte';
   import { restoreScroll } from '../lib/screen';
-  import { bytesToMb, formatBytes, parseMb } from '../lib/server';
+  import { bytesToMb, epubMbError, formatBytes, parseMb } from '../lib/server';
   import { message, store } from '../lib/store.svelte';
 
   let { path, scroller, onprofile }: {
@@ -90,6 +90,12 @@
       mb = mbField(settings.maxEpubBytes);
       return;
     }
+    const range = epubMbError(bytes);
+    if (range) {
+      mb = mbField(settings.maxEpubBytes);
+      store.notice = range;
+      return;
+    }
     saving = true;
     try {
       settings = await store.api.updateServerSettings({ maxEpubBytes: bytes });
@@ -130,9 +136,10 @@
       </span>
       <button
         class="icon-button shield"
+        class:mine={user.mine}
         aria-pressed={user.isAdmin}
+        aria-disabled={user.mine ? 'true' : undefined}
         aria-label={`${user.username} admin`}
-        disabled={user.mine}
         onclick={() => toggleAdmin(user)}
       >
         <Icon name="shield" filled={user.isAdmin} size={20} />
@@ -172,13 +179,12 @@
     </span>
   </label>
   <button class="settings-row" onclick={() => router.go('/settings/server/users')}>
-    Users
-    <Icon name="chevron" />
-  </button>
-  <div class="fact-row">
     <span>Users</span>
-    <span>{info.users}</span>
-  </div>
+    <span class="row-trail">
+      <span class="count">{info.users}</span>
+      <Icon name="chevron" />
+    </span>
+  </button>
   <div class="fact-row">
     <span>Books</span>
     <span>{info.books}</span>
@@ -211,6 +217,16 @@
 .settings-row :global(svg) {
   color: var(--mute);
   flex-shrink: 0;
+}
+
+.row-trail {
+  display: inline-flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.count {
+  font-weight: 400;
 }
 
 .settings-row:hover:not(:disabled) {
@@ -317,6 +333,11 @@
 
 .handle:hover {
   text-decoration: underline;
+}
+
+.shield.mine {
+  cursor: default;
+  pointer-events: none;
 }
 
 .shield[aria-pressed='true'] {

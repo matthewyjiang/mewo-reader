@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { MB, bytesToMb, formatBytes, parseMb } from '../src/lib/server.ts';
+import { EPUB_MB_ERROR, MB, bytesToMb, epubMbError, formatBytes, parseMb } from '../src/lib/server.ts';
 
 test('megabytes convert both ways and reject junk', () => {
   assert.equal(bytesToMb(64 * MB), 64);
@@ -15,6 +15,15 @@ test('megabytes convert both ways and reject junk', () => {
   assert.equal(parseMb('+64'), null);
   assert.equal(parseMb('1e2'), null);
   assert.equal(parseMb('64.'), null);
+});
+
+test('epub megabytes are 1 to 1024', () => {
+  assert.equal(epubMbError(MB), null);
+  assert.equal(epubMbError(64 * MB), null);
+  assert.equal(epubMbError(1024 * MB), null);
+  assert.equal(epubMbError(parseMb('0.5')), EPUB_MB_ERROR);
+  assert.equal(epubMbError(parseMb('1025')), EPUB_MB_ERROR);
+  assert.equal(EPUB_MB_ERROR, 'maxEpubBytes must be 1 to 1024 MB.');
 });
 
 test('formatBytes uses one decimal only when the unit is not exact', () => {
