@@ -220,23 +220,50 @@ test('book languages save through the settings patch and the last one stays on',
   await install(page);
   await page.goto('/settings/server');
   await expect(page.getByText('Requests only download books in these languages.')).toBeVisible();
-  const english = page.getByRole('checkbox', { name: 'English' });
-  const german = page.getByRole('checkbox', { name: 'German' });
-  await expect(english).toBeChecked();
-  await expect(english).toBeDisabled();
-  await expect(german).not.toBeChecked();
+  const field = page.getByRole('button', { name: 'Book languages' });
+  await expect(field).toHaveAttribute('aria-haspopup', 'listbox');
+  await expect(field).toHaveAttribute('aria-expanded', 'false');
+  await expect(field).toContainText('English');
+  await field.click();
+  const list = page.getByRole('listbox', { name: 'Book languages' });
+  await expect(list).toBeVisible();
+  await expect(field).toHaveAttribute('aria-expanded', 'true');
+  const english = page.getByRole('option', { name: 'English' });
+  const german = page.getByRole('option', { name: 'German' });
+  await expect(english).toHaveAttribute('aria-selected', 'true');
+  await expect(german).toHaveAttribute('aria-selected', 'false');
+  await expect(english).toBeFocused();
   const add = page.waitForRequest((request) =>
     request.method() === 'PATCH' && request.url().includes('/v1/admin/settings'));
-  await german.check();
+  await page.keyboard.press('ArrowDown');
+  await page.keyboard.press('ArrowDown');
+  await page.keyboard.press('ArrowDown');
+  await expect(german).toBeFocused();
+  await page.keyboard.press('Enter');
   expect((await add).postDataJSON()).toEqual({ languages: ['en', 'de'] });
-  await expect(german).toBeChecked();
-  await expect(english).toBeEnabled();
+  await expect(list).toBeVisible();
+  await expect(english).toHaveAttribute('aria-selected', 'true');
+  await expect(german).toHaveAttribute('aria-selected', 'true');
+  await expect(field).toContainText('English, German');
+  await page.keyboard.press('Escape');
+  await expect(list).toHaveCount(0);
+  await page.reload();
+  await expect(field).toContainText('English, German');
+  await field.click();
+  await expect(german).toHaveAttribute('aria-selected', 'true');
   const remove = page.waitForRequest((request) =>
     request.method() === 'PATCH' && request.url().includes('/v1/admin/settings'));
-  await german.uncheck();
+  await german.click();
   expect((await remove).postDataJSON()).toEqual({ languages: ['en'] });
-  await expect(english).toBeDisabled();
-  await expect(german).not.toBeChecked();
+  await expect(list).toBeVisible();
+  await expect(german).toHaveAttribute('aria-selected', 'false');
+  let locked = false;
+  page.on('request', (request) => {
+    if (request.method() === 'PATCH') locked = true;
+  });
+  await english.click();
+  await expect(english).toHaveAttribute('aria-selected', 'true');
+  expect(locked).toBe(false);
 });
 
 test('a saved key shows Saved, blur sends the key, and test connection lists three checks', async ({ page }) => {

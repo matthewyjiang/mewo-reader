@@ -35,6 +35,18 @@
   let checks = $state<{ name: string; ok: boolean; detail: string }[] | null>(null);
   let testing = $state(false);
   let requestCount = $state<number | null>(null);
+  let languagesOpen = $state(false);
+  let languageFocus = $state(0);
+  let languageRoot = $state<HTMLDivElement | null>(null);
+  let languageButton = $state<HTMLButtonElement | null>(null);
+  const selectedLanguages = $derived.by(() => {
+    const current = settings;
+    if (!current) return '';
+    return current.supportedLanguages
+      .filter((language) => current.languages.includes(language.code))
+      .map((language) => language.name)
+      .join(', ');
+  });
 
   function mbField(bytes: number): string {
     const value = bytesToMb(bytes);
@@ -49,6 +61,7 @@
     settings = null;
     info = null;
     users = null;
+    languagesOpen = false;
     void load(current, ticket);
   });
 
@@ -168,6 +181,74 @@
   function sameList(left: string[], right: string[]): boolean {
     return left.length === right.length && left.every((code, index) => code === right[index]);
   }
+
+  function openLanguages(): void {
+    const current = settings;
+    if (!current) return;
+    const selected = current.supportedLanguages.findIndex((language) =>
+      current.languages.includes(language.code));
+    languageFocus = selected >= 0 ? selected : 0;
+    languagesOpen = true;
+  }
+
+  function closeLanguages(): void {
+    languagesOpen = false;
+    languageButton?.focus();
+  }
+
+  function moveLanguage(delta: number): void {
+    if (!settings) return;
+    const count = settings.supportedLanguages.length;
+    languageFocus = (languageFocus + delta + count) % count;
+  }
+
+  function onLanguageButtonKey(event: KeyboardEvent): void {
+    if (event.key !== 'ArrowDown' && event.key !== 'ArrowUp') return;
+    event.preventDefault();
+    if (!languagesOpen) openLanguages();
+  }
+
+  function onLanguageListKey(event: KeyboardEvent): void {
+    if (event.key === 'ArrowDown') {
+      event.preventDefault();
+      moveLanguage(1);
+    } else if (event.key === 'ArrowUp') {
+      event.preventDefault();
+      moveLanguage(-1);
+    } else if (event.key === 'Escape') {
+      event.preventDefault();
+      closeLanguages();
+    }
+  }
+
+  $effect(() => {
+    if (!languagesOpen) return;
+    const index = languageFocus;
+    const root = languageRoot;
+    const option = root?.querySelectorAll<HTMLButtonElement>('[role="option"]')[index];
+    option?.focus();
+  });
+
+  $effect(() => {
+    if (!languagesOpen) return;
+    const root = languageRoot;
+    const outside = (event: PointerEvent) => {
+      const target = event.target;
+      if (target instanceof Node && root?.contains(target)) return;
+      languagesOpen = false;
+    };
+    const escape = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape') return;
+      event.preventDefault();
+      closeLanguages();
+    };
+    window.addEventListener('pointerdown', outside, true);
+    window.addEventListener('keydown', escape);
+    return () => {
+      window.removeEventListener('pointerdown', outside, true);
+      window.removeEventListener('keydown', escape);
+    };
+  });
 
   function toggleLanguage(code: string): void {
     if (!settings) return;
@@ -449,21 +530,54 @@
     </span>
   </label>
   <div class="language-row">
-    <span>Book languages</span>
+    <span id="book-languages-label">Book languages</span>
     <p class="language-hint">Requests only download books in these languages.</p>
-    <div class="language-choices" role="group" aria-label="Book languages">
-      {#each settings.supportedLanguages as language (language.code)}
-        {@const on = settings.languages.includes(language.code)}
-        <label class="language-choice" class:on>
-          <input
-            type="checkbox"
-            checked={on}
-            disabled={on && settings.languages.length === 1}
-            onchange={() => toggleLanguage(language.code)}
-          />
-          {language.name}
-        </label>
-      {/each}
+    <div class="language-select" bind:this={languageRoot}>
+      <button
+        type="button"
+        class="language-field"
+        bind:this={languageButton}
+        aria-haspopup="listbox"
+        aria-expanded={languagesOpen}
+        aria-controls="book-languages-list"
+        aria-labelledby="book-languages-label book-languages-value"
+        onclick={() => languagesOpen ? closeLanguages() : openLanguages()}
+        onkeydown={onLanguageButtonKey}
+      >
+        <span id="book-languages-value" class="language-value">{selectedLanguages}</span>
+        <Icon name="chevron" />
+      </button>
+      {#if languagesOpen}
+        <div
+          id="book-languages-list"
+          class="language-list"
+          role="listbox"
+          aria-multiselectable="true"
+          aria-label="Book languages"
+          tabindex="-1"
+          onkeydown={onLanguageListKey}
+        >
+          {#each settings.supportedLanguages as language, index (language.code)}
+            {@const on = settings.languages.includes(language.code)}
+            <button
+              type="button"
+              role="option"
+              class="language-option"
+              aria-selected={on}
+              tabindex={index === languageFocus ? 0 : -1}
+              onclick={() => {
+                languageFocus = index;
+                toggleLanguage(language.code);
+              }}
+            >
+              <span class="mark" aria-hidden="true">
+                {#if on}<Icon name="check" size={18} />{/if}
+              </span>
+              {language.name}
+            </button>
+          {/each}
+        </div>
+      {/if}
     </div>
   </div>
   <div class="fact-row">
@@ -673,38 +787,85 @@
   line-height: 1.3;
 }
 
-.language-choices {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
+.language-select {
+  position: relative;
+  width: 100%;
 }
 
-.language-choice {
-  display: inline-flex;
+.language-field {
+  width: 100%;
+  min-height: 36px;
+  padding: 6px 8px;
+  display: flex;
   align-items: center;
-  gap: 6px;
-  min-height: 32px;
-  padding: 0 10px;
+  justify-content: space-between;
+  gap: 8px;
+  text-align: left;
+  color: var(--ink);
+  background: var(--ground);
   border: 1px solid var(--line);
   border-radius: 4px;
-  background: var(--ground);
   font-weight: 400;
   font-size: .9375rem;
-  cursor: pointer;
 }
 
-.language-choice.on {
-  border-color: var(--accent);
+.language-field :global(svg) {
+  color: var(--mute);
+  transform: rotate(90deg);
+  flex-shrink: 0;
+}
+
+.language-field[aria-expanded='true'] :global(svg) {
+  transform: rotate(-90deg);
+}
+
+.language-value {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.language-list {
+  position: absolute;
+  z-index: 3;
+  top: calc(100% + 4px);
+  left: 0;
+  right: 0;
+  max-height: 16rem;
+  overflow: auto;
+  padding: 4px 0;
+  background: var(--ground);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+}
+
+.language-option {
+  width: 100%;
+  min-height: 40px;
+  padding: 0 12px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  text-align: left;
+  font-weight: 400;
+  font-size: .9375rem;
+}
+
+.language-option:hover,
+.language-option:focus {
+  background: var(--hover);
+}
+
+.language-option[aria-selected='true'] {
   color: var(--accent);
 }
 
-.language-choice input {
-  margin: 0;
-  accent-color: var(--accent);
-}
-
-.language-choice:has(input:disabled) {
-  cursor: default;
+.mark {
+  width: 18px;
+  height: 18px;
+  flex: 0 0 18px;
+  color: var(--accent);
 }
 
 .fact-row {
