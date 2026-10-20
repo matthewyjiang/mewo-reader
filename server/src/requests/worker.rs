@@ -11,7 +11,7 @@ use crate::library::{self, NewId, Owner};
 use crate::requests::http::{base_url, UpstreamError};
 use crate::requests::pick::{self, Wanted};
 use crate::requests::prowlarr::Prowlarr;
-use crate::requests::sabnzbd::{Job, Sabnzbd};
+use crate::requests::sabnzbd::{folder_matches, job_folder, Job, Sabnzbd};
 use crate::settings::{self, Settings};
 use crate::AppState;
 use sqlx::SqlitePool;
@@ -429,8 +429,8 @@ async fn downloading(
             )
             .await
         }
-        Job::Completed { folder } => {
-            completed(state, ready, &clients.sab, row, &nzo, &folder, now_ms).await
+        Job::Completed { storage } => {
+            completed(state, ready, &clients.sab, row, &nzo, &storage, now_ms).await
         }
     }
 }
@@ -476,11 +476,12 @@ async fn completed(
     sab: &Sabnzbd<'_>,
     row: &Due,
     nzo: &str,
-    folder: &str,
+    storage: &str,
     now_ms: i64,
 ) -> Result<(), ApiError> {
     let job = job_name(&row.id);
-    if !folder_ok(&job, folder) {
+    let folder = job_folder(storage, &job);
+    if !folder_ok(&job, &folder) {
         discard(sab, nzo).await;
         return fail_from(
             &state.pool,
@@ -502,7 +503,7 @@ async fn completed(
         )
         .await;
     };
-    let Some(dir) = confined(downloads, folder).await else {
+    let Some(dir) = confined(downloads, &folder).await else {
         discard(sab, nzo).await;
         return fail_from(
             &state.pool,
@@ -700,16 +701,7 @@ fn job_name(id: &str) -> String {
 }
 
 fn folder_ok(job: &str, folder: &str) -> bool {
-    if folder == job {
-        return true;
-    }
-    let Some(suffix) = folder.strip_prefix(job) else {
-        return false;
-    };
-    let Some(digits) = suffix.strip_prefix('.') else {
-        return false;
-    };
-    !digits.is_empty() && digits.bytes().all(|byte| byte.is_ascii_digit())
+    folder_matches(job, folder)
 }
 
 async fn remove_download(dir: &Path) {

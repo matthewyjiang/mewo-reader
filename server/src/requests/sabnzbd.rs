@@ -19,9 +19,10 @@ pub(crate) enum Job {
     },
     /// History: Verifying, Repairing, Extracting, Moving, Running, or Queued.
     Processing,
-    /// `folder` is `file_name(history.storage)`. The worker checks it.
+    /// History is done. `storage` is the job folder, or the one file SAB 4.5.3
+    /// leaves in that folder. The worker turns it into a folder name.
     Completed {
-        folder: String,
+        storage: String,
     },
     Failed {
         message: String,
@@ -209,7 +210,11 @@ fn history_job(slot: &Value) -> Job {
     let status = slot.get("status").and_then(Value::as_str).unwrap_or("");
     match status.to_ascii_lowercase().as_str() {
         "completed" => Job::Completed {
-            folder: folder_name(slot.get("storage").and_then(Value::as_str).unwrap_or("")),
+            storage: slot
+                .get("storage")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string(),
         },
         "failed" => Job::Failed {
             message: slot
@@ -225,9 +230,35 @@ fn history_job(slot: &Value) -> Job {
     }
 }
 
-pub(crate) fn folder_name(storage: &str) -> String {
-    Path::new(storage)
-        .file_name()
+/// Job folder name from history `storage`. SAB 4.5.3 sets that to the folder,
+/// or to the single unpacked file inside it. A `.N` suffix is the dedupe SAB
+/// already uses on the folder.
+pub(crate) fn job_folder(storage: &str, job: &str) -> String {
+    let path = Path::new(storage);
+    let name = base_name(path);
+    if folder_matches(job, &name) {
+        name
+    } else {
+        path.parent().map(base_name).unwrap_or_default()
+    }
+}
+
+/// `job`, or `job` plus `.` and digits (`mewo-<id>.1`).
+pub(crate) fn folder_matches(job: &str, folder: &str) -> bool {
+    if folder == job {
+        return true;
+    }
+    let Some(suffix) = folder.strip_prefix(job) else {
+        return false;
+    };
+    let Some(digits) = suffix.strip_prefix('.') else {
+        return false;
+    };
+    !digits.is_empty() && digits.bytes().all(|byte| byte.is_ascii_digit())
+}
+
+fn base_name(path: &Path) -> String {
+    path.file_name()
         .and_then(|name| name.to_str())
         .unwrap_or("")
         .to_string()
@@ -270,4 +301,36 @@ fn category_names(value: &Value) -> Vec<String> {
             _ => None,
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn storage_is_the_job_folder_or_the_file_inside_it() {
+        let job = "mewo-abc";
+        let root = "/data/downloads/usenet/complete/books";
+        assert_eq!(job_folder(&format!("{root}/{job}"), job), job);
+        assert_eq!(job_folder(&format!("{root}/{job}.1"), job), "mewo-abc.1");
+        assert_eq!(
+            job_folder(
+                &format!("{root}/{job}/Frank Herbert - Dune (epub).epub"),
+                job
+            ),
+            job
+        );
+        assert_eq!(
+            job_folder(&format!("{root}/{job}.2/Dune.epub"), job),
+            "mewo-abc.2"
+        );
+        assert_eq!(
+            job_folder("/tmp/not-downloads/mewo-other/Dune.epub", job),
+            "mewo-other"
+        );
+        assert_eq!(
+            job_folder("/tmp/not-downloads/Dune.epub", job),
+            "not-downloads"
+        );
+    }
 }
