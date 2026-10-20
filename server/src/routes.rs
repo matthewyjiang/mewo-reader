@@ -44,7 +44,7 @@ pub async fn register(
 ) -> Result<Json<AuthResponse>, ApiError> {
     let (username, norm) = normalize_username(&body.username)?;
     check_password(&body.password)?;
-    state.throttle.register(ip, &norm)?;
+    let attempt = state.throttle.register(ip, &norm)?;
     let settings = crate::settings::load(&state.pool).await?;
     if !settings.allow_signup {
         return Err(ApiError::Forbidden("Signups are off.".into()));
@@ -57,7 +57,14 @@ pub async fn register(
     if taken.is_some() {
         return Err(ApiError::Conflict("That username is taken.".into()));
     }
-    let password_hash = state.passwords.hash(&body.password).await?;
+    let password_hash = match state.passwords.hash(&body.password).await {
+        Ok(hash) => hash,
+        Err(ApiError::Busy) => {
+            attempt.abandon();
+            return Err(ApiError::Busy);
+        }
+        Err(err) => return Err(err),
+    };
     let id = Uuid::new_v4().to_string();
     let created_at = now_ms();
     let inserted = sqlx::query(
@@ -96,10 +103,18 @@ pub async fn login(
     .bind(&norm)
     .fetch_optional(&state.pool)
     .await?;
-    let ok = state
+    let ok = match state
         .passwords
         .verify_login(&body.password, row.as_ref().map(|row| row.2.as_str()))
-        .await?;
+        .await
+    {
+        Ok(ok) => ok,
+        Err(ApiError::Busy) => {
+            attempt.abandon();
+            return Err(ApiError::Busy);
+        }
+        Err(err) => return Err(err),
+    };
     let Some((id, username, _)) = row.filter(|_| ok) else {
         return Err(ApiError::Unauthorized("Wrong username or password.".into()));
     };

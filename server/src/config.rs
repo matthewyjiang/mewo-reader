@@ -97,7 +97,7 @@ impl Default for AuthConfig {
                 burst: 3,
                 every: Duration::from_secs(10 * 60),
             },
-            max_keys: 10_000,
+            max_keys: 100_000,
             trusted_proxy_hops: 0,
         }
     }

@@ -4071,6 +4071,29 @@ async fn post_auth(
     (status, headers, value)
 }
 
+async fn post_auth_raw(
+    app: &axum::Router,
+    path: &str,
+    ip: &str,
+    forwarded: &[u8],
+    username: &str,
+    password: &str,
+) -> (StatusCode, axum::http::HeaderMap, Value) {
+    let value = axum::http::HeaderValue::from_bytes(forwarded).unwrap();
+    let req = Request::builder()
+        .method("POST")
+        .uri(path)
+        .header(header::CONTENT_TYPE, "application/json")
+        .header("x-forwarded-for", value)
+        .body(Body::from(
+            json!({ "username": username, "password": password }).to_string(),
+        ))
+        .unwrap();
+    let (status, headers, bytes) = call(app, with_ip(req, ip)).await;
+    let value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+    (status, headers, value)
+}
+
 fn assert_limited(status: StatusCode, headers: &axum::http::HeaderMap, body: &Value) {
     assert_eq!(status, StatusCode::TOO_MANY_REQUESTS, "{body}");
     let header = headers
@@ -4460,6 +4483,100 @@ async fn private_peer_skips_the_ip_limit_but_not_the_username() {
     )
     .await;
     assert_eq!(status, StatusCode::UNAUTHORIZED, "{body}");
+}
+
+#[tokio::test]
+async fn a_non_ascii_forwarded_for_is_still_ip_limited() {
+    let mut auth = roomy_auth();
+    auth.login_ip = rate(1, 60);
+    auth.login_user = rate(100, 60);
+    auth.trusted_proxy_hops = 1;
+    let (_state, app, _tmp) = auth_app(auth).await;
+    let header = b"\xff, 203.0.113.9, 162.158.1.1";
+    let (status, _, body) = post_auth_raw(
+        &app,
+        "/v1/auth/login",
+        "10.42.0.8",
+        header,
+        "matt",
+        "wrongpass",
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "{body}");
+    let (status, headers, body) = post_auth_raw(
+        &app,
+        "/v1/auth/login",
+        "10.42.0.8",
+        header,
+        "ada",
+        "wrongpass",
+    )
+    .await;
+    assert_limited(status, &headers, &body);
+
+    let (status, _, body) = post_auth_raw(
+        &app,
+        "/v1/auth/login",
+        "10.42.0.8",
+        b"\xff",
+        "bea",
+        "wrongpass",
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "{body}");
+    let (status, headers, body) = post_auth_raw(
+        &app,
+        "/v1/auth/login",
+        "10.42.0.9",
+        b"\xff, not-an-ip",
+        "cyd",
+        "wrongpass",
+    )
+    .await;
+    assert_limited(status, &headers, &body);
+}
+
+#[tokio::test]
+async fn a_busy_password_service_does_not_spend_the_attempt() {
+    let mut auth = roomy_auth();
+    auth.max_concurrent = 0;
+    auth.queue_wait = Duration::from_millis(1);
+    auth.login_ip = rate(1, 60);
+    auth.login_user = rate(1, 60);
+    auth.register_ip = rate(1, 600);
+    auth.register_user = rate(1, 600);
+    let (state, app, _tmp) = auth_app(auth).await;
+    for n in 0..3 {
+        let (status, headers, body) = post_auth(
+            &app,
+            "/v1/auth/login",
+            "203.0.113.9",
+            None,
+            "matt",
+            "password1",
+        )
+        .await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{n} {body}");
+        assert_eq!(
+            headers.get(header::RETRY_AFTER).unwrap().to_str().unwrap(),
+            "1"
+        );
+    }
+    for n in 0..3 {
+        let (status, _, body) = post_auth(
+            &app,
+            "/v1/auth/register",
+            "203.0.113.9",
+            None,
+            "matt",
+            "password1",
+        )
+        .await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{n} {body}");
+    }
+    let stats = state.passwords.stats();
+    assert_eq!(stats.hashes, 0);
+    assert_eq!(stats.verifies, 0);
 }
 
 #[tokio::test]
