@@ -3829,9 +3829,10 @@ async fn languages_patch_round_trips() {
     )
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{rejected}");
+    let max = codes.len();
     assert_eq!(
         rejected["error"],
-        "languages must list 1 to 10 supported language codes."
+        format!("languages must list 1 to {max} supported language codes.")
     );
     assert_eq!(settings_doc(tmp.path()).await, doc);
 }

@@ -103,7 +103,7 @@ pub(crate) fn pick<'r>(
             Verdict::Match { fit, author_seen } => {
                 let rank = Rank {
                     author_seen,
-                    not_foreign: !foreign(&tokens, languages),
+                    not_foreign: !foreign(&tokens, matcher, languages),
                     retail: tokens.iter().any(|token| token == "retail"),
                     fit,
                     grabs: release.grabs.unwrap_or(0).min(20),
@@ -268,10 +268,24 @@ fn gates(release: &Release, tokens: &[String], matcher: &Matcher, max_bytes: u64
     true
 }
 
-fn foreign(tokens: &[String], languages: &[String]) -> bool {
-    tokens
-        .iter()
-        .any(|token| super::languages::foreign_word(token, languages))
+/// A language word that is also in the wanted title is a title word, same as a
+/// tag, and is ignored. A release with no remaining language word counts as
+/// English.
+fn foreign(tokens: &[String], matcher: &Matcher, languages: &[String]) -> bool {
+    let mut named = false;
+    for token in tokens {
+        let Some(code) = super::languages::word_code(token) else {
+            continue;
+        };
+        if matcher.has_token(token) {
+            continue;
+        }
+        named = true;
+        if !languages.iter().any(|accepted| accepted == code) {
+            return true;
+        }
+    }
+    !named && !languages.iter().any(|code| code == "en")
 }
 
 fn tokens(value: &str) -> Vec<String> {
@@ -510,6 +524,88 @@ mod tests {
                 .unwrap()
                 .guid,
             "en"
+        );
+    }
+
+    #[test]
+    fn an_unlabeled_release_counts_as_english() {
+        let wanted = Wanted {
+            title: "Dune",
+            author: "Frank Herbert",
+        };
+        let max = 64 * 1024 * 1024;
+        let unlabeled = release(
+            "plain",
+            "Frank.Herbert.Dune.RETAIL.EPUB",
+            800_000,
+            20,
+            &[7020],
+        );
+        let german = release(
+            "de",
+            "Frank.Herbert.Dune.German.EPUB",
+            2_000_000,
+            0,
+            &[7020],
+        );
+        let matcher = matcher_for(&wanted);
+        let only_de = codes(&["de"]);
+        assert_eq!(
+            pick(
+                &matcher,
+                &[unlabeled.clone(), german.clone()],
+                &[],
+                max,
+                &only_de
+            )
+            .release
+            .unwrap()
+            .guid,
+            "de"
+        );
+        let only_en = codes(&["en"]);
+        assert_eq!(
+            pick(&matcher, &[unlabeled, german], &[], max, &only_en)
+                .release
+                .unwrap()
+                .guid,
+            "plain"
+        );
+    }
+
+    #[test]
+    fn a_language_word_in_the_title_is_not_a_foreign_mark() {
+        let wanted = Wanted {
+            title: "The Polish Officer",
+            author: "Alan Furst",
+        };
+        let max = 64 * 1024 * 1024;
+        let book = release(
+            "book",
+            "Alan.Furst.The.Polish.Officer.EPUB",
+            2_000_000,
+            0,
+            &[7020],
+        );
+        let german = release(
+            "de",
+            "Alan.Furst.The.Polish.Officer.German.RETAIL.EPUB",
+            800_000,
+            20,
+            &[7020],
+        );
+        assert_eq!(
+            pick(
+                &matcher_for(&wanted),
+                &[book, german],
+                &[],
+                max,
+                &codes(&["en"])
+            )
+            .release
+            .unwrap()
+            .guid,
+            "book"
         );
     }
 

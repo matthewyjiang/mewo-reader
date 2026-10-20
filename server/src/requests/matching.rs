@@ -1435,6 +1435,23 @@ mod tests {
             verify_opf(&matcher, &context, &meta("eng"), &english),
             Opf::Confirmed
         );
+        assert_eq!(
+            verify_opf(&matcher, &context, &meta("English"), &english),
+            Opf::Confirmed
+        );
+        assert_eq!(
+            verify_opf(&matcher, &context, &meta("english"), &english),
+            Opf::Confirmed
+        );
+        let german = codes(&["de"]);
+        assert_eq!(
+            verify_opf(&matcher, &context, &meta("English"), &german),
+            Opf::Mismatch("Downloaded book is in English".into())
+        );
+        assert_eq!(
+            verify_opf(&matcher, &context, &meta("German"), &german),
+            Opf::Confirmed
+        );
     }
 
     #[test]

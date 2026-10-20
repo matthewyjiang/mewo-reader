@@ -177,16 +177,17 @@ fn check_category(raw: &str) -> Result<(), ApiError> {
 
 fn check_languages(languages: &[String]) -> Result<(), ApiError> {
     let mut seen = HashSet::new();
-    let ok = (1..=10).contains(&languages.len())
+    let max = crate::requests::languages::LANGUAGES.len();
+    let ok = (1..=max).contains(&languages.len())
         && languages
             .iter()
             .all(|code| crate::requests::languages::is_code(code) && seen.insert(code.as_str()));
     if ok {
         Ok(())
     } else {
-        Err(ApiError::BadRequest(
-            "languages must list 1 to 10 supported language codes.".into(),
-        ))
+        Err(ApiError::BadRequest(format!(
+            "languages must list 1 to {max} supported language codes."
+        )))
     }
 }
 
@@ -776,13 +777,20 @@ mod tests {
     }
 
     #[test]
-    fn languages_must_be_one_to_ten_distinct_codes() {
-        let message = "languages must list 1 to 10 supported language codes.";
+    fn languages_must_be_distinct_supported_codes() {
+        let max = crate::requests::languages::LANGUAGES.len();
+        let message = format!("languages must list 1 to {max} supported language codes.");
         let eleven: Vec<String> = crate::requests::languages::LANGUAGES
             .iter()
             .take(11)
             .map(|language| language.code.to_string())
             .collect();
+        let all: Vec<String> = crate::requests::languages::LANGUAGES
+            .iter()
+            .map(|language| language.code.to_string())
+            .collect();
+        let mut over = all.clone();
+        over.push("en".into());
         let rejected = [
             Vec::new(),
             vec!["xx".into()],
@@ -790,7 +798,7 @@ mod tests {
             vec!["eng".into()],
             vec!["en".into(), "en".into()],
             vec!["en".into(), "de".into(), "en".into()],
-            eleven,
+            over,
         ];
         for languages in rejected {
             let settings = Settings {
@@ -799,10 +807,12 @@ mod tests {
             };
             assert_eq!(settings.validate().unwrap_err().to_string(), message);
         }
-        let ok = Settings {
-            languages: vec!["de".into(), "en".into()],
-            ..Settings::default()
-        };
-        assert!(ok.validate().is_ok());
+        for languages in [vec!["de".into(), "en".into()], eleven, all] {
+            let settings = Settings {
+                languages,
+                ..Settings::default()
+            };
+            assert!(settings.validate().is_ok());
+        }
     }
 }

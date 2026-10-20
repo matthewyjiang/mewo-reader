@@ -98,8 +98,10 @@ pub(crate) fn is_code(code: &str) -> bool {
     LANGUAGES.iter().any(|language| language.code == code)
 }
 
-/// `und`, `mul`, and `zxx` are no language. Otherwise the primary subtag
-/// (`en-US`, `en_GB`, `ger`) has to name an accepted language.
+/// `und`, `mul`, and `zxx` are no language. Otherwise the tag has to name an
+/// accepted language: its code or 3-letter alias (a primary subtag such as
+/// `en-US`, `en_GB`, or `ger`), or that language's English word or display
+/// name (`English`, `english`).
 pub(crate) fn accepts(accepted: &[String], tag: &str) -> bool {
     let lower = tag.trim().to_ascii_lowercase();
     if matches!(lower.as_str(), "und" | "mul" | "zxx") {
@@ -108,13 +110,17 @@ pub(crate) fn accepts(accepted: &[String], tag: &str) -> bool {
     let primary = lower.split(['-', '_']).next().unwrap_or(lower.as_str());
     LANGUAGES.iter().any(|language| {
         accepted.iter().any(|code| code == language.code)
-            && (language.code == primary || language.aliases.contains(&primary))
+            && (language.code == primary
+                || language.aliases.contains(&primary)
+                || language.word == lower
+                || language.name.eq_ignore_ascii_case(&lower))
     })
 }
 
-/// A release word is foreign when it names a supported language that is not accepted.
-pub(crate) fn foreign_word(token: &str, accepted: &[String]) -> bool {
-    LANGUAGES.iter().any(|language| {
-        language.word == token && !accepted.iter().any(|code| code == language.code)
-    })
+/// ISO 639-1 code when `token` is a supported language's English word.
+pub(crate) fn word_code(token: &str) -> Option<&'static str> {
+    LANGUAGES
+        .iter()
+        .find(|language| language.word == token)
+        .map(|language| language.code)
 }
