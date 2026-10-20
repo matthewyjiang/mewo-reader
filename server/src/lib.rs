@@ -17,7 +17,7 @@ mod visibility;
 #[path = "../tests/common/mod.rs"]
 mod test_epub;
 
-use crate::config::{request_body_limit, Config, MAX_EPUB_BYTES_CEILING};
+use crate::config::{request_body_limit, Config, JSON_BODY_LIMIT, MAX_EPUB_BYTES_CEILING};
 use axum::extract::DefaultBodyLimit;
 use axum::routing::{any, get, post, put};
 use axum::{Extension, Router};
@@ -40,7 +40,6 @@ pub struct AppState {
 }
 
 pub fn router(state: AppState) -> Router {
-    let body_limit = request_body_limit(MAX_EPUB_BYTES_CEILING);
     let web_dir = state.web_dir.clone().filter(|dir| dir.is_dir());
     let api = Router::new()
         .route("/v1/version", get(routes::version))
@@ -51,7 +50,12 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/auth/logout", post(routes::logout))
         .route("/v1/me", get(routes::me))
         .route("/v1/library", get(routes::library))
-        .route("/v1/books", post(routes::upload_book))
+        .route(
+            "/v1/books",
+            post(routes::upload_book).layer(DefaultBodyLimit::max(request_body_limit(
+                MAX_EPUB_BYTES_CEILING,
+            ))),
+        )
         .route(
             "/v1/books/{id}",
             get(routes::get_book)
@@ -92,7 +96,7 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/{*path}", any(api_not_found))
         // `admin::require_admin` reads this. axum's `from_fn` cannot see `State`.
         .layer(Extension(state.clone()))
-        .layer(DefaultBodyLimit::max(body_limit))
+        .layer(DefaultBodyLimit::max(JSON_BODY_LIMIT))
         .layer(TraceLayer::new_for_http())
         .with_state(state);
     let app = if let Some(dir) = web_dir {

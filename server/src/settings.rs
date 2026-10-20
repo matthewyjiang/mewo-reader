@@ -47,24 +47,42 @@ impl Settings {
         }
     }
 
-    /// The message names the camelCase key and the bound, e.g.
-    /// "maxEpubBytes must be 1048576 to 1073741824 (asked 10)."
+    /// The message names the camelCase key and the bound in megabytes, e.g.
+    /// "maxEpubBytes must be 1 to 1024 MB."
     fn validate(&self) -> Result<(), ApiError> {
         if self.max_epub_bytes < MIN_EPUB_BYTES || self.max_epub_bytes > MAX_EPUB_BYTES_CEILING {
-            return Err(ApiError::BadRequest(format!(
-                "maxEpubBytes must be {MIN_EPUB_BYTES} to {MAX_EPUB_BYTES_CEILING} (asked {}).",
-                self.max_epub_bytes
-            )));
+            return Err(ApiError::BadRequest(max_epub_message()));
         }
         Ok(())
     }
+}
+
+fn max_epub_message() -> String {
+    let mb = 1024 * 1024;
+    format!(
+        "maxEpubBytes must be {} to {} MB.",
+        MIN_EPUB_BYTES / mb,
+        MAX_EPUB_BYTES_CEILING / mb
+    )
+}
+
+fn clamp_epub_bytes(bytes: u64) -> u64 {
+    bytes.clamp(MIN_EPUB_BYTES, MAX_EPUB_BYTES_CEILING)
+}
+
+fn clamp_seed_line(asked: u64, stored: u64) -> String {
+    format!("MEWO_MAX_EPUB_BYTES is {asked}; the EPUB size limit is clamped to {stored}.")
 }
 
 /// Inserts the row from env seeds if it's missing (`INSERT OR IGNORE`). If the row
 /// already exists and an env var is set to something different, logs one warn
 /// line naming the var. Running it twice changes nothing.
 pub async fn seed(pool: &SqlitePool, config: &Config) -> Result<(), sqlx::Error> {
-    let seeded = Settings::seed(config);
+    let raw = Settings::seed(config);
+    let seeded = Settings {
+        max_epub_bytes: clamp_epub_bytes(raw.max_epub_bytes),
+        ..raw
+    };
     let doc = serde_json::to_string(&seeded).map_err(json_error)?;
     let inserted = sqlx::query(
         "INSERT OR IGNORE INTO settings (id, doc, updated_at, updated_by) VALUES (1, ?, ?, NULL)",
@@ -74,15 +92,23 @@ pub async fn seed(pool: &SqlitePool, config: &Config) -> Result<(), sqlx::Error>
     .execute(pool)
     .await?;
     if inserted.rows_affected() > 0 {
+        if raw.max_epub_bytes != seeded.max_epub_bytes {
+            tracing::warn!(
+                "{}",
+                clamp_seed_line(raw.max_epub_bytes, seeded.max_epub_bytes)
+            );
+        }
         return Ok(());
     }
     let stored_doc: String = sqlx::query_scalar("SELECT doc FROM settings WHERE id = 1")
         .fetch_one(pool)
         .await?;
+    // Compare the raw env seed. A later boot with an out-of-range value still
+    // disagrees with the clamped row and logs the ignored-env line.
     let stored = decode_settings(&stored_doc).map_err(json_error)?;
     for line in ignored_env_lines(
         &stored,
-        &seeded,
+        &raw,
         env_present("MEWO_ALLOW_SIGNUP"),
         env_present("MEWO_MAX_EPUB_BYTES"),
     ) {
@@ -100,7 +126,14 @@ pub async fn load(pool: &SqlitePool) -> Result<Settings, ApiError> {
         .fetch_optional(pool)
         .await?;
     match doc {
-        Some(doc) => decode_settings(&doc),
+        Some(doc) => {
+            let mut settings = decode_settings(&doc)?;
+            // A row written before the bounds existed must not make every upload
+            // or the admin form use 0 or 5 GiB. The row itself is healed on the
+            // next patch that does not set maxEpubBytes.
+            settings.max_epub_bytes = clamp_epub_bytes(settings.max_epub_bytes);
+            Ok(settings)
+        }
         None => Ok(Settings::default()),
     }
 }
@@ -112,18 +145,23 @@ pub async fn load(pool: &SqlitePool) -> Result<Settings, ApiError> {
 ///   4. UPDATE settings SET doc, updated_at, updated_by WHERE id = 1
 ///
 /// Returns the saved Settings. An empty patch is a no-op that still returns the
-/// current settings.
+/// current settings (with an out-of-range max read as clamped, and not written).
+///
+/// `BEGIN IMMEDIATE` takes the write lock up front. A deferred transaction can
+/// lose the upgrade to a concurrent CLI write and surface as 500.
 pub async fn update(
     pool: &SqlitePool,
     patch: Map<String, Value>,
     by_user_id: &str,
 ) -> Result<Settings, ApiError> {
-    let mut tx = pool.begin().await?;
+    let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
     let doc: String = sqlx::query_scalar("SELECT doc FROM settings WHERE id = 1")
         .fetch_one(&mut *tx)
         .await?;
     if patch.is_empty() {
-        return decode_settings(&doc);
+        let mut settings = decode_settings(&doc)?;
+        settings.max_epub_bytes = clamp_epub_bytes(settings.max_epub_bytes);
+        return Ok(settings);
     }
     let (settings, next) = apply_patch(&doc, &patch)?;
     sqlx::query("UPDATE settings SET doc = ?, updated_at = ?, updated_by = ? WHERE id = 1")
@@ -154,6 +192,19 @@ fn apply_patch(doc: &str, patch: &Map<String, Value>) -> Result<(Settings, Strin
             return Err(ApiError::BadRequest(format!("{key} is the wrong type.")));
         }
         obj.insert(key.clone(), value.clone());
+    }
+    // An unrelated key must still save when a previous binary stored a max
+    // outside the current bounds. Setting maxEpubBytes itself still validates.
+    if !patch.contains_key("maxEpubBytes") {
+        if let Some(current) = obj.get("maxEpubBytes").and_then(Value::as_u64) {
+            let clamped = clamp_epub_bytes(current);
+            if clamped != current {
+                tracing::warn!(
+                    "maxEpubBytes {current} is outside 1 to 1024 MB; clamped to {clamped}."
+                );
+                obj.insert("maxEpubBytes".to_string(), Value::from(clamped));
+            }
+        }
     }
     let settings = decode_value(stored.clone())?;
     settings.validate()?;
@@ -229,9 +280,25 @@ mod tests {
             ..Settings::default()
         };
         let err = settings.validate().unwrap_err();
+        assert_eq!(err.to_string(), "maxEpubBytes must be 1 to 1024 MB.");
+    }
+
+    #[test]
+    fn clamp_seed_line_names_the_var() {
         assert_eq!(
-            err.to_string(),
-            "maxEpubBytes must be 1048576 to 1073741824 (asked 10)."
+            clamp_seed_line(0, MIN_EPUB_BYTES),
+            format!(
+                "MEWO_MAX_EPUB_BYTES is 0; the EPUB size limit is clamped to {MIN_EPUB_BYTES}."
+            )
+        );
+        assert_eq!(clamp_epub_bytes(0), MIN_EPUB_BYTES);
+        assert_eq!(
+            clamp_epub_bytes(5 * 1024 * 1024 * 1024),
+            MAX_EPUB_BYTES_CEILING
+        );
+        assert_eq!(
+            clamp_epub_bytes(DEFAULT_MAX_EPUB_BYTES),
+            DEFAULT_MAX_EPUB_BYTES
         );
     }
 
@@ -258,6 +325,14 @@ mod tests {
             ]
         );
         assert!(ignored_env_lines(&stored, &seeded, false, false).is_empty());
+        let huge = Settings {
+            max_epub_bytes: 5 * 1024 * 1024 * 1024,
+            ..stored
+        };
+        assert_eq!(
+            ignored_env_lines(&stored, &huge, false, true),
+            vec!["MEWO_MAX_EPUB_BYTES is ignored; the EPUB size limit is set in the web app."]
+        );
     }
 
     #[tokio::test]
@@ -293,5 +368,115 @@ mod tests {
             .unwrap();
         assert_eq!(first, second);
         assert_eq!(load(&pool).await.unwrap(), loaded);
+    }
+
+    async fn pool() -> (tempfile::TempDir, SqlitePool) {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let url = format!("sqlite://{}?mode=rwc", tmp.path().join("mewo.db").display());
+        let pool = crate::db::connect(&url, tmp.path()).await.unwrap();
+        (tmp, pool)
+    }
+
+    fn config(tmp: &std::path::Path, max_epub_bytes: u64) -> Config {
+        Config {
+            listen: "127.0.0.1:0".into(),
+            data_dir: tmp.to_path_buf(),
+            web_dir: None,
+            allow_signup: true,
+            max_epub_bytes,
+        }
+    }
+
+    #[tokio::test]
+    async fn seed_clamps_out_of_range_max() {
+        for asked in [0, 5 * 1024 * 1024 * 1024] {
+            let (tmp, pool) = pool().await;
+            seed(&pool, &config(tmp.path(), asked)).await.unwrap();
+            let expected = clamp_epub_bytes(asked);
+            let doc: String = sqlx::query_scalar("SELECT doc FROM settings WHERE id = 1")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+            assert!(
+                doc.contains(&format!("\"maxEpubBytes\":{expected}")),
+                "{doc}"
+            );
+            assert!(!doc.contains(&format!("\"maxEpubBytes\":{asked}")), "{doc}");
+            assert_eq!(load(&pool).await.unwrap().max_epub_bytes, expected);
+
+            let again = config(tmp.path(), asked.saturating_add(1));
+            seed(&pool, &again).await.unwrap();
+            let second: String = sqlx::query_scalar("SELECT doc FROM settings WHERE id = 1")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+            assert_eq!(doc, second);
+        }
+    }
+
+    #[tokio::test]
+    async fn out_of_range_stored_max_does_not_block_other_patches() {
+        let (tmp, pool) = pool().await;
+        seed(&pool, &config(tmp.path(), DEFAULT_MAX_EPUB_BYTES))
+            .await
+            .unwrap();
+        sqlx::query("UPDATE settings SET doc = ? WHERE id = 1")
+            .bind(r#"{"allowSignup":true,"maxEpubBytes":0}"#)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let loaded = load(&pool).await.unwrap();
+        assert_eq!(loaded.max_epub_bytes, MIN_EPUB_BYTES);
+        let still: String = sqlx::query_scalar("SELECT doc FROM settings WHERE id = 1")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert!(still.contains("\"maxEpubBytes\":0"), "{still}");
+
+        sqlx::query(
+            "INSERT INTO users (id, username, username_norm, password_hash, created_at)
+             VALUES ('user', 'user', 'user', 'x', 1)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        let mut signup = Map::new();
+        signup.insert("allowSignup".to_string(), Value::Bool(false));
+        let saved = update(&pool, signup, "user").await.unwrap();
+        assert!(!saved.allow_signup);
+        assert_eq!(saved.max_epub_bytes, MIN_EPUB_BYTES);
+        let healed: String = sqlx::query_scalar("SELECT doc FROM settings WHERE id = 1")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert!(
+            healed.contains(&format!("\"maxEpubBytes\":{MIN_EPUB_BYTES}")),
+            "{healed}"
+        );
+        assert!(healed.contains("\"allowSignup\":false"), "{healed}");
+
+        sqlx::query("UPDATE settings SET doc = ? WHERE id = 1")
+            .bind(r#"{"allowSignup":false,"maxEpubBytes":0}"#)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let mut bad = Map::new();
+        bad.insert("maxEpubBytes".to_string(), Value::from(10));
+        let err = update(&pool, bad, "user").await.unwrap_err();
+        assert_eq!(err.to_string(), "maxEpubBytes must be 1 to 1024 MB.");
+        let unchanged: String = sqlx::query_scalar("SELECT doc FROM settings WHERE id = 1")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert!(unchanged.contains("\"maxEpubBytes\":0"), "{unchanged}");
+
+        let empty = update(&pool, Map::new(), "user").await.unwrap();
+        assert_eq!(empty.max_epub_bytes, MIN_EPUB_BYTES);
+        let after_empty: String = sqlx::query_scalar("SELECT doc FROM settings WHERE id = 1")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(after_empty, unchanged);
     }
 }

@@ -690,15 +690,55 @@ async fn second_sample_returns_the_first() {
 }
 
 #[tokio::test]
+async fn oversized_json_auth_is_413() {
+    let (app, _tmp) = app().await;
+    let body = "a".repeat(1024 * 1024 + 64);
+    for path in ["/v1/auth/register", "/v1/auth/login"] {
+        let req = Request::builder()
+            .method("POST")
+            .uri(path)
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(body.clone()))
+            .unwrap();
+        let (status, bytes) = send(&app, req).await;
+        assert_eq!(
+            status,
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "{path} {}",
+            String::from_utf8_lossy(&bytes)
+        );
+    }
+}
+
+#[tokio::test]
+async fn upload_text_field_stops_at_its_cap() {
+    let (app, _tmp) = app().await;
+    let token = register(&app, "matt", "password1").await;
+    let long = "t".repeat(513);
+    let (status, body) = upload(&app, &token, &long, "A", &common::epub(), None, false).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert_eq!(body["error"], "Field is longer than 512 bytes.");
+
+    let ok = "t".repeat(512);
+    let (status, book) = upload(&app, &token, &ok, "A", &common::epub(), None, false).await;
+    assert_eq!(status, StatusCode::OK, "{book}");
+    assert_eq!(book["title"], ok);
+}
+
+#[tokio::test]
 async fn oversized_epub_is_413() {
+    // A seed below the floor is stored as 1 MiB, so a 200-byte file is accepted
+    // and a file past that floor is 413 naming the clamped limit.
     let (app, _tmp) = app_with(true, 64).await;
     let token = register(&app, "matt", "password1").await;
-    let (status, body) = upload(&app, &token, "Big", "A", &[0u8; 200], None, false).await;
+    let (status, book) = upload(&app, &token, "Ok", "A", &common::epub(), None, false).await;
+    assert_eq!(status, StatusCode::OK, "{book}");
+    let big = vec![0u8; (MIN_EPUB_BYTES as usize) + 8];
+    let (status, body) = upload(&app, &token, "Big", "A", &big, None, false).await;
     assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE, "{body}");
     let error = body["error"].as_str().unwrap();
-    assert!(error.contains("limit is 64 bytes"), "{error}");
     assert!(
-        error.contains("asked 65") || error.contains("asked 200"),
+        error.contains(&format!("limit is {MIN_EPUB_BYTES} bytes")),
         "{error}"
     );
 }
@@ -3656,19 +3696,27 @@ async fn settings_patch_validation() {
     let original = settings_doc(tmp.path()).await;
 
     let cases = [
-        (json!({ "future": 1 }), "future"),
-        (json!({ "allowSignup": "no" }), "allowSignup"),
-        (json!({ "maxEpubBytes": 10 }), "maxEpubBytes"),
-        (json!({ "maxEpubBytes": 1_073_741_825u64 }), "maxEpubBytes"),
-        (json!([1]), "object"),
+        (json!({ "future": 1 }), "Unknown setting \"future\"."),
+        (
+            json!({ "allowSignup": "no" }),
+            "allowSignup is the wrong type.",
+        ),
+        (
+            json!({ "maxEpubBytes": 10 }),
+            "maxEpubBytes must be 1 to 1024 MB.",
+        ),
+        (
+            json!({ "maxEpubBytes": 1_073_741_825u64 }),
+            "maxEpubBytes must be 1 to 1024 MB.",
+        ),
+        (json!([1]), "Settings patch must be a JSON object."),
     ];
-    for (body, needle) in cases {
+    for (body, expected) in cases {
         let (status, response) =
             json_req(&app, "PATCH", "/v1/admin/settings", Some(&token), body).await;
         assert_eq!(status, StatusCode::BAD_REQUEST, "{response}");
-        let error = response["error"].as_str().unwrap();
-        assert!(error.contains(needle), "{error}");
-        assert_eq!(settings_doc(tmp.path()).await, original, "{error}");
+        assert_eq!(response["error"], expected);
+        assert_eq!(settings_doc(tmp.path()).await, original, "{expected}");
     }
 
     let (status, body) =
@@ -3801,6 +3849,33 @@ async fn admin_users_list_and_toggle() {
     .await;
     assert_eq!(status, StatusCode::CONFLICT, "{self_row}");
     assert_eq!(self_row["error"], "You can't change your own admin access.");
+}
+
+#[tokio::test]
+async fn user_patch_rejections_are_json() {
+    let (app, tmp) = app().await;
+    let token = register(&app, "matt", "password1").await;
+    register(&app, "ada", "password1").await;
+    grant(tmp.path(), "matt").await;
+    for body in [
+        r#"{"isAdmin":"no"}"#,
+        r#"{"isAdmin":true,"extra":1}"#,
+        "not-json",
+        "[1]",
+    ] {
+        let req = Request::builder()
+            .method("PATCH")
+            .uri("/v1/admin/users/ada")
+            .header(header::AUTHORIZATION, format!("Bearer {token}"))
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(body))
+            .unwrap();
+        let (status, bytes) = send(&app, req).await;
+        let value: Value = serde_json::from_slice(&bytes)
+            .unwrap_or_else(|_| panic!("{body} was not json: {}", String::from_utf8_lossy(&bytes)));
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body} {value}");
+        assert_eq!(value["error"], "User patch must be a JSON object.");
+    }
 }
 
 #[tokio::test]

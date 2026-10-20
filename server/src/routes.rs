@@ -1512,14 +1512,19 @@ async fn read_upload(state: &AppState, mut multipart: Multipart) -> Result<Parse
 }
 
 async fn field_text(
-    field: axum::extract::multipart::Field<'_>,
+    mut field: axum::extract::multipart::Field<'_>,
     max: usize,
 ) -> Result<String, ApiError> {
-    let bytes = field.bytes().await?;
-    if bytes.len() > max {
-        return Err(ApiError::BadRequest(format!(
-            "Field is longer than {max} bytes."
-        )));
+    let mut written = 0usize;
+    let mut bytes = Vec::new();
+    while let Some(chunk) = field.chunk().await? {
+        written = written.saturating_add(chunk.len());
+        if written > max {
+            return Err(ApiError::BadRequest(format!(
+                "Field is longer than {max} bytes."
+            )));
+        }
+        bytes.extend_from_slice(&chunk);
     }
     Ok(String::from_utf8_lossy(&bytes).trim().to_string())
 }

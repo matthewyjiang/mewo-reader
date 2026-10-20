@@ -105,8 +105,10 @@ async fn patch_user(
     State(state): State<AppState>,
     Extension(admin): Extension<Admin>,
     Path(username): Path<String>,
-    Json(body): Json<PatchUser>,
+    body: Result<Json<PatchUser>, axum::extract::rejection::JsonRejection>,
 ) -> Result<Json<AdminUser>, ApiError> {
+    let Json(body) =
+        body.map_err(|_| ApiError::BadRequest("User patch must be a JSON object.".into()))?;
     let row = find_account(&state.pool, &username).await?;
     if row.id == admin.user_id {
         return Err(ApiError::Conflict(

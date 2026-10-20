@@ -54,11 +54,11 @@ Runtime:
 - `MEWO_WEB_DIR` — unset means API only. An existing directory is served as static files, with `index.html` for other non-API paths. Relative paths are relative to the process working directory. Unknown `/v1/...` routes stay a JSON 404. From `server/`, a local web build is `MEWO_WEB_DIR=../web/dist`. The image sets `/srv/web`
 - `MEWO_DATABASE_URL` — default `sqlite://<data>/mewo.db?mode=rwc`. SQLite only
 - `MEWO_ALLOW_SIGNUP` — first-boot seed only. Default on when unset. A set value is on only for `1`, `true`, `yes`, or `on` (any case). After the settings row exists, the database wins. A set variable that disagrees with the row logs one warning and is ignored
-- `MEWO_MAX_EPUB_BYTES` — first-boot seed only. Default `67108864` (64 MiB). After the settings row exists, the database wins, with the same warning. The panel accepts `1048576` to `1073741824` (1 MiB to 1 GiB)
+- `MEWO_MAX_EPUB_BYTES` — first-boot seed only. Default `67108864` (64 MiB). A seed outside 1 MiB to 1 GiB is clamped into that range, with one warning that names the variable. After the settings row exists, the database wins. A set variable that disagrees with the row logs one warning and is ignored. The panel accepts 1 to 1024 MB
 
 Compile-time, via `build.rs`: `MEWO_VERSION`, `MEWO_COMMIT`. See [Version and release](../README.md#version-and-release).
 
-Parsing reads at most `MAX_EPUB_TEXT_BYTES` (32 MiB) of inflated XML/XHTML per book (`src/epub.rs`). A cover is at most 4 MiB. The HTTP body limit is fixed at 1 GiB plus 4 MiB plus 64 KiB of form fields. The live EPUB cap is the settings value, checked while the upload streams. Over that cap is 413 `EPUB too large: asked N bytes, limit is N bytes`.
+Parsing reads at most `MAX_EPUB_TEXT_BYTES` (32 MiB) of inflated XML/XHTML per book (`src/epub.rs`). A cover is at most 4 MiB. JSON and other non-upload routes reject a body over 1 MiB with 413. `POST /v1/books` accepts up to 1 GiB plus 4 MiB plus 64 KiB of form fields. The live EPUB cap is the settings value, checked while the upload streams. Over that cap is 413 `EPUB too large: asked N bytes, limit is N bytes`.
 
 ## Auth
 
@@ -111,9 +111,9 @@ Prefix `/v1`.
 - `POST /auth/logout` → 204
 - `GET /me` → `{ "username", "isAdmin" }`
 - `GET /admin/settings` → `{ "allowSignup", "maxEpubBytes" }`. Admin
-- `PATCH /admin/settings` JSON object of keys to change. Returns the full settings. An empty object is 200 and changes nothing. An unknown key, a wrong type, or an out-of-range value is 400 and names the key. `maxEpubBytes` is `1048576` to `1073741824`
+- `PATCH /admin/settings` JSON object of keys to change. Returns the full settings. An empty object is 200 and changes nothing. An unknown key, a wrong type, or an out-of-range value is 400 and names the key. `maxEpubBytes` must be 1 to 1024 MB (`maxEpubBytes must be 1 to 1024 MB.`)
 - `GET /admin/users` → `{ "items": [ { "username", "joinedAt", "isAdmin", "books", "mine" } ] }`. Ordered by `created_at`. `mine` is true only on the caller. Admin
-- `PATCH /admin/users/{username}` `{ "isAdmin" }` → that row. Unknown username is 404. Your own username is 409 `You can't change your own admin access.` Idempotent. Admin
+- `PATCH /admin/users/{username}` `{ "isAdmin" }` → that row. Unknown username is 404. Your own username is 409 `You can't change your own admin access.` A body that is not a JSON object (wrong type, unknown field, or non-JSON) is 400 `User patch must be a JSON object.` Idempotent. Admin
 - `GET /admin/server` → `{ "users", "books", "comments", "reposts", "storageBytes" }`. `storageBytes` is `mewo.db`, `mewo.db-wal`, and `books/`. Admin
 
 Every `/admin` route is 401 without a token and 403 `Admins only.` for a signed-in account that is not an admin. A revoke applies on the next request.
