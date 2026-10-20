@@ -15,7 +15,7 @@ pub enum ApiError {
     NotFound,
     #[error("{0}")]
     Conflict(String),
-    #[error("EPUB too large: asked {asked} bytes, limit is MEWO_MAX_EPUB_BYTES={limit}")]
+    #[error("EPUB too large: asked {asked} bytes, limit is {limit} bytes")]
     PayloadTooLarge { asked: u64, limit: u64 },
     #[error("Request body is too large.")]
     RequestTooLarge,

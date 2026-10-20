@@ -14,6 +14,7 @@ pub struct Authed {
     pub user_id: String,
     pub username: String,
     pub token: String,
+    pub is_admin: bool,
 }
 
 pub fn hash_password(password: &str) -> Result<String, ApiError> {
@@ -90,7 +91,8 @@ impl FromRequestParts<AppState> for Authed {
             .strip_prefix("Bearer ")
             .ok_or_else(|| ApiError::Unauthorized("Sign in first.".into()))?;
         let row = sqlx::query_as::<_, Authed>(
-            "SELECT users.id AS user_id, users.username, sessions.token AS token
+            "SELECT users.id AS user_id, users.username, sessions.token AS token,
+                    users.is_admin AS is_admin
              FROM sessions
              JOIN users ON users.id = sessions.user_id
              WHERE sessions.token = ?",

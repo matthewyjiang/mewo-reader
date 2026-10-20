@@ -7,10 +7,10 @@ use crate::error::ApiError;
 use crate::feed::{slug, Post, Posts};
 use crate::models::{
     ActorRecord, AuthRequest, AuthResponse, BookRecord, BookRow, CommentIndex, CommentRecord,
-    CommentRow, CommentThread, FeedItem, FeedPage, LibrarySnapshot, LikeSet, MeResponse,
-    NewComment, PatchBook, ProfileBooks, ProfilePostRecord, ProfilePostsPage, ProfileRecord,
-    ProfileReplies, ProfileReplyRecord, ProfileReplyRow, ProfileRepostRecord, ProfileRepostsPage,
-    RepostState, SearchKind, SearchPage, MAX_COMMENT_CHARS, MAX_POST_ID_CHARS,
+    CommentRow, CommentThread, FeedItem, FeedPage, InstanceInfo, LibrarySnapshot, LikeSet,
+    MeResponse, NewComment, PatchBook, ProfileBooks, ProfilePostRecord, ProfilePostsPage,
+    ProfileRecord, ProfileReplies, ProfileReplyRecord, ProfileReplyRow, ProfileRepostRecord,
+    ProfileRepostsPage, RepostState, SearchKind, SearchPage, MAX_COMMENT_CHARS, MAX_POST_ID_CHARS,
 };
 use crate::search::{self, PROFILE_POSTS_LIMIT};
 use crate::version::VersionInfo;
@@ -31,11 +31,19 @@ pub async fn version() -> Json<VersionInfo> {
     Json(crate::version::current())
 }
 
+pub async fn instance(State(state): State<AppState>) -> Result<Json<InstanceInfo>, ApiError> {
+    let settings = crate::settings::load(&state.pool).await?;
+    Ok(Json(InstanceInfo {
+        allow_signup: settings.allow_signup,
+    }))
+}
+
 pub async fn register(
     State(state): State<AppState>,
     Json(body): Json<AuthRequest>,
 ) -> Result<Json<AuthResponse>, ApiError> {
-    if !state.allow_signup {
+    let settings = crate::settings::load(&state.pool).await?;
+    if !settings.allow_signup {
         return Err(ApiError::Forbidden("Signups are off.".into()));
     }
     let (username, norm) = normalize_username(&body.username)?;
@@ -101,6 +109,7 @@ pub async fn logout(
 pub async fn me(authed: Authed) -> Json<MeResponse> {
     Json(MeResponse {
         username: authed.username,
+        is_admin: authed.is_admin,
     })
 }
 
@@ -1410,6 +1419,7 @@ struct ParsedUpload {
 }
 
 async fn read_upload(state: &AppState, mut multipart: Multipart) -> Result<ParsedUpload, ApiError> {
+    let max_epub_bytes = crate::settings::load(&state.pool).await?.max_epub_bytes;
     let temp_dir = state.data_dir.join("tmp").join(Uuid::new_v4().to_string());
     tokio::fs::create_dir_all(&temp_dir).await?;
     let mut title = None;
@@ -1432,7 +1442,7 @@ async fn read_upload(state: &AppState, mut multipart: Multipart) -> Result<Parse
                 }
                 "epub" => {
                     let dest = temp_dir.join("book.epub");
-                    write_limited(field, &dest, state.max_epub_bytes).await?;
+                    write_limited(field, &dest, max_epub_bytes).await?;
                     epub_path = Some(dest);
                 }
                 "cover" => {
@@ -1502,14 +1512,19 @@ async fn read_upload(state: &AppState, mut multipart: Multipart) -> Result<Parse
 }
 
 async fn field_text(
-    field: axum::extract::multipart::Field<'_>,
+    mut field: axum::extract::multipart::Field<'_>,
     max: usize,
 ) -> Result<String, ApiError> {
-    let bytes = field.bytes().await?;
-    if bytes.len() > max {
-        return Err(ApiError::BadRequest(format!(
-            "Field is longer than {max} bytes."
-        )));
+    let mut written = 0usize;
+    let mut bytes = Vec::new();
+    while let Some(chunk) = field.chunk().await? {
+        written = written.saturating_add(chunk.len());
+        if written > max {
+            return Err(ApiError::BadRequest(format!(
+                "Field is longer than {max} bytes."
+            )));
+        }
+        bytes.extend_from_slice(&chunk);
     }
     Ok(String::from_utf8_lossy(&bytes).trim().to_string())
 }

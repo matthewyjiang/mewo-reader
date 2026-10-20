@@ -2,7 +2,7 @@
   export type IconName =
     | 'home' | 'search' | 'heart' | 'comment' | 'quote' | 'share'
     | 'back' | 'close' | 'plus' | 'trash' | 'settings' | 'chevron'
-    | 'more' | 'book' | 'lock' | 'people' | 'refresh' | 'person' | 'repost';
+    | 'more' | 'book' | 'lock' | 'people' | 'refresh' | 'person' | 'repost' | 'shield';
   const paths: Record<IconName, string> = {
     home: 'M3 10 12 3l9 7v10a1 1 0 0 1-1 1h-5v-7H9v7H4a1 1 0 0 1-1-1Z',
     search: 'M21 21l-5-5M18 10a8 8 0 1 1-16 0 8 8 0 0 1 16 0',
@@ -34,9 +34,11 @@
       + ' 1.16.84 1.97 1.97 1.97 3.45V19h6v-2.5c0-2.33-4.67-3.5-7-3.5z',
     person: 'M15.2 8a3.2 3.2 0 1 1-6.4 0 3.2 3.2 0 0 1 6.4 0M5.5 19.4c.6-3.3 3.2-5.2 6.5-5.2s5.9 1.9 6.5 5.2',
     repost: 'M17 2l4 4-4 4M21 6H9a4 4 0 0 0-4 4v1M7 22l-4-4 4-4M3 18h12a4 4 0 0 0 4-4v-1',
+    shield: 'M12 3.2 5 6.4v4.8c0 4.2 2.9 8.1 7 9.4 4.1-1.3 7-5.2 7-9.4V6.4L12 3.2z',
   };
   const filledPaths: Partial<Record<IconName, string>> = {
     person: 'M12 12c2.21 0 4-1.79 4-4s-1.79-4-4-4-4 1.79-4 4 1.79 4 4 4zm0 2c-2.67 0-8 1.34-8 4v2h16v-2c0-2.66-5.33-4-8-4z',
+    shield: 'M12 2.2 4.5 5.6v5.2c0 4.7 3.2 9.1 7.5 10.5 4.3-1.4 7.5-5.8 7.5-10.5V5.6L12 2.2z',
   };
 
   // Outlined lock's artwork is half a unit high in the 24px grid (pad 1 above, 2 below).

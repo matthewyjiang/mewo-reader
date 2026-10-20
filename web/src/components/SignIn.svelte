@@ -16,6 +16,34 @@
   let valid = $derived(usernameOk && passwordOk);
   let usernameError = $derived(usernameValue && !usernameOk ? usernameRule : '');
   let passwordError = $derived(password && !passwordOk ? passwordRule : '');
+  // null while the instance call is in flight or failed: keep today's link.
+  let allowSignup = $state<boolean | null>(null);
+
+  $effect(() => {
+    const controller = new AbortController();
+    allowSignup = null;
+    void fetch('/v1/instance', { signal: controller.signal })
+      .then(async (response) => {
+        if (!response.ok) throw new Error(String(response.status));
+        const body: unknown = await response.json();
+        if (!body || typeof body !== 'object' || !('allowSignup' in body)
+          || typeof body.allowSignup !== 'boolean') {
+          throw new Error('instance');
+        }
+        return body.allowSignup;
+      })
+      .then((open) => {
+        if (!controller.signal.aborted) allowSignup = open;
+      })
+      .catch(() => {
+        if (!controller.signal.aborted) allowSignup = null;
+      });
+    return () => controller.abort();
+  });
+
+  $effect(() => {
+    if (allowSignup === false && mode === 'register') mode = 'login';
+  });
 
   async function submit(event: SubmitEvent): Promise<void> {
     event.preventDefault();
@@ -86,9 +114,15 @@
     <button type="submit" class="pill auth-submit" disabled={!valid || busy}>
       {busy ? 'Connecting…' : mode === 'login' ? 'Sign in' : 'Create account'}
     </button>
-    <button type="button" class="text-button" disabled={busy} onclick={switchMode}>
-      {mode === 'login' ? 'Create an account' : 'Sign in instead'}
-    </button>
+    {#if mode === 'register'}
+      <button type="button" class="text-button" disabled={busy} onclick={switchMode}>
+        Sign in instead
+      </button>
+    {:else if allowSignup !== false}
+      <button type="button" class="text-button" disabled={busy} onclick={switchMode}>
+        Create an account
+      </button>
+    {/if}
   </form>
 </div>
 

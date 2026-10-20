@@ -4,7 +4,7 @@ import {
   readFeed, startFeedMore, appendFeed, writeFeed, type FeedPhase,
 } from './feed';
 import type {
-  AuthResponse, BookRecord, CommentIndex, FeedPost, PostComment, PostHit,
+  AuthResponse, BookRecord, CommentIndex, FeedPost, Me, PostComment, PostHit,
   ProfileBooks, ProfilePostsPage, ProfileRecord, ProfileRepostsPage,
 } from './models';
 import { commitRepost } from './repost';
@@ -47,6 +47,7 @@ const initialFeed: FeedPhase = initialSession
 /** Hosted library. Logout and book removal invalidate pending responses. */
 class HostedStore {
   session = $state<AuthResponse | null>(initialSession);
+  me = $state<Me | null>(null);
   shelf = $state<LibraryPhase>(initialShelf);
   books = $state<BookRecord[]>(shelfBooks(initialShelf));
   private readonly refresh = new ShelfRefresh(initialShelf, (phase) => {
@@ -103,6 +104,7 @@ class HostedStore {
     const username = this.session?.username;
     this.epoch++;
     this.session = null;
+    this.me = null;
     writeStored('mewo.session', null);
     this.refresh.reset();
     if (username) {
@@ -135,6 +137,20 @@ class HostedStore {
     this.clear();
     this.session = session;
     writeStored('mewo.session', session);
+  }
+
+  async loadMe(): Promise<boolean> {
+    const token = this.session?.token;
+    if (!token) return false;
+    try {
+      const me = await this.api.me();
+      if (this.session?.token !== token) return false;
+      this.me = me;
+      return true;
+    } catch {
+      if (this.session?.token === token) this.me = null;
+      return false;
+    }
   }
 
   async signOut(): Promise<void> {

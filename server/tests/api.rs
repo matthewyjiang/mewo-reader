@@ -2,7 +2,8 @@ use axum::body::{Body, Bytes};
 use axum::http::{header, Request, StatusCode};
 use http_body_util::BodyExt;
 use mewo_server::build;
-use mewo_server::config::Config;
+use mewo_server::cli::{self, AdminCommand};
+use mewo_server::config::{Config, MIN_EPUB_BYTES};
 use serde_json::{json, Value};
 use sqlx::migrate::Migrate;
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
@@ -95,6 +96,61 @@ async fn register(app: &axum::Router, username: &str, password: &str) -> String 
     .await;
     assert_eq!(status, StatusCode::OK, "{body}");
     body["token"].as_str().unwrap().to_string()
+}
+
+async fn login(app: &axum::Router, username: &str, password: &str) -> String {
+    let (status, body) = json_req(
+        app,
+        "POST",
+        "/v1/auth/login",
+        None,
+        json!({ "username": username, "password": password }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    body["token"].as_str().unwrap().to_string()
+}
+
+fn config_at(path: &Path, allow_signup: bool, max_epub_bytes: u64) -> Config {
+    Config {
+        listen: "127.0.0.1:0".into(),
+        data_dir: path.to_path_buf(),
+        web_dir: None,
+        allow_signup,
+        max_epub_bytes,
+    }
+}
+
+async fn admin_cli(path: &Path, cmd: AdminCommand, stdin: &str) -> (i32, String, String) {
+    let mut input = std::io::Cursor::new(stdin.as_bytes().to_vec());
+    let mut out = Vec::new();
+    let mut err = Vec::new();
+    let code = cli::run(
+        cmd,
+        &config_at(path, true, MIN_EPUB_BYTES),
+        &mut input,
+        &mut out,
+        &mut err,
+    )
+    .await;
+    (
+        code,
+        String::from_utf8(out).unwrap(),
+        String::from_utf8(err).unwrap(),
+    )
+}
+
+async fn grant(path: &Path, username: &str) {
+    let (code, out, err) = admin_cli(path, AdminCommand::Grant(username.to_string()), "").await;
+    assert_eq!(code, 0, "{out}{err}");
+}
+
+async fn settings_doc(path: &Path) -> String {
+    let pool = open_db(path).await;
+    sqlx::query_scalar("SELECT doc FROM settings WHERE id = 1")
+        .fetch_one(&pool)
+        .await
+        .unwrap()
 }
 
 fn multipart(fields: &[(&str, Option<&str>, &[u8])]) -> (String, Vec<u8>) {
@@ -634,15 +690,55 @@ async fn second_sample_returns_the_first() {
 }
 
 #[tokio::test]
+async fn oversized_json_auth_is_413() {
+    let (app, _tmp) = app().await;
+    let body = "a".repeat(1024 * 1024 + 64);
+    for path in ["/v1/auth/register", "/v1/auth/login"] {
+        let req = Request::builder()
+            .method("POST")
+            .uri(path)
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(body.clone()))
+            .unwrap();
+        let (status, bytes) = send(&app, req).await;
+        assert_eq!(
+            status,
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "{path} {}",
+            String::from_utf8_lossy(&bytes)
+        );
+    }
+}
+
+#[tokio::test]
+async fn upload_text_field_stops_at_its_cap() {
+    let (app, _tmp) = app().await;
+    let token = register(&app, "matt", "password1").await;
+    let long = "t".repeat(513);
+    let (status, body) = upload(&app, &token, &long, "A", &common::epub(), None, false).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert_eq!(body["error"], "Field is longer than 512 bytes.");
+
+    let ok = "t".repeat(512);
+    let (status, book) = upload(&app, &token, &ok, "A", &common::epub(), None, false).await;
+    assert_eq!(status, StatusCode::OK, "{book}");
+    assert_eq!(book["title"], ok);
+}
+
+#[tokio::test]
 async fn oversized_epub_is_413() {
+    // A seed below the floor is stored as 1 MiB, so a 200-byte file is accepted
+    // and a file past that floor is 413 naming the clamped limit.
     let (app, _tmp) = app_with(true, 64).await;
     let token = register(&app, "matt", "password1").await;
-    let (status, body) = upload(&app, &token, "Big", "A", &[0u8; 200], None, false).await;
+    let (status, book) = upload(&app, &token, "Ok", "A", &common::epub(), None, false).await;
+    assert_eq!(status, StatusCode::OK, "{book}");
+    let big = vec![0u8; (MIN_EPUB_BYTES as usize) + 8];
+    let (status, body) = upload(&app, &token, "Big", "A", &big, None, false).await;
     assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE, "{body}");
     let error = body["error"].as_str().unwrap();
-    assert!(error.contains("MEWO_MAX_EPUB_BYTES=64"), "{error}");
     assert!(
-        error.contains("asked 65") || error.contains("asked 200"),
+        error.contains(&format!("limit is {MIN_EPUB_BYTES} bytes")),
         "{error}"
     );
 }
@@ -3379,4 +3475,488 @@ async fn vacuum_keeps_fts_aligned_with_post_ids() {
     )
     .await;
     assert_eq!(comments_index, 1);
+}
+
+#[tokio::test]
+async fn me_reports_admin() {
+    let (app, tmp) = app().await;
+    let token = register(&app, "matt", "password1").await;
+    let (status, body) = empty_req(&app, "GET", "/v1/me", Some(&token)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["isAdmin"], false);
+
+    grant(tmp.path(), "matt").await;
+    let (status, body) = empty_req(&app, "GET", "/v1/me", Some(&token)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["username"], "matt");
+    assert_eq!(body["isAdmin"], true);
+}
+
+#[tokio::test]
+async fn instance_is_public_and_live() {
+    let (app, tmp) = app().await;
+    let (status, body) = empty_req(&app, "GET", "/v1/instance", None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body, json!({ "allowSignup": true }));
+    let (status, body) = empty_req(&app, "GET", "/v1/instance", Some("not-a-session")).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body.as_object().unwrap().len(), 1);
+
+    let token = register(&app, "matt", "password1").await;
+    grant(tmp.path(), "matt").await;
+    let (status, body) = json_req(
+        &app,
+        "PATCH",
+        "/v1/admin/settings",
+        Some(&token),
+        json!({ "allowSignup": false }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (status, body) = empty_req(&app, "GET", "/v1/instance", None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["allowSignup"], false);
+}
+
+#[tokio::test]
+async fn admin_routes_require_admin() {
+    let (app, tmp) = app().await;
+    let matt = register(&app, "matt", "password1").await;
+    let ada = register(&app, "ada", "password1").await;
+    grant(tmp.path(), "matt").await;
+
+    let cases = [
+        ("GET", "/v1/admin/settings", None),
+        ("PATCH", "/v1/admin/settings", Some(json!({}))),
+        ("GET", "/v1/admin/users", None),
+        (
+            "PATCH",
+            "/v1/admin/users/ada",
+            Some(json!({ "isAdmin": false })),
+        ),
+        ("GET", "/v1/admin/server", None),
+    ];
+    for (method, path, body) in cases {
+        let (status, response) = match &body {
+            Some(body) => json_req(&app, method, path, None, body.clone()).await,
+            None => empty_req(&app, method, path, None).await,
+        };
+        assert_eq!(
+            status,
+            StatusCode::UNAUTHORIZED,
+            "{method} {path} {response}"
+        );
+
+        let (status, response) = match &body {
+            Some(body) => json_req(&app, method, path, Some(&ada), body.clone()).await,
+            None => empty_req(&app, method, path, Some(&ada)).await,
+        };
+        assert_eq!(status, StatusCode::FORBIDDEN, "{method} {path} {response}");
+        assert_eq!(response["error"], "Admins only.");
+
+        let (status, response) = match body {
+            Some(body) => json_req(&app, method, path, Some(&matt), body).await,
+            None => empty_req(&app, method, path, Some(&matt)).await,
+        };
+        assert!(status.is_success(), "{method} {path} {status} {response}");
+    }
+
+    let (code, _, err) = admin_cli(tmp.path(), AdminCommand::Revoke("matt".into()), "").await;
+    assert_eq!(code, 0, "{err}");
+    let (status, body) = empty_req(&app, "GET", "/v1/admin/settings", Some(&matt)).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+    assert_eq!(body["error"], "Admins only.");
+}
+
+#[tokio::test]
+async fn settings_seed_from_config_once() {
+    let tmp = TempDir::new().unwrap();
+    let seeded = config_at(tmp.path(), false, MIN_EPUB_BYTES);
+    let app = build(seeded.clone()).await.unwrap();
+    let (code, _, err) = {
+        let mut input = std::io::Cursor::new(b"password1\n".to_vec());
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        let code = cli::run(
+            AdminCommand::Create("matt".into()),
+            &seeded,
+            &mut input,
+            &mut out,
+            &mut err,
+        )
+        .await;
+        (code, out, err)
+    };
+    assert_eq!(code, 0, "{}", String::from_utf8_lossy(&err));
+    let token = login(&app, "matt", "password1").await;
+    let (status, body) = empty_req(&app, "GET", "/v1/admin/settings", Some(&token)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["allowSignup"], false);
+
+    let (status, body) = json_req(
+        &app,
+        "PATCH",
+        "/v1/admin/settings",
+        Some(&token),
+        json!({ "allowSignup": true }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["allowSignup"], true);
+
+    let app = build(config_at(tmp.path(), false, MIN_EPUB_BYTES))
+        .await
+        .unwrap();
+    let (status, body) = empty_req(&app, "GET", "/v1/admin/settings", Some(&token)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["allowSignup"], true);
+}
+
+#[tokio::test]
+async fn signup_toggle_is_live() {
+    let (app, tmp) = app().await;
+    let token = register(&app, "matt", "password1").await;
+    grant(tmp.path(), "matt").await;
+    let (status, body) = json_req(
+        &app,
+        "PATCH",
+        "/v1/admin/settings",
+        Some(&token),
+        json!({ "allowSignup": false }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (status, body) = json_req(
+        &app,
+        "POST",
+        "/v1/auth/register",
+        None,
+        json!({ "username": "ada", "password": "password1" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+    assert_eq!(body["error"], "Signups are off.");
+
+    let (status, body) = json_req(
+        &app,
+        "PATCH",
+        "/v1/admin/settings",
+        Some(&token),
+        json!({ "allowSignup": true }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (status, _) = json_req(
+        &app,
+        "POST",
+        "/v1/auth/register",
+        None,
+        json!({ "username": "ada", "password": "password1" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+}
+
+#[tokio::test]
+async fn max_epub_setting_is_live() {
+    let (app, tmp) = app().await;
+    let token = register(&app, "matt", "password1").await;
+    grant(tmp.path(), "matt").await;
+    let (status, body) = json_req(
+        &app,
+        "PATCH",
+        "/v1/admin/settings",
+        Some(&token),
+        json!({ "maxEpubBytes": MIN_EPUB_BYTES }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["maxEpubBytes"], MIN_EPUB_BYTES);
+
+    let big = vec![1u8; (MIN_EPUB_BYTES as usize) + 8];
+    let (status, body) = upload(&app, &token, "Big", "A", &big, None, false).await;
+    assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE, "{body}");
+    let error = body["error"].as_str().unwrap();
+    assert!(
+        error.contains(&format!("limit is {MIN_EPUB_BYTES} bytes")),
+        "{error}"
+    );
+
+    let (status, book) = upload(&app, &token, "Ok", "A", &common::epub(), None, false).await;
+    assert_eq!(status, StatusCode::OK, "{book}");
+}
+
+#[tokio::test]
+async fn settings_patch_validation() {
+    let (app, tmp) = app().await;
+    let token = register(&app, "matt", "password1").await;
+    grant(tmp.path(), "matt").await;
+    let (status, before) = empty_req(&app, "GET", "/v1/admin/settings", Some(&token)).await;
+    assert_eq!(status, StatusCode::OK, "{before}");
+    let original = settings_doc(tmp.path()).await;
+
+    let cases = [
+        (json!({ "future": 1 }), "Unknown setting \"future\"."),
+        (
+            json!({ "allowSignup": "no" }),
+            "allowSignup is the wrong type.",
+        ),
+        (
+            json!({ "maxEpubBytes": 10 }),
+            "maxEpubBytes must be 1 to 1024 MB.",
+        ),
+        (
+            json!({ "maxEpubBytes": 1_073_741_825u64 }),
+            "maxEpubBytes must be 1 to 1024 MB.",
+        ),
+        (json!([1]), "Settings patch must be a JSON object."),
+    ];
+    for (body, expected) in cases {
+        let (status, response) =
+            json_req(&app, "PATCH", "/v1/admin/settings", Some(&token), body).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{response}");
+        assert_eq!(response["error"], expected);
+        assert_eq!(settings_doc(tmp.path()).await, original, "{expected}");
+    }
+
+    let (status, body) =
+        json_req(&app, "PATCH", "/v1/admin/settings", Some(&token), json!({})).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["allowSignup"], before["allowSignup"]);
+    assert_eq!(body["maxEpubBytes"], before["maxEpubBytes"]);
+    assert_eq!(settings_doc(tmp.path()).await, original);
+}
+
+#[tokio::test]
+async fn settings_doc_forward_compatible() {
+    let (app, tmp) = app().await;
+    let token = register(&app, "matt", "password1").await;
+    grant(tmp.path(), "matt").await;
+    {
+        let pool = open_db(tmp.path()).await;
+        sqlx::query("UPDATE settings SET doc = ? WHERE id = 1")
+            .bind(r#"{"future":1,"maxEpubBytes":67108864}"#)
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+    let (status, body) = empty_req(&app, "GET", "/v1/admin/settings", Some(&token)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["allowSignup"], true);
+    assert_eq!(body["maxEpubBytes"], 67_108_864);
+    assert!(body.get("future").is_none(), "{body}");
+
+    let (status, body) = json_req(
+        &app,
+        "PATCH",
+        "/v1/admin/settings",
+        Some(&token),
+        json!({ "allowSignup": false }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["allowSignup"], false);
+    assert_eq!(body["maxEpubBytes"], 67_108_864);
+    let doc = settings_doc(tmp.path()).await;
+    assert!(doc.contains("\"future\""), "{doc}");
+}
+
+#[tokio::test]
+async fn admin_users_list_and_toggle() {
+    let (app, tmp) = app().await;
+    let matt = register(&app, "matt", "password1").await;
+    let ada = register(&app, "ada", "password1").await;
+    grant(tmp.path(), "matt").await;
+    let (status, book) = upload(&app, &ada, "Emma", "Austen", &common::epub(), None, false).await;
+    assert_eq!(status, StatusCode::OK, "{book}");
+    {
+        let pool = open_db(tmp.path()).await;
+        sqlx::query("UPDATE users SET created_at = 1 WHERE username_norm = 'ada'")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE users SET created_at = 2 WHERE username_norm = 'matt'")
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+
+    let (status, body) = empty_req(&app, "GET", "/v1/admin/users", Some(&matt)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let items = body["items"].as_array().unwrap();
+    assert_eq!(items.len(), 2);
+    assert_eq!(items[0]["username"], "ada");
+    assert_eq!(items[0]["isAdmin"], false);
+    assert_eq!(items[0]["mine"], false);
+    assert_eq!(items[0]["books"], 1);
+    assert!(items[0]["joinedAt"].is_number());
+    assert_eq!(items[1]["username"], "matt");
+    assert_eq!(items[1]["isAdmin"], true);
+    assert_eq!(items[1]["mine"], true);
+    assert_eq!(items[1]["books"], 0);
+
+    let (status, row) = json_req(
+        &app,
+        "PATCH",
+        "/v1/admin/users/ada",
+        Some(&matt),
+        json!({ "isAdmin": true }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{row}");
+    assert_eq!(row["isAdmin"], true);
+    assert_eq!(row["books"], 1);
+    assert_eq!(row["mine"], false);
+    let (status, again) = json_req(
+        &app,
+        "PATCH",
+        "/v1/admin/users/Ada",
+        Some(&matt),
+        json!({ "isAdmin": true }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{again}");
+    assert_eq!(again["isAdmin"], true);
+
+    let (status, row) = json_req(
+        &app,
+        "PATCH",
+        "/v1/admin/users/ada",
+        Some(&matt),
+        json!({ "isAdmin": false }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{row}");
+    assert_eq!(row["isAdmin"], false);
+
+    let (status, missing) = json_req(
+        &app,
+        "PATCH",
+        "/v1/admin/users/nobody",
+        Some(&matt),
+        json!({ "isAdmin": true }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{missing}");
+
+    let (status, self_row) = json_req(
+        &app,
+        "PATCH",
+        "/v1/admin/users/Matt",
+        Some(&matt),
+        json!({ "isAdmin": false }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{self_row}");
+    assert_eq!(self_row["error"], "You can't change your own admin access.");
+}
+
+#[tokio::test]
+async fn user_patch_rejections_are_json() {
+    let (app, tmp) = app().await;
+    let token = register(&app, "matt", "password1").await;
+    register(&app, "ada", "password1").await;
+    grant(tmp.path(), "matt").await;
+    for body in [
+        r#"{"isAdmin":"no"}"#,
+        r#"{"isAdmin":true,"extra":1}"#,
+        "not-json",
+        "[1]",
+    ] {
+        let req = Request::builder()
+            .method("PATCH")
+            .uri("/v1/admin/users/ada")
+            .header(header::AUTHORIZATION, format!("Bearer {token}"))
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(body))
+            .unwrap();
+        let (status, bytes) = send(&app, req).await;
+        let value: Value = serde_json::from_slice(&bytes)
+            .unwrap_or_else(|_| panic!("{body} was not json: {}", String::from_utf8_lossy(&bytes)));
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body} {value}");
+        assert_eq!(value["error"], "User patch must be a JSON object.");
+    }
+}
+
+#[tokio::test]
+async fn server_info_counts() {
+    let (app, tmp) = app().await;
+    let matt = register(&app, "matt", "password1").await;
+    register(&app, "ada", "password1").await;
+    grant(tmp.path(), "matt").await;
+    let (status, book) = upload(&app, &matt, "Emma", "Austen", &common::epub(), None, false).await;
+    assert_eq!(status, StatusCode::OK, "{book}");
+    let id = book["id"].as_str().unwrap();
+    let (status, thread) = json_req(
+        &app,
+        "POST",
+        &format!("/v1/books/{id}/comments/0"),
+        Some(&matt),
+        json!({ "text": "A note." }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{thread}");
+    let (status, repost) = empty_req(
+        &app,
+        "PUT",
+        &format!("/v1/books/{id}/posts/0/repost"),
+        Some(&matt),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{repost}");
+
+    let (status, info) = empty_req(&app, "GET", "/v1/admin/server", Some(&matt)).await;
+    assert_eq!(status, StatusCode::OK, "{info}");
+    assert_eq!(info["users"], 2);
+    assert_eq!(info["books"], 1);
+    assert_eq!(info["comments"], 1);
+    assert_eq!(info["reposts"], 1);
+    assert!(info["storageBytes"].as_u64().unwrap() > 0, "{info}");
+}
+
+#[tokio::test]
+async fn migration_006_existing_users_not_admin() {
+    let tmp = TempDir::new().unwrap();
+    let url = format!("sqlite://{}?mode=rwc", tmp.path().join("mewo.db").display());
+    let pool = sqlx::SqlitePool::connect(&url).await.unwrap();
+    let migrator = sqlx::migrate!("./migrations");
+    let mut conn = pool.acquire().await.unwrap();
+    Migrate::ensure_migrations_table(&mut *conn).await.unwrap();
+    for migration in migrator.iter() {
+        if migration.version < 6 {
+            Migrate::apply(&mut *conn, migration).await.unwrap();
+        }
+    }
+    drop(conn);
+    sqlx::query(
+        "INSERT INTO users (id, username, username_norm, password_hash, created_at)
+         VALUES ('user', 'matt', 'matt', 'x', 1)",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    let before = sqlx::query_scalar::<_, i64>("SELECT is_admin FROM users WHERE id = 'user'")
+        .fetch_one(&pool)
+        .await;
+    assert!(before.is_err(), "is_admin exists before migration 006");
+    sqlx::migrate!("./migrations").run(&pool).await.unwrap();
+    let is_admin: i64 = sqlx::query_scalar("SELECT is_admin FROM users WHERE id = 'user'")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(is_admin, 0);
+    let rows: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM settings")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(rows, 0);
+    drop(pool);
+
+    let _app = build(config_at(tmp.path(), false, 32 * 1024 * 1024))
+        .await
+        .unwrap();
+    let doc = settings_doc(tmp.path()).await;
+    let value: Value = serde_json::from_str(&doc).unwrap();
+    assert_eq!(value["allowSignup"], false);
+    assert_eq!(value["maxEpubBytes"], 32 * 1024 * 1024);
 }

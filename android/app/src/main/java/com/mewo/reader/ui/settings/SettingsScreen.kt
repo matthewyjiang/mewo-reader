@@ -287,11 +287,13 @@ fun SettingsDisplayPage(onBack: () -> Unit) {
 fun SettingsLibraryPage(
     onBack: () -> Unit,
     startOnCreate: Boolean = false,
+    signupsOpen: Boolean? = null,
 ) {
     SettingsScaffold(title = "Library", onBack = onBack) {
         LibrarySettings(
             modifier = Modifier.padding(horizontal = 16.dp),
             startOnCreate = startOnCreate,
+            signupsOpen = signupsOpen,
         )
     }
 }

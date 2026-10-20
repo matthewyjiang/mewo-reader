@@ -1,5 +1,7 @@
 use mewo_server::build;
+use mewo_server::cli::{self, Command};
 use mewo_server::config::Config;
+use std::io::{self, BufReader};
 
 #[tokio::main]
 async fn main() {
@@ -11,6 +13,28 @@ async fn main() {
         .init();
 
     let config = Config::from_env();
+    match cli::parse(std::env::args().skip(1)) {
+        Ok(Command::Serve) => serve(config).await,
+        Ok(Command::Help) => print!("{}", cli::USAGE),
+        Ok(Command::Admin(cmd)) => {
+            let code = cli::run(
+                cmd,
+                &config,
+                &mut BufReader::new(io::stdin()),
+                &mut io::stdout(),
+                &mut io::stderr(),
+            )
+            .await;
+            std::process::exit(code);
+        }
+        Err(message) => {
+            eprint!("{message}");
+            std::process::exit(2);
+        }
+    }
+}
+
+async fn serve(config: Config) {
     let listen = config.listen.clone();
     let app = build(config).await.expect("database");
     let listener = tokio::net::TcpListener::bind(&listen)

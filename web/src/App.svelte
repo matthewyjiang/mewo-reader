@@ -15,6 +15,7 @@
   import Profile from './screens/Profile.svelte';
   import Reader from './screens/Reader.svelte';
   import Search from './screens/Search.svelte';
+  import Server from './screens/Server.svelte';
   import Settings from './screens/Settings.svelte';
   import { chrome } from './lib/chrome.svelte';
   import type { BookRecord, FeedPost, PostHit } from './lib/models';
@@ -41,6 +42,7 @@
   let query = $state('');
   let shelfToken = '';
   let shelfPromise: Promise<void> | undefined;
+  let meToken = '';
   let touchStart: { x: number; y: number } | null = null;
   let pullStart: { x: number; y: number; active: boolean } | null = null;
   let pull = $state(0);
@@ -66,6 +68,7 @@
       '/': 'Home', '/search': 'Search', '/likes': 'Likes', '/settings': 'Settings',
       '/settings/display': 'Display', '/settings/account': 'Account',
       '/settings/library': 'Library', '/settings/about': 'About',
+      '/settings/server': 'Server', '/settings/server/users': 'Users',
     };
     return titles[path] ?? 'Mewo';
   }
@@ -90,6 +93,14 @@
     await shelfPromise;
   }
 
+  function ensureMe(token: string): void {
+    if (meToken === token) return;
+    meToken = token;
+    void store.loadMe().then((ok) => {
+      if (!ok && meToken === token) meToken = '';
+    });
+  }
+
   function refreshShelf(): void {
     shelfPromise = undefined;
     void store.load();
@@ -110,8 +121,10 @@
       if (!token) {
         shelfToken = '';
         shelfPromise = undefined;
+        meToken = '';
         return;
       }
+      ensureMe(token);
       void ensureShelf(token);
     });
   });
@@ -386,6 +399,8 @@
                 onprofile={openProfile}
                 oncount={(count) => profileCount = count}
               />
+            {:else if path === '/settings/server' || path === '/settings/server/users'}
+              <Server {path} scroller={main} onprofile={openProfile} />
             {:else if settings}
               <Settings
                 {path}
