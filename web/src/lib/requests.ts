@@ -15,7 +15,7 @@ export function stateLabel(request: Pick<BookRequest, 'state' | 'progress' | 'er
 export function rowAction(request: BookRequest | null): 'request' | 'pending' | 'open' | 'retry' {
   if (!request) return 'request';
   if (request.state === 'requested' || request.state === 'downloading') return 'pending';
-  if (request.state === 'imported') return 'open';
+  if (request.state === 'imported' && request.bookId) return 'open';
   return 'retry';
 }
 

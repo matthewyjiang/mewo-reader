@@ -37,6 +37,7 @@ test('rowAction is request, pending, open, or retry', () => {
   assert.equal(rowAction(request()), 'pending');
   assert.equal(rowAction(request({ state: 'downloading', progress: 42 })), 'pending');
   assert.equal(rowAction(request({ state: 'imported', bookId: 'req-1' })), 'open');
+  assert.equal(rowAction(request({ state: 'imported', bookId: null })), 'retry');
   assert.equal(rowAction(request({ state: 'failed', error: 'Download failed: missing' })), 'retry');
   assert.equal(rowAction(request({ state: 'canceled' })), 'retry');
 });

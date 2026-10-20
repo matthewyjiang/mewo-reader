@@ -215,18 +215,7 @@ async fn create_request(
         tx.commit().await?;
         return Ok((StatusCode::OK, Json(existing)));
     }
-    let active: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM book_requests
-         WHERE user_id = ? AND state IN ('requested', 'downloading')",
-    )
-    .bind(&authed.user_id)
-    .fetch_one(&mut *tx)
-    .await?;
-    if active >= ACTIVE_CAP {
-        return Err(ApiError::Conflict(
-            "You have 5 requests in progress.".into(),
-        ));
-    }
+    ensure_under_cap(&mut *tx, &authed.user_id).await?;
     let id = Uuid::new_v4().to_string();
     let now = now_ms();
     let inserted = sqlx::query(
@@ -354,6 +343,9 @@ async fn retry_request(
             "Only a failed or canceled request can be retried.".into(),
         ));
     }
+    let mut tx = state.pool.begin_with("BEGIN IMMEDIATE").await?;
+    // The owner's cap, even when an admin presses retry.
+    ensure_under_cap(&mut *tx, &row.user_id).await?;
     let now = now_ms();
     let changed = sqlx::query(
         "UPDATE book_requests
@@ -366,7 +358,7 @@ async fn retry_request(
     .bind(now)
     .bind(&row.id)
     .bind(&row.user_id)
-    .execute(&state.pool)
+    .execute(&mut *tx)
     .await?
     .rows_affected();
     if changed == 0 {
@@ -374,6 +366,7 @@ async fn retry_request(
             "Only a failed or canceled request can be retried.".into(),
         ));
     }
+    tx.commit().await?;
     state.worker.notify_one();
     let row = fetch(&state.pool, &row.id)
         .await?
@@ -424,6 +417,52 @@ fn required(raw: &str, max: usize, empty: &str, long: &str) -> Result<String, Ap
         return Err(ApiError::BadRequest(long.into()));
     }
     Ok(value.to_string())
+}
+
+async fn ensure_under_cap<'a, E>(executor: E, user_id: &str) -> Result<(), ApiError>
+where
+    E: sqlx::Executor<'a, Database = sqlx::Sqlite>,
+{
+    let active: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM book_requests
+         WHERE user_id = ? AND state IN ('requested', 'downloading')",
+    )
+    .bind(user_id)
+    .fetch_one(executor)
+    .await?;
+    if active >= ACTIVE_CAP {
+        return Err(ApiError::Conflict(
+            "You have 5 requests in progress.".into(),
+        ));
+    }
+    Ok(())
+}
+
+/// Called in the same transaction that deletes the book. Compare-and-set so
+/// only an `imported` request moves to `canceled`; the foreign key does not
+/// change state.
+pub(crate) async fn cancel_imported<'a, E>(
+    executor: E,
+    user_id: &str,
+    book_id: &str,
+) -> Result<(), ApiError>
+where
+    E: sqlx::Executor<'a, Database = sqlx::Sqlite>,
+{
+    let now = now_ms();
+    sqlx::query(
+        "UPDATE book_requests
+         SET state = 'canceled', book_id = NULL, error = NULL, download_id = NULL,
+             updated_at = ?, next_check_at = ?
+         WHERE book_id = ? AND user_id = ? AND state = 'imported'",
+    )
+    .bind(now)
+    .bind(now)
+    .bind(book_id)
+    .bind(user_id)
+    .execute(executor)
+    .await?;
+    Ok(())
 }
 
 async fn active_for_work<'a, E>(

@@ -176,11 +176,14 @@ pub async fn delete_book(
             "Only the person who added this book can remove it.".into(),
         ));
     }
+    let mut tx = state.pool.begin_with("BEGIN IMMEDIATE").await?;
+    crate::requests::cancel_imported(&mut *tx, &authed.user_id, &row.id).await?;
     sqlx::query("DELETE FROM books WHERE id = ? AND user_id = ?")
         .bind(&row.id)
         .bind(&authed.user_id)
-        .execute(&state.pool)
+        .execute(&mut *tx)
         .await?;
+    tx.commit().await?;
     let dest = book_dir(&state.data_dir, &row.owner_id, &row.id);
     let _ = tokio::fs::remove_dir_all(dest).await;
     Ok(axum::http::StatusCode::NO_CONTENT)

@@ -482,6 +482,26 @@ async fn ask(world: &World, work: &str) -> Value {
     body
 }
 
+async fn bring_in(world: &World, work: &str) -> String {
+    world.prowlarr.lock().await.key_ok = true;
+    let created = ask(world, work).await;
+    let id = created["id"].as_str().unwrap().to_string();
+    let now = created["createdAt"].as_i64().unwrap();
+    worker::tick_at(&world.state, now).await.unwrap();
+    let nzo = world.sab.lock().await.adds[0].nzo.clone();
+    finish_job(world, &nzo, &format!("/data/mewo-{id}")).await;
+    write_epub(
+        &world.downloads.path().join(format!("mewo-{id}")),
+        "Dune.epub",
+        &common::epub(),
+    );
+    worker::tick_at(&world.state, now + POLL * 2).await.unwrap();
+    let row = stored(&world.state.pool, &id).await;
+    assert_eq!(row.state, "imported");
+    assert_eq!(row.book_id.as_deref(), Some(id.as_str()));
+    id
+}
+
 fn write_epub(dir: &Path, name: &str, bytes: &[u8]) {
     std::fs::create_dir_all(dir).unwrap();
     std::fs::write(dir.join(name), bytes).unwrap();
@@ -1018,6 +1038,139 @@ async fn one_active_per_work_and_cap() {
     .await;
     assert_eq!(status, StatusCode::CONFLICT, "{body}");
     assert_eq!(body["error"], "You have 5 requests in progress.");
+}
+
+#[tokio::test]
+async fn retry_counts_toward_the_active_cap() {
+    let world = world().await;
+    let mut canceled = String::new();
+    for index in 1..=5 {
+        let created = ask(&world, &format!("/works/OL{index}W")).await;
+        if index == 1 {
+            canceled = created["id"].as_str().unwrap().to_string();
+        }
+    }
+    let (status, body) = empty_req(
+        &world.app,
+        "DELETE",
+        &format!("/v1/requests/{canceled}"),
+        Some(&world.token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+    let (status, body) = json_req(
+        &world.app,
+        "POST",
+        "/v1/requests",
+        Some(&world.token),
+        json!({
+            "workKey": "/works/OL6W",
+            "title": "Dune",
+            "author": "Frank Herbert"
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+
+    let (status, body) = empty_req(
+        &world.app,
+        "POST",
+        &format!("/v1/requests/{canceled}/retry"),
+        Some(&world.token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_eq!(body["error"], "You have 5 requests in progress.");
+    assert_eq!(stored(&world.state.pool, &canceled).await.state, "canceled");
+
+    let admin = register(&world.app, "ada", "password1").await;
+    grant(&world.state.pool, "ada").await;
+    let (status, body) = empty_req(
+        &world.app,
+        "POST",
+        &format!("/v1/requests/{canceled}/retry"),
+        Some(&admin),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_eq!(body["error"], "You have 5 requests in progress.");
+    assert_eq!(stored(&world.state.pool, &canceled).await.state, "canceled");
+    let active: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM book_requests
+         WHERE user_id = ? AND state IN ('requested', 'downloading')",
+    )
+    .bind(&world.user_id)
+    .fetch_one(&world.state.pool)
+    .await
+    .unwrap();
+    assert_eq!(active, 5);
+}
+
+#[tokio::test]
+async fn deleting_an_imported_book_lets_you_request_it_again() {
+    let world = world().await;
+    let id = bring_in(&world, "/works/OL893415W").await;
+    let (status, body) = empty_req(
+        &world.app,
+        "DELETE",
+        &format!("/v1/books/{id}"),
+        Some(&world.token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+    let row = stored(&world.state.pool, &id).await;
+    assert_eq!(row.state, "canceled");
+    assert!(row.book_id.is_none());
+    let books: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM books")
+        .fetch_one(&world.state.pool)
+        .await
+        .unwrap();
+    assert_eq!(books, 0);
+
+    let (status, page) = empty_req(
+        &world.app,
+        "GET",
+        "/v1/catalog/search?q=dune&page=1",
+        Some(&world.token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{page}");
+    assert_eq!(page["items"][0]["request"]["state"], "canceled");
+    assert!(page["items"][0]["request"]["bookId"].is_null());
+
+    let (status, body) = empty_req(
+        &world.app,
+        "POST",
+        &format!("/v1/requests/{id}/retry"),
+        Some(&world.token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["state"], "requested");
+    let (status, body) = empty_req(
+        &world.app,
+        "DELETE",
+        &format!("/v1/requests/{id}"),
+        Some(&world.token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+
+    let (status, body) = json_req(
+        &world.app,
+        "POST",
+        "/v1/requests",
+        Some(&world.token),
+        json!({
+            "workKey": "/works/OL893415W",
+            "title": "Dune",
+            "author": "Frank Herbert"
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    assert_ne!(body["id"], id);
+    assert_eq!(stored(&world.state.pool, &id).await.state, "canceled");
 }
 
 #[tokio::test]
