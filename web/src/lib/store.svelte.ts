@@ -139,14 +139,17 @@ class HostedStore {
     writeStored('mewo.session', session);
   }
 
-  async loadMe(): Promise<void> {
+  async loadMe(): Promise<boolean> {
     const token = this.session?.token;
-    if (!token) return;
+    if (!token) return false;
     try {
       const me = await this.api.me();
-      if (this.session?.token === token) this.me = me;
+      if (this.session?.token !== token) return false;
+      this.me = me;
+      return true;
     } catch {
       if (this.session?.token === token) this.me = null;
+      return false;
     }
   }
 

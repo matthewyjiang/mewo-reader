@@ -96,7 +96,9 @@
   function ensureMe(token: string): void {
     if (meToken === token) return;
     meToken = token;
-    void store.loadMe();
+    void store.loadMe().then((ok) => {
+      if (!ok && meToken === token) meToken = '';
+    });
   }
 
   function refreshShelf(): void {

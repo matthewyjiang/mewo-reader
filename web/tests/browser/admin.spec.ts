@@ -11,6 +11,7 @@ const info = {
 
 function freshState() {
   return {
+    meFails: 0,
     settings: { allowSignup: true, maxEpubBytes: 64 * 1024 * 1024 },
     ada: {
       username: 'ada',
@@ -31,7 +32,12 @@ function freshState() {
 
 async function install(
   page: Page,
-  options: { admin?: boolean; theme?: 'x_light' | 'x_lights_out'; signupError?: string } = {},
+  options: {
+    admin?: boolean;
+    theme?: 'x_light' | 'x_lights_out';
+    signupError?: string;
+    meFails?: number;
+  } = {},
 ) {
   const admin = options.admin ?? true;
   const theme = options.theme ?? 'x_light';
@@ -42,6 +48,7 @@ async function install(
     }));
   }, theme);
   const state = freshState();
+  state.meFails = options.meFails ?? 0;
   await page.route('**/v1/**', (route) => answer(route, admin, options.signupError, state));
 }
 
@@ -59,7 +66,13 @@ async function answer(
     contentType: 'application/json',
     body: JSON.stringify(body),
   });
-  if (path === '/v1/me') return json({ username: 'ada', isAdmin: admin });
+  if (path === '/v1/me') {
+    if (state.meFails > 0) {
+      state.meFails -= 1;
+      return json({ error: 'unavailable' }, 500);
+    }
+    return json({ username: 'ada', isAdmin: admin });
+  }
   if (path === '/v1/library') return json({ books: [] });
   if (path === '/v1/feed') return json({ items: [], nextCursor: null });
   if (!admin && path.startsWith('/v1/admin/')) {
@@ -138,6 +151,23 @@ test('an out-of-range EPUB size is rejected before the request', async ({ page }
   await expect(page.getByRole('status')).toContainText('maxEpubBytes must be 1 to 1024 MB.');
   await expect(input).toHaveValue('64');
   expect(patched).toBe(false);
+});
+
+test('a failed /v1/me is retried and the Server row appears', async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await install(page, { meFails: 1 });
+  const failed = page.waitForResponse((response) =>
+    response.url().includes('/v1/me') && response.status() === 500);
+  await page.goto('/settings');
+  await failed;
+  await expect(page.getByRole('button', { name: 'About' })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Server' })).toHaveCount(0);
+  const retried = page.waitForResponse((response) =>
+    response.url().includes('/v1/me') && response.status() === 200);
+  await page.getByRole('button', { name: 'About' }).click();
+  await retried;
+  await page.goBack();
+  await expect(page.getByRole('button', { name: 'Server' })).toBeVisible();
 });
 
 test('/v1/me loads once per token', async ({ page }) => {
