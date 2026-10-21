@@ -53,6 +53,42 @@ pub fn broken_ncx() -> Vec<u8> {
     build(false, 0, CHAPTER, Some("<ncx><navMap>"))
 }
 
+/// Chapter nav entries repeated against the same target, plus real subsections.
+///
+/// `intro.xhtml` lists "1. Introductory" and a nested "INTRODUCTORY" at the
+/// same href. `power.xhtml#divine-omnipotence` repeats the chapter heading.
+/// `nest.xhtml` keeps `#pain` and `#heaven` as different sections, and collapses
+/// the two labels that share `#pain`.
+#[allow(dead_code)] // used by src/epub.rs unit tests, not tests/api.rs
+pub fn repeated_chapters(epub3: bool) -> Vec<u8> {
+    let (toc_item, toc_path, toc) = if epub3 {
+        (
+            r#"<item id="toc" href="nav.xhtml" media-type="application/xhtml+xml" properties="nav"/>"#,
+            "OPS/nav.xhtml",
+            r#"<html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops"><body><nav epub:type="toc"><ol><li><a href="intro.xhtml">1. Introductory</a><ol><li><a href="intro.xhtml">INTRODUCTORY</a></li></ol></li><li><a href="power.xhtml">2. Divine Omnipotence</a><ol><li><a href="power.xhtml#divine-omnipotence">DIVINE OMNIPOTENCE</a></li></ol></li><li><a href="nest.xhtml">3. The Fall</a><ol><li><a href="nest.xhtml#pain">Human Pain</a></li><li><a href="nest.xhtml#pain">HUMAN PAIN</a></li><li><a href="nest.xhtml#heaven">Heaven</a></li></ol></li></ol></nav></body></html>"#,
+        )
+    } else {
+        (
+            r#"<item id="toc" href="toc.ncx" media-type="application/x-dtbncx+xml"/>"#,
+            "OPS/toc.ncx",
+            r#"<?xml version="1.0"?><!DOCTYPE ncx PUBLIC "-//NISO//DTD ncx 2005-1//EN" "http://www.daisy.org/z3986/2005/ncx-2005-1.dtd"><ncx xmlns="http://www.daisy.org/z3986/2005/ncx/"><navMap><navPoint id="intro"><navLabel><text>1. Introductory</text></navLabel><content src="intro.xhtml"/><navPoint id="intro-dup"><navLabel><text>INTRODUCTORY</text></navLabel><content src="intro.xhtml"/></navPoint></navPoint><navPoint id="power"><navLabel><text>2. Divine Omnipotence</text></navLabel><content src="power.xhtml"/><navPoint id="power-dup"><navLabel><text>DIVINE OMNIPOTENCE</text></navLabel><content src="power.xhtml#divine-omnipotence"/></navPoint></navPoint><navPoint id="fall"><navLabel><text>3. The Fall</text></navLabel><content src="nest.xhtml"/><navPoint id="pain"><navLabel><text>Human Pain</text></navLabel><content src="nest.xhtml#pain"/></navPoint><navPoint id="pain-dup"><navLabel><text>HUMAN PAIN</text></navLabel><content src="nest.xhtml#pain"/></navPoint><navPoint id="heaven"><navLabel><text>Heaven</text></navLabel><content src="nest.xhtml#heaven"/></navPoint></navPoint></navMap></ncx>"#,
+        )
+    };
+    let opf = format!(
+        r#"<package xmlns="http://www.idpf.org/2007/opf" xmlns:dc="http://purl.org/dc/elements/1.1/" version="{}"><metadata><dc:title>The Problem of Pain</dc:title><dc:creator>C. S. Lewis</dc:creator></metadata><manifest>{toc_item}<item id="intro" href="intro.xhtml" media-type="application/xhtml+xml"/><item id="power" href="power.xhtml" media-type="application/xhtml+xml"/><item id="nest" href="nest.xhtml" media-type="application/xhtml+xml"/></manifest><spine toc="toc"><itemref idref="intro"/><itemref idref="power"/><itemref idref="nest"/></spine></package>"#,
+        if epub3 { "3.0" } else { "2.0" }
+    );
+    zip_files(&[
+        ("mimetype", b"application/epub+zip"),
+        ("META-INF/container.xml", br#"<container xmlns="urn:oasis:names:tc:opendocument:xmlns:container" version="1.0"><rootfiles><rootfile full-path="OPS/package.opf" media-type="application/oebps-package+xml"/></rootfiles></container>"#),
+        ("OPS/package.opf", opf.as_bytes()),
+        (toc_path, toc.as_bytes()),
+        ("OPS/intro.xhtml", b"<html><body><p>1</p><h1>INTRODUCTORY</h1><p>The problem of pain.</p></body></html>"),
+        ("OPS/power.xhtml", b"<html><body><h1 id=\"divine-omnipotence\">DIVINE OMNIPOTENCE</h1><p>Omnipotence means power.</p></body></html>"),
+        ("OPS/nest.xhtml", b"<html><body><h1>The Fall</h1><p>Opening.</p><h2 id=\"pain\">HUMAN PAIN</h2><p>Pain text.</p><h2 id=\"heaven\">HEAVEN</h2><p>Heaven text.</p><h2>A Distinct Argument</h2><p>Argument text.</p></body></html>"),
+    ])
+}
+
 /// Both EPUB3 nav and EPUB2 NCX fixtures include publisher chrome, a duplicate
 /// nested TOC href, an HTML entity, metadata fallbacks and a PNG cover.
 pub fn book(epub3: bool, padding: usize) -> Vec<u8> {
