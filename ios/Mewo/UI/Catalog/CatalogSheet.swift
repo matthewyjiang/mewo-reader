@@ -1,7 +1,9 @@
 import SwiftUI
+import UIKit
 
 struct CatalogSheet: View {
     @Environment(\.mewo) private var mewo
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     @Bindable var model: CatalogSheetModel
     var onOpenBook: (String) -> Void
     @Environment(\.dismiss) private var dismiss
@@ -151,14 +153,18 @@ struct CatalogSheet: View {
                         Text(blurb)
                             .font(MewoFont.regular(17))
                             .foregroundStyle(mewo.ink)
+                            .lineSpacing(7)
                             .lineLimit(model.expanded ? nil : 6)
                             .frame(maxWidth: .infinity, alignment: .leading)
                             .background {
                                 GeometryReader { geo in
                                     Color.clear
-                                        .onAppear { model.noteBlurbWidth(geo.size.width) }
+                                        .onAppear { noteBlurb(geo.size.width) }
                                         .onChange(of: geo.size.width) { _, width in
-                                            model.noteBlurbWidth(width)
+                                            noteBlurb(width)
+                                        }
+                                        .onChange(of: dynamicTypeSize) { _, _ in
+                                            noteBlurb(geo.size.width)
                                         }
                                 }
                             }
@@ -197,6 +203,7 @@ struct CatalogSheet: View {
                         }
                         .foregroundStyle(mewo.accent)
                         .frame(maxWidth: .infinity, minHeight: 40, alignment: .leading)
+                        .contentShape(Rectangle())
                     }
                     .accessibilityIdentifier("catalog-open-library")
                 }
@@ -227,6 +234,7 @@ struct CatalogSheet: View {
         Text(line)
             .font(MewoFont.regular(17))
             .foregroundStyle(mewo.ink)
+            .lineSpacing(7)
             .accessibilityIdentifier("catalog-status")
     }
 
@@ -249,9 +257,10 @@ struct CatalogSheet: View {
                 .font(MewoFont.bold(15))
                 .foregroundStyle(mewo.onAccent)
                 .frame(maxWidth: .infinity, minHeight: 44)
+                .background(mewo.accent, in: Capsule())
+                .contentShape(Capsule())
         }
         .buttonStyle(.plain)
-        .background(mewo.accent, in: Capsule())
         .opacity(enabled ? 1 : 0.4)
         .disabled(!enabled)
         .accessibilityIdentifier(identifier)
@@ -263,11 +272,12 @@ struct CatalogSheet: View {
                 .font(MewoFont.bold(15))
                 .foregroundStyle(mewo.like)
                 .frame(maxWidth: .infinity, minHeight: 44)
+                .background {
+                    Capsule().strokeBorder(mewo.line, lineWidth: 1)
+                }
+                .contentShape(Capsule())
         }
         .buttonStyle(.plain)
-        .background {
-            Capsule().strokeBorder(mewo.line, lineWidth: 1)
-        }
         .opacity(enabled ? 1 : 0.4)
         .disabled(!enabled)
         .accessibilityIdentifier(identifier)
@@ -298,11 +308,34 @@ struct CatalogSheet: View {
             Text(title)
                 .font(MewoFont.regular(17))
                 .foregroundStyle(mewo.mute)
+                .lineSpacing(7)
                 .frame(width: 76, alignment: .leading)
             Text(value)
                 .font(MewoFont.regular(17))
                 .foregroundStyle(mewo.ink)
+                .lineSpacing(7)
                 .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
+    private func noteBlurb(_ width: CGFloat) {
+        model.noteBlurbLayout(width: width, contentSize: blurbContentSize(dynamicTypeSize))
+    }
+
+    private func blurbContentSize(_ size: DynamicTypeSize) -> UIContentSizeCategory {
+        switch size {
+        case .xSmall: return .extraSmall
+        case .small: return .small
+        case .medium: return .medium
+        case .large: return .large
+        case .xLarge: return .extraLarge
+        case .xxLarge: return .extraExtraLarge
+        case .xxxLarge: return .extraExtraExtraLarge
+        case .accessibility1: return .accessibilityMedium
+        case .accessibility2: return .accessibilityLarge
+        case .accessibility3: return .accessibilityExtraLarge
+        case .accessibility4: return .accessibilityExtraExtraLarge
+        case .accessibility5: return .accessibilityExtraExtraExtraLarge
         }
     }
 

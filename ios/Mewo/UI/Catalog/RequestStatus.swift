@@ -199,6 +199,14 @@ func badgeTone(_ label: String) -> BadgeTone {
     return .progress
 }
 
+/// "{author} · {year}", with either part left out when it is missing.
+func catalogMeta(author: String, year: Int?) -> String {
+    var parts: [String] = []
+    if !author.isEmpty { parts.append(author) }
+    if let year { parts.append(String(year)) }
+    return parts.joined(separator: " · ")
+}
+
 func catalogRowLabel(_ work: CatalogWork, _ request: BookRequest?) -> String {
     var parts = [work.title]
     if !work.author.isEmpty { parts.append(work.author) }
@@ -318,6 +326,11 @@ func sheetStatus(
     }
     if phase == .failed, let request {
         return .failed(line: request.error ?? "The download failed.", capNote: capNote)
+    }
+    // The viewer's own import wins over a copy someone else shared. The row
+    // checks the request first; the sheet uses the same order.
+    if phase == .imported, let owned = request?.bookId {
+        return .available(line: "On your shelf", bookId: owned)
     }
     // An import that never received a book, and nothing already on the server,
     // is not on the shelf. "Open book" would sit there disabled.

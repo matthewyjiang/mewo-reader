@@ -30,6 +30,7 @@ final class CatalogSheetModel: Identifiable {
     var notice: String?
     var expanded = false
     private var blurbWidth: CGFloat = 0
+    private var blurbContentSize: UIContentSizeCategory = .large
 
     @ObservationIgnored private var seed: BookRequest?
     @ObservationIgnored private var importedShelf = false
@@ -109,18 +110,33 @@ final class CatalogSheetModel: Identifiable {
     /// misses a short column and a wide one.
     var blurbOverflow: Bool {
         guard case .ready(let about) = self.about, let blurb = about.blurb else { return false }
-        return Self.blurbOverflow(text: blurb, width: blurbWidth)
+        return Self.blurbOverflow(text: blurb, width: blurbWidth, contentSize: blurbContentSize)
     }
 
-    func noteBlurbWidth(_ width: CGFloat) {
-        guard width > 0, blurbWidth != width else { return }
+    func noteBlurbLayout(width: CGFloat, contentSize: UIContentSizeCategory) {
+        guard width > 0 else { return }
+        guard blurbWidth != width || blurbContentSize != contentSize else { return }
         blurbWidth = width
+        blurbContentSize = contentSize
+    }
+
+    /// `MewoFont.regular(17)` is a body-relative custom font, so the measurement
+    /// has to grow with the same text style. A fixed 17pt font hides More once
+    /// Dynamic Type wraps the blurb past six lines.
+    static func blurbFont(contentSize: UIContentSizeCategory = .large) -> UIFont {
+        let base = UIFont(name: MewoFont.regular, size: 17) ?? .systemFont(ofSize: 17)
+        let traits = UITraitCollection(preferredContentSizeCategory: contentSize)
+        return UIFontMetrics(forTextStyle: .body).scaledFont(for: base, compatibleWith: traits)
     }
 
     /// Unclamped height against six lines of the same font at `width`.
-    static func blurbOverflow(text: String, width: CGFloat) -> Bool {
+    static func blurbOverflow(
+        text: String,
+        width: CGFloat,
+        contentSize: UIContentSizeCategory = .large
+    ) -> Bool {
         guard width > 0 else { return false }
-        let font = UIFont(name: MewoFont.regular, size: 17) ?? .systemFont(ofSize: 17)
+        let font = blurbFont(contentSize: contentSize)
         let full = (text as NSString).boundingRect(
             with: CGSize(width: width, height: .greatestFiniteMagnitude),
             options: [.usesLineFragmentOrigin, .usesFontLeading],

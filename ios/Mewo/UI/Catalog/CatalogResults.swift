@@ -183,6 +183,8 @@ struct CatalogResults: View {
                 Text("Try again")
                     .font(MewoFont.bold(15))
                     .foregroundStyle(mewo.accent)
+                    .frame(minHeight: 40)
+                    .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
             .accessibilityIdentifier("catalog-feed-retry")

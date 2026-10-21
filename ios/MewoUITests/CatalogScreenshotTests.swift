@@ -48,6 +48,11 @@ final class CatalogScreenshotTests: XCTestCase {
         reveal(app, "Parable of the Sower")
         XCTAssertTrue(app.staticTexts["Parable of the Sower"].exists)
         XCTAssertTrue(app.buttons["Request again"].exists)
+        frameBoth(app, "On server · @bea", "Parable of the Sower")
+        XCTAssertTrue(app.staticTexts["On server · @bea"].isHittable)
+        XCTAssertTrue(app.staticTexts["Parable of the Sower"].isHittable)
+        dismissKeyboard(app)
+        shot(app, "catalog-trending-bottom")
         scrollToHeading(app)
         dismissKeyboard(app)
         shot(app, "catalog-trending")
@@ -88,19 +93,23 @@ final class CatalogScreenshotTests: XCTestCase {
         closeSheet(app)
 
         openRow(app, "OL3W")
-        XCTAssertTrue(app.staticTexts["Downloading 42%"].waitForExistence(timeout: 8))
+        XCTAssertTrue(app.staticTexts["catalog-status"].waitForExistence(timeout: 8))
+        XCTAssertTrue(app.buttons["catalog-cancel"].waitForExistence(timeout: 8))
+        XCTAssertTrue(app.staticTexts["Downloading 42%"].exists)
         shot(app, "catalog-detail-downloading")
         closeSheet(app)
 
         openRow(app, "OL6W")
-        XCTAssertTrue(app.staticTexts["No release found."].waitForExistence(timeout: 8))
-        XCTAssertTrue(app.buttons["Retry"].exists)
+        XCTAssertTrue(app.staticTexts["catalog-status"].waitForExistence(timeout: 8))
+        XCTAssertTrue(app.buttons["catalog-retry"].waitForExistence(timeout: 8))
+        XCTAssertTrue(app.staticTexts["No release found."].exists)
         shot(app, "catalog-detail-failed")
         closeSheet(app)
 
         openRow(app, "OL4W")
-        XCTAssertTrue(app.staticTexts["On your shelf"].waitForExistence(timeout: 8))
-        XCTAssertTrue(app.buttons["Open book"].exists)
+        XCTAssertTrue(app.staticTexts["catalog-status"].waitForExistence(timeout: 8))
+        XCTAssertTrue(app.buttons["catalog-open"].waitForExistence(timeout: 8))
+        XCTAssertTrue(app.staticTexts["On your shelf"].exists)
         shot(app, "catalog-detail-on-shelf")
         closeSheet(app)
 
@@ -154,6 +163,22 @@ final class CatalogScreenshotTests: XCTestCase {
         for _ in 0..<8 {
             if element.exists { return }
             app.swipeUp()
+        }
+    }
+
+    /// Slow nudges until the shared badge and the canceled title are both on screen.
+    private func frameBoth(_ app: XCUIApplication, _ top: String, _ bottom: String) {
+        let upper = app.staticTexts[top]
+        let lower = app.staticTexts[bottom]
+        for _ in 0..<12 {
+            if upper.isHittable, lower.isHittable { return }
+            if lower.exists, upper.exists, !upper.isHittable {
+                app.swipeDown(velocity: .slow)
+            } else if lower.exists, !upper.exists {
+                app.swipeDown(velocity: .slow)
+            } else {
+                app.swipeUp(velocity: .slow)
+            }
         }
     }
 

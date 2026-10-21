@@ -1,3 +1,4 @@
+import UIKit
 import XCTest
 @testable import Mewo
 
@@ -219,6 +220,34 @@ final class CatalogCopyTests: XCTestCase {
         if case .available(let line, _) = available {
             XCTAssertFalse(line.contains("secret"))
         }
+        XCTAssertEqual(
+            sheetStatus(
+                phase: .imported,
+                request: bookRequest(state: "imported", bookId: "mine"),
+                detailRequest: nil,
+                copy: sharedCopy(),
+                bookId: "shared-book",
+                capNote: nil,
+                hasAcceptedEdition: true
+            ),
+            .available(line: "On your shelf", bookId: "mine")
+        )
+        XCTAssertEqual(
+            sheetStatus(
+                phase: .imported,
+                request: bookRequest(state: "imported"),
+                detailRequest: nil,
+                copy: sharedCopy(),
+                bookId: "shared-book",
+                capNote: nil,
+                hasAcceptedEdition: true
+            ),
+            .available(line: "On server, shared by @alice", bookId: "shared-book")
+        )
+        XCTAssertEqual(catalogMeta(author: "Frank Herbert", year: 1965), "Frank Herbert · 1965")
+        XCTAssertEqual(catalogMeta(author: "Frank Herbert", year: nil), "Frank Herbert")
+        XCTAssertEqual(catalogMeta(author: "", year: 1965), "1965")
+        XCTAssertEqual(catalogMeta(author: "", year: nil), "")
         XCTAssertEqual(
             sheetStatus(
                 phase: .imported,
@@ -534,6 +563,31 @@ final class CatalogModelTests: XCTestCase {
         let lines = (0..<8).map { _ in "line" }.joined(separator: "\n")
         XCTAssertTrue(CatalogSheetModel.blurbOverflow(text: lines, width: 320))
         XCTAssertFalse(CatalogSheetModel.blurbOverflow(text: long, width: 0))
+    }
+
+    func testBlurbOverflowGrowsAtALargeContentSize() {
+        let width: CGFloat = 300
+        let word = "Arrakis "
+        var count = 1
+        var text = word
+        while count < 400, !CatalogSheetModel.blurbOverflow(text: text, width: width) {
+            count += 1
+            text += word
+        }
+        XCTAssertGreaterThan(count, 1)
+        XCTAssertLessThan(count, 400)
+        let fitted = String(repeating: word, count: count - 1)
+        XCTAssertFalse(CatalogSheetModel.blurbOverflow(text: fitted, width: width))
+        let base = CatalogSheetModel.blurbFont()
+        let grown = CatalogSheetModel.blurbFont(contentSize: .accessibilityExtraExtraExtraLarge)
+        XCTAssertGreaterThan(grown.pointSize, base.pointSize)
+        XCTAssertTrue(
+            CatalogSheetModel.blurbOverflow(
+                text: fitted,
+                width: width,
+                contentSize: .accessibilityExtraExtraExtraLarge
+            )
+        )
     }
 
     func testRowRequestWritesTheOverlayAndImportsOnce() async {

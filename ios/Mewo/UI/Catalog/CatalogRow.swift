@@ -52,6 +52,7 @@ struct CatalogRow: View {
                         .frame(width: 32, height: 32)
                         .overlay(Circle().strokeBorder(mewo.accent, lineWidth: 1.5))
                         .frame(width: 44, height: 44)
+                        .contentShape(Circle())
                 }
                 .buttonStyle(.plain)
                 .accessibilityLabel(rowActionLabel(action, work, request))
@@ -64,8 +65,7 @@ struct CatalogRow: View {
     }
 
     private var meta: String {
-        if let year = work.year { return "\(work.author) · \(year)" }
-        return work.author
+        catalogMeta(author: work.author, year: work.year)
     }
 
     private var dot: Color {
