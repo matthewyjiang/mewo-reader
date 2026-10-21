@@ -215,6 +215,25 @@ describe('SearchModel', { concurrency: false }, () => {
     assert.equal(timers.length, 0);
   });
 
+  test('clearing the box does not keep another query under the browse heading', async () => {
+    const { model, fire, settle, fail, replace } = harness('clear-hits', 'books');
+    model.setQuery('dune');
+    fire();
+    await settle(books);
+    model.setQuery('');
+    assert.equal(model.state.phase.status, 'loading');
+    assert.equal(model.state.phase.previous, undefined);
+    replace();
+    fire(0);
+    await fail(new Error('offline'));
+    assert.equal(model.state.phase.status, 'failed');
+    assert.equal(model.state.phase.previous, undefined);
+    replace();
+    model.retry();
+    await settle({ type: 'books', items: [{ id: 'pop', title: 'Popular' }], nextCursor: null });
+    assert.equal(model.state.phase.page.items[0].id, 'pop');
+  });
+
   test('clearing the query shows the browse memo immediately', async () => {
     const { model, fire, settle, timers } = harness('clear');
     fire(0);

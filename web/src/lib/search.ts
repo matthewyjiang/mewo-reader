@@ -213,7 +213,8 @@ export class SearchModel {
       return;
     }
     const previous = visiblePage(this.state);
-    const kept = previous?.type === this.state.kind ? previous : undefined;
+    // Browse has its own heading. Another query's hits must not sit under it.
+    const kept = trimmed && previous?.type === this.state.kind ? previous : undefined;
     this.update({ ...this.state, query, phase: { status: 'loading', previous: kept } });
     this.arm(null);
   }
