@@ -32,6 +32,8 @@ struct TocEntry {
     path: String,
     fragment: String,
     title: String,
+    /// Other labels for this same target that name a different chapter.
+    others: Vec<String>,
 }
 
 /// Feed assembly from Android's FeedExtractor.kt / FeedStart.kt.
@@ -49,6 +51,7 @@ pub(crate) fn assemble(elements: Vec<TextElement>, toc: Vec<(String, String)>) -
     let entries = collapse_toc(toc);
     let mut file_order = Vec::new();
     let mut file_title: HashMap<String, String> = HashMap::new();
+    let mut file_others: HashMap<String, Vec<String>> = HashMap::new();
     let mut sections: HashMap<(String, String), String> = HashMap::new();
     let mut seen_path = HashSet::new();
     for entry in &entries {
@@ -69,6 +72,7 @@ pub(crate) fn assemble(elements: Vec<TextElement>, toc: Vec<(String, String)>) -
             .find(|index| entries[*index].fragment.is_empty())
             .unwrap_or(indexes[0]);
         file_title.insert(path.clone(), entries[chosen].title.clone());
+        file_others.insert(path.clone(), entries[chosen].others.clone());
         for index in indexes {
             if index == chosen {
                 continue;
@@ -187,11 +191,22 @@ pub(crate) fn assemble(elements: Vec<TextElement>, toc: Vec<(String, String)>) -
             }
         }
         if toc_start {
-            // The element that opens the file is the contents heading only
-            // when it names that chapter. Otherwise it is body, including an
-            // h1 that is a note rather than the chapter title.
+            // The opening block is the contents heading when it names that
+            // chapter. A heading that names another label for this same target
+            // is that chapter. Anything else, including a translator's note,
+            // is body.
             if !same_heading(text, &file_title[&key]) {
-                add(&mut posts, PostKind::Body, text, &chapter);
+                let sibling = element.heading.then(|| {
+                    file_others
+                        .get(&key)
+                        .and_then(|labels| labels.iter().find(|label| same_heading(label, text)))
+                });
+                if let Some(Some(label)) = sibling {
+                    chapter = prefer(label, text).to_owned();
+                    add(&mut posts, PostKind::Heading, &chapter, &chapter);
+                } else {
+                    add(&mut posts, PostKind::Body, text, &chapter);
+                }
             }
             continue;
         }
@@ -225,6 +240,12 @@ fn collapse_toc(toc: Vec<(String, String)>) -> Vec<TocEntry> {
             // one chapter. "1. Introductory" and "INTRODUCTORY" are.
             if same_heading(&entries[*slot].title, title) {
                 entries[*slot].title = prefer(&entries[*slot].title, title).to_owned();
+            } else if !entries[*slot]
+                .others
+                .iter()
+                .any(|other| same_heading(other, title))
+            {
+                entries[*slot].others.push(title.to_owned());
             }
         } else {
             index.insert(key.clone(), entries.len());
@@ -232,6 +253,7 @@ fn collapse_toc(toc: Vec<(String, String)>) -> Vec<TocEntry> {
                 path: key.0,
                 fragment: key.1,
                 title: title.to_owned(),
+                others: Vec::new(),
             });
         }
     }
@@ -310,10 +332,33 @@ fn same_heading(text: &str, title: &str) -> bool {
     {
         return true;
     }
+    // "Part I" and "Chapter I" both reduce to "i" once the section word is
+    // removed. They are different chapters, so do not compare them further.
+    let body_word = section_word(&body);
+    let title_word = section_word(&title);
+    if body_word.is_some() && title_word.is_some() && body_word != title_word {
+        return false;
+    }
     // "1. Introductory" and "INTRODUCTORY" name one chapter.
     let body = strip_section_number(&body);
     let title = strip_section_number(&title);
     !body.is_empty() && body == title
+}
+
+fn section_word(value: &str) -> Option<&'static str> {
+    if value
+        .strip_prefix("chapter")
+        .is_some_and(|rest| !rest.is_empty())
+    {
+        Some("chapter")
+    } else if value
+        .strip_prefix("part")
+        .is_some_and(|rest| !rest.is_empty())
+    {
+        Some("part")
+    } else {
+        None
+    }
 }
 
 fn strip_section_number(value: &str) -> &str {

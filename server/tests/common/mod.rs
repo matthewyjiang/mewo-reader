@@ -119,6 +119,43 @@ pub fn part_and_chapter(epub3: bool) -> Vec<u8> {
     )
 }
 
+/// `Part I` / `Chapter I` and `Part 1` / `Chapter 1` share a file. The roman
+/// file has both headings; the numbered file opens on the chapter heading.
+#[allow(dead_code)] // used by src/epub.rs unit tests, not tests/api.rs
+pub fn numbered_part_and_chapter(epub3: bool) -> Vec<u8> {
+    let (toc_item, toc_path, toc) = if epub3 {
+        (
+            r#"<item id="toc" href="nav.xhtml" media-type="application/xhtml+xml" properties="nav"/>"#,
+            "OPS/nav.xhtml",
+            r#"<html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops"><body><nav epub:type="toc"><ol><li><a href="roman.xhtml">Part I</a><ol><li><a href="roman.xhtml">Chapter I</a></li></ol></li><li><a href="digit.xhtml">Part 1</a><ol><li><a href="digit.xhtml">Chapter 1</a></li></ol></li></ol></nav></body></html>"#,
+        )
+    } else {
+        (
+            r#"<item id="toc" href="toc.ncx" media-type="application/x-dtbncx+xml"/>"#,
+            "OPS/toc.ncx",
+            r#"<?xml version="1.0"?><!DOCTYPE ncx PUBLIC "-//NISO//DTD ncx 2005-1//EN" "http://www.daisy.org/z3986/2005/ncx-2005-1.dtd"><ncx xmlns="http://www.daisy.org/z3986/2005/ncx/"><navMap><navPoint id="roman"><navLabel><text>Part I</text></navLabel><content src="roman.xhtml"/><navPoint id="roman-ch"><navLabel><text>Chapter I</text></navLabel><content src="roman.xhtml"/></navPoint></navPoint><navPoint id="digit"><navLabel><text>Part 1</text></navLabel><content src="digit.xhtml"/><navPoint id="digit-ch"><navLabel><text>Chapter 1</text></navLabel><content src="digit.xhtml"/></navPoint></navPoint></navMap></ncx>"#,
+        )
+    };
+    labeled_book(
+        epub3,
+        toc_item,
+        toc_path,
+        toc,
+        &[
+            (
+                "roman",
+                "roman.xhtml",
+                "<html><body><h1>Part I</h1><p>Between.</p><h2>Chapter I</h2></body></html>",
+            ),
+            (
+                "digit",
+                "digit.xhtml",
+                "<html><body><h1>Chapter 1</h1><p>Opens on the chapter.</p></body></html>",
+            ),
+        ],
+    )
+}
+
 /// Labels that share a target but do not name one chapter, a first heading
 /// that is not the contents entry, and a fragment that points at a paragraph.
 #[allow(dead_code)] // used by src/epub.rs unit tests, not tests/api.rs

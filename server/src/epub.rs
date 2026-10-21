@@ -714,6 +714,42 @@ mod tests {
     }
 
     #[test]
+    fn numbered_part_and_chapter_stay_separate() {
+        let headings = ["Part I", "Chapter I", "Part 1", "Chapter 1"];
+        for epub3 in [true, false] {
+            let book = parse(
+                Cursor::new(test_epub::numbered_part_and_chapter(epub3)),
+                1024,
+            )
+            .unwrap();
+            let got: Vec<_> = book
+                .posts
+                .iter()
+                .filter(|post| post.kind == PostKind::Heading)
+                .map(|post| post.text.as_str())
+                .collect();
+            assert_eq!(got, headings, "epub3={epub3}");
+            let between = book
+                .posts
+                .iter()
+                .find(|post| post.text == "Between.")
+                .unwrap();
+            assert_eq!(between.chapter, "Part I");
+            let opening = book
+                .posts
+                .iter()
+                .find(|post| post.text == "Opens on the chapter.")
+                .unwrap();
+            assert_eq!(opening.kind, PostKind::Body);
+            assert_eq!(opening.chapter, "Chapter 1");
+            assert!(book
+                .posts
+                .iter()
+                .all(|post| post.kind == PostKind::Heading || post.text != "Chapter 1"));
+        }
+    }
+
+    #[test]
     fn unrelated_labels_keep_the_contents_title() {
         let headings = [
             "Part I",
