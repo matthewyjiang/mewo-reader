@@ -1,7 +1,9 @@
 <script lang="ts">
-  let { title, src = null }: {
+  let { title, src = null, width = 40, height = 60 }: {
     title: string;
     src?: string | null;
+    width?: number;
+    height?: number;
   } = $props();
 
   let failed = $state(false);
@@ -10,7 +12,7 @@
   $effect(() => { src; failed = false; });
 </script>
 
-<span class="book-cover" aria-hidden="true">
+<span class="book-cover" style:width="{width}px" style:height="{height}px" aria-hidden="true">
   {#if src && !failed}
     <img {src} alt="" loading="lazy" onerror={() => failed = true} />
   {:else}

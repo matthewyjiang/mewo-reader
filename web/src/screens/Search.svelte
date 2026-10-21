@@ -1,25 +1,29 @@
 <script lang="ts">
-  import { onMount, untrack } from 'svelte';
+  import { onMount, tick, untrack } from 'svelte';
   import BookRow from '../components/BookRow.svelte';
-  import Icon from '../components/Icon.svelte';
+  import CatalogRow from '../components/CatalogRow.svelte';
+  import CatalogSheet from '../components/CatalogSheet.svelte';
   import Post from '../components/Post.svelte';
+  import SearchEmpty from '../components/SearchEmpty.svelte';
+  import SearchSection from '../components/SearchSection.svelte';
+  import SearchSkeleton from '../components/SearchSkeleton.svelte';
   import UnderlineTabs from '../components/UnderlineTabs.svelte';
   import Avatar from '../components/Avatar.svelte';
-  import BookCover from '../components/BookCover.svelte';
   import type { BookRequest, CatalogWork, SearchKind } from '../lib/models';
   import { message } from '../lib/store.svelte';
-  import { coverUrl, rowAction, stateLabel } from '../lib/requests';
+  import { rowAction } from '../lib/requests';
   import { readerUrl, router } from '../lib/router.svelte';
   import { restoreScroll } from '../lib/screen';
   import type { FeedScreenProps } from '../lib/screen';
-  import { SearchModel, showNoMatches, visiblePage } from '../lib/search';
+  import { emptyKind, isBrowse, SearchModel, sectionFor, visiblePage } from '../lib/search';
   import type { SearchState } from '../lib/search';
   import { readStored, writeStored } from '../lib/storage';
   import { store } from '../lib/store.svelte';
 
-  let { scroller, query, oncomment, onprofile }: FeedScreenProps & {
+  let { scroller, query, oncomment, onprofile, onadd }: FeedScreenProps & {
     query: string;
     onprofile: (username: string) => void;
+    onadd: () => void;
   } = $props();
 
   const saved = readStored<string>('mewo.search.kind', 'accounts');
@@ -27,14 +31,19 @@
     ? saved
     : 'accounts';
   const entryKey = untrack(() => router.current.key);
+  const initialQuery = untrack(() => query);
   let searchState = $state<SearchState>({
-    query: '',
+    query: initialQuery,
     kind: initialKind,
     phase: { status: 'idle' },
     session: store.session?.token ?? null,
   });
-  let overrides = $state<Record<string, BookRequest>>({});
+  let overrides = $state<Record<string, BookRequest | null>>({});
+  let openWork = $state<CatalogWork | null>(null);
   let restoredCatalog = false;
+  const scrollByKind = new Map<SearchKind, number>();
+  let restoreKind = $state<SearchKind | null>(null);
+  let restoreY = 0;
   const model = new SearchModel(
     async (request) => {
       if (request.kind !== 'catalog') {
@@ -57,15 +66,23 @@
     (id) => clearTimeout(id),
     store.session?.token ?? null,
     initialKind,
+    () => Date.now(),
+    initialQuery,
   );
 
   let canRequest = $derived(store.me?.canRequest === true);
+  let isAdmin = $derived(store.me?.isAdmin === true);
   let tabs = $derived([
     { id: 'accounts', label: 'Accounts' },
     { id: 'books', label: 'Books' },
     { id: 'posts', label: 'Posts' },
     ...(canRequest ? [{ id: 'catalog', label: 'Catalog' }] : []),
   ]);
+  let page = $derived(visiblePage(searchState));
+  let browse = $derived(isBrowse(searchState));
+  let section = $derived(browse && searchState.session ? sectionFor(searchState.kind) : null);
+  let blank = $derived(emptyKind(searchState));
+  let showSkeleton = $derived(searchState.phase.status === 'loading' && !page);
 
   export function capture(): void {
     router.scroll.set(entryKey, scroller.scrollTop);
@@ -82,51 +99,79 @@
   $effect(() => {
     const text = query;
     untrack(() => {
-      if (text.trim() !== searchState.query.trim()) overrides = {};
+      if (text.trim() !== searchState.query.trim()) {
+        overrides = {};
+        openWork = null;
+      }
       model.setQuery(text);
     });
   });
 
   $effect(() => {
+    const me = store.me;
     const can = canRequest;
-    const remembered = saved;
     untrack(() => {
-      if (store.me == null || restoredCatalog) return;
+      if (me == null || restoredCatalog) return;
       restoredCatalog = true;
-      if (remembered === 'catalog' && can && searchState.kind !== 'catalog') model.setKind('catalog');
+      if (saved === 'catalog' && can && searchState.kind !== 'catalog') model.setKind('catalog');
       if (!can && searchState.kind === 'catalog') model.setKind('accounts');
     });
   });
 
-  function select(id: string): void {
+  $effect(() => {
+    const kind = searchState.kind;
+    const pending = restoreKind;
+    const status = searchState.phase.status;
+    const count = page?.type === kind ? page.items.length : -1;
+    if (pending !== kind) return;
+    void tick().then(() => {
+      if (restoreKind !== kind || searchState.kind !== kind) return;
+      scroller.scrollTop = restoreY;
+      if ((status === 'loaded' || status === 'failed') && count >= 0) restoreKind = null;
+    });
+  });
+
+  async function select(id: string): Promise<void> {
     if (id !== 'accounts' && id !== 'books' && id !== 'posts' && id !== 'catalog') return;
     if (id === 'catalog' && !canRequest) return;
+    if (id === searchState.kind) return;
+    scrollByKind.set(searchState.kind, scroller.scrollTop);
     writeStored('mewo.search.kind', id);
-    overrides = {};
+    openWork = null;
     model.setKind(id);
+    restoreKind = id;
+    restoreY = scrollByKind.get(id) ?? 0;
+    await tick();
+    if (searchState.kind === id) scroller.scrollTop = restoreY;
   }
 
   function shown(work: CatalogWork): BookRequest | null {
-    return overrides[work.workKey] ?? work.request;
+    if (Object.hasOwn(overrides, work.workKey)) return overrides[work.workKey];
+    return work.request;
+  }
+
+  function onRequest(workKey: string, next: BookRequest | null): void {
+    overrides[workKey] = next;
+    model.noteRequest(workKey, next);
   }
 
   async function act(work: CatalogWork): Promise<void> {
     const current = shown(work);
-    const action = rowAction(current);
+    const action = rowAction(current, work.onServer);
     try {
       if (action === 'request') {
-        overrides[work.workKey] = await store.api.requestBook(work);
+        onRequest(work.workKey, await store.api.requestBook(work));
       } else if (action === 'retry' && current) {
-        overrides[work.workKey] = await store.api.retryRequest(current.id);
-      } else if (action === 'open' && current?.bookId) {
-        router.go(readerUrl(current.bookId));
+        onRequest(work.workKey, await store.api.retryRequest(current.id));
+      } else if (action === 'open') {
+        const id = current?.bookId || work.onServer?.bookId;
+        if (id) router.go(readerUrl(id));
       }
     } catch (error) {
       store.notice = message(error);
     }
   }
 
-  let page = $derived(visiblePage(searchState));
   let socialIds = $derived(page?.type === 'posts' ? [...new Set(page.items.map((hit) => hit.book.id))] : []);
   let socialKey = $derived(JSON.stringify(socialIds));
   $effect(() => {
@@ -145,23 +190,23 @@
   }
 </script>
 
-<UnderlineTabs {tabs} selected={searchState.kind} fixed onselect={select} />
+<UnderlineTabs {tabs} selected={searchState.kind} fixed onselect={(id) => { void select(id); }} />
 
-{#if searchState.phase.status === 'loading'}
-  <div class="status-row" role="status">
-    <span class="spinner"></span>
-    <span class="sr-only">Searching…</span>
-  </div>
-{/if}
 {#if searchState.phase.status === 'failed'}
   <div class="status-row">
     <span class="error" role="alert">{searchState.phase.error}</span>
-    <button class="text-button" onclick={() => model.retry()}>Try again</button>
+    <button class="text-button" type="button" onclick={() => model.retry()}>Try again</button>
   </div>
+{/if}
+{#if section}
+  <SearchSection title={section.title} />
+{/if}
+{#if showSkeleton}
+  <SearchSkeleton kind={searchState.kind} />
 {/if}
 {#if page?.type === 'accounts'}
   {#each page.items as account (account.username)}
-    <button class="account-row" onclick={() => onprofile(account.username)}>
+    <button class="account-row" type="button" onclick={() => onprofile(account.username)}>
       <Avatar name={account.username} size={40} />
       <span class="account-names">
         <strong>{account.username}</strong>
@@ -175,32 +220,12 @@
   {/each}
 {:else if page?.type === 'catalog'}
   {#each page.items as work (work.workKey)}
-    {@const current = shown(work)}
-    {@const action = rowAction(current)}
-    <div class="book-row">
-      <div class="book-link">
-        <BookCover title={work.title} src={coverUrl(work.coverId)} />
-        <div class="post-column">
-          <div class="post-meta">
-            <strong class="truncate">{work.title}</strong>
-          </div>
-          <p class="meta">{work.author}{work.year != null ? ` · ${work.year}` : ''}</p>
-        </div>
-      </div>
-      <div class="book-actions">
-        <button
-          class="icon-button"
-          aria-label={action === 'request' ? 'Request' : action === 'pending' && current ? stateLabel(current) : action === 'open' ? 'On your shelf' : 'Retry'}
-          disabled={action === 'pending'}
-          onclick={() => { void act(work); }}
-        >
-          <Icon
-            name={action === 'request' ? 'plus' : action === 'pending' ? 'clock' : action === 'open' ? 'check' : 'retry'}
-            size={18}
-          />
-        </button>
-      </div>
-    </div>
+    <CatalogRow
+      {work}
+      request={shown(work)}
+      onopen={() => openWork = work}
+      onact={() => { void act(work); }}
+    />
   {/each}
 {:else if page?.type === 'posts'}
   {#each page.items as hit (`${hit.book.id}:${hit.post.id}`)}
@@ -221,56 +246,23 @@
 {#if searchState.phase.status === 'loaded' && searchState.phase.page.nextCursor && !searchState.phase.more}
   <div use:sentinel></div>
 {/if}
-{#if showNoMatches(searchState)}
-  <div class="empty-state">
-    <h2>No matches</h2>
-  </div>
+{#if blank !== 'none'}
+  <SearchEmpty
+    kind={searchState.kind}
+    mode={blank}
+    query={searchState.query}
+    {canRequest}
+    {isAdmin}
+    onkind={(id) => { void select(id); }}
+    {onadd}
+  />
 {/if}
-
-<style>
-  .book-row {
-    display: flex;
-    align-items: flex-start;
-    border-bottom: .6px solid var(--line);
-    padding-right: 12px;
-  }
-
-  .book-row:hover {
-    background: var(--hover);
-  }
-
-  .book-link {
-    flex: 1;
-    min-width: 0;
-    display: flex;
-    gap: 12px;
-    padding: 12px 4px 16px 16px;
-  }
-
-  .book-link p {
-    margin-top: 3px;
-    font-size: .9375rem;
-    line-height: 1.33;
-  }
-
-  .book-row .post-meta {
-    height: 21px;
-  }
-
-  .book-actions {
-    display: flex;
-    align-items: center;
-    flex: 0 0 auto;
-    margin-top: 12px;
-    height: 21px;
-    min-height: 0;
-  }
-
-  .book-actions > .icon-button {
-    width: 40px;
-    height: 40px;
-    padding: 0;
-    line-height: 0;
-    color: var(--mute);
-  }
-</style>
+{#if openWork}
+  {@const work = openWork}
+  <CatalogSheet
+    {work}
+    request={shown(work)}
+    onchange={(next) => onRequest(work.workKey, next)}
+    onclose={() => openWork = null}
+  />
+{/if}

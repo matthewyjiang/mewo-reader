@@ -2,7 +2,7 @@ import type {
   AdminUser, AuthResponse, BookRecord, BookRequest, CatalogWork, CommentIndex, FeedPost,
   HomeFeedPage, Me, PostComment, ProfileBooks, ProfilePostsPage, ProfileRecord,
   ProfileRepostsPage, RepostState, SearchKind, SearchPage, ServerInfo, ServerSettings,
-  SettingsPatch,
+  SettingsPatch, WorkDetail,
 } from './models';
 
 export class ApiError extends Error {
@@ -169,7 +169,9 @@ export class HostedClient {
     cursor?: string | null,
     signal?: AbortSignal,
   ): Promise<SearchPage> {
-    const params = new URLSearchParams({ q, type });
+    const params = new URLSearchParams({ type });
+    const trimmed = q.trim();
+    if (trimmed) params.set('q', trimmed);
     if (cursor) params.set('cursor', cursor);
     return this.json(`/search?${params}`, 'GET', undefined, signal);
   }
@@ -199,8 +201,14 @@ export class HostedClient {
     page: number,
     signal?: AbortSignal,
   ): Promise<{ items: CatalogWork[]; nextPage: number | null }> {
-    const params = new URLSearchParams({ q, page: String(page) });
+    const params = new URLSearchParams({ page: String(page) });
+    const trimmed = q.trim();
+    if (trimmed) params.set('q', trimmed);
     return this.json(`/catalog/search?${params}`, 'GET', undefined, signal);
+  }
+
+  catalogWork(olid: string, signal?: AbortSignal): Promise<WorkDetail> {
+    return this.json(`/catalog/works/${encodeURIComponent(olid)}`, 'GET', undefined, signal);
   }
 
   requestBook(work: CatalogWork): Promise<BookRequest> {

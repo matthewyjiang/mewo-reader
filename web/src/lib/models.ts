@@ -73,6 +73,18 @@ export interface BookRequest {
   requester: string;
   createdAt: number;
   updatedAt: number;
+  /** Leader username. Present only on the admin list. */
+  follows?: string;
+}
+
+/** A copy of a catalog work this account can open. */
+export interface ServerCopy {
+  bookId: string;
+  /** Empty when the viewer holds a private copy. */
+  ownerUsername: string;
+  mine: boolean;
+  shared: boolean;
+  held: boolean;
 }
 
 export interface CatalogWork {
@@ -82,6 +94,68 @@ export interface CatalogWork {
   year: number | null;
   coverId: number | null;
   request: BookRequest | null;
+  /** Null when this account cannot open a copy. Older payloads omit it. */
+  onServer?: ServerCopy | null;
+}
+
+export type RequestPhase =
+  | 'searching'
+  | 'waiting'
+  | 'no_match'
+  | 'held'
+  | 'retrying'
+  | 'downloading'
+  | 'importing'
+  | 'failed'
+  | 'canceled'
+  | 'imported';
+
+/** `GET /v1/catalog/works/{olid}` flattens the request under these fields. */
+export interface RequestDetail extends BookRequest {
+  attempts: number;
+  maxAttempts: number;
+  nextCheckAt: number | null;
+  releaseTitle: string | null;
+  releaseSize: number | null;
+  phase: RequestPhase;
+}
+
+export interface Rating {
+  average: number;
+  count: number;
+}
+
+export interface WorkInfo {
+  canonicalKey: string;
+  title: string;
+  subtitle: string | null;
+  authors: string[];
+  year: number | null;
+  coverId: number | null;
+  description: string | null;
+  subjects: string[];
+  awards: string[];
+  series: string[];
+  editionCount: number | null;
+  pagesMedian: number | null;
+  languages: string[];
+  hasAcceptedEdition: boolean;
+  rating: Rating | null;
+}
+
+export interface WorkStatus {
+  request: RequestDetail | null;
+  onServer: ServerCopy | null;
+  active: number;
+  cap: number;
+  otherRequests: BookRequest[];
+}
+
+export interface WorkDetail {
+  workKey: string;
+  info: WorkInfo | null;
+  infoError: string | null;
+  status: WorkStatus;
 }
 
 export type SearchPage =

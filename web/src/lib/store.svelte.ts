@@ -18,6 +18,7 @@ import {
   ShelfRefresh, writeShelf, clearShelf,
   type LibraryPhase,
 } from './shelf';
+import { clearSearchMemos } from './search';
 import { readStored, writeStored } from './storage';
 
 export const message = (error: unknown): string => error instanceof Error
@@ -107,6 +108,7 @@ class HostedStore {
     this.me = null;
     writeStored('mewo.session', null);
     this.refresh.reset();
+    clearSearchMemos();
     if (username) {
       clearShelf(server, username);
       clearFeed(server, username);
