@@ -53,6 +53,8 @@ export type SearchFetch = (request: SearchRequest) => Promise<SearchPage>;
 interface MemoEntry {
   page: SearchPage;
   at: number;
+  /** Responses concatenated into `page`. A quiet refresh is one response. */
+  pages: number;
 }
 
 const memos = new Map<string, Map<string, MemoEntry>>();
@@ -71,6 +73,11 @@ function dropMemo(token: string): void {
   const memo = memos.get(token);
   memo?.clear();
   memos.delete(token);
+}
+
+/** Sign-out drops every session's pages, including when Search is not mounted. */
+export function clearSearchMemos(): void {
+  memos.clear();
 }
 
 function memoKey(kind: SearchKind, query: string): string {
@@ -315,18 +322,25 @@ export class SearchModel {
     return searchMemo(session).get(memoKey(kind, query));
   }
 
+  /**
+   * A quiet refresh asks for the first page only, so a memo built from more
+   * than one response stays as it is. Catalog request status changes while
+   * the query does not, so a single catalog page refreshes whenever it is shown.
+   */
   private stale(entry: MemoEntry, query: string): boolean {
+    if (entry.pages > 1) return false;
+    if (entry.page.type === 'catalog') return true;
     if (query) return false;
     return this.now() - entry.at > BROWSE_REVALIDATE_MS;
   }
 
-  private remember(page: SearchPage): void {
+  private remember(page: SearchPage, pages: number): void {
     const session = this.state.session;
     if (!session) return;
     const key = memoKey(page.type, this.state.query.trim());
     const memo = searchMemo(session);
     if (memo.has(key)) memo.delete(key);
-    memo.set(key, { page, at: this.now() });
+    memo.set(key, { page, at: this.now(), pages });
     while (memo.size > MEMO_LIMIT) {
       const oldest = memo.keys().next().value;
       if (oldest === undefined) break;
@@ -341,9 +355,9 @@ export class SearchModel {
     const kind = this.state.kind;
     if (!session) return;
     this.pendingCursor = cursor;
-    const delay = query
-      ? (kind === 'catalog' ? CATALOG_DEBOUNCE_MS : SEARCH_DEBOUNCE_MS)
-      : 0;
+    const delay = quiet || !query
+      ? 0
+      : (kind === 'catalog' ? CATALOG_DEBOUNCE_MS : SEARCH_DEBOUNCE_MS);
     this.timer = this.schedule(() => {
       this.timer = undefined;
       if (generation !== this.generation) return;
@@ -369,7 +383,8 @@ export class SearchModel {
       if (page.type !== kind) return;
       const shown = visiblePage(this.state);
       const merged = cursor && shown && shown.type === page.type ? concatPages(shown, page) : page;
-      this.remember(merged);
+      const prior = cursor ? (this.recall(kind, query)?.pages ?? 1) : 0;
+      this.remember(merged, cursor ? prior + 1 : 1);
       this.update({ ...this.state, phase: { status: 'loaded', page: merged, more: false } });
     } catch (error) {
       if (abort.signal.aborted || !this.current(generation, session, query, kind)) return;

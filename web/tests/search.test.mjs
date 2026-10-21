@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { describe, test } from 'node:test';
 import {
-  BROWSE_REVALIDATE_MS, CATALOG_DEBOUNCE_MS, emptyKind, isBrowse, SearchModel,
+  BROWSE_REVALIDATE_MS, CATALOG_DEBOUNCE_MS, clearSearchMemos, emptyKind, isBrowse, SearchModel,
   SEARCH_DEBOUNCE_MS, searchMemo, trendingNote,
 } from '../src/lib/search.ts';
 
@@ -12,7 +12,7 @@ function deferred() {
   return { promise, resolve, reject };
 }
 
-function harness(session = 'token', kind = 'accounts', now = () => 0, keepMemo = false) {
+function harness(session = 'token', kind = 'accounts', now = () => 0, keepMemo = false, query = '') {
   if (session && !keepMemo) searchMemo(session).clear();
   const timers = [];
   const calls = [];
@@ -36,6 +36,7 @@ function harness(session = 'token', kind = 'accounts', now = () => 0, keepMemo =
     session,
     kind,
     now,
+    query,
   );
   return {
     model,
@@ -237,6 +238,15 @@ describe('SearchModel', { concurrency: false }, () => {
     assert.equal(second.timers.length, 0);
   });
 
+  test('clearSearchMemos drops pages kept after sign-out', async () => {
+    const { fire, settle } = harness('signed-out');
+    fire(0);
+    await settle(ada);
+    assert.equal(searchMemo('signed-out').size, 1);
+    clearSearchMemos();
+    assert.equal(searchMemo('signed-out').size, 0);
+  });
+
   test('a token change clears the memo', async () => {
     const { model, fire, settle } = harness('drop');
     fire(0);
@@ -276,6 +286,76 @@ describe('SearchModel', { concurrency: false }, () => {
     assert.equal(model.state.phase.page.items[0].request, requested);
     const second = harness('note', 'catalog', () => 0, true);
     assert.equal(second.model.state.phase.page.items[0].request.state, 'requested');
+  });
+
+  test('a multi-page catalog memo is not replaced by the first page', async () => {
+    let now = 0;
+    const { model, fire, settle, timers, calls, replace } = harness('trend', 'catalog', () => now);
+    const pageOf = (start) => ({
+      type: 'catalog',
+      items: Array.from({ length: 20 }, (_, index) => ({
+        workKey: `/works/OL${start + index}W`,
+        title: `Title ${start + index}`,
+      })),
+      nextCursor: String(start / 20 + 2),
+    });
+    fire(0);
+    await settle(pageOf(0));
+    replace();
+    model.loadMore();
+    await settle(pageOf(20));
+    assert.equal(model.state.phase.page.items.length, 40);
+    now = BROWSE_REVALIDATE_MS + 1;
+    model.setKind('books');
+    fire(0);
+    await settle({ type: 'books', items: [], nextCursor: null });
+    replace();
+    const before = calls.length;
+    model.setKind('catalog');
+    assert.equal(model.state.phase.status, 'loaded');
+    assert.equal(model.state.phase.page.items.length, 40);
+    assert.equal(timers.length, 0);
+    assert.equal(calls.length, before);
+  });
+
+  test('a catalog page refreshes request status when shown again', async () => {
+    const searching = {
+      workKey: '/works/OL893415W',
+      title: 'Dune',
+      request: { id: 'req-1', state: 'requested', progress: 0, error: null, bookId: null },
+      onServer: null,
+    };
+    const imported = {
+      ...searching,
+      request: { ...searching.request, state: 'imported', progress: 100, bookId: 'book-dune' },
+      onServer: { bookId: 'book-dune', ownerUsername: 'ada', mine: true, shared: false, held: false },
+    };
+    const first = harness('fresh-cat', 'catalog');
+    first.model.setQuery('dune');
+    first.fire();
+    await first.settle({ type: 'catalog', items: [searching], nextCursor: null });
+    const second = harness('fresh-cat', 'catalog', () => 0, true, 'dune');
+    assert.equal(second.model.state.phase.status, 'loaded');
+    assert.equal(second.model.state.phase.page.items[0].request.state, 'requested');
+    assert.equal(second.timers.length, 1);
+    second.fire(0);
+    await second.settle({ type: 'catalog', items: [imported], nextCursor: null });
+    assert.equal(second.model.state.phase.status, 'loaded');
+    assert.equal(second.model.state.phase.page.items[0].request.state, 'imported');
+    assert.equal(second.model.state.phase.page.items[0].onServer.mine, true);
+
+    const browse = harness('fresh-browse', 'catalog', () => 0);
+    browse.fire(0);
+    await browse.settle({ type: 'catalog', items: [searching], nextCursor: null });
+    browse.model.setKind('books');
+    browse.fire(0);
+    await browse.settle({ type: 'books', items: [], nextCursor: null });
+    browse.replace();
+    browse.model.setKind('catalog');
+    assert.equal(browse.model.state.phase.page.items[0].request.state, 'requested');
+    browse.fire(0);
+    await browse.settle({ type: 'catalog', items: [imported], nextCursor: null });
+    assert.equal(browse.model.state.phase.page.items[0].onServer.bookId, 'book-dune');
   });
 
   test('browse catalog load more asks for the next page', async () => {
