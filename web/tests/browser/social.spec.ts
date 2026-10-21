@@ -70,9 +70,11 @@ const comment = {
 };
 
 let reposted = false;
+const removed = new Set<string>();
 
 async function install(page: Page, theme: 'x_light' | 'x_lights_out' = 'x_light') {
   reposted = false;
+  removed.clear();
   await page.addInitScript((nextTheme) => {
     localStorage.setItem('mewo.session', JSON.stringify({ token: 'token', username: 'ada' }));
     localStorage.setItem('mewo.display', JSON.stringify({
@@ -91,7 +93,15 @@ async function answer(route: Route) {
     contentType: 'application/json',
     body: JSON.stringify(body),
   });
-  if (path === '/v1/library') return json({ books: [book, privateBook, heldBook, sharedBook, namelessBook] });
+  if (path === '/v1/library') {
+    const books = [book, privateBook, heldBook, sharedBook, namelessBook]
+      .filter((row) => !removed.has(row.id));
+    return json({ books });
+  }
+  if (method === 'DELETE' && path.startsWith('/v1/books/')) {
+    removed.add(path.slice('/v1/books/'.length));
+    return json({});
+  }
   if (path === '/v1/feed') {
     return json({
       items: [
@@ -256,6 +266,20 @@ test('home opens on Feed and Books keeps the shelf', async ({ page }) => {
   await expect(page.getByText(/Added by/)).toHaveCount(0);
   await expect(page.getByText('secret')).toHaveCount(0);
   await expect(page.getByText('Shared by @', { exact: true })).toHaveCount(0);
+  await expect(page.getByRole('button', { name: 'Remove Emma' })).toBeVisible();
+  const held = page.locator('.book-row', { hasText: 'Mansfield' });
+  await expect(held.getByRole('button', { name: 'Remove from library' })).toBeVisible();
+  await expect(held.getByRole('button', { name: 'Share' })).toHaveCount(0);
+  await expect(held.getByRole('button', { name: 'Make private' })).toHaveCount(0);
+  await held.getByRole('button', { name: 'Remove from library' }).click();
+  const sheet = page.getByRole('dialog', { name: 'Remove book' });
+  await expect(sheet).toContainText('Only removes it for you.');
+  const deleted = page.waitForRequest((request) =>
+    request.method() === 'DELETE' && request.url().includes('/v1/books/b3'));
+  await sheet.getByRole('button', { name: 'Remove', exact: true }).click();
+  await deleted;
+  await expect(page.getByText('Mansfield', { exact: true })).toHaveCount(0);
+  await expect(page.getByText('Emma', { exact: true })).toBeVisible();
 });
 
 test('the drawer Profile row opens your profile', async ({ page }) => {

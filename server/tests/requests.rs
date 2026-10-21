@@ -3165,7 +3165,9 @@ async fn migration_008_demotes_duplicate_active_requests() {
          ('m1-old', 'u1', '/works/OLM1', 'Dune', 'Frank', 'downloading', 'sab-1', 1, 1700000000001, 1),
          ('m1-new', 'u2', '/works/OLM1', 'Dune', 'Frank', 'requested', NULL, 1, 1700000000002, 1),
          ('m2-b', 'u1', '/works/OLM2', 'Dune', 'Frank', 'downloading', 'sab-2', 1, 1700000000005, 1),
-         ('m2-a', 'u2', '/works/OLM2', 'Dune', 'Frank', 'requested', NULL, 1, 1700000000005, 1)",
+         ('m2-a', 'u2', '/works/OLM2', 'Dune', 'Frank', 'requested', NULL, 1, 1700000000005, 1),
+         ('m3-old', 'u1', '/works/OLM3', 'Dune', 'Frank', 'requested', NULL, 1, 1700000000010, 1),
+         ('m3-new', 'u2', '/works/OLM3', 'Dune', 'Frank', 'downloading', 'sab-3', 1, 1700000000020, 1)",
     )
     .execute(&pool)
     .await
@@ -3187,13 +3189,20 @@ async fn migration_008_demotes_duplicate_active_requests() {
     let newer = row("m1-new", pool.clone()).await;
     assert_eq!(newer.0, "requested");
     assert_eq!(newer.1.as_deref(), Some("m1-old"));
-    let same_time_leader = row("m2-a", pool.clone()).await;
-    assert_eq!(same_time_leader.0, "requested");
-    assert!(same_time_leader.1.is_none());
-    let demoted = row("m2-b", pool.clone()).await;
-    assert_eq!(demoted.0, "requested");
-    assert_eq!(demoted.1.as_deref(), Some("m2-a"));
-    assert_eq!(demoted.2.as_deref(), Some("sab-2"));
+    let same_time = row("m2-a", pool.clone()).await;
+    assert_eq!(same_time.0, "requested");
+    assert_eq!(same_time.1.as_deref(), Some("m2-b"));
+    let downloading = row("m2-b", pool.clone()).await;
+    assert_eq!(downloading.0, "downloading");
+    assert!(downloading.1.is_none());
+    assert_eq!(downloading.2.as_deref(), Some("sab-2"));
+    let older_requested = row("m3-old", pool.clone()).await;
+    assert_eq!(older_requested.0, "requested");
+    assert_eq!(older_requested.1.as_deref(), Some("m3-new"));
+    let newer_download = row("m3-new", pool.clone()).await;
+    assert_eq!(newer_download.0, "downloading");
+    assert!(newer_download.1.is_none());
+    assert_eq!(newer_download.2.as_deref(), Some("sab-3"));
 
     let err = sqlx::query(
         "INSERT INTO book_requests
@@ -3210,4 +3219,319 @@ async fn migration_008_demotes_duplicate_active_requests() {
             .await
             .unwrap();
     assert!(files.is_none());
+}
+
+#[tokio::test]
+async fn canceled_follower_keeps_its_own_state() {
+    let world = world().await;
+    world.prowlarr.lock().await.key_ok = true;
+    let created = ask(&world, "/works/OL893414W").await;
+    let leader = created["id"].as_str().unwrap().to_string();
+    let now = created["createdAt"].as_i64().unwrap();
+    worker::tick_at(&world.state, now).await.unwrap();
+    world.sab.lock().await.jobs[0].percent = 40;
+    worker::tick_at(&world.state, now + POLL).await.unwrap();
+    assert_eq!(stored(&world.state.pool, &leader).await.progress, 40);
+
+    let ada = account(&world, "ada").await;
+    let (status, body) = post_work(&world, &ada.token, "/works/OL893414W").await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    let ada_id = body["id"].as_str().unwrap().to_string();
+
+    let (status, _) = empty_req(
+        &world.app,
+        "DELETE",
+        &format!("/v1/requests/{ada_id}"),
+        Some(&ada.token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    assert!(follows_of(&world.state.pool, &ada_id).await.is_none());
+
+    let (status, mine) = empty_req(&world.app, "GET", "/v1/requests", Some(&ada.token)).await;
+    assert_eq!(status, StatusCode::OK, "{mine}");
+    assert_eq!(mine["items"][0]["id"], ada_id);
+    assert_eq!(mine["items"][0]["state"], "canceled");
+    assert_eq!(mine["items"][0]["progress"], 0);
+    assert!(mine["items"][0]["bookId"].is_null());
+    assert!(mine["items"][0].get("follows").is_none(), "{mine}");
+
+    let (status, page) = empty_req(
+        &world.app,
+        "GET",
+        "/v1/catalog/search?q=dune&page=1",
+        Some(&ada.token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{page}");
+    let item = page["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["workKey"] == "/works/OL893414W")
+        .unwrap();
+    assert_eq!(item["request"]["id"], ada_id);
+    assert_eq!(item["request"]["state"], "canceled");
+    assert_eq!(item["request"]["progress"], 0);
+    assert!(item["request"]["bookId"].is_null());
+
+    let (status, all) =
+        empty_req(&world.app, "GET", "/v1/requests?all=1", Some(&world.token)).await;
+    assert_eq!(status, StatusCode::OK, "{all}");
+    let admin = all["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["id"] == ada_id)
+        .unwrap();
+    assert_eq!(admin["state"], "canceled");
+    assert_eq!(admin["progress"], 0);
+    assert!(admin["bookId"].is_null());
+    assert!(admin.get("follows").is_none(), "{admin}");
+
+    let nzo = world.sab.lock().await.adds[0].nzo.clone();
+    finish_job(&world, &nzo, &format!("/data/mewo-{leader}")).await;
+    write_epub(
+        &world.downloads.path().join(format!("mewo-{leader}")),
+        "Dune.epub",
+        &common::epub(),
+    );
+    worker::tick_at(&world.state, now + POLL * 2).await.unwrap();
+    assert_eq!(stored(&world.state.pool, &leader).await.state, "imported");
+    let ada_row = stored(&world.state.pool, &ada_id).await;
+    assert_eq!(ada_row.state, "canceled");
+    assert!(ada_row.book_id.is_none());
+
+    let (status, mine) = empty_req(&world.app, "GET", "/v1/requests", Some(&ada.token)).await;
+    assert_eq!(status, StatusCode::OK, "{mine}");
+    assert_eq!(mine["items"][0]["state"], "canceled");
+    assert!(mine["items"][0]["bookId"].is_null(), "{mine}");
+    let (status, page) = empty_req(
+        &world.app,
+        "GET",
+        "/v1/catalog/search?q=dune&page=1",
+        Some(&ada.token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{page}");
+    let item = page["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["workKey"] == "/works/OL893414W")
+        .unwrap();
+    assert_eq!(item["request"]["state"], "canceled");
+    assert!(item["request"]["bookId"].is_null(), "{item}");
+}
+
+#[tokio::test]
+async fn holder_search_does_not_match_a_private_owners_name() {
+    let world = world().await;
+    let book_id = bring_in(&world, "/works/OL893414W").await;
+    let ada = account(&world, "ada").await;
+    let (status, body) = post_work(&world, &ada.token, "/works/OL893414W").await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    assert_eq!(body["bookId"], book_id);
+
+    let (status, by_owner) = empty_req(
+        &world.app,
+        "GET",
+        "/v1/search?q=matt&type=books",
+        Some(&ada.token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{by_owner}");
+    assert!(
+        by_owner["items"].as_array().unwrap().is_empty(),
+        "{by_owner}"
+    );
+
+    let (status, by_title) = empty_req(
+        &world.app,
+        "GET",
+        "/v1/search?q=Dune&type=books",
+        Some(&ada.token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{by_title}");
+    assert_eq!(by_title["items"][0]["id"], book_id);
+
+    let (status, owner_hits) = empty_req(
+        &world.app,
+        "GET",
+        "/v1/search?q=matt&type=books",
+        Some(&world.token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{owner_hits}");
+    assert_eq!(owner_hits["items"][0]["id"], book_id);
+
+    let (status, shared) = json_req(
+        &world.app,
+        "PATCH",
+        &format!("/v1/books/{book_id}"),
+        Some(&world.token),
+        json!({ "shared": true }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{shared}");
+    let (status, named) = empty_req(
+        &world.app,
+        "GET",
+        "/v1/search?q=matt&type=books",
+        Some(&ada.token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{named}");
+    assert_eq!(named["items"][0]["id"], book_id);
+}
+
+#[tokio::test]
+async fn sweep_promotes_followers_of_an_inactive_leader() {
+    let world = world().await;
+    {
+        let mut prowl = world.prowlarr.lock().await;
+        prowl.key_ok = true;
+        let origin = prowl.origin.clone();
+        prowl.releases = two_releases(&origin);
+    }
+    let created = ask(&world, "/works/OL893414W").await;
+    let leader = created["id"].as_str().unwrap().to_string();
+    let now = created["createdAt"].as_i64().unwrap();
+    worker::tick_at(&world.state, now).await.unwrap();
+
+    let ada = account(&world, "ada").await;
+    let bea = account(&world, "bea").await;
+    let (status, body) = post_work(&world, &ada.token, "/works/OL893414W").await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    let ada_id = body["id"].as_str().unwrap().to_string();
+    let (status, body) = post_work(&world, &bea.token, "/works/OL893414W").await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    let bea_id = body["id"].as_str().unwrap().to_string();
+
+    // The residue of a cancel that read `leading` before a promotion committed:
+    // the new leader is canceled and the followers still point at it.
+    sqlx::query(
+        "UPDATE book_requests
+         SET state = 'canceled', download_id = NULL, follows = NULL, updated_at = ?
+         WHERE id = ?",
+    )
+    .bind(now)
+    .bind(&leader)
+    .execute(&world.state.pool)
+    .await
+    .unwrap();
+
+    worker::tick_at(&world.state, now + POLL).await.unwrap();
+    assert_eq!(stored(&world.state.pool, &leader).await.state, "canceled");
+    assert!(follows_of(&world.state.pool, &ada_id).await.is_none());
+    let promoted = stored(&world.state.pool, &ada_id).await;
+    assert_eq!(promoted.state, "downloading");
+    assert_eq!(promoted.attempts, 1);
+    assert_eq!(
+        follows_of(&world.state.pool, &bea_id).await.as_deref(),
+        Some(ada_id.as_str())
+    );
+    assert_eq!(stored(&world.state.pool, &bea_id).await.state, "requested");
+}
+
+#[tokio::test]
+async fn retry_of_an_old_row_conflicts_with_a_live_request() {
+    let world = world().await;
+    world.prowlarr.lock().await.key_ok = true;
+    let created = ask(&world, "/works/OL893414W").await;
+    let now = created["createdAt"].as_i64().unwrap();
+    worker::tick_at(&world.state, now).await.unwrap();
+
+    let ada = account(&world, "ada").await;
+    let (status, body) = post_work(&world, &ada.token, "/works/OL893414W").await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    let old = body["id"].as_str().unwrap().to_string();
+    let (status, _) = empty_req(
+        &world.app,
+        "DELETE",
+        &format!("/v1/requests/{old}"),
+        Some(&ada.token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+
+    let (status, body) = post_work(&world, &ada.token, "/works/OL893414W").await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    let live = body["id"].as_str().unwrap().to_string();
+
+    let (status, body) = empty_req(
+        &world.app,
+        "POST",
+        &format!("/v1/requests/{old}/retry"),
+        Some(&ada.token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_eq!(body["error"], "You already have a request for this book.");
+    assert_eq!(stored(&world.state.pool, &old).await.state, "canceled");
+    assert_eq!(stored(&world.state.pool, &live).await.state, "requested");
+    assert!(follows_of(&world.state.pool, &live).await.is_some());
+}
+
+#[tokio::test]
+async fn retry_reuse_does_not_import_a_second_row() {
+    let world = world().await;
+    world.prowlarr.lock().await.key_ok = true;
+    let created = ask(&world, "/works/OL893414W").await;
+    let leader = created["id"].as_str().unwrap().to_string();
+    let now = created["createdAt"].as_i64().unwrap();
+    worker::tick_at(&world.state, now).await.unwrap();
+
+    let ada = account(&world, "ada").await;
+    let (status, body) = post_work(&world, &ada.token, "/works/OL893414W").await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    let old = body["id"].as_str().unwrap().to_string();
+    let (status, _) = empty_req(
+        &world.app,
+        "DELETE",
+        &format!("/v1/requests/{old}"),
+        Some(&ada.token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+
+    let nzo = world.sab.lock().await.adds[0].nzo.clone();
+    finish_job(&world, &nzo, &format!("/data/mewo-{leader}")).await;
+    write_epub(
+        &world.downloads.path().join(format!("mewo-{leader}")),
+        "Dune.epub",
+        &common::epub(),
+    );
+    worker::tick_at(&world.state, now + POLL * 2).await.unwrap();
+    assert_eq!(stored(&world.state.pool, &leader).await.state, "imported");
+
+    let (status, body) = post_work(&world, &ada.token, "/works/OL893414W").await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    assert_eq!(body["state"], "imported");
+    let imported = body["id"].as_str().unwrap().to_string();
+    assert_ne!(imported, old);
+
+    let (status, body) = empty_req(
+        &world.app,
+        "POST",
+        &format!("/v1/requests/{old}/retry"),
+        Some(&ada.token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["id"], imported);
+    assert_eq!(body["state"], "imported");
+    assert_eq!(body["bookId"], leader);
+    assert_eq!(stored(&world.state.pool, &old).await.state, "canceled");
+    assert!(stored(&world.state.pool, &old).await.book_id.is_none());
+    let imported_rows: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM book_requests
+         WHERE user_id = ? AND work_key = '/works/OL893414W' AND state = 'imported'",
+    )
+    .bind(&ada.id)
+    .fetch_one(&world.state.pool)
+    .await
+    .unwrap();
+    assert_eq!(imported_rows, 1);
 }

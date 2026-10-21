@@ -104,11 +104,9 @@ struct RequestRow {
     progress: i64,
     error: Option<String>,
     book_id: Option<String>,
-    download_id: Option<String>,
     requester: String,
     created_at: i64,
     updated_at: i64,
-    follows: Option<String>,
     lead_state: Option<String>,
     lead_progress: Option<i64>,
     lead_error: Option<String>,
@@ -116,10 +114,11 @@ struct RequestRow {
 }
 
 impl RequestRow {
-    /// A follower's wire state, progress, and error are the leader's. `show_leader`
-    /// adds the leader's username for the admin list.
+    /// A waiting follower's wire state, progress, and error are the leader's.
+    /// A canceled or failed row keeps its own, even if `follows` is still set.
+    /// `show_leader` adds the leader's username for the admin list.
     fn into_wire(self, show_leader: bool) -> BookRequest {
-        let following = self.lead_state.is_some();
+        let following = self.state == "requested" && self.lead_state.is_some();
         BookRequest {
             id: self.id,
             work_key: self.work_key,
@@ -146,7 +145,7 @@ impl RequestRow {
             requester: self.requester,
             created_at: self.created_at,
             updated_at: self.updated_at,
-            follows: if show_leader {
+            follows: if show_leader && following {
                 self.lead_requester
             } else {
                 None
@@ -157,8 +156,8 @@ impl RequestRow {
 
 const REQUEST_COLUMNS: &str =
     "SELECT r.id, r.user_id, r.work_key, r.title, r.author, r.year, r.cover_id,
-        r.state, r.progress, r.error, r.book_id, r.download_id, u.username AS requester,
-        r.created_at, r.updated_at, r.follows AS follows,
+        r.state, r.progress, r.error, r.book_id, u.username AS requester,
+        r.created_at, r.updated_at,
         lead.state AS lead_state, lead.progress AS lead_progress, lead.error AS lead_error,
         lead_user.username AS lead_requester
      FROM book_requests r
@@ -248,18 +247,20 @@ async fn create_request(
     let mut tx = state.pool.begin_with("BEGIN IMMEDIATE").await?;
     let admitted = admit(
         &mut tx,
-        &authed.user_id,
         &asked,
         cached.as_deref(),
-        &title,
-        &author,
-        body.year,
-        body.cover_id,
+        Seed {
+            user_id: &authed.user_id,
+            title: &title,
+            author: &author,
+            year: body.year,
+            cover_id: body.cover_id,
+        },
     )
     .await?;
     tx.commit().await?;
     let (status, request) = match admitted {
-        Admitted::Existing(request) => (StatusCode::OK, request),
+        Admitted::Existing(request) => (StatusCode::OK, *request),
         Admitted::Fresh { id, wake } => {
             if wake {
                 state.worker.notify_one();
@@ -318,15 +319,31 @@ async fn cancel_request(
     if row.state == "imported" {
         return Err(ApiError::Conflict("That book is on your shelf.".into()));
     }
-    // A follower has no SABnzbd job of its own. A leader's job is deleted
-    // after the hand-off, so the unique index sees the leader leave first.
-    let leading =
-        row.follows.is_none() && matches!(row.state.as_str(), "requested" | "downloading");
     let now = now_ms();
     let mut tx = state.pool.begin_with("BEGIN IMMEDIATE").await?;
+    // A promotion can commit between the read above and this lock. The
+    // hand-off decision uses the row as it is now, and so does the job delete.
+    let fresh: Option<(Option<String>, String, Option<String>)> = sqlx::query_as(
+        "SELECT follows, state, download_id FROM book_requests WHERE id = ? AND user_id = ?",
+    )
+    .bind(&row.id)
+    .bind(&row.user_id)
+    .fetch_optional(&mut *tx)
+    .await?;
+    let Some((follows, state_now, download_id)) = fresh else {
+        return Err(ApiError::NotFound);
+    };
+    if state_now == "canceled" {
+        return Ok(StatusCode::NO_CONTENT);
+    }
+    if state_now == "imported" {
+        return Err(ApiError::Conflict("That book is on your shelf.".into()));
+    }
+    let leading = follows.is_none() && matches!(state_now.as_str(), "requested" | "downloading");
     let changed = sqlx::query(
         "UPDATE book_requests
-         SET state = 'canceled', error = NULL, download_id = NULL, updated_at = ?, next_check_at = ?
+         SET state = 'canceled', follows = NULL, error = NULL, download_id = NULL,
+             updated_at = ?, next_check_at = ?
          WHERE id = ? AND user_id = ? AND state IN ('requested', 'downloading', 'failed')",
     )
     .bind(now)
@@ -351,7 +368,7 @@ async fn cancel_request(
     }
     tx.commit().await?;
     if leading {
-        if let Some(nzo) = row.download_id {
+        if let Some(nzo) = download_id {
             delete_job(&state, &nzo).await;
         }
         state.worker.notify_one();
@@ -374,15 +391,20 @@ async fn retry_request(
     let cached = state.work_cache.cached_canonical(&row.work_key);
     let mut tx = state.pool.begin_with("BEGIN IMMEDIATE").await?;
     let work_key = resolve_key(&mut *tx, &row.work_key, cached.as_deref()).await?;
-    let wake = requeue(&mut tx, &row, &work_key).await?;
+    let outcome = requeue(&mut tx, &row, &work_key).await?;
     tx.commit().await?;
-    if wake {
-        state.worker.notify_one();
+    match outcome {
+        Requeued::Existing(existing) => Ok(Json(*existing)),
+        Requeued::Ready { wake } => {
+            if wake {
+                state.worker.notify_one();
+            }
+            let row = fetch(&state.pool, &row.id)
+                .await?
+                .ok_or(ApiError::NotFound)?;
+            Ok(Json(row.into_wire(false)))
+        }
     }
-    let row = fetch(&state.pool, &row.id)
-        .await?
-        .ok_or(ApiError::NotFound)?;
-    Ok(Json(row.into_wire(false)))
 }
 
 async fn owned_row(state: &AppState, authed: &Authed, id: &str) -> Result<RequestRow, ApiError> {
@@ -450,8 +472,16 @@ where
     Ok(())
 }
 
+struct Seed<'a> {
+    user_id: &'a str,
+    title: &'a str,
+    author: &'a str,
+    year: Option<i64>,
+    cover_id: Option<i64>,
+}
+
 enum Admitted {
-    Existing(BookRequest),
+    Existing(Box<BookRequest>),
     Fresh { id: String, wake: bool },
 }
 
@@ -459,54 +489,41 @@ enum Admitted {
 /// The caller's own active row is returned as it stands.
 async fn admit(
     tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
-    user_id: &str,
     asked: &str,
     cached: Option<&str>,
-    title: &str,
-    author: &str,
-    year: Option<i64>,
-    cover_id: Option<i64>,
+    seed: Seed<'_>,
 ) -> Result<Admitted, ApiError> {
     let work_key = resolve_key(&mut **tx, asked, cached).await?;
-    if let Some(existing) = active_for_work(&mut **tx, user_id, &work_key).await? {
-        return Ok(Admitted::Existing(existing));
+    if let Some(existing) = active_for_work(&mut **tx, seed.user_id, &work_key).await? {
+        return Ok(Admitted::Existing(Box::new(existing)));
     }
     if work_key != asked {
-        if let Some(existing) = active_for_work(&mut **tx, user_id, asked).await? {
-            return Ok(Admitted::Existing(existing));
+        if let Some(existing) = active_for_work(&mut **tx, seed.user_id, asked).await? {
+            return Ok(Admitted::Existing(Box::new(existing)));
         }
     }
     if let Some(book_id) = reusable_book(&mut **tx, &work_key).await? {
-        if let Some(existing) = own_imported(&mut **tx, user_id, &work_key, &book_id).await? {
-            return Ok(Admitted::Existing(existing));
+        if let Some(existing) = own_imported(&mut **tx, seed.user_id, &work_key, &book_id).await? {
+            return Ok(Admitted::Existing(Box::new(existing)));
         }
-        let id = insert_imported(
-            tx, user_id, &work_key, title, author, year, cover_id, &book_id,
-        )
-        .await?;
+        let id = insert_imported(tx, &seed, &work_key, &book_id).await?;
         return Ok(Admitted::Fresh { id, wake: false });
     }
     if let Some(leader) = leader_id(&mut **tx, &work_key).await? {
-        return follow(
-            tx, user_id, &work_key, title, author, year, cover_id, &leader,
-        )
-        .await;
+        return follow(tx, &seed, &work_key, &leader).await;
     }
-    ensure_under_cap(&mut **tx, user_id).await?;
-    match insert_leader(tx, user_id, &work_key, title, author, year, cover_id).await {
+    ensure_under_cap(&mut **tx, seed.user_id).await?;
+    match insert_leader(tx, &seed, &work_key).await {
         Ok(id) => Ok(Admitted::Fresh { id, wake: true }),
         Err(err) if leader_conflict(&err) => {
             let Some(leader) = leader_id(&mut **tx, &work_key).await? else {
                 return Err(err.into());
             };
-            follow(
-                tx, user_id, &work_key, title, author, year, cover_id, &leader,
-            )
-            .await
+            follow(tx, &seed, &work_key, &leader).await
         }
         Err(err) if user_conflict(&err) => {
-            if let Some(existing) = active_for_work(&mut **tx, user_id, &work_key).await? {
-                return Ok(Admitted::Existing(existing));
+            if let Some(existing) = active_for_work(&mut **tx, seed.user_id, &work_key).await? {
+                return Ok(Admitted::Existing(Box::new(existing)));
             }
             Err(ApiError::Conflict(
                 "You have 5 requests in progress.".into(),
@@ -607,12 +624,8 @@ where
 
 async fn insert_imported(
     tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
-    user_id: &str,
+    seed: &Seed<'_>,
     work_key: &str,
-    title: &str,
-    author: &str,
-    year: Option<i64>,
-    cover_id: Option<i64>,
     book_id: &str,
 ) -> Result<String, ApiError> {
     let id = Uuid::new_v4().to_string();
@@ -624,12 +637,12 @@ async fn insert_imported(
          VALUES (?, ?, ?, ?, ?, ?, ?, 'imported', 100, ?, ?, ?, ?)",
     )
     .bind(&id)
-    .bind(user_id)
+    .bind(seed.user_id)
     .bind(work_key)
-    .bind(title)
-    .bind(author)
-    .bind(year)
-    .bind(cover_id)
+    .bind(seed.title)
+    .bind(seed.author)
+    .bind(seed.year)
+    .bind(seed.cover_id)
     .bind(book_id)
     .bind(now)
     .bind(now)
@@ -641,19 +654,15 @@ async fn insert_imported(
 
 async fn follow(
     tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
-    user_id: &str,
+    seed: &Seed<'_>,
     work_key: &str,
-    title: &str,
-    author: &str,
-    year: Option<i64>,
-    cover_id: Option<i64>,
     leader: &str,
 ) -> Result<Admitted, ApiError> {
-    match insert_follower(tx, user_id, work_key, title, author, year, cover_id, leader).await {
+    match insert_follower(tx, seed, work_key, leader).await {
         Ok(id) => Ok(Admitted::Fresh { id, wake: false }),
         Err(err) if user_conflict(&err) => {
-            if let Some(existing) = active_for_work(&mut **tx, user_id, work_key).await? {
-                return Ok(Admitted::Existing(existing));
+            if let Some(existing) = active_for_work(&mut **tx, seed.user_id, work_key).await? {
+                return Ok(Admitted::Existing(Box::new(existing)));
             }
             Err(err.into())
         }
@@ -663,12 +672,8 @@ async fn follow(
 
 async fn insert_follower(
     tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
-    user_id: &str,
+    seed: &Seed<'_>,
     work_key: &str,
-    title: &str,
-    author: &str,
-    year: Option<i64>,
-    cover_id: Option<i64>,
     leader: &str,
 ) -> Result<String, sqlx::Error> {
     let id = Uuid::new_v4().to_string();
@@ -680,12 +685,12 @@ async fn insert_follower(
          VALUES (?, ?, ?, ?, ?, ?, ?, 'requested', ?, ?, ?, ?)",
     )
     .bind(&id)
-    .bind(user_id)
+    .bind(seed.user_id)
     .bind(work_key)
-    .bind(title)
-    .bind(author)
-    .bind(year)
-    .bind(cover_id)
+    .bind(seed.title)
+    .bind(seed.author)
+    .bind(seed.year)
+    .bind(seed.cover_id)
     .bind(leader)
     .bind(now)
     .bind(now)
@@ -697,12 +702,8 @@ async fn insert_follower(
 
 async fn insert_leader(
     tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
-    user_id: &str,
+    seed: &Seed<'_>,
     work_key: &str,
-    title: &str,
-    author: &str,
-    year: Option<i64>,
-    cover_id: Option<i64>,
 ) -> Result<String, sqlx::Error> {
     let id = Uuid::new_v4().to_string();
     let now = now_ms();
@@ -712,12 +713,12 @@ async fn insert_leader(
          VALUES (?, ?, ?, ?, ?, ?, ?, 'requested', ?, ?, ?)",
     )
     .bind(&id)
-    .bind(user_id)
+    .bind(seed.user_id)
     .bind(work_key)
-    .bind(title)
-    .bind(author)
-    .bind(year)
-    .bind(cover_id)
+    .bind(seed.title)
+    .bind(seed.author)
+    .bind(seed.year)
+    .bind(seed.cover_id)
     .bind(now)
     .bind(now)
     .bind(now)
@@ -726,15 +727,25 @@ async fn insert_leader(
     Ok(id)
 }
 
+enum Requeued {
+    Existing(Box<BookRequest>),
+    Ready { wake: bool },
+}
+
 /// Failed or canceled row becomes a reuse, a follower, or a leader.
-/// `true` when the worker should wake (this row is now the leader).
+/// `Ready { wake: true }` when the worker should wake (this row is now the leader).
+/// `Existing` is the caller's imported row, left in place so retry does not
+/// write a second one.
 async fn requeue(
     tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
     row: &RequestRow,
     work_key: &str,
-) -> Result<bool, ApiError> {
+) -> Result<Requeued, ApiError> {
     let now = now_ms();
     if let Some(book_id) = reusable_book(&mut **tx, work_key).await? {
+        if let Some(existing) = own_imported(&mut **tx, &row.user_id, work_key, &book_id).await? {
+            return Ok(Requeued::Existing(Box::new(existing)));
+        }
         let changed = sqlx::query(
             "UPDATE book_requests
              SET state = 'imported', book_id = ?, progress = 100, error = NULL, follows = NULL,
@@ -755,19 +766,19 @@ async fn requeue(
                 "Only a failed or canceled request can be retried.".into(),
             ));
         }
-        return Ok(false);
+        return Ok(Requeued::Ready { wake: false });
     }
     if let Some(leader) = leader_id(&mut **tx, work_key).await? {
         if leader != row.id {
             become_follower(tx, row, work_key, &leader, now).await?;
-            return Ok(false);
+            return Ok(Requeued::Ready { wake: false });
         }
     }
     // The owner's cap, even when an admin presses retry. A follower does not
     // spend a slot, and neither does a reuse.
     ensure_under_cap(&mut **tx, &row.user_id).await?;
     match become_leader(tx, row, work_key, now).await {
-        Ok(true) => Ok(true),
+        Ok(true) => Ok(Requeued::Ready { wake: true }),
         Ok(false) => Err(ApiError::Conflict(
             "Only a failed or canceled request can be retried.".into(),
         )),
@@ -776,7 +787,7 @@ async fn requeue(
                 return Err(err.into());
             };
             become_follower(tx, row, work_key, &leader, now).await?;
-            Ok(false)
+            Ok(Requeued::Ready { wake: false })
         }
         Err(err) if user_conflict(&err) => Err(ApiError::Conflict(
             "You already have a request for this book.".into(),
@@ -806,7 +817,14 @@ async fn become_follower(
     .bind(&row.id)
     .bind(&row.user_id)
     .execute(&mut **tx)
-    .await?
+    .await
+    .map_err(|err| {
+        if user_conflict(&err) {
+            ApiError::Conflict("You already have a request for this book.".into())
+        } else {
+            ApiError::from(err)
+        }
+    })?
     .rows_affected();
     if changed == 0 {
         return Err(ApiError::Conflict(

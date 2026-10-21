@@ -172,6 +172,7 @@ pub async fn tick_at(state: &AppState, now_ms: i64) -> Result<(), ApiError> {
     let Some(ready) = ready(state).await? else {
         return Ok(());
     };
+    sweep_inactive_leaders(state, now_ms).await?;
     if let Err(err) = clear_follower_jobs(state, &ready).await {
         tracing::error!(error = %err, "could not drop a follower download");
     }
@@ -781,6 +782,36 @@ async fn fail_from(
 
 /// A row demoted to follower can still name a SABnzbd job. Delete it. The
 /// follower never steps, so nothing else would.
+/// A cancel can commit after it has already decided it was not the leader.
+/// Followers of that canceled (or failed) row would wait forever. Promote the
+/// oldest one. An imported leader is left alone: its followers are updated
+/// in the import transaction, and promoting them would start a second download.
+async fn sweep_inactive_leaders(state: &AppState, now_ms: i64) -> Result<(), ApiError> {
+    let leaders: Vec<String> = sqlx::query_scalar(
+        "SELECT DISTINCT lead.id
+         FROM book_requests follower
+         JOIN book_requests lead ON lead.id = follower.follows
+         WHERE follower.state = 'requested'
+           AND lead.state IN ('canceled', 'failed')",
+    )
+    .fetch_all(&state.pool)
+    .await?;
+    for leader in leaders {
+        let mut tx = state.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let inactive: Option<i64> = sqlx::query_scalar(
+            "SELECT 1 FROM book_requests WHERE id = ? AND state IN ('canceled', 'failed')",
+        )
+        .bind(&leader)
+        .fetch_optional(&mut *tx)
+        .await?;
+        if inactive.is_some() {
+            super::hand_off(&mut tx, &leader, now_ms).await?;
+        }
+        tx.commit().await?;
+    }
+    Ok(())
+}
+
 async fn clear_follower_jobs(state: &AppState, ready: &Ready) -> Result<(), ApiError> {
     let rows: Vec<(String, String)> = sqlx::query_as(
         "SELECT id, download_id FROM book_requests

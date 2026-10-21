@@ -178,7 +178,10 @@ async fn books(
                  b.title LIKE ? ESCAPE '\\'
                  OR b.author LIKE ? ESCAPE '\\'
                  OR b.handle LIKE ? ESCAPE '\\'
-                 OR owner.username LIKE ? ESCAPE '\\'
+                 OR (
+                   (b.user_id = ? OR b.shared = 1 OR b.is_sample = 1)
+                   AND owner.username LIKE ? ESCAPE '\\'
+                 )
                )
          ) AS ranked
          WHERE rank > ?
@@ -194,6 +197,7 @@ async fn books(
         .bind(&infix)
         .bind(&infix)
         .bind(&infix)
+        .bind(&viewer.user_id)
         .bind(&infix)
         .bind(after.rank)
         .bind(after.rank)

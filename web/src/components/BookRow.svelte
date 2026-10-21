@@ -40,21 +40,23 @@
       {/if}
     </div>
   </a>
-  {#if book.mine}
+  {#if book.mine || book.held}
     <div class="book-actions">
-      <button
-        class="icon-button"
-        title={book.shared ? 'Make private' : 'Share'}
-        aria-label={book.shared ? 'Make private' : 'Share'}
-        aria-pressed={book.shared}
-        onclick={() => { void share(!book.shared); }}
-      >
-        <Icon name={book.shared ? 'people' : 'lock'} filled size={18} />
-      </button>
+      {#if book.mine}
+        <button
+          class="icon-button"
+          title={book.shared ? 'Make private' : 'Share'}
+          aria-label={book.shared ? 'Make private' : 'Share'}
+          aria-pressed={book.shared}
+          onclick={() => { void share(!book.shared); }}
+        >
+          <Icon name={book.shared ? 'people' : 'lock'} filled size={18} />
+        </button>
+      {/if}
       {#if onremove}
         <button
           class="icon-button"
-          aria-label={`Remove ${book.title}`}
+          aria-label={book.held ? 'Remove from library' : `Remove ${book.title}`}
           onclick={() => onremove?.(book)}
         >
           <Icon name="trash" size={18} />

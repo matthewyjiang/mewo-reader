@@ -26,7 +26,9 @@
   <section class="confirm-remove">
     <h2>Remove {book.title}?</h2>
     <p class="muted">
-      {#if visibleToOthers(book)}
+      {#if book.held}
+        Only removes it for you.
+      {:else if visibleToOthers(book)}
         Removes it for everyone who can read it.
       {:else}
         Removes it from your library.

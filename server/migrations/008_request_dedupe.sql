@@ -4,12 +4,16 @@
 
 ALTER TABLE book_requests ADD COLUMN follows TEXT REFERENCES book_requests(id) ON DELETE SET NULL;
 
--- Two users can both be active leaders today. Keep the oldest; the rest
--- follow it. state becomes requested so the leader's import update, which
--- only touches followers in that state, picks up a row that was downloading.
--- The worker deletes the demoted row's SABnzbd job.
+-- Two users can both be active leaders today. Prefer a row that is already
+-- downloading, so its SABnzbd job survives. Otherwise keep the oldest. The
+-- rest follow it. state becomes requested so the leader's import update,
+-- which only touches followers in that state, picks up a row that was
+-- downloading. The worker deletes the demoted row's SABnzbd job.
 WITH first AS (
-    SELECT work_key, MIN(created_at || ':' || id) AS k
+    SELECT work_key, MIN(
+        CASE state WHEN 'downloading' THEN '0' ELSE '1' END
+        || ':' || created_at || ':' || id
+    ) AS k
     FROM book_requests
     WHERE state IN ('requested', 'downloading')
     GROUP BY work_key
@@ -19,11 +23,13 @@ UPDATE book_requests SET
         SELECT o.id FROM book_requests o
         JOIN first f ON f.work_key = o.work_key
         WHERE o.work_key = book_requests.work_key
-          AND o.created_at || ':' || o.id = f.k
+          AND CASE o.state WHEN 'downloading' THEN '0' ELSE '1' END
+              || ':' || o.created_at || ':' || o.id = f.k
     ),
     state = 'requested'
 WHERE state IN ('requested', 'downloading')
-  AND created_at || ':' || id <> (
+  AND CASE state WHEN 'downloading' THEN '0' ELSE '1' END
+      || ':' || created_at || ':' || id <> (
       SELECT k FROM first WHERE first.work_key = book_requests.work_key
   );
 
