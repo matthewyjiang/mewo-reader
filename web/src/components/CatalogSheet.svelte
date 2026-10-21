@@ -194,6 +194,15 @@
     acting = true;
     try {
       const next = await store.api.retryRequest(current.id);
+      if (detail?.status.request) {
+        detail = {
+          ...detail,
+          status: {
+            ...detail.status,
+            request: { ...detail.status.request, ...next, phase: requestPhase(next) },
+          },
+        };
+      }
       onchange(next);
       if (next.state === 'imported') {
         importedShelf = true;

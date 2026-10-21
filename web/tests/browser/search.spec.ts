@@ -245,6 +245,9 @@ async function install(
       { username: 'noor', mine: false },
     ],
     miss: options.emptyQuery ?? null as string | null,
+    holdDetail: false,
+    releaseDetail: () => {},
+    retryTo: null as string | null,
   };
   state.booksGate = new Promise((resolve) => { state.releaseBooks = resolve; });
   await page.addInitScript((kind) => {
@@ -309,14 +312,20 @@ async function answer(route: Route, state: Awaited<ReturnType<typeof install>>) 
     if (state.miss && q === state.miss) return json({ items: [], nextPage: null });
     return json({ items: trending, nextPage: null });
   }
-  if (path === '/v1/catalog/works/OL893415W') return json(detailFor(state.stage, state.info));
+  if (path === '/v1/catalog/works/OL893415W') {
+    if (state.holdDetail) {
+      state.holdDetail = false;
+      await new Promise<void>((resolve) => { state.releaseDetail = resolve; });
+    }
+    return json(detailFor(state.stage, state.info));
+  }
   if (path === '/v1/requests' && method === 'POST') {
     const retry = path.endsWith('/retry');
     state.stage = retry ? state.stage : 'searching';
     return json(detailFor(state.stage, state.info).status.request, 201);
   }
   if (method === 'POST' && path === '/v1/requests/req-1/retry') {
-    state.stage = 'imported';
+    state.stage = state.retryTo ?? 'imported';
     return json(detailFor(state.stage, state.info).status.request);
   }
   if (path.startsWith('/v1/books/book-dune/posts')) {
@@ -478,6 +487,22 @@ test('a canceled request with a server copy opens the book', async ({ page }) =>
   await expect(sheet.getByRole('button', { name: 'Open book' })).toBeVisible();
   await expect(sheet.getByText('On your shelf').first()).toBeVisible();
   await expect(sheet.getByRole('button', { name: 'Request again' })).toHaveCount(0);
+});
+
+test('retry updates the sheet before the next detail load', async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  const state = await install(page, { kind: 'catalog' });
+  state.stage = 'failed';
+  await page.goto('/search');
+  await page.getByRole('button', { name: 'Dune, Frank Herbert, 1965' }).click();
+  const sheet = page.getByRole('dialog', { name: 'Dune' });
+  await expect(sheet.getByRole('button', { name: 'Retry' })).toBeVisible();
+  state.holdDetail = true;
+  state.retryTo = 'searching';
+  await sheet.getByRole('button', { name: 'Retry' }).click();
+  await expect(sheet.getByText('Looking for a release…')).toBeVisible();
+  await expect(sheet.getByRole('button', { name: 'Retry' })).toHaveCount(0);
+  state.releaseDetail();
 });
 
 test('an Open Library miss keeps the row and still requests', async ({ page }) => {
