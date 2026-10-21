@@ -37,11 +37,14 @@ struct TocEntry {
 /// Feed assembly from Android's FeedExtractor.kt / FeedStart.kt.
 ///
 /// TOC entries arrive in depth-first order. Two entries are one target when
-/// they share an href with no fragment, or the same fragment on that href. The
-/// more descriptive label wins. A different fragment is a nested section and
-/// stays. Basename matching still ignores the directory, as on the phones.
-/// The in-document heading for a target is the same chapter, so "1. Introductory"
-/// and "INTRODUCTORY" do not both land in the table of contents.
+/// they share an href with no fragment, or the same fragment on that href.
+/// They collapse only when the labels name the same chapter; the more
+/// descriptive one wins. A different label keeps the first, which is what a
+/// part and its opening chapter need when both point at the file. A different
+/// fragment stays a nested section. Basename matching still ignores the
+/// directory, as on the phones. An in-file heading replaces a contents label
+/// only when it names that same chapter, so "1. Introductory" and
+/// "INTRODUCTORY" are one row and a translator's note is not.
 pub(crate) fn assemble(elements: Vec<TextElement>, toc: Vec<(String, String)>) -> Vec<Post> {
     let entries = collapse_toc(toc);
     let mut file_order = Vec::new();
@@ -114,11 +117,16 @@ pub(crate) fn assemble(elements: Vec<TextElement>, toc: Vec<(String, String)>) -
             let Some(title) = file_title.get(path) else {
                 continue;
             };
-            // The fragment sits on the chapter heading itself, not a later section.
-            if !same_heading(section, title) && !same_heading(heading, title) {
+            // Fold only when this fragment names the file's chapter. A different
+            // label, even on the first heading's id, stays its own section.
+            if !same_heading(section, title) {
                 continue;
             }
-            prefer(prefer(title, section), heading).to_owned()
+            let mut better = prefer(title, section).to_owned();
+            if same_heading(heading, &better) {
+                better = prefer(&better, heading).to_owned();
+            }
+            better
         };
         file_title.insert(path.clone(), better);
         folded.push((path.clone(), id.clone()));
@@ -127,7 +135,11 @@ pub(crate) fn assemble(elements: Vec<TextElement>, toc: Vec<(String, String)>) -
         sections.remove(&key);
     }
     for (path, heading) in &first_heading_text {
-        if let Some(title) = file_title.get(path) {
+        let Some(title) = file_title.get(path) else {
+            continue;
+        };
+        // "Chapter One" must not become the translator's note that opens the file.
+        if same_heading(heading, title) {
             let better = prefer(title, heading).to_owned();
             file_title.insert(path.clone(), better);
         }
@@ -160,7 +172,13 @@ pub(crate) fn assemble(elements: Vec<TextElement>, toc: Vec<(String, String)>) -
             let target = (key.clone(), element.id.clone());
             if let Some(title) = sections.get(&target) {
                 if emitted_sections.insert(target) {
-                    chapter = prefer(title, text).to_owned();
+                    // A fragment on a paragraph is still that section, but the
+                    // paragraph is body text. Only a heading element can name it.
+                    chapter = if element.heading {
+                        prefer(title, text).to_owned()
+                    } else {
+                        title.clone()
+                    };
                     add(&mut posts, PostKind::Heading, &chapter, &chapter);
                     if element.heading || same_heading(text, &chapter) {
                         continue;
@@ -168,12 +186,20 @@ pub(crate) fn assemble(elements: Vec<TextElement>, toc: Vec<(String, String)>) -
                 }
             }
         }
-        if (toc_start || element.heading) && same_heading(text, &chapter) {
+        if toc_start {
+            // The element that opens the file is the contents heading only
+            // when it names that chapter. Otherwise it is body, including an
+            // h1 that is a note rather than the chapter title.
+            if !same_heading(text, &file_title[&key]) {
+                add(&mut posts, PostKind::Body, text, &chapter);
+            }
             continue;
         }
         if element.heading {
-            chapter = text.to_owned();
-            add(&mut posts, PostKind::Heading, &chapter, &chapter);
+            if !same_heading(text, &chapter) {
+                chapter = text.to_owned();
+                add(&mut posts, PostKind::Heading, text, &chapter);
+            }
             continue;
         }
         add(&mut posts, PostKind::Body, text, &chapter);
@@ -195,7 +221,11 @@ fn collapse_toc(toc: Vec<(String, String)>) -> Vec<TocEntry> {
         };
         let key = (path, fragment);
         if let Some(slot) = index.get(&key) {
-            entries[*slot].title = prefer(&entries[*slot].title, title).to_owned();
+            // "Part I" and "Chapter 1: The Storm" share the file and are not
+            // one chapter. "1. Introductory" and "INTRODUCTORY" are.
+            if same_heading(&entries[*slot].title, title) {
+                entries[*slot].title = prefer(&entries[*slot].title, title).to_owned();
+            }
         } else {
             index.insert(key.clone(), entries.len());
             entries.push(TocEntry {

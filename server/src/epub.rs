@@ -692,6 +692,66 @@ mod tests {
     }
 
     #[test]
+    fn part_and_chapter_that_share_a_file_stay_separate() {
+        let headings = ["Part One", "Chapter 1"];
+        for epub3 in [true, false] {
+            let book = parse(Cursor::new(test_epub::part_and_chapter(epub3)), 1024).unwrap();
+            let got: Vec<_> = book
+                .posts
+                .iter()
+                .filter(|post| post.kind == PostKind::Heading)
+                .map(|post| post.text.as_str())
+                .collect();
+            assert_eq!(got, headings, "epub3={epub3}");
+            let epigraph = book
+                .posts
+                .iter()
+                .find(|post| post.text == "Epigraph.")
+                .unwrap();
+            assert_eq!(epigraph.kind, PostKind::Body);
+            assert_eq!(epigraph.chapter, "Part One");
+        }
+    }
+
+    #[test]
+    fn unrelated_labels_keep_the_contents_title() {
+        let headings = [
+            "Part I",
+            "Chapter 1: The Storm",
+            "Book One",
+            "Chapter 1",
+            "Chapter One",
+            "Chapter Two",
+            "The Argument",
+        ];
+        let note = "A Note on the Translation Used Throughout";
+        let paragraph =
+            "This paragraph is long enough to outrank the short toc label and must stay body text.";
+        for epub3 in [true, false] {
+            let book = parse(Cursor::new(test_epub::separate_labels(epub3)), 1024).unwrap();
+            let got: Vec<_> = book
+                .posts
+                .iter()
+                .filter(|post| post.kind == PostKind::Heading)
+                .map(|post| post.text.as_str())
+                .collect();
+            assert_eq!(got, headings, "epub3={epub3}");
+            let note = book.posts.iter().find(|post| post.text == note).unwrap();
+            assert_eq!(note.kind, PostKind::Body, "epub3={epub3}");
+            assert_eq!(note.chapter, "Chapter One");
+            let paragraph = book
+                .posts
+                .iter()
+                .find(|post| post.text == paragraph)
+                .unwrap();
+            assert_eq!(paragraph.kind, PostKind::Body, "epub3={epub3}");
+            assert_eq!(paragraph.chapter, "The Argument");
+            let rain = book.posts.iter().find(|post| post.text == "Rain.").unwrap();
+            assert_eq!(rain.chapter, "Chapter 1: The Storm");
+        }
+    }
+
+    #[test]
     fn ncx_only_and_legacy_cover_metadata_match_nav() {
         let ncx = parse(Cursor::new(test_epub::book(false, 0)), 1024).unwrap();
         let nav = parse(Cursor::new(test_epub::epub()), 1024).unwrap();
