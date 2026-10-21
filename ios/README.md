@@ -9,6 +9,16 @@ Phone app. SwiftUI and the [Readium Swift toolkit](https://github.com/readium/sw
 
 CI runs on `macos-26`, generates the project, and tests `MewoTests` on the first available iOS 26 iPhone simulator. UI tests are not in that job.
 
+## UI screenshot tests
+
+`project.yml` is what XcodeGen reads. CI runs `xcodegen generate` first, and the `MewoUITests` target already globs `MewoUITests/`, which is how `CatalogScreenshotTests` gets into the scheme. The committed `Mewo.xcodeproj` is left as it is.
+
+On a Mac, with the social fixture listening, shots land in `/tmp/mewo-catalog-shots`:
+
+```bash
+cd ios && xcodegen generate && (python3 MewoUITests/Fixtures/social-fixture.py &) && xcodebuild test -project Mewo.xcodeproj -scheme Mewo -destination 'platform=iOS Simulator,name=iPhone 17' -only-testing:MewoUITests/CatalogScreenshotTests
+```
+
 ## Build on a Mac
 
 ```bash

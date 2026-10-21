@@ -16,6 +16,8 @@ PORT = 8766
 lock = threading.Lock()
 released = threading.Event()
 feed_requests = 0
+fail_search = False
+next_request = 0
 
 BOOK = {
     "id": "44444444-4444-4444-4444-444444444444",
@@ -35,79 +37,138 @@ POST = {"id": "1", "kind": "Body", "text": "The first sentence is the one you re
 HEADING = {"id": "0", "kind": "Heading", "text": "Chapter One", "chapter": "One"}
 COMMENT = {"id": "k", "username": "ada", "text": "Still true.", "createdAt": 1710000000000, "mine": True}
 
-DUNE_REQUEST = {
-    "id": "req-1",
-    "workKey": "/works/OL1W",
-    "title": "Dune",
-    "author": "Frank Herbert",
-    "year": 1965,
-    "coverId": None,
-    "state": "requested",
-    "progress": 0,
-    "error": None,
-    "bookId": None,
-    "requester": "ada",
-    "createdAt": 10,
-    "updatedAt": 11,
-    "follows": None,
-}
-
-DUNE = {
-    "workKey": "/works/OL1W",
-    "title": "Dune",
-    "author": "Frank Herbert",
-    "year": 1965,
-    "coverId": None,
-    "request": DUNE_REQUEST,
-    "onServer": None,
-}
-
-LEFT = {
-    "workKey": "/works/OL2W",
-    "title": "The Left Hand of Darkness",
-    "author": "Ursula K. Le Guin",
-    "year": 1969,
-    "coverId": None,
-    "request": None,
-    "onServer": None,
-}
-
-WORK_DETAIL = {
-    "workKey": "/works/OL1W",
-    "info": {
-        "canonicalKey": "/works/OL1W",
-        "title": "Dune",
-        "subtitle": None,
-        "authors": ["Frank Herbert"],
-        "year": 1965,
+def request_row(olid, title, author, year, state, progress=0, error=None, book_id=None):
+    return {
+        "id": f"req-{olid}",
+        "workKey": f"/works/{olid}",
+        "title": title,
+        "author": author,
+        "year": year,
         "coverId": None,
-        "description": "A desert planet. A boy. A spice.",
-        "subjects": ["Science fiction", "Arrakis", "Deserts", "Sand", "Politics"],
-        "awards": ["Hugo Award"],
-        "series": ["Dune"],
-        "editionCount": 12,
-        "pagesMedian": 412,
-        "languages": ["eng"],
-        "hasAcceptedEdition": True,
-        "rating": {"average": 4.3, "count": 10},
-    },
-    "infoError": None,
-    "status": {
-        "request": {
-            **DUNE_REQUEST,
+        "state": state,
+        "progress": progress,
+        "error": error,
+        "bookId": book_id,
+        "requester": "ada",
+        "createdAt": 10,
+        "updatedAt": 11,
+        "follows": None,
+    }
+
+
+def work_row(olid, title, author, year, request=None, on_server=None):
+    return {
+        "workKey": f"/works/{olid}",
+        "title": title,
+        "author": author,
+        "year": year,
+        "coverId": None,
+        "request": request,
+        "onServer": on_server,
+    }
+
+
+# OL1 stays req-1 so older walks that cancel or retry that id still match.
+DUNE_REQUEST = request_row("OL1W", "Dune", "Frank Herbert", 1965, "requested")
+DUNE_REQUEST["id"] = "req-1"
+
+SHARED_BY_BEA = {
+    "bookId": "77777777-7777-7777-7777-777777777777",
+    "ownerUsername": "bea",
+    "mine": False,
+    "shared": True,
+    "held": False,
+}
+
+WORKS = [
+    work_row("OL1W", "Dune", "Frank Herbert", 1965, request=DUNE_REQUEST),
+    work_row("OL2W", "The Left Hand of Darkness", "Ursula K. Le Guin", 1969),
+    work_row(
+        "OL3W", "Foundation", "Isaac Asimov", 1951,
+        request=request_row("OL3W", "Foundation", "Isaac Asimov", 1951, "downloading", progress=42),
+    ),
+    work_row(
+        "OL4W", "Emma", "Jane Austen", 1815,
+        request=request_row("OL4W", "Emma", "Jane Austen", 1815, "imported", book_id=BOOK["id"]),
+    ),
+    work_row(
+        "OL5W", "Pale Fire", "Vladimir Nabokov", 1962,
+        request=request_row("OL5W", "Pale Fire", "Vladimir Nabokov", 1962, "imported", book_id=None),
+    ),
+    work_row(
+        "OL6W", "The Dispossessed", "Ursula K. Le Guin", 1974,
+        request=request_row(
+            "OL6W", "The Dispossessed", "Ursula K. Le Guin", 1974, "failed", error="No release found.",
+        ),
+    ),
+    work_row("OL7W", "Kindred", "Octavia E. Butler", 1979, on_server=SHARED_BY_BEA),
+    work_row(
+        "OL8W", "Parable of the Sower", "Octavia E. Butler", 1993,
+        request=request_row("OL8W", "Parable of the Sower", "Octavia E. Butler", 1993, "canceled"),
+    ),
+]
+WORK_BY_OLID = {item["workKey"].rsplit("/", 1)[-1]: item for item in WORKS}
+
+
+def phase_of(request):
+    state = request["state"]
+    if state == "downloading":
+        return "importing" if request["progress"] >= 100 else "downloading"
+    if state == "requested":
+        return "searching"
+    return state
+
+
+def work_detail(item):
+    request = item["request"]
+    detail_request = None
+    if request is not None:
+        detail_request = {
+            **request,
             "attempts": 1,
             "maxAttempts": 4,
             "nextCheckAt": None,
             "releaseTitle": None,
             "releaseSize": None,
-            "phase": "searching",
+            "phase": phase_of(request),
+        }
+    live = request is not None and request["state"] in ("requested", "downloading")
+    return {
+        "workKey": item["workKey"],
+        "info": {
+            "canonicalKey": item["workKey"],
+            "title": item["title"],
+            "subtitle": None,
+            "authors": [item["author"]],
+            "year": item["year"],
+            "coverId": None,
+            "description": "A desert planet. A boy. A spice.",
+            "subjects": ["Science fiction", "Arrakis", "Deserts", "Sand", "Politics"],
+            "awards": ["Hugo Award"],
+            "series": ["Dune"],
+            "editionCount": 12,
+            "pagesMedian": 412,
+            "languages": ["eng"],
+            "hasAcceptedEdition": True,
+            "rating": {"average": 4.3, "count": 10},
         },
-        "onServer": None,
-        "active": 1,
-        "cap": 5,
-        "otherRequests": [],
-    },
-}
+        "infoError": None,
+        "status": {
+            "request": detail_request,
+            "onServer": item["onServer"],
+            "active": 1 if live else 0,
+            "cap": 5,
+            "otherRequests": [],
+        },
+    }
+
+
+def find_request(req_id):
+    for item in WORKS:
+        request = item["request"]
+        if request is not None and request["id"] == req_id:
+            return request
+    return None
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -129,8 +190,13 @@ class Handler(BaseHTTPRequestHandler):
             self.json_ok({"username": "ada", "isAdmin": False, "canRequest": True})
         elif path == "/v1/catalog/search":
             self.catalog_search(query.get("q", [""])[0])
-        elif path == "/v1/catalog/works/OL1W":
-            self.json_ok(WORK_DETAIL)
+        elif path.startswith("/v1/catalog/works/"):
+            olid = path.rsplit("/", 1)[-1]
+            item = WORK_BY_OLID.get(olid)
+            if item is None:
+                self.send_error(404)
+            else:
+                self.json_ok(work_detail(item))
         elif path == "/v1/users/ada":
             self.json_ok({
                 "username": "ada",
@@ -169,19 +235,31 @@ class Handler(BaseHTTPRequestHandler):
             self.json_ok(BOOK)
         elif path == "/control/status":
             with lock:
-                body = {"released": released.is_set(), "feed_requests": feed_requests}
+                body = {
+                    "released": released.is_set(),
+                    "feed_requests": feed_requests,
+                    "fail_search": fail_search,
+                }
             self.json_ok(body)
         else:
             self.send_error(404)
 
     def do_POST(self):
         path = urlparse(self.path).path
+        body = self.read_json()
         if path == "/control/hold":
             released.clear()
             self.json_ok({"released": False})
         elif path == "/control/release":
             released.set()
             self.json_ok({"released": True})
+        elif path == "/control/fail-search":
+            self.toggle_fail_search()
+        elif path == "/v1/requests":
+            self.new_request(body)
+        elif path.startswith("/v1/requests/") and path.endswith("/retry"):
+            req_id = path[len("/v1/requests/"):-len("/retry")]
+            self.retry_request(req_id)
         else:
             self.send_error(404)
 
@@ -248,8 +326,13 @@ class Handler(BaseHTTPRequestHandler):
         self.json_ok({"type": kind, "items": items, "nextCursor": None})
 
     def catalog_search(self, query):
+        with lock:
+            failing = fail_search
+        if failing:
+            self.json_status(500, {"error": "Couldn't search the catalog right now."})
+            return
         needle = query.strip().lower()
-        items = [DUNE, LEFT]
+        items = list(WORKS)
         if needle:
             items = [
                 item for item in items
@@ -257,9 +340,64 @@ class Handler(BaseHTTPRequestHandler):
             ]
         self.json_ok({"items": items, "nextPage": None})
 
+    def toggle_fail_search(self):
+        global fail_search
+        with lock:
+            fail_search = not fail_search
+            state = fail_search
+        self.json_ok({"failSearch": state})
+
+    def new_request(self, body):
+        global next_request
+        with lock:
+            next_request += 1
+            n = next_request
+        self.json_status(201, {
+            "id": f"req-new-{n}",
+            "workKey": body.get("workKey") or "/works/OL0W",
+            "title": body.get("title") or "",
+            "author": body.get("author") or "",
+            "year": body.get("year"),
+            "coverId": body.get("coverId"),
+            "state": "requested",
+            "progress": 0,
+            "error": None,
+            "bookId": None,
+            "requester": "ada",
+            "createdAt": 12,
+            "updatedAt": 12,
+            "follows": None,
+        })
+
+    def retry_request(self, req_id):
+        current = find_request(req_id)
+        if current is None:
+            self.json_status(404, {"error": "That book is no longer in the catalog."})
+            return
+        self.json_ok({
+            **current,
+            "state": "requested",
+            "progress": 0,
+            "error": None,
+            "bookId": None,
+        })
+
+    def read_json(self):
+        length = int(self.headers.get("Content-Length", "0") or 0)
+        raw = self.rfile.read(length) if length else b""
+        if not raw:
+            return {}
+        try:
+            return json.loads(raw)
+        except json.JSONDecodeError:
+            return {}
+
     def json_ok(self, payload):
+        self.json_status(200, payload)
+
+    def json_status(self, status, payload):
         raw = json.dumps(payload).encode()
-        self.send_response(200)
+        self.send_response(status)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(raw)))
         self.end_headers()

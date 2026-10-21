@@ -1,7 +1,9 @@
 import SwiftUI
+import UIKit
 
 struct CatalogSheet: View {
     @Environment(\.mewo) private var mewo
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     @Bindable var model: CatalogSheetModel
     var onOpenBook: (String) -> Void
     @Environment(\.dismiss) private var dismiss
@@ -23,20 +25,24 @@ struct CatalogSheet: View {
     }
 
     private var header: some View {
-        HStack(spacing: 8) {
-            Button {
-                dismiss()
-            } label: {
-                Image(systemName: "xmark")
-                    .font(.system(size: 16, weight: .semibold))
-                    .foregroundStyle(mewo.ink)
-                    .frame(width: 44, height: 44)
+        VStack(spacing: 0) {
+            HStack(spacing: 8) {
+                Button {
+                    dismiss()
+                } label: {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 24, weight: .regular))
+                        .foregroundStyle(mewo.ink)
+                        .frame(width: 48, height: 48)
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Close")
+                Spacer(minLength: 0)
             }
-            .buttonStyle(.plain)
-            .accessibilityLabel("Close")
-            Spacer(minLength: 0)
+            .padding(.leading, 4)
+            .frame(height: 56)
+            Hairline()
         }
-        .padding(.leading, 4)
     }
 
     private var hero: some View {
@@ -53,7 +59,7 @@ struct CatalogSheet: View {
             Spacer(minLength: 0)
         }
         .padding(.horizontal, 16)
-        .padding(.top, 8)
+        .padding(.top, 16)
     }
 
     private var statusBlock: some View {
@@ -67,7 +73,7 @@ struct CatalogSheet: View {
             if let notice = model.notice {
                 Text(notice)
                     .font(MewoFont.regular(15))
-                    .foregroundStyle(mewo.ink)
+                    .foregroundStyle(mewo.like)
                     .accessibilityIdentifier("catalog-sheet-notice")
             }
         }
@@ -82,38 +88,33 @@ struct CatalogSheet: View {
     private var statusBody: some View {
         switch model.status {
         case .live(_, let line, let progress):
-            Text(line)
-                .font(MewoFont.regular(15))
-                .foregroundStyle(mewo.ink)
-                .accessibilityIdentifier("catalog-status")
+            statusLine(line)
             if let progress {
-                ProgressView(value: Double(progress), total: 100)
-                    .tint(mewo.accent)
+                progressBar(progress)
                     .accessibilityLabel(line)
             }
             outlined("Cancel request", identifier: "catalog-cancel", enabled: !model.acting) {
                 Task { await model.cancel() }
             }
         case .failed(let line, let note):
-            Text(line)
-                .font(MewoFont.regular(15))
-                .foregroundStyle(mewo.ink)
-                .accessibilityIdentifier("catalog-status")
+            statusLine(line)
             filled("Retry", identifier: "catalog-retry", enabled: !model.acting && !model.atCap) {
                 Task { await model.retry() }
             }
             noteText(note)
         case .available(let line, let bookId):
-            Text(line)
-                .font(MewoFont.regular(15))
-                .foregroundStyle(mewo.ink)
-                .accessibilityIdentifier("catalog-status")
+            statusLine(line)
             filled("Open book", identifier: "catalog-open", enabled: bookId != nil) {
                 if let bookId { onOpenBook(bookId) }
             }
         case .canceled(let note):
             filled("Request again", identifier: "catalog-again", enabled: !model.acting && !model.atCap) {
                 Task { await model.retry() }
+            }
+            noteText(note)
+        case .requestAgain(let note):
+            filled("Request again", identifier: "catalog-again", enabled: !model.acting && !model.atCap) {
+                Task { await model.request() }
             }
             noteText(note)
         case .requestable(let note, let edition):
@@ -129,11 +130,14 @@ struct CatalogSheet: View {
     private var aboutBlock: some View {
         switch model.about {
         case .loading:
-            VStack(alignment: .leading, spacing: 8) {
-                bone
-                bone.frame(maxWidth: 220)
-                bone
+            GeometryReader { geo in
+                VStack(alignment: .leading, spacing: 10) {
+                    bone.frame(width: geo.size.width)
+                    bone.frame(width: geo.size.width * 0.64)
+                    bone.frame(width: geo.size.width)
+                }
             }
+            .frame(height: 62)
             .padding(.horizontal, 16)
             .padding(.top, 28)
             .accessibilityElement(children: .ignore)
@@ -147,14 +151,25 @@ struct CatalogSheet: View {
                 if let blurb = about.blurb {
                     VStack(alignment: .leading, spacing: 4) {
                         Text(blurb)
-                            .font(MewoFont.regular(15))
+                            .font(MewoFont.regular(17))
                             .foregroundStyle(mewo.ink)
+                            .lineSpacing(7)
                             .lineLimit(model.expanded ? nil : 6)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .background {
+                                GeometryReader { geo in
+                                    Color.clear
+                                        .onAppear { noteBlurb(geo.size.width) }
+                                        .onChange(of: geo.size.width) { _, width in
+                                            noteBlurb(width)
+                                        }
+                                        .onChange(of: dynamicTypeSize) { _, _ in
+                                            noteBlurb(geo.size.width)
+                                        }
+                                }
+                            }
                         if model.blurbOverflow || model.expanded {
-                            Button(model.expanded ? "Less" : "More") { model.expanded.toggle() }
-                                .font(MewoFont.regular(15))
-                                .foregroundStyle(mewo.accent)
-                                .buttonStyle(.plain)
+                            textButton(model.expanded ? "Less" : "More") { model.expanded.toggle() }
                         }
                     }
                 }
@@ -182,11 +197,13 @@ struct CatalogSheet: View {
                     Link(destination: url) {
                         HStack(spacing: 6) {
                             Text("View on Open Library")
-                            Image(systemName: "arrow.up.right")
-                                .font(.system(size: 14, weight: .semibold))
+                                .font(MewoFont.bold(15))
+                            Image(systemName: "arrow.up.right.square")
+                                .font(.system(size: 16, weight: .regular))
                         }
-                        .font(MewoFont.regular(15))
                         .foregroundStyle(mewo.accent)
+                        .frame(maxWidth: .infinity, minHeight: 40, alignment: .leading)
+                        .contentShape(Rectangle())
                     }
                     .accessibilityIdentifier("catalog-open-library")
                 }
@@ -197,7 +214,7 @@ struct CatalogSheet: View {
         }
     }
 
-    private var displayTitle: String { model.detail?.info?.title ?? model.work.title }
+    private var displayTitle: String { model.work.title }
 
     private var displayCover: Int? { model.detail?.info?.coverId ?? model.work.coverId }
 
@@ -213,25 +230,68 @@ struct CatalogSheet: View {
         return author
     }
 
+    private func statusLine(_ line: String) -> some View {
+        Text(line)
+            .font(MewoFont.regular(17))
+            .foregroundStyle(mewo.ink)
+            .lineSpacing(7)
+            .accessibilityIdentifier("catalog-status")
+    }
+
+    private func progressBar(_ value: Int) -> some View {
+        let fraction = CGFloat(min(max(value, 0), 100)) / 100
+        return GeometryReader { geo in
+            ZStack(alignment: .leading) {
+                Capsule().fill(mewo.line)
+                Capsule()
+                    .fill(mewo.accent)
+                    .frame(width: max(0, geo.size.width * fraction))
+            }
+        }
+        .frame(height: 4)
+    }
+
     private func filled(_ title: String, identifier: String, enabled: Bool, action: @escaping () -> Void) -> some View {
-        Button(title, action: action)
-            .buttonStyle(.borderedProminent)
-            .buttonBorderShape(.capsule)
-            .controlSize(.large)
-            .tint(mewo.accent)
-            .disabled(!enabled)
-            .frame(maxWidth: .infinity)
-            .accessibilityIdentifier(identifier)
+        Button(action: action) {
+            Text(title)
+                .font(MewoFont.bold(15))
+                .foregroundStyle(mewo.onAccent)
+                .frame(maxWidth: .infinity, minHeight: 44)
+                .background(mewo.accent, in: Capsule())
+                .contentShape(Capsule())
+        }
+        .buttonStyle(.plain)
+        .opacity(enabled ? 1 : 0.4)
+        .disabled(!enabled)
+        .accessibilityIdentifier(identifier)
     }
 
     private func outlined(_ title: String, identifier: String, enabled: Bool, action: @escaping () -> Void) -> some View {
-        Button(title, role: .destructive, action: action)
-            .buttonStyle(.bordered)
-            .buttonBorderShape(.capsule)
-            .controlSize(.large)
-            .disabled(!enabled)
-            .frame(maxWidth: .infinity)
-            .accessibilityIdentifier(identifier)
+        Button(action: action) {
+            Text(title)
+                .font(MewoFont.bold(15))
+                .foregroundStyle(mewo.like)
+                .frame(maxWidth: .infinity, minHeight: 44)
+                .background {
+                    Capsule().strokeBorder(mewo.line, lineWidth: 1)
+                }
+                .contentShape(Capsule())
+        }
+        .buttonStyle(.plain)
+        .opacity(enabled ? 1 : 0.4)
+        .disabled(!enabled)
+        .accessibilityIdentifier(identifier)
+    }
+
+    private func textButton(_ title: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Text(title)
+                .font(MewoFont.bold(15))
+                .foregroundStyle(mewo.accent)
+                .frame(maxWidth: .infinity, minHeight: 40, alignment: .leading)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
     }
 
     @ViewBuilder
@@ -246,25 +306,45 @@ struct CatalogSheet: View {
     private func labeled(_ title: String, _ value: String) -> some View {
         HStack(alignment: .firstTextBaseline, spacing: 16) {
             Text(title)
-                .font(MewoFont.regular(15))
+                .font(MewoFont.regular(17))
                 .foregroundStyle(mewo.mute)
+                .lineSpacing(7)
                 .frame(width: 76, alignment: .leading)
             Text(value)
-                .font(MewoFont.regular(15))
+                .font(MewoFont.regular(17))
                 .foregroundStyle(mewo.ink)
+                .lineSpacing(7)
                 .frame(maxWidth: .infinity, alignment: .leading)
         }
     }
 
+    private func noteBlurb(_ width: CGFloat) {
+        model.noteBlurbLayout(width: width, contentSize: blurbContentSize(dynamicTypeSize))
+    }
+
+    private func blurbContentSize(_ size: DynamicTypeSize) -> UIContentSizeCategory {
+        switch size {
+        case .xSmall: return .extraSmall
+        case .small: return .small
+        case .medium: return .medium
+        case .large: return .large
+        case .xLarge: return .extraLarge
+        case .xxLarge: return .extraExtraLarge
+        case .xxxLarge: return .extraExtraExtraLarge
+        case .accessibility1: return .accessibilityMedium
+        case .accessibility2: return .accessibilityLarge
+        case .accessibility3: return .accessibilityExtraLarge
+        case .accessibility4: return .accessibilityExtraExtraLarge
+        case .accessibility5: return .accessibilityExtraExtraExtraLarge
+        }
+    }
+
     private func retryLine(_ message: String) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: .leading, spacing: 4) {
             Text(message)
                 .font(MewoFont.regular(15))
                 .foregroundStyle(mewo.mute)
-            Button("Try again") { model.reload() }
-                .font(MewoFont.regular(15))
-                .foregroundStyle(mewo.accent)
-                .buttonStyle(.plain)
+            textButton("Try again") { model.reload() }
         }
         .padding(.horizontal, 16)
         .padding(.top, 28)
@@ -273,8 +353,7 @@ struct CatalogSheet: View {
 
     private var bone: some View {
         RoundedRectangle(cornerRadius: 4)
-            .fill(mewo.hover)
+            .fill(mewo.mute.opacity(0.16))
             .frame(height: 14)
-            .frame(maxWidth: .infinity)
     }
 }

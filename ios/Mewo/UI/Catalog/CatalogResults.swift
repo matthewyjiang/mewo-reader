@@ -33,31 +33,15 @@ struct CatalogResults: View {
             if let failure = feed.failure {
                 failureBlock(failure)
             } else if feed.items.isEmpty, case .loading = feed.phase {
-                ProgressView()
-                    .tint(mewo.accent)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-                    .padding(.top, 24)
-                    .accessibilityIdentifier("catalog-loading")
+                skeleton
             } else if feed.items.isEmpty, case .loaded = feed.phase {
-                VStack(alignment: .leading, spacing: 0) {
-                    if let heading = catalogHeading(feed.query) {
-                        Text(heading)
-                            .font(MewoFont.bold(15))
-                            .foregroundStyle(mewo.ink)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .frame(minHeight: 44)
-                            .padding(.horizontal, 16)
-                            .accessibilityIdentifier("catalog-heading")
-                        Hairline()
-                    }
-                    Text(catalogEmptyCopy(feed.query))
-                        .font(MewoFont.bold(22))
-                        .foregroundStyle(mewo.ink)
-                        .padding(.horizontal, 28)
-                        .padding(.vertical, 48)
-                }
-                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-                .accessibilityIdentifier("catalog-empty")
+                Text(catalogEmptyCopy(feed.query))
+                    .font(MewoFont.bold(22))
+                    .foregroundStyle(mewo.ink)
+                    .padding(.horizontal, 28)
+                    .padding(.vertical, 48)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                    .accessibilityIdentifier("catalog-empty")
             } else if feed.items.isEmpty {
                 Color.clear
             } else {
@@ -95,16 +79,7 @@ struct CatalogResults: View {
     private var list: some View {
         ScrollView {
             LazyVStack(alignment: .leading, spacing: 0) {
-                if let heading = catalogHeading(feed.query) {
-                    Text(heading)
-                        .font(MewoFont.bold(15))
-                        .foregroundStyle(mewo.ink)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .frame(minHeight: 44)
-                        .padding(.horizontal, 16)
-                        .accessibilityIdentifier("catalog-heading")
-                    Hairline()
-                }
+                trendingHeader
                 if case .loading = feed.phase {
                     ProgressView()
                         .tint(mewo.accent)
@@ -141,25 +116,82 @@ struct CatalogResults: View {
         .accessibilityIdentifier("catalog-results")
     }
 
-    private func failureBlock(_ message: String) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
-            if let heading = catalogHeading(feed.query) {
-                Text(heading)
-                    .font(MewoFont.bold(15))
-                    .foregroundStyle(mewo.ink)
+    @ViewBuilder
+    private var trendingHeader: some View {
+        if let heading = catalogHeading(feed.query) {
+            Text(heading)
+                .font(MewoFont.bold(15))
+                .foregroundStyle(mewo.ink)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .frame(minHeight: 44)
+                .padding(.horizontal, 16)
+                .accessibilityIdentifier("catalog-heading")
+            Hairline()
+        }
+    }
+
+    private var skeleton: some View {
+        ScrollView {
+            LazyVStack(alignment: .leading, spacing: 0) {
+                trendingHeader
+                ForEach(0..<6, id: \.self) { _ in
+                    skeletonRow
+                    Hairline()
+                }
             }
+        }
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("Loading results…")
+        .accessibilityIdentifier("catalog-loading")
+    }
+
+    private var skeletonRow: some View {
+        HStack(alignment: .center, spacing: 12) {
+            RoundedRectangle(cornerRadius: 3)
+                .fill(bone)
+                .frame(width: 40, height: 60)
+            GeometryReader { geo in
+                VStack(alignment: .leading, spacing: 8) {
+                    skeletonLine(geo.size.width * 0.6)
+                    skeletonLine(geo.size.width * 0.4)
+                }
+                .frame(maxHeight: .infinity, alignment: .center)
+            }
+            .frame(height: 36)
+        }
+        .padding(.leading, 16)
+        .padding(.trailing, 16)
+        .padding(.vertical, 12)
+    }
+
+    private func skeletonLine(_ width: CGFloat) -> some View {
+        RoundedRectangle(cornerRadius: 4)
+            .fill(bone)
+            .frame(width: width, height: 14)
+    }
+
+    private var bone: Color { mewo.mute.opacity(0.16) }
+
+    private func failureBlock(_ message: String) -> some View {
+        HStack(alignment: .center, spacing: 12) {
             Text(message)
                 .font(MewoFont.regular(15))
-                .foregroundStyle(mewo.ink)
+                .foregroundStyle(mewo.like)
+                .frame(maxWidth: .infinity, alignment: .leading)
                 .accessibilityIdentifier("catalog-error")
-            Button("Try again") { feed.retry() }
-                .font(MewoFont.regular(15))
-                .foregroundStyle(mewo.accent)
-                .buttonStyle(.plain)
-                .accessibilityIdentifier("catalog-feed-retry")
+            Button { feed.retry() } label: {
+                Text("Try again")
+                    .font(MewoFont.bold(15))
+                    .foregroundStyle(mewo.accent)
+                    .frame(minHeight: 40)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityIdentifier("catalog-feed-retry")
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 12)
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .frame(minHeight: 48)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
     }
 }
