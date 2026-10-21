@@ -34,6 +34,17 @@ fun catalogQuery(raw: String): CatalogQuery {
     return if (scalars < CATALOG_MIN_QUERY) CatalogQuery.Browse else CatalogQuery.Search(trimmed)
 }
 
+/** The trending heading is only for browse, and only while those rows are loading or on screen. */
+internal fun showTrendingHeader(query: String, phase: CatalogPhase): Boolean {
+    if (catalogQuery(query) !is CatalogQuery.Browse) return false
+    return when (phase) {
+        CatalogPhase.Idle -> false
+        is CatalogPhase.Failed -> false
+        is CatalogPhase.Loading -> true
+        is CatalogPhase.Loaded -> phase.more || phase.page.items.isNotEmpty()
+    }
+}
+
 /** Service name from a held-upstream error, such as `SABnzbd: down`. */
 fun holdService(error: String?): String? {
     if (error.isNullOrEmpty()) return null
@@ -124,7 +135,8 @@ private fun phaseLabel(phase: RequestPhase, progress: Int, error: String?): Stri
 enum class RowAction { Request, Again, Pending, Open, Retry }
 
 /** The catalog row's trailing action. A live request has no control.
- *  An imported request with no book, and nothing already on the server, starts over. */
+ *  Canceled, and an imported request with no book and nothing on the server, start over.
+ *  The arrow is only a failed download. */
 fun rowAction(request: BookRequest?, onServer: ServerCopy?): RowAction {
     if (request != null && (request.state == "requested" || request.state == "downloading")) {
         return RowAction.Pending
@@ -132,7 +144,7 @@ fun rowAction(request: BookRequest?, onServer: ServerCopy?): RowAction {
     if (request?.state == "failed") return RowAction.Retry
     if (request?.state == "imported" && request.bookId != null) return RowAction.Open
     if (onServer?.bookId != null) return RowAction.Open
-    if (request?.state == "canceled") return RowAction.Retry
+    if (request?.state == "canceled") return RowAction.Again
     if (request?.state == "imported") return RowAction.Again
     return RowAction.Request
 }
@@ -260,6 +272,9 @@ sealed class SheetStatus {
     data class Failed(val line: String, val capNote: String? = null) : SheetStatus()
     data class Available(val line: String, val bookId: String? = null) : SheetStatus()
     data class Canceled(val capNote: String? = null) : SheetStatus()
+
+    /** Imported, but no book landed and nothing is on the server. */
+    data class RequestAgain(val capNote: String? = null) : SheetStatus()
     data class Requestable(val capNote: String? = null, val editionNote: String? = null) : SheetStatus()
 }
 
@@ -289,6 +304,10 @@ fun sheetStatus(work: CatalogWork, detail: WorkDetail?, fallback: BookRequest?):
     }
     if (phase == RequestPhase.Failed && request != null) {
         return SheetStatus.Failed(request.error ?: "The download failed.", note)
+    }
+    // An import that produced no book, and no server copy, is not on the shelf.
+    if (phase == RequestPhase.Imported && bookId == null && copy == null) {
+        return SheetStatus.RequestAgain(note)
     }
     if (copy != null || phase == RequestPhase.Imported) {
         val line = if (copy != null) copyLabel(copy, CopyStyle.Sheet) else "On your shelf"
@@ -327,14 +346,14 @@ private fun liveLine(
  * is replaced. A sentence the server wrote is kept.
  */
 fun catalogErrorText(code: Int, serverMessage: String?, network: Boolean): String {
-    if (network) return "Could not reach the server. Check your connection and try again."
+    if (network) return "Couldn't reach the server. Check your connection."
     val raw = serverMessage?.trim().orEmpty()
     if (raw.isNotEmpty() && !rawStatus(raw)) return raw
     return when (code) {
         401 -> "Sign in again."
         403 -> "Requests are off."
         404 -> "That book is no longer in the catalog."
-        else -> "Could not load the catalog. Try again."
+        else -> "Couldn't load the catalog."
     }
 }
 

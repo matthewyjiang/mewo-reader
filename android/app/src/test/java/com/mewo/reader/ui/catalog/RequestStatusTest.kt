@@ -1,6 +1,7 @@
 package com.mewo.reader.ui.catalog
 
 import com.mewo.reader.data.BookRequest
+import com.mewo.reader.data.CatalogPage
 import com.mewo.reader.data.CatalogWork
 import com.mewo.reader.data.Rating
 import com.mewo.reader.data.RequestDetail
@@ -84,7 +85,7 @@ class RequestStatusTest {
         assertEquals(RowAction.Pending, rowAction(book(state = "requested"), null))
         assertEquals(RowAction.Pending, rowAction(book(state = "downloading"), null))
         assertEquals(RowAction.Retry, rowAction(book(state = "failed"), null))
-        assertEquals(RowAction.Retry, rowAction(book(state = "canceled"), null))
+        assertEquals(RowAction.Again, rowAction(book(state = "canceled"), null))
         assertEquals(RowAction.Open, rowAction(book(state = "imported", bookId = "b1"), null))
         assertEquals(RowAction.Again, rowAction(book(state = "imported"), null))
         assertEquals(RowAction.Request, rowAction(null, null))
@@ -133,6 +134,17 @@ class RequestStatusTest {
     }
 
     @Test
+    fun trendingHeaderShowsForBrowseWhileLoadingOrFilled() {
+        val rows = CatalogPage(items = listOf(CatalogWork(workKey = "/works/OL1W", title = "Dune")))
+        val empty = CatalogPage()
+        assertTrue(showTrendingHeader("", CatalogPhase.Loading()))
+        assertTrue(showTrendingHeader("du", CatalogPhase.Loaded(rows)))
+        assertFalse(showTrendingHeader("", CatalogPhase.Loaded(empty)))
+        assertFalse(showTrendingHeader("", CatalogPhase.Failed("Couldn't load the catalog.")))
+        assertFalse(showTrendingHeader("dune", CatalogPhase.Loaded(rows)))
+    }
+
+    @Test
     fun errorTextNeverShowsARawStatus() {
         val rendered = listOf(
             catalogErrorText(500, "Server returned 500", network = false),
@@ -152,13 +164,47 @@ class RequestStatusTest {
         assertEquals("Sign in again.", catalogErrorText(401, "Server returned 401", false))
         assertEquals("That book is no longer in the catalog.", catalogErrorText(404, "HTTP 404", false))
         assertEquals(
-            "Could not reach the server. Check your connection and try again.",
+            "Couldn't reach the server. Check your connection.",
             catalogErrorText(0, "Server returned 0", network = true),
+        )
+        assertEquals(
+            "Couldn't load the catalog.",
+            catalogErrorText(500, "Server returned 500", false),
         )
         assertEquals(
             "Open Library is busy. Try again.",
             catalogErrorText(502, "Open Library is busy. Try again.", false),
         )
+        assertFalse(catalogErrorText(0, null, true).endsWith("Try again."))
+        assertFalse(catalogErrorText(500, null, false).endsWith("Try again."))
+    }
+
+    @Test
+    fun anImportedRequestWithNoBookAsksToRequestAgain() {
+        val status = sheetStatus(work(), null, book(state = "imported")) as SheetStatus.RequestAgain
+        assertNull(status.capNote)
+        val open = sheetStatus(work(), null, book(state = "imported", bookId = "b1")) as SheetStatus.Available
+        assertEquals("On your shelf", open.line)
+        assertEquals("b1", open.bookId)
+        val copied = sheetStatus(
+            work(onServer = ServerCopy(bookId = "b2", ownerUsername = "ada", shared = true)),
+            null,
+            book(state = "imported"),
+        ) as SheetStatus.Available
+        assertEquals("b2", copied.bookId)
+        val capped = sheetStatus(
+            work(),
+            WorkDetail(
+                KEY,
+                status = WorkStatus(
+                    request = request(state = "imported", error = null, phase = "imported"),
+                    active = 5,
+                    cap = 5,
+                ),
+            ),
+            null,
+        ) as SheetStatus.RequestAgain
+        assertEquals("You have 5 requests in progress", capped.capNote)
     }
 
     @Test

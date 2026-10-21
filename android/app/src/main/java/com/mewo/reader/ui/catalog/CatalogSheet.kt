@@ -3,11 +3,12 @@ package com.mewo.reader.ui.catalog
 import android.content.Intent
 import android.net.Uri
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -35,7 +36,6 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -47,6 +47,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -232,6 +233,14 @@ private fun StatusBlock(
                 )
                 status.capNote?.let { Note(it, mute) }
             }
+            is SheetStatus.RequestAgain -> {
+                FilledAction(
+                    text = "Request again",
+                    enabled = !state.acting && status.capNote == null,
+                    onClick = onRequest,
+                )
+                status.capNote?.let { Note(it, mute) }
+            }
             is SheetStatus.Requestable -> {
                 FilledAction(
                     text = "Request",
@@ -280,8 +289,12 @@ private fun AboutBlock(
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 modifier = Modifier.padding(start = 16.dp, end = 16.dp, top = 28.dp),
             )
-            TextButton(onClick = onReload, contentPadding = PaddingValues(horizontal = 16.dp)) {
-                Text("Try again", color = MaterialTheme.colorScheme.primary)
+            TextLink(onClick = onReload, modifier = Modifier.padding(start = 16.dp)) {
+                Text(
+                    text = "Try again",
+                    style = MaterialTheme.typography.titleSmall,
+                    color = MaterialTheme.colorScheme.primary,
+                )
             }
         }
         about != null -> {
@@ -305,7 +318,7 @@ private fun AboutBlock(
                 about.subjects?.let { subjects ->
                     Text(
                         text = subjects,
-                        style = MaterialTheme.typography.bodyLarge,
+                        style = MaterialTheme.typography.bodyMedium,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
@@ -314,16 +327,14 @@ private fun AboutBlock(
                         text = stats,
                         style = MaterialTheme.typography.bodyMedium,
                         color = MaterialTheme.colorScheme.onBackground,
-                        maxLines = 1,
-                        softWrap = false,
-                        overflow = TextOverflow.Ellipsis,
                     )
                 }
-                TextButton(
-                    onClick = { onOpenLibrary(about.openLibraryUrl) },
-                    contentPadding = PaddingValues(0.dp),
-                ) {
-                    Text("View on Open Library", color = MaterialTheme.colorScheme.primary)
+                TextLink(onClick = { onOpenLibrary(about.openLibraryUrl) }) {
+                    Text(
+                        text = "View on Open Library",
+                        style = MaterialTheme.typography.titleSmall,
+                        color = MaterialTheme.colorScheme.primary,
+                    )
                     Spacer(Modifier.width(6.dp))
                     Icon(
                         imageVector = Icons.AutoMirrored.Outlined.OpenInNew,
@@ -351,9 +362,10 @@ private fun Description(text: String, expanded: Boolean, onToggle: () -> Unit) {
             },
         )
         if (overflow || expanded) {
-            TextButton(onClick = onToggle, contentPadding = PaddingValues(0.dp)) {
+            TextLink(onClick = onToggle) {
                 Text(
                     text = if (expanded) "Less" else "More",
+                    style = MaterialTheme.typography.titleSmall,
                     color = MaterialTheme.colorScheme.primary,
                 )
             }
@@ -394,6 +406,22 @@ private fun Bone(fraction: Float = 1f) {
     )
 }
 
+/** TextButton's minimum width centers a short label. This stays flush left. */
+@Composable
+private fun TextLink(
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+    content: @Composable RowScope.() -> Unit,
+) {
+    Row(
+        modifier = modifier
+            .heightIn(min = 40.dp)
+            .clickable(role = Role.Button, onClick = onClick),
+        verticalAlignment = Alignment.CenterVertically,
+        content = content,
+    )
+}
+
 @Composable
 private fun FilledAction(text: String, enabled: Boolean, onClick: () -> Unit) {
     val scheme = MaterialTheme.colorScheme
@@ -402,11 +430,17 @@ private fun FilledAction(text: String, enabled: Boolean, onClick: () -> Unit) {
         enabled = enabled,
         modifier = Modifier
             .fillMaxWidth()
-            .heightIn(min = 40.dp),
+            .heightIn(min = 44.dp),
         shape = CircleShape,
+        colors = ButtonDefaults.buttonColors(
+            containerColor = scheme.primary,
+            contentColor = scheme.onPrimary,
+            disabledContainerColor = scheme.primary.copy(alpha = 0.4f),
+            disabledContentColor = scheme.onPrimary,
+        ),
     ) {
         // Typography pins the ink color, so the label has to name the button color.
-        Text(text, color = if (enabled) scheme.onPrimary else scheme.onSurface.copy(alpha = 0.38f))
+        Text(text, style = MaterialTheme.typography.titleSmall, color = scheme.onPrimary)
     }
 }
 
@@ -418,7 +452,7 @@ private fun OutlineDestructive(text: String, enabled: Boolean, onClick: () -> Un
         enabled = enabled,
         modifier = Modifier
             .fillMaxWidth()
-            .heightIn(min = 40.dp),
+            .heightIn(min = 44.dp),
         shape = CircleShape,
         border = BorderStroke(1.dp, if (enabled) scheme.outline else scheme.onSurface.copy(alpha = 0.12f)),
         colors = ButtonDefaults.outlinedButtonColors(
@@ -426,6 +460,10 @@ private fun OutlineDestructive(text: String, enabled: Boolean, onClick: () -> Un
             disabledContentColor = scheme.onSurface.copy(alpha = 0.38f),
         ),
     ) {
-        Text(text, color = if (enabled) scheme.error else scheme.onSurface.copy(alpha = 0.38f))
+        Text(
+            text,
+            style = MaterialTheme.typography.titleSmall,
+            color = if (enabled) scheme.error else scheme.onSurface.copy(alpha = 0.38f),
+        )
     }
 }

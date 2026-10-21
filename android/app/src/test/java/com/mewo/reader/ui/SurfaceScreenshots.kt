@@ -34,6 +34,7 @@ import com.mewo.reader.data.AccountHit
 import com.mewo.reader.data.BackendKind
 import com.mewo.reader.data.BookRecord
 import com.mewo.reader.data.BookRequest
+import com.mewo.reader.data.CatalogPage
 import com.mewo.reader.data.CatalogWork
 import com.mewo.reader.data.Rating
 import com.mewo.reader.data.RequestDetail
@@ -49,11 +50,17 @@ import com.mewo.reader.data.HostedSession
 import com.mewo.reader.data.LocalProfile
 import com.mewo.reader.data.PostKind
 import com.mewo.reader.data.ProfileRecord
+import com.mewo.reader.ui.catalog.CatalogEmpty
+import com.mewo.reader.ui.catalog.CatalogErrorRow
+import com.mewo.reader.ui.catalog.CatalogHeading
+import com.mewo.reader.ui.catalog.CatalogNotice
+import com.mewo.reader.ui.catalog.CatalogPhase
 import com.mewo.reader.ui.catalog.CatalogRow
 import com.mewo.reader.ui.catalog.CatalogSheetContent
 import com.mewo.reader.ui.catalog.CatalogSheetState
+import com.mewo.reader.ui.catalog.CatalogSkeleton
+import com.mewo.reader.ui.catalog.showTrendingHeader
 import com.mewo.reader.ui.components.AccountDrawer
-import com.mewo.reader.ui.components.ErrorStatus
 import com.mewo.reader.ui.components.AppTab
 import com.mewo.reader.ui.components.BrandMark
 import com.mewo.reader.ui.components.HomeTabBar
@@ -303,20 +310,89 @@ class SurfaceScreenshots {
     @Test
     fun catalogTrending() = shoot("catalog-trending") {
         SearchChrome("catalog", query = "", tabs = searchTabs(hosted = true, canRequest = true)) {
-            CatalogHeadingShot()
+            CatalogHeader("", trendingPhase())
             CatalogRow(work = duneWork, request = null, onOpen = {}, onAct = {})
             CatalogRow(work = emmaWork, request = null, onOpen = {}, onAct = {})
             CatalogRow(work = longWork, request = longWork.request, onOpen = {}, onAct = {})
+            CatalogRow(work = failedWork, request = failedWork.request, onOpen = {}, onAct = {})
+            CatalogRow(work = canceledWork, request = canceledWork.request, onOpen = {}, onAct = {})
+            CatalogRow(work = shelfWork, request = shelfWork.request, onOpen = {}, onAct = {})
+            CatalogRow(work = importedWork, request = importedWork.request, onOpen = {}, onAct = {})
+        }
+    }
+
+    @Test
+    fun catalogShortQuery() = shoot("catalog-short-query") {
+        SearchChrome("catalog", query = "du", tabs = searchTabs(hosted = true, canRequest = true)) {
+            CatalogHeader("du", trendingPhase())
+            CatalogRow(work = duneWork, request = null, onOpen = {}, onAct = {})
+        }
+    }
+
+    @Test
+    fun catalogLoading() = shoot("catalog-loading") {
+        SearchChrome("catalog", query = "", tabs = searchTabs(hosted = true, canRequest = true)) {
+            CatalogHeader("", CatalogPhase.Loading())
+            CatalogSkeleton()
+        }
+    }
+
+    @Test
+    fun catalogEmpty() = shoot("catalog-empty") {
+        SearchChrome("catalog", query = "", tabs = searchTabs(hosted = true, canRequest = true)) {
+            CatalogHeader("", CatalogPhase.Loaded(CatalogPage()))
+            CatalogEmpty("")
         }
     }
 
     @Test
     fun catalogError() = shoot("catalog-error") {
         SearchChrome("catalog", query = "", tabs = searchTabs(hosted = true, canRequest = true)) {
-            ErrorStatus(
-                message = "Could not reach the server. Check your connection and try again.",
+            CatalogHeader("", CatalogPhase.Failed("Couldn't reach the server. Check your connection."))
+            CatalogErrorRow(
+                message = "Couldn't reach the server. Check your connection.",
                 onRetry = {},
             )
+        }
+    }
+
+    @Test
+    fun catalogNotice() = shoot("catalog-notice") {
+        val focus = remember { FocusRequester() }
+        SideEffect { focus.requestFocus() }
+        Column(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)) {
+            MewoAppBar(
+                leading = { ProfileButton(onClick = {}) },
+                content = {
+                    SearchField(
+                        query = "",
+                        onQueryChange = {},
+                        hosted = true,
+                        focusRequester = focus,
+                        modifier = Modifier.weight(1f).padding(end = 8.dp),
+                    )
+                },
+            )
+            UnderlineTabs(
+                tabs = searchTabs(hosted = true, canRequest = true),
+                selected = "catalog",
+                onSelect = {},
+            )
+            Box(Modifier.weight(1f).fillMaxWidth()) {
+                Column {
+                    CatalogHeader("", trendingPhase())
+                    CatalogRow(work = duneWork, request = null, onOpen = {}, onAct = {})
+                }
+                CatalogNotice(
+                    message = "Couldn't request that book.",
+                    onDismiss = {},
+                    modifier = Modifier
+                        .align(Alignment.BottomCenter)
+                        .padding(start = 16.dp, end = 16.dp, bottom = 16.dp)
+                        .fillMaxWidth(),
+                )
+            }
+            HomeTabBar(selected = AppTab.Search, onSelect = {})
         }
     }
 
@@ -357,6 +433,30 @@ class SurfaceScreenshots {
     fun catalogSheetOpen() = shoot("catalog-sheet-open") {
         catalogSheet(
             duneSheet(WorkStatus(onServer = ServerCopy(bookId = "b1", mine = true), cap = 5)),
+        )
+    }
+
+    @Test
+    fun catalogSheetAgain() = shoot("catalog-sheet-again") {
+        catalogSheet(
+            duneSheet(
+                WorkStatus(
+                    request = detailRequest(state = "imported", phase = "imported"),
+                    cap = 5,
+                ),
+            ),
+        )
+    }
+
+    @Test
+    fun catalogSheetCanceled() = shoot("catalog-sheet-canceled") {
+        catalogSheet(
+            duneSheet(
+                WorkStatus(
+                    request = detailRequest(state = "canceled", phase = "canceled"),
+                    cap = 5,
+                ),
+            ),
         )
     }
 
@@ -418,9 +518,13 @@ class SurfaceScreenshots {
     }
 }
 
+private fun trendingPhase() = CatalogPhase.Loaded(CatalogPage(items = listOf(duneWork)))
+
 @Composable
-private fun CatalogHeadingShot() {
-    com.mewo.reader.ui.catalog.CatalogHeading("Trending on Open Library")
+private fun CatalogHeader(query: String, phase: CatalogPhase) {
+    if (showTrendingHeader(query, phase)) {
+        CatalogHeading("Trending on Open Library")
+    }
 }
 
 @Composable
@@ -480,6 +584,68 @@ private val emmaWork = CatalogWork(
     author = "Jane Austen",
     year = 1815,
     onServer = ServerCopy(bookId = "emma", ownerUsername = "austen", shared = true),
+)
+
+private val failedWork = CatalogWork(
+    workKey = "/works/OL2W",
+    title = "Frankenstein",
+    author = "Mary Shelley",
+    year = 1818,
+    request = BookRequest(
+        id = "r-fail",
+        workKey = "/works/OL2W",
+        title = "Frankenstein",
+        author = "Mary Shelley",
+        year = 1818,
+        state = "failed",
+        error = "No release found.",
+    ),
+)
+
+private val canceledWork = CatalogWork(
+    workKey = "/works/OL3W",
+    title = "Persuasion",
+    author = "Jane Austen",
+    year = 1817,
+    request = BookRequest(
+        id = "r-cancel",
+        workKey = "/works/OL3W",
+        title = "Persuasion",
+        author = "Jane Austen",
+        year = 1817,
+        state = "canceled",
+    ),
+)
+
+private val shelfWork = CatalogWork(
+    workKey = "/works/OL4W",
+    title = "Pride and Prejudice",
+    author = "Jane Austen",
+    year = 1813,
+    request = BookRequest(
+        id = "r-shelf",
+        workKey = "/works/OL4W",
+        title = "Pride and Prejudice",
+        author = "Jane Austen",
+        year = 1813,
+        state = "imported",
+        bookId = "b-pnp",
+    ),
+)
+
+private val importedWork = CatalogWork(
+    workKey = "/works/OL5W",
+    title = "The Left Hand of Darkness",
+    author = "Ursula K. Le Guin",
+    year = 1969,
+    request = BookRequest(
+        id = "r-again",
+        workKey = "/works/OL5W",
+        title = "The Left Hand of Darkness",
+        author = "Ursula K. Le Guin",
+        year = 1969,
+        state = "imported",
+    ),
 )
 
 private val longWork = CatalogWork(

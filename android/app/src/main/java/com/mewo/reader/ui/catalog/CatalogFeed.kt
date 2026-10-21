@@ -143,7 +143,16 @@ class CatalogFeed(
                 val id = current?.bookId ?: work.onServer?.bookId
                 if (id.isNullOrBlank()) RowOutcome.Done else RowOutcome.OpenBook(id)
             }
-            RowAction.Request, RowAction.Again -> submit(work.workKey) { store.request(work) }
+            RowAction.Request -> submit(work.workKey) { store.request(work) }
+            RowAction.Again -> {
+                // Retry accepts only failed or canceled. An import with no book starts a new request.
+                val id = current?.takeIf { it.state == "canceled" }?.id
+                if (id != null) {
+                    submit(work.workKey) { store.retry(id) }
+                } else {
+                    submit(work.workKey) { store.request(work) }
+                }
+            }
             RowAction.Retry -> {
                 val id = current?.id ?: return RowOutcome.Done
                 submit(work.workKey) { store.retry(id) }
@@ -178,7 +187,7 @@ class CatalogFeed(
         } catch (error: CancellationException) {
             throw error
         } catch (error: Exception) {
-            _state.update { it.copy(notice = error.message ?: "Could not request that book.") }
+            _state.update { it.copy(notice = error.message ?: "Couldn't request that book.") }
         }
         return RowOutcome.Done
     }
