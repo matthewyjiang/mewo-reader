@@ -30,7 +30,7 @@ use std::collections::HashMap;
 use uuid::Uuid;
 
 const ACTIVE_CAP: i64 = 5;
-const MIN_QUERY_CHARS: usize = 2;
+const MIN_QUERY_CHARS: usize = 3;
 const MAX_QUERY_CHARS: usize = 100;
 const MAX_TITLE: usize = 500;
 const MAX_AUTHOR: usize = 300;
@@ -340,9 +340,9 @@ async fn catalog_search(
     }
     let asked = q.chars().count();
     if asked < MIN_QUERY_CHARS {
-        return Err(ApiError::BadRequest(
-            "Type at least 2 characters to search the catalog.".into(),
-        ));
+        return Err(ApiError::BadRequest(format!(
+            "Type at least {MIN_QUERY_CHARS} characters to search the catalog."
+        )));
     }
     if asked > MAX_QUERY_CHARS {
         return Err(ApiError::BadRequest(format!(
@@ -352,8 +352,18 @@ async fn catalog_search(
     let page = query.page.max(1);
     let (works, next_page) = openlibrary::search(&state, q, page)
         .await
-        .map_err(|err| ApiError::BadGateway(err.to_string()))?;
+        .map_err(search_upstream)?;
     catalog_items(&state, &authed.user_id, works, next_page).await
+}
+
+/// Open Library's status and error stay in the log. Callers see one sentence.
+fn search_upstream(err: http::UpstreamError) -> ApiError {
+    if let http::UpstreamError::Status(status) = &err {
+        tracing::warn!(status, error = %err, "open library search failed");
+    } else {
+        tracing::warn!(error = %err, "open library search failed");
+    }
+    ApiError::BadGateway(openlibrary::SEARCH_DOWN.into())
 }
 
 async fn catalog_trending(

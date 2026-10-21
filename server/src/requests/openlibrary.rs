@@ -27,6 +27,7 @@ const DESCRIPTION_CAP: usize = 2000;
 pub(crate) const MISSING_WORK: &str = "Open Library has no record of this work.";
 pub(crate) const LIBRARY_DOWN: &str = "Open Library is not answering.";
 pub(crate) const LIBRARY_AGAIN: &str = "Open Library is not answering. Try again.";
+pub(crate) const SEARCH_DOWN: &str = "Couldn't search the catalog right now.";
 
 const GAP: Duration = Duration::from_secs(1);
 const PAGE: i64 = 20;
