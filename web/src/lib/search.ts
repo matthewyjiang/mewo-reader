@@ -3,6 +3,8 @@ import type { BookRequest, SearchKind, SearchPage } from './models';
 export const SEARCH_DEBOUNCE_MS = 250;
 export const CATALOG_DEBOUNCE_MS = 300;
 export const BROWSE_REVALIDATE_MS = 60_000;
+/** Catalog search starts at three characters. Shorter text is the trending browse. */
+export const CATALOG_MIN_QUERY_CHARS = 3;
 const MEMO_LIMIT = 8;
 
 /** No session. A signed-in empty field is a browse request, not this. */
@@ -91,9 +93,19 @@ export function visiblePage(state: SearchState): SearchPage | undefined {
   return undefined;
 }
 
-/** An empty field is browse, including a field of only spaces. */
+/** Blank text is browse, including spaces. A catalog query under three characters is browse too. */
 export function isBrowse(state: SearchState): boolean {
-  return !state.query.trim();
+  return !searchedQuery(state.kind, state.query);
+}
+
+/**
+ * Query sent to the server. Catalog text under three characters stays on trending,
+ * so it searches as blank and does not ask Open Library.
+ */
+export function searchedQuery(kind: SearchKind, query: string): string {
+  const trimmed = query.trim();
+  if (kind === 'catalog' && [...trimmed].length < CATALOG_MIN_QUERY_CHARS) return '';
+  return trimmed;
 }
 
 export type EmptyKind = 'none' | 'noMatches' | 'nothingYet';
@@ -183,8 +195,8 @@ export class SearchModel {
   }
 
   setQuery(query: string): void {
-    const trimmed = query.trim();
-    if (trimmed === this.state.query.trim()) {
+    const next = this.asked(query);
+    if (next === this.asked()) {
       if (query !== this.state.query) this.update({ ...this.state, query });
       return;
     }
@@ -195,15 +207,15 @@ export class SearchModel {
       this.update({ ...this.state, query, phase: { status: 'idle' } });
       return;
     }
-    const hit = this.recall(this.state.kind, trimmed);
+    const hit = this.recall(this.state.kind, next);
     if (hit) {
       this.update({ ...this.state, query, phase: { status: 'loaded', page: hit.page, more: false } });
-      if (this.stale(hit, trimmed)) this.arm(null, true);
+      if (this.stale(hit, next)) this.arm(null, true);
       return;
     }
     const previous = visiblePage(this.state);
     // Browse has its own heading. Another query's hits must not sit under it.
-    const kept = trimmed && previous?.type === this.state.kind ? previous : undefined;
+    const kept = next && previous?.type === this.state.kind ? previous : undefined;
     this.update({ ...this.state, query, phase: { status: 'loading', previous: kept } });
     this.arm(null);
   }
@@ -217,7 +229,7 @@ export class SearchModel {
       this.update({ ...this.state, kind, phase: { status: 'idle' } });
       return;
     }
-    const trimmed = this.state.query.trim();
+    const trimmed = this.asked(this.state.query, kind);
     const hit = this.recall(kind, trimmed);
     if (hit) {
       this.update({ ...this.state, kind, phase: { status: 'loaded', page: hit.page, more: false } });
@@ -234,7 +246,7 @@ export class SearchModel {
     if (this.state.phase.status !== 'failed') return;
     const session = this.state.session;
     if (!session) return;
-    const query = this.state.query.trim();
+    const query = this.asked();
     const cursor = this.pendingCursor;
     const previous = this.state.phase.previous;
     this.generation += 1;
@@ -248,7 +260,7 @@ export class SearchModel {
     if (phase.status !== 'loaded' || phase.more || !phase.page.nextCursor) return;
     const session = this.state.session;
     if (!session) return;
-    const query = this.state.query.trim();
+    const query = this.asked();
     const cursor = phase.page.nextCursor;
     this.generation += 1;
     this.stop();
@@ -295,7 +307,7 @@ export class SearchModel {
       this.update({ ...this.state, phase: { status: 'idle' } });
       return;
     }
-    const trimmed = this.state.query.trim();
+    const trimmed = this.asked();
     const hit = this.recall(this.state.kind, trimmed);
     if (hit) {
       this.update({ ...this.state, phase: { status: 'loaded', page: hit.page, more: false } });
@@ -327,7 +339,7 @@ export class SearchModel {
   private remember(page: SearchPage, pages: number): void {
     const session = this.state.session;
     if (!session) return;
-    const key = memoKey(page.type, this.state.query.trim());
+    const key = memoKey(page.type, this.asked());
     const memo = searchMemo(session);
     if (memo.has(key)) memo.delete(key);
     memo.set(key, { page, at: this.now(), pages });
@@ -341,7 +353,7 @@ export class SearchModel {
   private arm(cursor: string | null, quiet = false): void {
     const generation = this.generation;
     const session = this.state.session;
-    const query = this.state.query.trim();
+    const query = this.asked();
     const kind = this.state.kind;
     if (!session) return;
     this.pendingCursor = cursor;
@@ -379,7 +391,9 @@ export class SearchModel {
     } catch (error) {
       if (abort.signal.aborted || !this.current(generation, session, query, kind)) return;
       if (quiet && visiblePage(this.state)) return;
-      const previous = visiblePage(this.state);
+      const shown = visiblePage(this.state);
+      // A failed catalog page replaces the list. Load-more keeps the page it was extending.
+      const previous = kind === 'catalog' && !cursor ? undefined : shown;
       const message = error instanceof Error && error.message
         ? error.message
         : 'Something went wrong. Try again.';
@@ -392,8 +406,12 @@ export class SearchModel {
   private current(generation: number, session: string, query: string, kind: SearchKind): boolean {
     return generation === this.generation
       && session === this.state.session
-      && query === this.state.query.trim()
+      && query === this.asked()
       && kind === this.state.kind;
+  }
+
+  private asked(query = this.state.query, kind = this.state.kind): string {
+    return searchedQuery(kind, query);
   }
 
   private stop(): void {

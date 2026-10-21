@@ -251,6 +251,8 @@ async function install(
       { username: 'noor', mine: false },
     ],
     miss: options.emptyQuery ?? null as string | null,
+    catalogQueries: [] as string[],
+    catalogFailure: null as null | { query: string; status: number; error: string },
     holdDetail: false,
     releaseDetail: () => {},
     retryTo: null as string | null,
@@ -301,6 +303,9 @@ async function answer(route: Route, state: Awaited<ReturnType<typeof install>>) 
   }
   if (path === '/v1/catalog/search') {
     const q = url.searchParams.get('q') ?? '';
+    state.catalogQueries.push(q);
+    const failure = state.catalogFailure;
+    if (failure && q === failure.query) return json({ error: failure.error }, failure.status);
     if (state.miss && q === state.miss) return json({ items: [], nextPage: null });
     return json({ items: trending, nextPage: null });
   }
@@ -500,6 +505,63 @@ test('retry updates the sheet before the next detail load', async ({ page }) => 
   await expect(sheet.getByText('Looking for a release…')).toBeVisible();
   await expect(sheet.getByRole('button', { name: 'Retry' })).toHaveCount(0);
   state.releaseDetail();
+});
+
+test('one or two characters on Catalog keep trending', async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  const state = await install(page, { kind: 'catalog' });
+  await page.goto('/search');
+  await expect(page.getByRole('heading', { name: 'Trending on Open Library' })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Dune, Frank Herbert, 1965' })).toBeVisible();
+  const before = state.catalogQueries.length;
+
+  await page.getByPlaceholder('Search').fill('d');
+  await page.waitForTimeout(500);
+  await page.getByPlaceholder('Search').fill('du');
+  await page.waitForTimeout(500);
+  expect(state.catalogQueries.slice(before)).toEqual([]);
+  await expect(page.getByRole('alert')).toHaveCount(0);
+  await expect(page.getByText('Type at least')).toHaveCount(0);
+  await expect(page.getByRole('heading', { name: 'Trending on Open Library' })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Dune, Frank Herbert, 1965' })).toBeVisible();
+
+  await page.getByPlaceholder('Search').fill('dun');
+  await expect.poll(() => state.catalogQueries.includes('dun')).toBe(true);
+  expect(state.catalogQueries.includes('d')).toBe(false);
+  expect(state.catalogQueries.includes('du')).toBe(false);
+});
+
+test('a catalog search error replaces the list', async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  const state = await install(page, { kind: 'catalog' });
+  state.catalogFailure = {
+    query: 'dune',
+    status: 502,
+    error: "Couldn't search the catalog right now.",
+  };
+  await page.goto('/search');
+  await expect(page.getByRole('button', { name: 'Dune, Frank Herbert, 1965' })).toBeVisible();
+
+  await page.getByPlaceholder('Search').fill('dune');
+  const alert = page.getByRole('alert');
+  await expect(alert).toHaveText("Couldn't search the catalog right now.");
+  await expect(page.getByRole('button', { name: 'Try again' })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Trending on Open Library' })).toHaveCount(0);
+  await expect(page.getByRole('button', { name: 'Dune, Frank Herbert, 1965' })).toHaveCount(0);
+
+  state.catalogFailure = {
+    query: 'dune',
+    status: 502,
+    error: 'Open Library is not answering. Try again.',
+  };
+  await page.getByRole('button', { name: 'Try again' }).click();
+  await expect(alert).toHaveText('Open Library is not answering. Try again.');
+  await expect(page.getByRole('button', { name: 'Dune, Frank Herbert, 1965' })).toHaveCount(0);
+
+  state.catalogFailure = null;
+  await page.getByRole('button', { name: 'Try again' }).click();
+  await expect(alert).toHaveCount(0);
+  await expect(page.getByRole('button', { name: 'Dune, Frank Herbert, 1965' })).toBeVisible();
 });
 
 test('an Open Library miss keeps the row and still requests', async ({ page }) => {

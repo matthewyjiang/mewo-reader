@@ -1187,13 +1187,59 @@ async fn catalog_upstream_failure_is_502() {
     assert_eq!(status, StatusCode::OK, "{body}");
     let (status, body) = empty_req(&app, "GET", "/v1/catalog/search?q=dune", Some(&token)).await;
     assert_eq!(status, StatusCode::BAD_GATEWAY, "{body}");
-    assert_eq!(body["error"], "HTTP 500");
+    assert_eq!(body["error"], "Couldn't search the catalog right now.");
     let (status, body) = empty_req(&app, "GET", "/v1/catalog/search?q=", Some(&token)).await;
     assert_eq!(status, StatusCode::BAD_GATEWAY, "{body}");
     assert_eq!(body["error"], "Open Library is not answering. Try again.");
     let (status, body) = empty_req(&app, "GET", "/v1/catalog/search", Some(&token)).await;
     assert_eq!(status, StatusCode::BAD_GATEWAY, "{body}");
     assert_eq!(body["error"], "Open Library is not answering. Try again.");
+}
+
+#[tokio::test]
+async fn catalog_search_rejects_a_query_shorter_than_three_characters() {
+    let catalog = Arc::new(Mutex::new(Catalog::default()));
+    let (_state, app, _data, token) = catalog_app(Arc::clone(&catalog)).await;
+    for q in ["d", "du", " d ", "é", "书"] {
+        let path = format!("/v1/catalog/search?q={}", percent_encode(q));
+        let (status, body) = empty_req(&app, "GET", &path, Some(&token)).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{q:?} {body}");
+        assert_eq!(
+            body["error"],
+            "Type at least 3 characters to search the catalog."
+        );
+    }
+    assert!(
+        catalog.lock().await.hits.is_empty(),
+        "short queries must not call Open Library: {:?}",
+        catalog.lock().await.hits
+    );
+
+    let (status, body) = empty_req(&app, "GET", "/v1/catalog/search?q=%20%20", Some(&token)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(body["items"].is_array(), "{body}");
+    assert_eq!(catalog.lock().await.hits, vec!["trending".to_string()]);
+
+    let (status, body) = empty_req(&app, "GET", "/v1/catalog/search?q=dun", Some(&token)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["items"][0]["title"], "Dune");
+    assert_eq!(
+        catalog.lock().await.hits,
+        vec!["trending".to_string(), "q=dun".to_string()]
+    );
+}
+
+fn percent_encode(value: &str) -> String {
+    let mut out = String::new();
+    for b in value.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(b as char);
+            }
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    out
 }
 
 #[tokio::test]
