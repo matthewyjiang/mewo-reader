@@ -411,6 +411,31 @@ strong {
   padding-bottom: env(safe-area-inset-bottom);
 }
 
+/* Chapter list is the only scroller. The dialog's own overflow would sit beside it. */
+.sheet.toc {
+  --toc-max: 85dvh;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  margin: auto auto 0;
+  max-height: var(--toc-max);
+  border-radius: 16px 16px 0 0;
+  padding-bottom: env(safe-area-inset-bottom);
+}
+
+.sheet.toc .sheet-content {
+  height: auto;
+}
+
+@media (min-width: 1000px) {
+  .sheet.toc {
+    --toc-max: min(40rem, calc(100dvh - 6rem));
+    margin: auto;
+    border-radius: 16px;
+    padding-bottom: 0;
+  }
+}
+
 .sheet-content {
   min-height: 0;
   height: 100%;

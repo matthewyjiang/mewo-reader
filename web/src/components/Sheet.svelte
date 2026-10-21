@@ -4,7 +4,7 @@
 
   let { label, kind = 'bottom', onclose, children }: {
     label: string;
-    kind?: 'bottom' | 'full' | 'drawer';
+    kind?: 'bottom' | 'full' | 'drawer' | 'toc';
     onclose: () => void;
     children: Snippet;
   } = $props();

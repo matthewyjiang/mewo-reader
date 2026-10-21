@@ -294,7 +294,7 @@ fn nav_toc(text: &str, path: &str) -> Result<Vec<(String, String)>, String> {
     nav.descendants()
         .filter(|n| n.has_tag_name("a"))
         .filter_map(|n| n.attribute("href").map(|href| (href, node_text(n))))
-        .map(|(href, title)| resolve(path, href).map(|href| (href, title)))
+        .map(|(href, title)| toc_ref(path, href).map(|href| (href, title)))
         .collect()
 }
 
@@ -310,8 +310,21 @@ fn ncx_toc(text: &str, path: &str) -> Result<Vec<(String, String)>, String> {
             let content = point.children().find(|n| n.has_tag_name("content"))?;
             Some((content.attribute("src")?, node_text(label)))
         })
-        .map(|(href, title)| resolve(path, href).map(|href| (href, title)))
+        .map(|(href, title)| toc_ref(path, href).map(|href| (href, title)))
         .collect()
+}
+
+/// Keep the fragment. `resolve` drops it so archive paths cannot escape, but
+/// `#pain` and `#heaven` are different sections of one file.
+fn toc_ref(base: &str, href: &str) -> Result<String, String> {
+    let (path, fragment) = href.split_once('#').unwrap_or((href, ""));
+    let path = resolve(base, path)?;
+    let fragment = fragment.split('?').next().unwrap_or("").trim();
+    if fragment.is_empty() {
+        Ok(path)
+    } else {
+        Ok(format!("{path}#{fragment}"))
+    }
 }
 
 /// Resolve EPUB URI references without ever touching filesystem paths. Decode
@@ -389,7 +402,7 @@ fn text_elements(source: &str, href: &str) -> Vec<TextElement> {
         return Vec::new();
     };
     let mut parser = TextParser::default();
-    let mut blocks = Vec::new();
+    let mut blocks: Vec<OpenBlock> = Vec::new();
     let mut skipped = None;
     for edge in body.traverse() {
         match edge {
@@ -401,16 +414,22 @@ fn text_elements(source: &str, href: &str) -> Vec<TextElement> {
                     scraper::Node::Element(element) => {
                         let tag = element.name();
                         if matches!(tag, "script" | "style" | "head" | "noscript" | "template") {
-                            parser.flush(href, blocks.last().copied().unwrap_or(false));
+                            let (heading, id) = block_state(&blocks);
+                            parser.flush(href, heading, id);
                             skipped = Some(node.id());
                             continue;
                         }
                         if is_block(tag) {
-                            parser.flush(href, blocks.last().copied().unwrap_or(false));
-                            blocks.push(matches!(tag, "h1" | "h2" | "h3" | "h4" | "h5" | "h6"));
+                            let (heading, id) = block_state(&blocks);
+                            parser.flush(href, heading, id);
+                            blocks.push(OpenBlock {
+                                heading: matches!(tag, "h1" | "h2" | "h3" | "h4" | "h5" | "h6"),
+                                id: element.attr("id").unwrap_or("").to_owned(),
+                            });
                         }
                         if matches!(tag, "br" | "img" | "audio" | "video") {
-                            parser.flush(href, blocks.last().copied().unwrap_or(false));
+                            let (heading, id) = block_state(&blocks);
+                            parser.flush(href, heading, id);
                         }
                     }
                     scraper::Node::Text(text) if !text.trim().is_empty() => {
@@ -444,14 +463,27 @@ fn text_elements(source: &str, href: &str) -> Vec<TextElement> {
                     .as_element()
                     .is_some_and(|e| is_block(e.name()))
                 {
-                    parser.flush(href, blocks.last().copied().unwrap_or(false));
+                    let (heading, id) = block_state(&blocks);
+                    parser.flush(href, heading, id);
                     blocks.pop();
                 }
             }
         }
     }
-    parser.flush(href, false);
+    parser.flush(href, false, "");
     parser.elements
+}
+
+struct OpenBlock {
+    heading: bool,
+    id: String,
+}
+
+fn block_state(blocks: &[OpenBlock]) -> (bool, &str) {
+    match blocks.last() {
+        Some(block) => (block.heading, block.id.as_str()),
+        None => (false, ""),
+    }
 }
 
 fn is_block(tag: &str) -> bool {
@@ -571,13 +603,14 @@ impl TextParser {
         self.text.clear();
     }
 
-    fn flush(&mut self, href: &str, heading: bool) {
+    fn flush(&mut self, href: &str, heading: bool, id: &str) {
         self.flush_segment();
         if !self.segments.trim().is_empty() {
             self.elements.push(TextElement {
                 href: href.to_owned(),
                 text: self.segments.trim_end().to_owned(),
                 heading,
+                id: id.to_owned(),
             });
         }
         self.segments.clear();
@@ -610,6 +643,148 @@ mod tests {
         assert_eq!(book.posts[1].text, "First\u{a0} paragraph & second.");
         assert_eq!(book.posts[1].kind, PostKind::Body);
         assert!(book.posts.iter().all(|p| p.chapter == "Chapter I"));
+    }
+
+    #[test]
+    fn repeated_chapter_labels_collapse_without_dropping_nested_sections() {
+        let headings = [
+            "1. Introductory",
+            "2. Divine Omnipotence",
+            "3. The Fall",
+            "Human Pain",
+            "Heaven",
+            "A Distinct Argument",
+        ];
+        let bodies = [
+            "1",
+            "The problem of pain.",
+            "Omnipotence means power.",
+            "Opening.",
+            "Pain text.",
+            "Heaven text.",
+            "Argument text.",
+        ];
+        for epub3 in [true, false] {
+            let book = parse(Cursor::new(test_epub::repeated_chapters(epub3)), 1024).unwrap();
+            let got_headings: Vec<_> = book
+                .posts
+                .iter()
+                .filter(|post| post.kind == PostKind::Heading)
+                .map(|post| post.text.as_str())
+                .collect();
+            assert_eq!(got_headings, headings, "epub3={epub3}");
+            let got_bodies: Vec<_> = book
+                .posts
+                .iter()
+                .filter(|post| post.kind == PostKind::Body)
+                .map(|post| post.text.as_str())
+                .collect();
+            assert_eq!(got_bodies, bodies, "epub3={epub3}");
+            let pain = book
+                .posts
+                .iter()
+                .find(|post| post.text == "Pain text.")
+                .unwrap();
+            assert_eq!(pain.chapter, "Human Pain");
+            let argument = book.posts.last().unwrap();
+            assert_eq!(argument.chapter, "A Distinct Argument");
+        }
+    }
+
+    #[test]
+    fn part_and_chapter_that_share_a_file_stay_separate() {
+        let headings = ["Part One", "Chapter 1"];
+        for epub3 in [true, false] {
+            let book = parse(Cursor::new(test_epub::part_and_chapter(epub3)), 1024).unwrap();
+            let got: Vec<_> = book
+                .posts
+                .iter()
+                .filter(|post| post.kind == PostKind::Heading)
+                .map(|post| post.text.as_str())
+                .collect();
+            assert_eq!(got, headings, "epub3={epub3}");
+            let epigraph = book
+                .posts
+                .iter()
+                .find(|post| post.text == "Epigraph.")
+                .unwrap();
+            assert_eq!(epigraph.kind, PostKind::Body);
+            assert_eq!(epigraph.chapter, "Part One");
+        }
+    }
+
+    #[test]
+    fn numbered_part_and_chapter_stay_separate() {
+        let headings = ["Part I", "Chapter I", "Part 1", "Chapter 1"];
+        for epub3 in [true, false] {
+            let book = parse(
+                Cursor::new(test_epub::numbered_part_and_chapter(epub3)),
+                1024,
+            )
+            .unwrap();
+            let got: Vec<_> = book
+                .posts
+                .iter()
+                .filter(|post| post.kind == PostKind::Heading)
+                .map(|post| post.text.as_str())
+                .collect();
+            assert_eq!(got, headings, "epub3={epub3}");
+            let between = book
+                .posts
+                .iter()
+                .find(|post| post.text == "Between.")
+                .unwrap();
+            assert_eq!(between.chapter, "Part I");
+            let opening = book
+                .posts
+                .iter()
+                .find(|post| post.text == "Opens on the chapter.")
+                .unwrap();
+            assert_eq!(opening.kind, PostKind::Body);
+            assert_eq!(opening.chapter, "Chapter 1");
+            assert!(book
+                .posts
+                .iter()
+                .all(|post| post.kind == PostKind::Heading || post.text != "Chapter 1"));
+        }
+    }
+
+    #[test]
+    fn unrelated_labels_keep_the_contents_title() {
+        let headings = [
+            "Part I",
+            "Chapter 1: The Storm",
+            "Book One",
+            "Chapter 1",
+            "Chapter One",
+            "Chapter Two",
+            "The Argument",
+        ];
+        let note = "A Note on the Translation Used Throughout";
+        let paragraph =
+            "This paragraph is long enough to outrank the short toc label and must stay body text.";
+        for epub3 in [true, false] {
+            let book = parse(Cursor::new(test_epub::separate_labels(epub3)), 1024).unwrap();
+            let got: Vec<_> = book
+                .posts
+                .iter()
+                .filter(|post| post.kind == PostKind::Heading)
+                .map(|post| post.text.as_str())
+                .collect();
+            assert_eq!(got, headings, "epub3={epub3}");
+            let note = book.posts.iter().find(|post| post.text == note).unwrap();
+            assert_eq!(note.kind, PostKind::Body, "epub3={epub3}");
+            assert_eq!(note.chapter, "Chapter One");
+            let paragraph = book
+                .posts
+                .iter()
+                .find(|post| post.text == paragraph)
+                .unwrap();
+            assert_eq!(paragraph.kind, PostKind::Body, "epub3={epub3}");
+            assert_eq!(paragraph.chapter, "The Argument");
+            let rain = book.posts.iter().find(|post| post.text == "Rain.").unwrap();
+            assert_eq!(rain.chapter, "Chapter 1: The Storm");
+        }
     }
 
     #[test]
