@@ -35,7 +35,6 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -70,8 +69,9 @@ import com.mewo.reader.ui.LocalCatalogStore
 import com.mewo.reader.ui.LocalHostedAuth
 import com.mewo.reader.ui.LocalLibraryStore
 import com.mewo.reader.ui.catalog.CatalogPhase
+import com.mewo.reader.ui.catalog.CatalogQuery
 import com.mewo.reader.ui.catalog.CatalogResults
-import com.mewo.reader.ui.catalog.RowOutcome
+import com.mewo.reader.ui.catalog.catalogQuery
 import com.mewo.reader.ui.components.Avatar
 import com.mewo.reader.ui.components.BindListTop
 import com.mewo.reader.ui.components.ErrorStatus
@@ -86,7 +86,6 @@ import com.mewo.reader.ui.library.BookPost
 import com.mewo.reader.ui.reader.CommentSheet
 import com.mewo.reader.ui.reader.CommentTarget
 import com.mewo.reader.ui.reader.TimelinePost
-import kotlinx.coroutines.launch
 
 @Composable
 fun SearchScreen(
@@ -129,7 +128,6 @@ fun SearchScreen(
     val canRequest = LocalCatalogStore.current.access.collectAsStateWithLifecycle().value == CatalogAccess.On
     val catalogState by viewModel.catalog.state.collectAsStateWithLifecycle()
     val tabs = searchTabs(hosted, canRequest)
-    val scope = rememberCoroutineScope()
     val onCatalog = search.kind == SearchKind.Catalog
 
     Column(Modifier.fillMaxSize()) {
@@ -161,7 +159,7 @@ fun SearchScreen(
             },
         )
         val catalogIdle = onCatalog && (
-            state.query.isBlank() ||
+            catalogQuery(state.query) is CatalogQuery.Browse ||
                 catalogState.phase is CatalogPhase.Failed ||
                 (catalogState.phase as? CatalogPhase.Loaded)?.page?.items?.isEmpty() == true
             )
@@ -174,14 +172,7 @@ fun SearchScreen(
                 query = state.query,
                 hideOnScroll = hideOnScroll,
                 onOpen = viewModel.catalog::open,
-                onAct = { work ->
-                    scope.launch {
-                        when (val outcome = viewModel.catalog.act(work)) {
-                            is RowOutcome.OpenBook -> onOpenBook(outcome.id)
-                            RowOutcome.Done -> Unit
-                        }
-                    }
-                },
+                onAct = { work -> viewModel.actOnCatalog(work, onOpenBook) },
                 onRetry = viewModel.catalog::retry,
                 onLoadMore = viewModel.catalog::loadMore,
                 onDismissNotice = viewModel.catalog::dismissNotice,

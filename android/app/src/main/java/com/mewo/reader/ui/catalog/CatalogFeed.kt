@@ -43,10 +43,10 @@ private data class Memo(val page: CatalogPage, val pages: Int)
 private const val MEMO_LIMIT = 8
 
 /**
- * Open Library list for the Catalog tab. Trending (a blank query, or one
- * Unicode scalar) is memoized per session. A memo of a single page is
- * refreshed in place; a longer one is left alone. A failed load replaces
- * whatever was on screen.
+ * Open Library list for the Catalog tab. Trending (a blank query, or fewer
+ * than [CATALOG_MIN_QUERY] Unicode scalars) is memoized per session. A memo
+ * of a single page is refreshed in place; a longer one is left alone. A
+ * failed load replaces whatever was on screen.
  *
  * Only this feed writes [CatalogListState.overlay]. The sheet reports
  * request changes back through [CatalogSheetModel].
@@ -143,7 +143,7 @@ class CatalogFeed(
                 val id = current?.bookId ?: work.onServer?.bookId
                 if (id.isNullOrBlank()) RowOutcome.Done else RowOutcome.OpenBook(id)
             }
-            RowAction.Request -> submit(work.workKey) { store.request(work) }
+            RowAction.Request, RowAction.Again -> submit(work.workKey) { store.request(work) }
             RowAction.Retry -> {
                 val id = current?.id ?: return RowOutcome.Done
                 submit(work.workKey) { store.retry(id) }

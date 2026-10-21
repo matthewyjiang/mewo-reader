@@ -1,7 +1,9 @@
 package com.mewo.reader.ui.search
 
 import android.net.Uri
+import com.mewo.reader.data.BookRequest
 import com.mewo.reader.data.CatalogAccess
+import com.mewo.reader.data.CatalogWork
 import com.mewo.reader.data.AccountHit
 import com.mewo.reader.data.BookRecord
 import com.mewo.reader.data.CommentIndex
@@ -452,6 +454,49 @@ class SearchViewModelTest {
         runCurrent()
         assertEquals(SearchKind.Accounts, vm.state.value.search.kind)
         assertTrue(store.pages.isEmpty())
+    }
+
+    @Test
+    fun anOfflineStartDoesNotOpenAMissingCatalogTab() = runTest(main) {
+        val store = HostedFake()
+        val catalog = FakeCatalogStore()
+        catalog.setAccess(CatalogAccess.Unknown)
+        val memory = MemorySearchKind()
+        memory.write(SearchKind.Catalog)
+        val vm = SearchViewModel(store, memory, catalog)
+        runCurrent()
+        assertEquals(SearchKind.Accounts, vm.state.value.search.kind)
+        catalog.setAccess(CatalogAccess.On)
+        runCurrent()
+        assertEquals(SearchKind.Catalog, vm.state.value.search.kind)
+    }
+
+    @Test
+    fun aCatalogRowRequestRunsWithTheViewModel() = runTest(main) {
+        val catalog = FakeCatalogStore()
+        val vm = SearchViewModel(HostedFake(), catalogStore = catalog)
+        runCurrent()
+        vm.bindSession("token")
+        vm.setKind(SearchKind.Catalog)
+        runCurrent()
+        val work = CatalogWork(workKey = "/works/OL1W", title = "Dune", author = "Herbert")
+        catalog.requestHandler = { asked ->
+            BookRequest(id = "r1", workKey = asked.workKey, title = asked.title, state = "requested")
+        }
+        vm.actOnCatalog(work) {}
+        runCurrent()
+        assertEquals(listOf("/works/OL1W"), catalog.requestCalls)
+    }
+
+    @Test
+    fun reloadLibraryRethrowsCancellation() = runTest {
+        try {
+            reloadLibrary { throw kotlinx.coroutines.CancellationException("stop") }
+            error("cancellation was swallowed")
+        } catch (error: kotlinx.coroutines.CancellationException) {
+            assertEquals("stop", error.message)
+        }
+        reloadLibrary { throw java.io.IOException("disk") }
     }
 
     @Test

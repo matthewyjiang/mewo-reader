@@ -280,6 +280,7 @@ fun LibraryScreen(
                 options = addOptions,
                 onUpload = uploadEpub,
                 onBrowseCatalog = onBrowseCatalog,
+                menuAlignment = Alignment.End,
                 modifier = Modifier
                     .align(Alignment.BottomEnd)
                     .padding(end = 16.dp, bottom = 16.dp),
@@ -291,7 +292,7 @@ fun LibraryScreen(
                     shape = CircleShape,
                     modifier = Modifier.size(56.dp),
                 ) {
-                    Icon(Icons.Outlined.Add, contentDescription = "Add an EPUB")
+                    Icon(Icons.Outlined.Add, contentDescription = "Add a book")
                 }
             }
         }

@@ -5,6 +5,7 @@ import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import com.mewo.reader.data.CatalogAccess
 import com.mewo.reader.data.CatalogStore
+import com.mewo.reader.data.CatalogWork
 import com.mewo.reader.data.CommentIndex
 import com.mewo.reader.data.DisabledCatalogStore
 import com.mewo.reader.data.LibraryStore
@@ -15,6 +16,7 @@ import com.mewo.reader.data.SearchResult
 import com.mewo.reader.data.cursor
 import com.mewo.reader.data.kind
 import com.mewo.reader.ui.catalog.CatalogFeed
+import com.mewo.reader.ui.catalog.RowOutcome
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -38,7 +40,7 @@ class SearchViewModel(
     private val memory: SearchKindMemory = MemorySearchKind(),
     private val catalogStore: CatalogStore = DisabledCatalogStore(),
 ) : ViewModel() {
-    private val initialKind = rememberKind(memory.read(), store.hostedSocial)
+    private val initialKind = rememberKind(memory.read(), store.hostedSocial, catalogStore.access.value)
     private val _state = MutableStateFlow(
         SearchUiState(search = SearchState(kind = initialKind, session = "local")),
     )
@@ -47,7 +49,7 @@ class SearchViewModel(
     val catalog = CatalogFeed(
         store = catalogStore,
         scope = viewModelScope,
-        onImported = { runCatching { store.load() } },
+        onImported = { reloadLibrary { store.load() } },
     )
     private var restoredCatalog = false
 
@@ -92,6 +94,15 @@ class SearchViewModel(
      * newer keystroke or tab cancels it. A response for another session or
      * query is dropped. The catalog tab never asks `/v1/search`.
      */
+    fun actOnCatalog(work: CatalogWork, onOpenBook: (String) -> Unit) {
+        viewModelScope.launch {
+            when (val outcome = catalog.act(work)) {
+                is RowOutcome.OpenBook -> onOpenBook(outcome.id)
+                RowOutcome.Done -> Unit
+            }
+        }
+    }
+
     fun setQuery(query: String) {
         catalog.setQuery(query)
         if (_state.value.search.kind == SearchKind.Catalog) {
@@ -291,12 +302,24 @@ class SearchViewModel(
     }
 }
 
-private fun rememberKind(saved: SearchKind?, hosted: Boolean): SearchKind = when {
+private fun rememberKind(saved: SearchKind?, hosted: Boolean, access: CatalogAccess): SearchKind = when {
     saved == SearchKind.Accounts && !hosted -> SearchKind.Books
     saved == SearchKind.Catalog && !hosted -> SearchKind.Books
+    saved == SearchKind.Catalog && access == CatalogAccess.Unknown ->
+        if (hosted) SearchKind.Accounts else SearchKind.Books
     saved != null -> saved
     hosted -> SearchKind.Accounts
     else -> SearchKind.Books
+}
+
+/** A library reload must not keep a cancelled caller alive. Other failures stay on the sheet. */
+internal suspend fun reloadLibrary(load: suspend () -> Unit) {
+    try {
+        load()
+    } catch (error: CancellationException) {
+        throw error
+    } catch (_: Exception) {
+    }
 }
 
 private fun localPage(kind: SearchKind, result: SearchResult): SearchPage = when (kind) {

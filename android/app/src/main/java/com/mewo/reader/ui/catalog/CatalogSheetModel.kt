@@ -238,8 +238,9 @@ class CatalogSheetModel(
 
     private fun merge(next: BookRequest) {
         _state.update { state ->
-            val detail = state.detail ?: return@update state
-            val request = detail.status.request ?: return@update state
+            val detail = state.detail
+            val request = detail?.status?.request
+            if (detail == null || request == null) return@update state.copy(fallback = next)
             val merged = request.copy(
                 id = next.id,
                 workKey = next.workKey,
@@ -257,7 +258,10 @@ class CatalogSheetModel(
                 follows = next.follows,
                 phase = requestPhase(next).wire,
             )
-            state.copy(detail = detail.copy(status = detail.status.copy(request = merged)))
+            state.copy(
+                fallback = next,
+                detail = detail.copy(status = detail.status.copy(request = merged)),
+            )
         }
     }
 

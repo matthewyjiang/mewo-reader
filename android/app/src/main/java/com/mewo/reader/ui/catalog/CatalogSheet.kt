@@ -118,20 +118,12 @@ internal fun CatalogSheetContent(
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .height(56.dp)
-                .padding(end = 8.dp),
+                .height(56.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
             IconButton(onClick = onDismiss) {
                 Icon(Icons.Outlined.Close, contentDescription = "Close")
             }
-            Text(
-                text = state.work.title,
-                style = MaterialTheme.typography.titleLarge,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-                modifier = Modifier.weight(1f),
-            )
         }
         HorizontalDivider(color = MaterialTheme.colorScheme.outline, thickness = 0.6.dp)
         Column(
@@ -404,6 +396,7 @@ private fun Bone(fraction: Float = 1f) {
 
 @Composable
 private fun FilledAction(text: String, enabled: Boolean, onClick: () -> Unit) {
+    val scheme = MaterialTheme.colorScheme
     Button(
         onClick = onClick,
         enabled = enabled,
@@ -412,12 +405,14 @@ private fun FilledAction(text: String, enabled: Boolean, onClick: () -> Unit) {
             .heightIn(min = 40.dp),
         shape = CircleShape,
     ) {
-        Text(text, color = MaterialTheme.colorScheme.onPrimary)
+        // Typography pins the ink color, so the label has to name the button color.
+        Text(text, color = if (enabled) scheme.onPrimary else scheme.onSurface.copy(alpha = 0.38f))
     }
 }
 
 @Composable
 private fun OutlineDestructive(text: String, enabled: Boolean, onClick: () -> Unit) {
+    val scheme = MaterialTheme.colorScheme
     OutlinedButton(
         onClick = onClick,
         enabled = enabled,
@@ -425,11 +420,12 @@ private fun OutlineDestructive(text: String, enabled: Boolean, onClick: () -> Un
             .fillMaxWidth()
             .heightIn(min = 40.dp),
         shape = CircleShape,
-        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline),
+        border = BorderStroke(1.dp, if (enabled) scheme.outline else scheme.onSurface.copy(alpha = 0.12f)),
         colors = ButtonDefaults.outlinedButtonColors(
-            contentColor = MaterialTheme.colorScheme.error,
+            contentColor = scheme.error,
+            disabledContentColor = scheme.onSurface.copy(alpha = 0.38f),
         ),
     ) {
-        Text(text, color = MaterialTheme.colorScheme.error)
+        Text(text, color = if (enabled) scheme.error else scheme.onSurface.copy(alpha = 0.38f))
     }
 }

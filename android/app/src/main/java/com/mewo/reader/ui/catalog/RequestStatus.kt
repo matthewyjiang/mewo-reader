@@ -121,10 +121,10 @@ private fun phaseLabel(phase: RequestPhase, progress: Int, error: String?): Stri
     RequestPhase.Canceled -> "Canceled"
 }
 
-enum class RowAction { Request, Pending, Open, Retry }
+enum class RowAction { Request, Again, Pending, Open, Retry }
 
-/** The catalog row's trailing action. A copy the viewer can open wins over Request,
- *  except while their own request is still running or failed. */
+/** The catalog row's trailing action. A live request has no control.
+ *  An imported request with no book, and nothing already on the server, starts over. */
 fun rowAction(request: BookRequest?, onServer: ServerCopy?): RowAction {
     if (request != null && (request.state == "requested" || request.state == "downloading")) {
         return RowAction.Pending
@@ -132,9 +132,8 @@ fun rowAction(request: BookRequest?, onServer: ServerCopy?): RowAction {
     if (request?.state == "failed") return RowAction.Retry
     if (request?.state == "imported" && request.bookId != null) return RowAction.Open
     if (onServer?.bookId != null) return RowAction.Open
-    if (request != null && (request.state == "canceled" || request.state == "imported")) {
-        return RowAction.Retry
-    }
+    if (request?.state == "canceled") return RowAction.Retry
+    if (request?.state == "imported") return RowAction.Again
     return RowAction.Request
 }
 

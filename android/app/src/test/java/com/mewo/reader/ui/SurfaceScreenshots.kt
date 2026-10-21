@@ -3,20 +3,16 @@ package com.mewo.reader.ui
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.shape.CircleShape
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Add
 import androidx.compose.material3.DrawerValue
-import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.HorizontalDivider
@@ -72,6 +68,7 @@ import com.mewo.reader.ui.reader.TimelinePost
 import com.mewo.reader.ui.reader.relativeTime
 import com.mewo.reader.ui.search.AccountHitRow
 import com.mewo.reader.ui.search.SearchField
+import com.mewo.reader.ui.library.AddBookAnchor
 import com.mewo.reader.ui.library.BookPost
 import com.mewo.reader.ui.library.addBookOptions
 import com.mewo.reader.ui.library.EmptyTimeline
@@ -372,34 +369,21 @@ class SurfaceScreenshots {
                     SectionLabel("My books")
                     shelfBook(privateBook)
                 }
-                Column(
+                AddBookAnchor(
+                    options = addBookOptions(canRequest = true),
+                    onUpload = {},
+                    onBrowseCatalog = {},
+                    menuAlignment = Alignment.End,
+                    startExpanded = true,
                     modifier = Modifier.align(Alignment.BottomEnd).padding(16.dp),
-                    horizontalAlignment = Alignment.End,
-                ) {
-                    androidx.compose.material3.Surface(
-                        shape = RoundedCornerShape(4.dp),
-                        color = MaterialTheme.colorScheme.surface,
-                        shadowElevation = 8.dp,
-                    ) {
-                        Column(Modifier.widthIn(min = 180.dp)) {
-                            addBookOptions(canRequest = true).forEach { option ->
-                                DropdownMenuItem(
-                                    text = {
-                                        Text(option.label, color = MaterialTheme.colorScheme.onSurface)
-                                    },
-                                    onClick = {},
-                                )
-                            }
-                        }
-                    }
-                    Spacer(Modifier.height(8.dp))
+                ) { open ->
                     FloatingActionButton(
-                        onClick = {},
+                        onClick = open,
                         containerColor = MaterialTheme.colorScheme.primary,
                         contentColor = MaterialTheme.colorScheme.onPrimary,
                         shape = CircleShape,
                     ) {
-                        Icon(Icons.Outlined.Add, contentDescription = "Add an EPUB")
+                        Icon(Icons.Outlined.Add, contentDescription = "Add a book")
                     }
                 }
             }

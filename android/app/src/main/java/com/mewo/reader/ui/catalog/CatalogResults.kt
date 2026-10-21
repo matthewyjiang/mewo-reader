@@ -66,7 +66,9 @@ fun CatalogResults(
                 .fillMaxSize()
                 .nestedScroll(hideOnScroll.connection),
         ) {
-            val showTrending = query.isBlank() && failed == null && phase !is CatalogPhase.Idle
+            val showTrending = catalogQuery(query) is CatalogQuery.Browse &&
+                failed == null &&
+                phase !is CatalogPhase.Idle
             if (showTrending) {
                 item(key = "trending") { CatalogHeading("Trending on Open Library") }
             }

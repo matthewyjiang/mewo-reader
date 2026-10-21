@@ -81,6 +81,13 @@ class RequestStatusTest {
         val work = work(onServer = held)
         assertEquals("On your shelf", badge(work, null))
         assertEquals(RowAction.Open, rowAction(null, held))
+        assertEquals(RowAction.Pending, rowAction(book(state = "requested"), null))
+        assertEquals(RowAction.Pending, rowAction(book(state = "downloading"), null))
+        assertEquals(RowAction.Retry, rowAction(book(state = "failed"), null))
+        assertEquals(RowAction.Retry, rowAction(book(state = "canceled"), null))
+        assertEquals(RowAction.Open, rowAction(book(state = "imported", bookId = "b1"), null))
+        assertEquals(RowAction.Again, rowAction(book(state = "imported"), null))
+        assertEquals(RowAction.Request, rowAction(null, null))
         val status = sheetStatus(work, null, null) as SheetStatus.Available
         assertEquals("On your shelf", status.line)
         assertFalse(status.line.contains("secret"))
@@ -205,6 +212,7 @@ class RequestStatusTest {
         state: String = "requested",
         error: String? = null,
         requester: String = "ada",
+        bookId: String? = null,
     ) = BookRequest(
         id = id,
         workKey = KEY,
@@ -212,6 +220,7 @@ class RequestStatusTest {
         state = state,
         error = error,
         requester = requester,
+        bookId = bookId,
     )
 
     private fun request(state: String, error: String?, phase: String) = RequestDetail(

@@ -1,5 +1,6 @@
 package com.mewo.reader.ui.catalog
 
+import com.mewo.reader.data.BookRequest
 import com.mewo.reader.data.CatalogException
 import com.mewo.reader.data.CatalogPage
 import com.mewo.reader.data.CatalogWork
@@ -180,6 +181,24 @@ class CatalogFeedTest {
         feed.bindSession("ada")
         assertEquals("Trending", loaded(feed).items.single().title)
         feed.hide()
+    }
+
+    @Test
+    fun anImportedRowWithNoBookRequestsAgain() = runTest {
+        val store = FakeCatalogStore()
+        val work = CatalogWork(
+            workKey = "/works/OL1W",
+            title = "Dune",
+            author = "Herbert",
+            request = BookRequest(id = "r1", workKey = "/works/OL1W", title = "Dune", state = "imported"),
+        )
+        store.requestHandler = { asked ->
+            BookRequest(id = "r2", workKey = asked.workKey, title = asked.title, state = "requested")
+        }
+        val feed = feed(store, this)
+        feed.act(work)
+        assertEquals(listOf("/works/OL1W"), store.requestCalls)
+        assertTrue(store.retries.isEmpty())
     }
 
     private fun feed(store: FakeCatalogStore, scope: CoroutineScope) =

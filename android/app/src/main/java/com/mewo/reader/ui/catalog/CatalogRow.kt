@@ -18,12 +18,10 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Add
-import androidx.compose.material.icons.outlined.Check
+import androidx.compose.material.icons.outlined.Book
 import androidx.compose.material.icons.outlined.Refresh
-import androidx.compose.material.icons.outlined.Schedule
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -63,8 +61,10 @@ fun CatalogRow(
     val action = rowAction(request, work.onServer)
     val label = badge(work, request)
     val tone = label?.let { badgeTone(it) } ?: BadgeTone.Progress
+    val icon = rowIcon(action)
     val actionName = when (action) {
         RowAction.Request -> "Request"
+        RowAction.Again -> "Request again"
         RowAction.Pending -> request?.let { stateLabel(it) } ?: "Searching"
         RowAction.Open -> openLabel(work, request)
         RowAction.Retry -> "Retry"
@@ -128,19 +128,31 @@ fun CatalogRow(
                     }
                 }
             }
-            IconButton(
-                onClick = onAct,
-                enabled = action != RowAction.Pending,
-                modifier = Modifier
-                    .padding(end = 4.dp)
-                    .size(40.dp),
-            ) {
-                Icon(
-                    imageVector = actionIcon(action),
-                    contentDescription = actionName,
-                    modifier = Modifier.size(18.dp),
-                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
+            if (icon != null) {
+                Box(
+                    modifier = Modifier
+                        .padding(end = 4.dp)
+                        .size(44.dp)
+                        .clickable(role = Role.Button, onClick = onAct)
+                        .semantics { contentDescription = actionName },
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .size(32.dp)
+                            .border(1.5.dp, MaterialTheme.colorScheme.primary, CircleShape),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Icon(
+                            imageVector = icon,
+                            contentDescription = null,
+                            modifier = Modifier.size(16.dp),
+                            tint = MaterialTheme.colorScheme.primary,
+                        )
+                    }
+                }
+            } else {
+                Spacer(Modifier.width(12.dp))
             }
         }
         HorizontalDivider(color = MaterialTheme.colorScheme.outline, thickness = 0.6.dp)
@@ -202,11 +214,12 @@ private fun toneColor(tone: BadgeTone) = when (tone) {
     BadgeTone.Progress -> MaterialTheme.colorScheme.onSurfaceVariant
 }
 
-private fun actionIcon(action: RowAction): ImageVector = when (action) {
-    RowAction.Request -> Icons.Outlined.Add
-    RowAction.Pending -> Icons.Outlined.Schedule
-    RowAction.Open -> Icons.Outlined.Check
+/** A live row already says its status, so it has no trailing control. */
+private fun rowIcon(action: RowAction): ImageVector? = when (action) {
+    RowAction.Request, RowAction.Again -> Icons.Outlined.Add
+    RowAction.Open -> Icons.Outlined.Book
     RowAction.Retry -> Icons.Outlined.Refresh
+    RowAction.Pending -> null
 }
 
 private fun File?.decodeCover() = this
