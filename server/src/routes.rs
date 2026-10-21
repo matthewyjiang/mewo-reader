@@ -155,6 +155,7 @@ pub async fn library(
     ))
     .bind(&authed.user_id)
     .bind(&authed.user_id)
+    .bind(&authed.user_id)
     .fetch_all(&state.pool)
     .await?;
     Ok(Json(LibrarySnapshot {
@@ -782,6 +783,7 @@ pub async fn profile_books(
          ORDER BY b.imported_at DESC, b.id ASC"
     ))
     .bind(&authed.user_id)
+    .bind(&authed.user_id)
     .bind(&user_id)
     .bind(&authed.user_id)
     .fetch_all(&state.pool)
@@ -963,6 +965,7 @@ impl ProfileRepostRow {
             owner_id: self.owner_id,
             owner_username: self.owner_username,
             files_owner: None,
+            holds: 0,
         }
         .into_record(viewer);
         Ok(ProfileRepostRecord {
@@ -1021,6 +1024,7 @@ impl FeedRow {
             owner_id: self.owner_id,
             owner_username: self.owner_username,
             files_owner: None,
+            holds: 0,
         }
         .into_record(viewer);
         let post = stored_post(
@@ -1120,6 +1124,7 @@ impl ProfilePostRow {
             owner_id: self.owner_id,
             owner_username: self.owner_username,
             files_owner: None,
+            holds: 0,
         }
         .into_record(viewer);
         Ok(ProfilePostRecord {
@@ -1306,6 +1311,7 @@ async fn visible_book(state: &AppState, user_id: &str, id: &str) -> Result<BookR
     let row = sqlx::query_as::<_, BookRow>(&format!(
         "{BOOK_SELECT} WHERE b.id = ? AND {BOOK_VISIBLE_TO}"
     ))
+    .bind(user_id)
     .bind(user_id)
     .bind(&id)
     .bind(user_id)

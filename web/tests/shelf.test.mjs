@@ -43,6 +43,10 @@ test('a held book and an empty owner name hide who added it', () => {
   const mine = book('mine', { mine: true, ownerUsername: 'ada' });
   assert.equal(showOwner(held), false);
   assert.equal(showOwner(named), true);
+  const sharedHold = book('both', {
+    mine: false, shared: true, held: true, ownerUsername: 'mary',
+  });
+  assert.equal(showOwner(sharedHold), true);
   assert.equal(showOwner(blank), false);
   assert.equal(showOwner(mine), false);
 

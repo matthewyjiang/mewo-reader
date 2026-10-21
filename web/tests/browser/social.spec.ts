@@ -42,6 +42,16 @@ const sharedBook = {
   ownerUsername: 'mary',
 };
 
+const sharedHeld = {
+  ...book,
+  id: 'b6',
+  title: 'Northanger',
+  mine: false,
+  shared: true,
+  held: true,
+  ownerUsername: 'mary',
+};
+
 const namelessBook = {
   ...book,
   id: 'b5',
@@ -94,7 +104,7 @@ async function answer(route: Route) {
     body: JSON.stringify(body),
   });
   if (path === '/v1/library') {
-    const books = [book, privateBook, heldBook, sharedBook, namelessBook]
+    const books = [book, privateBook, heldBook, sharedBook, namelessBook, sharedHeld]
       .filter((row) => !removed.has(row.id));
     return json({ books });
   }
@@ -262,7 +272,8 @@ test('home opens on Feed and Books keeps the shelf', async ({ page }) => {
   await expect(page.getByText('Mansfield', { exact: true })).toBeVisible();
   await expect(page.getByText('Sanditon', { exact: true })).toBeVisible();
   await expect(page.getByText('Lady Susan', { exact: true })).toBeVisible();
-  await expect(page.getByText('Shared by @mary')).toBeVisible();
+  await expect(page.getByText('Northanger', { exact: true })).toBeVisible();
+  await expect(page.getByText('Shared by @mary')).toHaveCount(2);
   await expect(page.getByText(/Added by/)).toHaveCount(0);
   await expect(page.getByText('secret')).toHaveCount(0);
   await expect(page.getByText('Shared by @', { exact: true })).toHaveCount(0);
@@ -280,6 +291,18 @@ test('home opens on Feed and Books keeps the shelf', async ({ page }) => {
   await deleted;
   await expect(page.getByText('Mansfield', { exact: true })).toHaveCount(0);
   await expect(page.getByText('Emma', { exact: true })).toBeVisible();
+  const sharedHold = page.locator('.book-row', { hasText: 'Northanger' });
+  await expect(sharedHold.getByText('Shared by @mary')).toBeVisible();
+  await expect(sharedHold.getByRole('button', { name: 'Remove from library' })).toBeVisible();
+  await expect(sharedHold.getByRole('button', { name: 'Share' })).toHaveCount(0);
+  await sharedHold.getByRole('button', { name: 'Remove from library' }).click();
+  const holdSheet = page.getByRole('dialog', { name: 'Remove book' });
+  await expect(holdSheet).toContainText('Only removes it for you.');
+  await holdSheet.getByRole('button', { name: 'Keep' }).click();
+  await expect(page.getByText('Northanger', { exact: true })).toBeVisible();
+  const sharedOnly = page.locator('.book-row', { hasText: 'Sanditon' });
+  await expect(sharedOnly.getByRole('button', { name: 'Remove from library' })).toHaveCount(0);
+  await expect(sharedOnly.getByRole('button', { name: 'Remove Sanditon' })).toHaveCount(0);
 });
 
 test('the drawer Profile row opens your profile', async ({ page }) => {

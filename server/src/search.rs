@@ -347,6 +347,7 @@ impl PostHitRow {
             owner_id: self.owner_id,
             owner_username: self.owner_username,
             files_owner: None,
+            holds: 0,
         }
         .into_record(viewer);
         Ok(PostHitRecord {

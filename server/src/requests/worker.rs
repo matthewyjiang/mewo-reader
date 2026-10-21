@@ -172,7 +172,10 @@ pub async fn tick_at(state: &AppState, now_ms: i64) -> Result<(), ApiError> {
     let Some(ready) = ready(state).await? else {
         return Ok(());
     };
-    sweep_inactive_leaders(state, now_ms).await?;
+    // A sweep error must not skip the due rows. The sweep is a repair.
+    if let Err(err) = sweep_inactive_leaders(state, now_ms).await {
+        tracing::error!(error = %err, "could not sweep inactive leaders");
+    }
     if let Err(err) = clear_follower_jobs(state, &ready).await {
         tracing::error!(error = %err, "could not drop a follower download");
     }
@@ -780,12 +783,12 @@ async fn fail_from(
     Ok(())
 }
 
-/// A row demoted to follower can still name a SABnzbd job. Delete it. The
-/// follower never steps, so nothing else would.
 /// A cancel can commit after it has already decided it was not the leader.
 /// Followers of that canceled (or failed) row would wait forever. Promote the
-/// oldest one. An imported leader is left alone: its followers are updated
-/// in the import transaction, and promoting them would start a second download.
+/// oldest one, unless the work already has an active leader: those followers
+/// point at that leader instead. Promoting them would violate the one-leader
+/// index and, if the error escaped, stop every later tick. An imported leader
+/// is left alone: its followers are updated in the import transaction.
 async fn sweep_inactive_leaders(state: &AppState, now_ms: i64) -> Result<(), ApiError> {
     let leaders: Vec<String> = sqlx::query_scalar(
         "SELECT DISTINCT lead.id
@@ -797,21 +800,55 @@ async fn sweep_inactive_leaders(state: &AppState, now_ms: i64) -> Result<(), Api
     .fetch_all(&state.pool)
     .await?;
     for leader in leaders {
-        let mut tx = state.pool.begin_with("BEGIN IMMEDIATE").await?;
-        let inactive: Option<i64> = sqlx::query_scalar(
-            "SELECT 1 FROM book_requests WHERE id = ? AND state IN ('canceled', 'failed')",
-        )
-        .bind(&leader)
-        .fetch_optional(&mut *tx)
-        .await?;
-        if inactive.is_some() {
-            super::hand_off(&mut tx, &leader, now_ms).await?;
+        if let Err(err) = sweep_one(state, &leader, now_ms).await {
+            tracing::error!(error = %err, leader = %leader, "could not sweep an inactive leader");
         }
-        tx.commit().await?;
     }
     Ok(())
 }
 
+async fn sweep_one(state: &AppState, leader_id: &str, now_ms: i64) -> Result<(), ApiError> {
+    let mut tx = state.pool.begin_with("BEGIN IMMEDIATE").await?;
+    let row: Option<(String, String)> =
+        sqlx::query_as("SELECT state, work_key FROM book_requests WHERE id = ?")
+            .bind(leader_id)
+            .fetch_optional(&mut *tx)
+            .await?;
+    let Some((state_now, work_key)) = row else {
+        tx.commit().await?;
+        return Ok(());
+    };
+    if state_now != "canceled" && state_now != "failed" {
+        tx.commit().await?;
+        return Ok(());
+    }
+    let active: Option<String> = sqlx::query_scalar(
+        "SELECT id FROM book_requests
+         WHERE work_key = ? AND follows IS NULL AND state IN ('requested', 'downloading')
+         LIMIT 1",
+    )
+    .bind(&work_key)
+    .fetch_optional(&mut *tx)
+    .await?;
+    if let Some(active) = active {
+        sqlx::query(
+            "UPDATE book_requests SET follows = ?, updated_at = ?
+             WHERE follows = ? AND state = 'requested'",
+        )
+        .bind(&active)
+        .bind(now_ms)
+        .bind(leader_id)
+        .execute(&mut *tx)
+        .await?;
+    } else {
+        super::hand_off(&mut tx, leader_id, now_ms).await?;
+    }
+    tx.commit().await?;
+    Ok(())
+}
+
+/// A row demoted to follower can still name a SABnzbd job. Delete it. The
+/// follower never steps, so nothing else would.
 async fn clear_follower_jobs(state: &AppState, ready: &Ready) -> Result<(), ApiError> {
     let rows: Vec<(String, String)> = sqlx::query_as(
         "SELECT id, download_id FROM book_requests

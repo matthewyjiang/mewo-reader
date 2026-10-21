@@ -413,6 +413,7 @@ async fn owned_book(
     let row =
         sqlx::query_as::<_, BookRow>(&format!("{BOOK_SELECT} WHERE b.id = ? AND b.user_id = ?"))
             .bind(owner.user_id)
+            .bind(owner.user_id)
             .bind(id)
             .bind(owner.user_id)
             .fetch_optional(&state.pool)
@@ -424,6 +425,7 @@ async fn existing_sample(state: &AppState, user_id: &str) -> Result<Option<BookR
     let row = sqlx::query_as::<_, BookRow>(&format!(
         "{BOOK_SELECT} WHERE b.is_sample = 1 AND {BOOK_VISIBLE_TO} ORDER BY b.imported_at ASC LIMIT 1"
     ))
+    .bind(user_id)
     .bind(user_id)
     .bind(user_id)
     .fetch_optional(&state.pool)

@@ -2,9 +2,10 @@
 //!
 //! The shelf, search, profiles, and the home feed use these fragments. Do not
 //! copy the predicate into a query. The book alias is `b`. `BOOK_SELECT` binds
-//! the viewer first (that account's reading place). `BOOK_VISIBLE_TO` binds the
-//! viewer next. `social_visible` binds the viewer once more, on a comment or
-//! repost row that is joined to that book.
+//! the viewer first (whether they hold the book through a request), then again
+//! for that account's reading place. `BOOK_VISIBLE_TO` binds the viewer next.
+//! `social_visible` binds the viewer once more, on a comment or repost row that
+//! is joined to that book.
 
 /// Shared, the sample, or a book this account owns or holds.
 /// The subquery is not correlated: SQLite builds the viewer's holder set once.
@@ -22,7 +23,11 @@ pub(crate) const BOOK_SELECT: &str = "
 SELECT b.id, b.title, b.author, b.handle, b.imported_at, b.post_count,
        COALESCE(p.progress_index, 0) as progress_index,
        b.is_sample, b.shared, b.user_id as owner_id, owner.username as owner_username,
-       COALESCE(b.files_user_id, b.user_id) AS files_owner
+       COALESCE(b.files_user_id, b.user_id) AS files_owner,
+       EXISTS (
+           SELECT 1 FROM book_requests holder
+           WHERE holder.book_id = b.id AND holder.user_id = ? AND holder.state = 'imported'
+       ) AS holds
 FROM books b
 JOIN users owner ON owner.id = b.user_id
 LEFT JOIN book_progress p ON p.book_id = b.id AND p.user_id = ?

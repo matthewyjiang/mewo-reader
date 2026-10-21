@@ -14,8 +14,9 @@ export interface BookRecord {
   /** Username of the account that added the book. Empty when the viewer holds a private copy. */
   ownerUsername: string;
   /**
-   * The viewer holds a private copy they do not own. Older shelves omit it.
-   * When set, the owner name stays hidden even if `ownerUsername` is filled in.
+   * The viewer has this book through a request and is not the owner.
+   * Older shelves omit it. A private hold hides the owner name even if
+   * `ownerUsername` is filled in. A shared book keeps the name.
    */
   held?: boolean;
 }
@@ -220,9 +221,12 @@ export const visibleToOthers = (book: BookRecord): boolean => book.shared || boo
 export function showOwner(book: {
   mine: boolean;
   held?: boolean;
+  shared?: boolean;
   ownerUsername?: string;
 }): boolean {
-  return !book.mine && book.held !== true && Boolean(book.ownerUsername);
+  if (book.mine || !book.ownerUsername) return false;
+  if (book.held === true && book.shared !== true) return false;
+  return true;
 }
 
 export function shelfGroups(books: BookRecord[]): {

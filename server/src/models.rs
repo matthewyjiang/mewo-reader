@@ -17,10 +17,12 @@ pub struct BookRecord {
     pub mine: bool,
     /// Owner chose to show this book on other accounts' shelves.
     pub shared: bool,
-    /// Username of the account that added the book. Empty when `held` is set,
-    /// so a holder of a private copy is not told who else has it.
+    /// Username of the account that added the book. Empty for a private hold,
+    /// so that account is not told who else has the copy. A shared book still
+    /// names the owner.
     pub owner_username: String,
-    /// The viewer holds a private copy they do not own.
+    /// The viewer has an imported request for this book and is not the owner.
+    /// Set whether or not the book is shared, so they can drop their own copy.
     #[serde(default)]
     pub held: bool,
 }
@@ -41,6 +43,10 @@ pub struct BookRow {
     /// Directory owner. Missing from selects that never open the file.
     #[sqlx(default)]
     pub files_owner: Option<String>,
+    /// 1 when this viewer has an imported request for the book.
+    /// Selects that never needed it leave the column out.
+    #[sqlx(default)]
+    pub holds: i64,
 }
 
 impl BookRow {
@@ -54,8 +60,10 @@ impl BookRow {
         let mine = self.owner_id == user_id;
         let shared = self.shared != 0;
         let is_sample = self.is_sample != 0;
-        // Reaching a private book without owning it means the viewer holds it.
-        let held = !mine && !shared && !is_sample;
+        // A private book is visible to a non-owner only because they hold it.
+        // `holds` covers the same fact once the book is shared.
+        let private_hold = !mine && !shared && !is_sample;
+        let held = !mine && (self.holds != 0 || private_hold);
         BookRecord {
             id: self.id,
             title: self.title,
@@ -67,7 +75,7 @@ impl BookRow {
             is_sample,
             mine,
             shared,
-            owner_username: if held {
+            owner_username: if private_hold {
                 String::new()
             } else {
                 self.owner_username

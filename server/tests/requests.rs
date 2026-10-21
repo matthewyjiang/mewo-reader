@@ -3436,6 +3436,108 @@ async fn sweep_promotes_followers_of_an_inactive_leader() {
 }
 
 #[tokio::test]
+async fn sweep_follows_an_existing_leader_and_the_tick_continues() {
+    let world = world().await;
+    world.prowlarr.lock().await.key_ok = true;
+    let created = ask(&world, "/works/OLSTUCK").await;
+    let canceled = created["id"].as_str().unwrap().to_string();
+    let now = created["createdAt"].as_i64().unwrap();
+    worker::tick_at(&world.state, now).await.unwrap();
+
+    let ada = account(&world, "ada").await;
+    let bea = account(&world, "bea").await;
+    let (status, body) = post_work(&world, &ada.token, "/works/OLSTUCK").await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    let ada_id = body["id"].as_str().unwrap().to_string();
+    sqlx::query(
+        "UPDATE book_requests
+         SET state = 'canceled', download_id = NULL, follows = NULL, updated_at = ?
+         WHERE id = ?",
+    )
+    .bind(now)
+    .bind(&canceled)
+    .execute(&world.state.pool)
+    .await
+    .unwrap();
+
+    let (status, body) = post_work(&world, &bea.token, "/works/OLSTUCK").await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    let leader = body["id"].as_str().unwrap().to_string();
+    assert!(follows_of(&world.state.pool, &leader).await.is_none());
+    let (status, body) = post_work(&world, &world.token, "/works/OLOTHER").await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    let other = body["id"].as_str().unwrap().to_string();
+    let due = stored(&world.state.pool, &other).await.next_check_at;
+
+    worker::tick_at(&world.state, due).await.unwrap();
+    assert_eq!(
+        follows_of(&world.state.pool, &ada_id).await.as_deref(),
+        Some(leader.as_str())
+    );
+    assert_eq!(stored(&world.state.pool, &ada_id).await.state, "requested");
+    assert!(follows_of(&world.state.pool, &leader).await.is_none());
+    assert_eq!(stored(&world.state.pool, &other).await.state, "downloading");
+    worker::tick_at(&world.state, due + POLL).await.unwrap();
+}
+
+#[tokio::test]
+async fn a_holder_of_a_shared_book_still_holds_it() {
+    let world = world().await;
+    let book_id = bring_in(&world, "/works/OL893414W").await;
+    let ada = account(&world, "ada").await;
+    let carol = account(&world, "carol").await;
+    let (status, body) = post_work(&world, &ada.token, "/works/OL893414W").await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    assert_eq!(body["state"], "imported");
+
+    let (status, shared) = json_req(
+        &world.app,
+        "PATCH",
+        &format!("/v1/books/{book_id}"),
+        Some(&world.token),
+        json!({ "shared": true }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{shared}");
+
+    let (status, library) = empty_req(&world.app, "GET", "/v1/library", Some(&ada.token)).await;
+    assert_eq!(status, StatusCode::OK, "{library}");
+    let held = library["books"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|book| book["id"] == book_id)
+        .unwrap();
+    assert_eq!(held["held"], true);
+    assert_eq!(held["mine"], false);
+    assert_eq!(held["shared"], true);
+    assert_eq!(held["ownerUsername"], "matt");
+
+    let (status, book) = empty_req(
+        &world.app,
+        "GET",
+        &format!("/v1/books/{book_id}"),
+        Some(&ada.token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{book}");
+    assert_eq!(book["held"], true);
+    assert_eq!(book["ownerUsername"], "matt");
+
+    let (status, library) = empty_req(&world.app, "GET", "/v1/library", Some(&carol.token)).await;
+    assert_eq!(status, StatusCode::OK, "{library}");
+    let seen = library["books"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|book| book["id"] == book_id)
+        .unwrap();
+    assert_eq!(seen["held"], false);
+    assert_eq!(seen["shared"], true);
+    assert_eq!(seen["ownerUsername"], "matt");
+}
+
+#[tokio::test]
 async fn retry_of_an_old_row_conflicts_with_a_live_request() {
     let world = world().await;
     world.prowlarr.lock().await.key_ok = true;
