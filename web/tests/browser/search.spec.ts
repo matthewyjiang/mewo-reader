@@ -236,7 +236,7 @@ async function install(
     localStorage.setItem('mewo.display', JSON.stringify({
       theme: 'x_light', step: 2, mewo: false, keepBars: true,
     }));
-    if (kind) localStorage.setItem('mewo.search.kind', kind);
+    if (kind) localStorage.setItem('mewo.search.kind', JSON.stringify(kind));
   }, options.kind ?? 'books');
   await page.route('**/covers.openlibrary.org/**', (route) => route.fulfill({
     status: 200, contentType: 'image/jpeg', body: COVER,
@@ -350,6 +350,7 @@ test('empty search shows a browse page, keeps each tab, and restores scroll', as
   await page.getByRole('tab', { name: 'Posts' }).click();
   await expect(page.getByRole('heading', { name: 'Top posts' })).toBeVisible();
   await expect(page.getByText('Most replied and reposted in the last 30 days')).toBeVisible();
+  await expect(page.getByText('Emma Woodhouse, handsome, clever, and rich.')).toBeVisible();
   await page.screenshot({ path: `${SHOTS}/search-posts.png` });
 
   await page.getByRole('tab', { name: 'Catalog' }).click();
@@ -399,10 +400,11 @@ test('a catalog row opens a sheet and follows the request through to the book', 
   await main.evaluate((el) => { el.scrollTop = 160; });
   const scroll = await main.evaluate((el) => el.scrollTop);
 
-  await page.getByRole('button', { name: 'Dune, Frank Herbert, 1965' }).click();
+  // Click in the page. Playwright's click would scroll this first row into view first.
+  await page.getByRole('button', { name: 'Dune, Frank Herbert, 1965' }).evaluate((el: HTMLElement) => el.click());
   const sheet = page.getByRole('dialog', { name: 'Dune' });
   await expect(sheet.locator('.hero')).toContainText('Frank Herbert');
-  await expect(sheet.getByText('Arrakis')).toBeVisible();
+  await expect(sheet.getByText('Arrakis', { exact: true })).toBeVisible();
   await expect(sheet.getByText('First published 1965 · 155 editions · ~608 pages · ★ 4.3 (448)')).toBeVisible();
   await expect(sheet.getByText('Editions in English, German, French')).toBeVisible();
   await expect(sheet.getByRole('link', { name: 'View on Open Library' })).toHaveAttribute(
@@ -413,7 +415,7 @@ test('a catalog row opens a sheet and follows the request through to the book', 
   await expect(sheet).toHaveCount(0);
   expect(await main.evaluate((el) => el.scrollTop)).toBe(scroll);
 
-  await page.getByRole('button', { name: 'Dune, Frank Herbert, 1965' }).click();
+  await page.getByRole('button', { name: 'Dune, Frank Herbert, 1965' }).evaluate((el: HTMLElement) => el.click());
   const open = page.getByRole('dialog', { name: 'Dune' });
   await page.clock.install({ time: new Date('2026-10-21T15:00:00Z') });
   await open.getByRole('button', { name: 'Request', exact: true }).click();
