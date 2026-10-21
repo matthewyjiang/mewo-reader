@@ -85,16 +85,18 @@ struct LibraryScreen: View {
     @Bindable var chrome: HideOnScrollState
     var onOpenBook: (String) -> Void
     var onOpenAccount: () -> Void
+    var onBrowseCatalog: () -> Void
     var showsBar: Bool
     @State private var model: LibraryViewModel
     @State private var picking = false
     @State private var pendingDelete: BookRecord?
     @State private var lastOffset: CGFloat = 0
 
-    init(env: AppEnvironment, chrome: HideOnScrollState, onOpenBook: @escaping (String) -> Void, onOpenAccount: @escaping () -> Void, showsBar: Bool = true) {
+    init(env: AppEnvironment, chrome: HideOnScrollState, onOpenBook: @escaping (String) -> Void, onOpenAccount: @escaping () -> Void, onBrowseCatalog: @escaping () -> Void = {}, showsBar: Bool = true) {
         self.chrome = chrome
         self.onOpenBook = onOpenBook
         self.onOpenAccount = onOpenAccount
+        self.onBrowseCatalog = onBrowseCatalog
         self.showsBar = showsBar
         _model = State(initialValue: LibraryViewModel(env: env))
     }
@@ -116,20 +118,21 @@ struct LibraryScreen: View {
                     .accessibilityIdentifier("library-scroll")
                 }
             }
-            Button {
-                picking = true
-            } label: {
+            AddBookButton(
+                canRequest: app.catalog.access == .on,
+                identifier: "add-epub",
+                accessibilityLabel: app.catalog.access == .on ? "Add a book" : "Add an EPUB",
+                onUpload: { picking = true },
+                onBrowseCatalog: onBrowseCatalog
+            ) {
                 Image(systemName: "plus")
                     .font(.system(size: 22, weight: .semibold))
                     .foregroundStyle(mewo.onAccent)
                     .frame(width: 56, height: 56)
                     .background(mewo.accent, in: Circle())
             }
-            .buttonStyle(.plain)
             .padding(.trailing, 16)
             .padding(.bottom, 16)
-            .accessibilityLabel("Add an EPUB")
-            .accessibilityIdentifier("add-epub")
             if let message = model.error ?? model.notice ?? loadNotice {
                 banner(message)
                     .padding(.horizontal, 16)
@@ -251,9 +254,12 @@ struct LibraryScreen: View {
                 .font(MewoFont.bold(22))
                 .foregroundStyle(mewo.ink)
             Spacer().frame(height: 20)
-            Button {
-                picking = true
-            } label: {
+            AddBookButton(
+                canRequest: app.catalog.access == .on,
+                identifier: "add-book-empty",
+                onUpload: { picking = true },
+                onBrowseCatalog: onBrowseCatalog
+            ) {
                 Text("Add a book")
                     .font(MewoFont.bold(14))
                     .foregroundStyle(mewo.onAccent)
@@ -261,8 +267,6 @@ struct LibraryScreen: View {
                     .padding(.vertical, 8)
                     .background(mewo.accent, in: Capsule())
             }
-            .buttonStyle(.plain)
-            .accessibilityIdentifier("add-book-empty")
             Button("Open a sample") { model.importSample() }
                 .font(MewoFont.regular(15))
                 .foregroundStyle(mewo.accent)

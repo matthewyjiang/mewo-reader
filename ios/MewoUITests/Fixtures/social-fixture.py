@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Hosted social fixture for screenshot walks. GET /v1/feed waits until /control/release.
 
-SocialScreenshotTests talks to 127.0.0.1:8766. Start this on the Mac before that
-test; the test skips when nothing is listening.
+SocialScreenshotTests and CatalogScreenshotTests talk to 127.0.0.1:8766. Start
+this on the Mac before those tests; each test fails when nothing is listening.
 """
 
 import json
@@ -35,6 +35,80 @@ POST = {"id": "1", "kind": "Body", "text": "The first sentence is the one you re
 HEADING = {"id": "0", "kind": "Heading", "text": "Chapter One", "chapter": "One"}
 COMMENT = {"id": "k", "username": "ada", "text": "Still true.", "createdAt": 1710000000000, "mine": True}
 
+DUNE_REQUEST = {
+    "id": "req-1",
+    "workKey": "/works/OL1W",
+    "title": "Dune",
+    "author": "Frank Herbert",
+    "year": 1965,
+    "coverId": None,
+    "state": "requested",
+    "progress": 0,
+    "error": None,
+    "bookId": None,
+    "requester": "ada",
+    "createdAt": 10,
+    "updatedAt": 11,
+    "follows": None,
+}
+
+DUNE = {
+    "workKey": "/works/OL1W",
+    "title": "Dune",
+    "author": "Frank Herbert",
+    "year": 1965,
+    "coverId": None,
+    "request": DUNE_REQUEST,
+    "onServer": None,
+}
+
+LEFT = {
+    "workKey": "/works/OL2W",
+    "title": "The Left Hand of Darkness",
+    "author": "Ursula K. Le Guin",
+    "year": 1969,
+    "coverId": None,
+    "request": None,
+    "onServer": None,
+}
+
+WORK_DETAIL = {
+    "workKey": "/works/OL1W",
+    "info": {
+        "canonicalKey": "/works/OL1W",
+        "title": "Dune",
+        "subtitle": None,
+        "authors": ["Frank Herbert"],
+        "year": 1965,
+        "coverId": None,
+        "description": "A desert planet. A boy. A spice.",
+        "subjects": ["Science fiction", "Arrakis", "Deserts", "Sand", "Politics"],
+        "awards": ["Hugo Award"],
+        "series": ["Dune"],
+        "editionCount": 12,
+        "pagesMedian": 412,
+        "languages": ["eng"],
+        "hasAcceptedEdition": True,
+        "rating": {"average": 4.3, "count": 10},
+    },
+    "infoError": None,
+    "status": {
+        "request": {
+            **DUNE_REQUEST,
+            "attempts": 1,
+            "maxAttempts": 4,
+            "nextCheckAt": None,
+            "releaseTitle": None,
+            "releaseSize": None,
+            "phase": "searching",
+        },
+        "onServer": None,
+        "active": 1,
+        "cap": 5,
+        "otherRequests": [],
+    },
+}
+
 
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
@@ -51,6 +125,12 @@ class Handler(BaseHTTPRequestHandler):
             self.feed()
         elif path == "/v1/search":
             self.search(query.get("type", ["accounts"])[0], query.get("q", [""])[0])
+        elif path == "/v1/me":
+            self.json_ok({"username": "ada", "isAdmin": False, "canRequest": True})
+        elif path == "/v1/catalog/search":
+            self.catalog_search(query.get("q", [""])[0])
+        elif path == "/v1/catalog/works/OL1W":
+            self.json_ok(WORK_DETAIL)
         elif path == "/v1/users/ada":
             self.json_ok({
                 "username": "ada",
@@ -166,6 +246,16 @@ class Handler(BaseHTTPRequestHandler):
             accounts = [{"username": "ada", "mine": True}, {"username": "bea", "mine": False}]
             items = [account for account in accounts if needle in account["username"].lower()]
         self.json_ok({"type": kind, "items": items, "nextCursor": None})
+
+    def catalog_search(self, query):
+        needle = query.strip().lower()
+        items = [DUNE, LEFT]
+        if needle:
+            items = [
+                item for item in items
+                if needle in item["title"].lower() or needle in item["author"].lower()
+            ]
+        self.json_ok({"items": items, "nextPage": None})
 
     def json_ok(self, payload):
         raw = json.dumps(payload).encode()

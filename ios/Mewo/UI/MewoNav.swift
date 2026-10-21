@@ -17,6 +17,7 @@ struct MewoNav: View {
     @State private var path: [Route] = []
     @State private var drawerOpen = false
     @State private var chrome = HideOnScrollState()
+    @State private var focusSearchOnAppear = true
 
     private var onCover: Bool {
         if let last = path.last {
@@ -84,7 +85,8 @@ struct MewoNav: View {
                 onOpenBook: { push(.reader(bookId: $0, postId: nil)) },
                 onOpenPost: { book, post in push(.reader(bookId: book, postId: post)) },
                 onOpenAccount: { withAnimation(.easeInOut(duration: 0.22)) { drawerOpen = true } },
-                onOpenProfile: { handle, name in push(.profile(handle: handle, name: name)) }
+                onOpenProfile: { handle, name in push(.profile(handle: handle, name: name)) },
+                onBrowseCatalog: browseCatalog
             )
         case .search:
             SearchScreen(
@@ -93,7 +95,8 @@ struct MewoNav: View {
                 onOpenBook: { push(.reader(bookId: $0, postId: nil)) },
                 onOpenPost: { book, post in push(.reader(bookId: book, postId: post)) },
                 onOpenAccount: { withAnimation(.easeInOut(duration: 0.22)) { drawerOpen = true } },
-                onOpenProfile: { handle, name in push(.profile(handle: handle, name: name)) }
+                onOpenProfile: { handle, name in push(.profile(handle: handle, name: name)) },
+                focusOnAppear: focusSearchOnAppear
             )
         case .likes:
             LikesScreen(
@@ -154,7 +157,17 @@ struct MewoNav: View {
 
     private func goTab(_ next: AppTab) {
         chrome.show()
+        if next == .search { focusSearchOnAppear = true }
         tab = next
+        path.removeAll()
+    }
+
+    /// Search, with Catalog selected. The field, query, and anything else stay as they are.
+    private func browseCatalog() {
+        UserDefaults(suiteName: "mewo")?.set(SearchTab.catalog.rawValue, forKey: searchTabKey)
+        focusSearchOnAppear = false
+        chrome.show()
+        tab = .search
         path.removeAll()
     }
 

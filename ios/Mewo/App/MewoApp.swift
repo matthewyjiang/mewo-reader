@@ -19,6 +19,7 @@ struct MewoApp: App {
 
 struct RootView: View {
     @Bindable var app: AppEnvironment
+    @Environment(\.scenePhase) private var scenePhase
 
     var body: some View {
         Group {
@@ -38,6 +39,11 @@ struct RootView: View {
             Task { try? await app.library.load() }
             if kind == .hosted {
                 Task { await app.homeFeed.load() }
+            }
+        }
+        .onChange(of: scenePhase) { _, phase in
+            if phase == .active {
+                Task { await app.catalog.refreshAccess() }
             }
         }
     }

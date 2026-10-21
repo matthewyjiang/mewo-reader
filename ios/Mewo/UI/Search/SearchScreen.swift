@@ -1,6 +1,6 @@
 import SwiftUI
 
-private let searchTabKey = "search_tab"
+let searchTabKey = "search_tab"
 
 /// Search state. Local scans publish through `result`. Hosted search waits
 /// 250ms, and a page is applied only for the session token and query that
@@ -19,8 +19,11 @@ final class SearchViewModel {
     private let library: LibraryStore
     private var remote: RemoteSearch?
     private let defaults: UserDefaults?
+    let catalog: CatalogFeed
     private let debounceNanos: UInt64
     private var sessionSeen: String?
+    /// Saved Catalog tab, applied once `/v1/me` says requests are on.
+    private var pendingCatalog = false
     /// The running scan. Tests await it.
     @ObservationIgnored private(set) var searchTask: Task<Void, Never>?
     /// Bumped per scan, so a scan started for an older query (even the same
@@ -33,6 +36,8 @@ final class SearchViewModel {
         library: LibraryStore,
         remote: RemoteSearch? = nil,
         defaults: UserDefaults? = nil,
+        catalog: CatalogFeed? = nil,
+        canRequest: Bool = false,
         debounceNanos: UInt64 = searchDebounceNanos
     ) {
         self.library = library
@@ -40,10 +45,20 @@ final class SearchViewModel {
         self.defaults = defaults
         self.debounceNanos = debounceNanos
         self.sessionSeen = remote?.token
+        let feed = catalog ?? CatalogFeed(service: OffCatalogService())
+        self.catalog = feed
+        feed.noteSession(remote?.token)
         let saved = defaults?.string(forKey: searchTabKey).flatMap(SearchTab.init(rawValue:))
         if remote != nil {
-            tab = saved ?? .accounts
-        } else if let saved, saved != .accounts {
+            if saved == .catalog && canRequest {
+                tab = .catalog
+            } else if saved == .catalog {
+                tab = .accounts
+                pendingCatalog = true
+            } else {
+                tab = saved ?? .accounts
+            }
+        } else if let saved, saved == .books || saved == .posts {
             tab = saved
         } else {
             tab = .books
@@ -72,6 +87,7 @@ final class SearchViewModel {
         case .accounts: return visibleAccounts().isEmpty
         case .books: return visibleBooks().isEmpty
         case .posts: return visiblePosts().isEmpty
+        case .catalog: return false
         }
     }
 
@@ -89,7 +105,11 @@ final class SearchViewModel {
         }
         self.remote = remote
         sessionSeen = remote?.token
-        if remote == nil, tab == .accounts { tab = .books }
+        catalog.noteSession(remote?.token)
+        if remote == nil, tab == .accounts || tab == .catalog {
+            tab = .books
+            catalog.hide()
+        }
         searchTask?.cancel()
         generation += 1
         slices = [:]
@@ -106,6 +126,7 @@ final class SearchViewModel {
     /// Drops in-flight pages when the account changes. A response that was
     /// already on the way is ignored because it carries the old token.
     func noteSession(_ token: String?) {
+        catalog.noteSession(token)
         guard remote != nil else { return }
         if token == sessionSeen { return }
         sessionSeen = token
@@ -123,6 +144,8 @@ final class SearchViewModel {
     func setQuery(_ query: String) {
         if query == self.query { return }
         self.query = query
+        catalog.setQuery(query)
+        if tab == .catalog { return }
         if remote == nil {
             run()
         } else {
@@ -131,14 +154,44 @@ final class SearchViewModel {
     }
 
     func select(_ tab: SearchTab) {
-        if remote == nil && tab == .accounts { return }
+        if remote == nil && (tab == .accounts || tab == .catalog) { return }
         guard tab != self.tab else { return }
+        let previous = self.tab
         self.tab = tab
         defaults?.set(tab.rawValue, forKey: searchTabKey)
+        if previous == .catalog { catalog.hide() }
+        if tab == .catalog {
+            searchTask?.cancel()
+            generation += 1
+            searching = false
+            loadingMore = false
+            failure = nil
+            catalog.show()
+            return
+        }
         if remote != nil { schedule(append: false) }
     }
 
+    /// Once requests are known, restore a saved Catalog tab or leave it.
+    func noteCatalogAccess(_ access: CatalogAccess) {
+        switch access {
+        case .unknown:
+            return
+        case .off:
+            pendingCatalog = false
+            if tab == .catalog { select(hosted ? .accounts : .books) }
+        case .on:
+            guard pendingCatalog else { return }
+            pendingCatalog = false
+            select(.catalog)
+        }
+    }
+
     func loadMore() {
+        if tab == .catalog {
+            catalog.loadMore()
+            return
+        }
         guard remote != nil, !searching, !loadingMore else { return }
         let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
         guard slices[tab]?.answeredQuery == trimmed else { return }
@@ -147,6 +200,10 @@ final class SearchViewModel {
     }
 
     func retry() {
+        if tab == .catalog {
+            catalog.retry()
+            return
+        }
         guard remote != nil else { return }
         failure = nil
         schedule(append: false)
@@ -157,6 +214,10 @@ final class SearchViewModel {
     /// reload lands. Called when the screen appears.
     func refresh() {
         for social in socials.values { social.invalidate() }
+        if tab == .catalog {
+            catalog.show()
+            return
+        }
         if remote == nil {
             run()
         } else {
@@ -188,6 +249,7 @@ final class SearchViewModel {
     }
 
     private func schedule(append: Bool) {
+        if tab == .catalog { return }
         searchTask?.cancel()
         generation += 1
         let token = generation
@@ -259,6 +321,8 @@ final class SearchViewModel {
             let rows = page.posts
             slice.posts = append ? appendingNew(slice.posts, rows) : rows
             for hit in rows { social(hit.book.id).load() }
+        case .catalog:
+            return
         }
         slice.nextCursor = page.nextCursor
         slice.answeredQuery = query
@@ -317,8 +381,34 @@ final class HostedRemoteSearch: RemoteSearch {
     }
 
     func search(query: String, type: SearchTab, cursor: String?) async throws -> SearchPage {
+        guard let typeName = librarySearchType(type) else {
+            throw CatalogError(reason: .notSearch, message: "Catalog is not a library search.")
+        }
         let session = sessions.session
-        return try await client.search(session, query: query, type: type.rawValue, cursor: cursor)
+        return try await client.search(session, query: query, type: typeName, cursor: cursor)
+    }
+}
+
+/// Catalog stays off until a real service is installed. Search tests use this.
+@MainActor
+private final class OffCatalogService: CatalogService {
+    var access: CatalogAccess { .off }
+    var token: String? { nil }
+    func refreshAccess() async {}
+    func page(query: String?, page: Int) async throws -> CatalogPage {
+        throw CatalogError(reason: .off, message: "Requests are off.")
+    }
+    func work(workKey: String) async throws -> WorkDetail {
+        throw CatalogError(reason: .off, message: "Requests are off.")
+    }
+    func request(_ body: NewBookRequest) async throws -> BookRequest {
+        throw CatalogError(reason: .off, message: "Requests are off.")
+    }
+    func cancel(id: String) async throws {
+        throw CatalogError(reason: .off, message: "Requests are off.")
+    }
+    func retry(id: String) async throws -> BookRequest {
+        throw CatalogError(reason: .off, message: "Requests are off.")
     }
 }
 
@@ -430,25 +520,32 @@ struct SearchScreen: View {
     var onOpenPost: (String, String) -> Void
     var onOpenAccount: () -> Void
     var onOpenProfile: (String, String) -> Void
+    var focusOnAppear: Bool
     @State private var model: SearchViewModel
     @State private var commentTarget: CommentTarget?
     @State private var shareText: String?
     @State private var lastOffset: CGFloat = 0
     @FocusState private var focused: Bool
 
-    init(env: AppEnvironment, chrome: HideOnScrollState, onOpenBook: @escaping (String) -> Void, onOpenPost: @escaping (String, String) -> Void, onOpenAccount: @escaping () -> Void, onOpenProfile: @escaping (String, String) -> Void) {
+    init(env: AppEnvironment, chrome: HideOnScrollState, onOpenBook: @escaping (String) -> Void, onOpenPost: @escaping (String, String) -> Void, onOpenAccount: @escaping () -> Void, onOpenProfile: @escaping (String, String) -> Void, focusOnAppear: Bool = true) {
         self.chrome = chrome
         self.onOpenBook = onOpenBook
         self.onOpenPost = onOpenPost
         self.onOpenAccount = onOpenAccount
         self.onOpenProfile = onOpenProfile
+        self.focusOnAppear = focusOnAppear
         let remote: RemoteSearch? = env.backend.kind == .hosted
             ? HostedRemoteSearch(sessions: env.hostedSession, client: env.client)
             : nil
+        let feed = CatalogFeed(service: env.catalog, onImported: {
+            Task { try? await env.library.load() }
+        })
         _model = State(initialValue: SearchViewModel(
             library: env.library,
             remote: remote,
-            defaults: UserDefaults(suiteName: "mewo")
+            defaults: UserDefaults(suiteName: "mewo"),
+            catalog: feed,
+            canRequest: env.catalog.access == .on
         ))
     }
 
@@ -501,16 +598,25 @@ struct SearchScreen: View {
         }
         .background(mewo.ground)
         .onAppear {
-            focused = true
+            if focusOnAppear { focused = true }
             model.configure(remote: hostedRemote)
             model.noteSession(app.hostedSession.session.token)
-            model.refresh()
+            model.noteCatalogAccess(app.catalog.access)
+            if model.tab == .catalog {
+                model.catalog.show()
+            } else {
+                model.refresh()
+            }
         }
+        .onDisappear { model.catalog.hide() }
         .onChange(of: app.backend.kind) { _, _ in
             model.configure(remote: hostedRemote)
         }
         .onChange(of: app.hostedSession.session.token) { _, token in
             model.noteSession(token)
+        }
+        .onChange(of: app.catalog.access) { _, access in
+            model.noteCatalogAccess(access)
         }
         .onChange(of: model.query) { _, q in
             chrome.showWhenIdle(q.isEmpty || model.showNoMatches())
@@ -541,13 +647,16 @@ struct SearchScreen: View {
     }
 
     private var tabItems: [UnderlineTabItem] {
-        let tabs: [SearchTab] = model.hosted ? SearchTab.allCases : [.books, .posts]
-        return tabs.map { UnderlineTabItem(id: $0.rawValue, title: $0.title) }
+        searchTabs(hosted: model.hosted, canRequest: app.catalog.access == .on).map {
+            UnderlineTabItem(id: $0.rawValue, title: $0.title)
+        }
     }
 
     @ViewBuilder
     private var results: some View {
-        if model.query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+        if model.tab == .catalog {
+            CatalogResults(feed: model.catalog, onOpenBook: onOpenBook)
+        } else if model.query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             Color.clear
         } else if model.showNoMatches() {
             Text(noMatchesCopy)
@@ -599,6 +708,7 @@ struct SearchScreen: View {
         case .accounts: return model.visibleAccounts().isEmpty
         case .books: return model.visibleBooks().isEmpty
         case .posts: return model.visiblePosts().isEmpty
+        case .catalog: return true
         }
     }
 
@@ -683,6 +793,8 @@ struct SearchScreen: View {
                 )
                 .onAppear { if hit.id == model.visiblePosts().last?.id { model.loadMore() } }
             }
+        case .catalog:
+            EmptyView()
         }
     }
 }

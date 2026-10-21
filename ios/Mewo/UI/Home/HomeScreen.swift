@@ -23,6 +23,7 @@ struct HomeScreen: View {
     var onOpenPost: (String, String) -> Void
     var onOpenAccount: () -> Void
     var onOpenProfile: (String, String) -> Void
+    var onBrowseCatalog: () -> Void = {}
     @State private var section: HomeSection = .feed
 
     var body: some View {
@@ -55,6 +56,7 @@ struct HomeScreen: View {
                     chrome: chrome,
                     onOpenBook: onOpenBook,
                     onOpenAccount: onOpenAccount,
+                    onBrowseCatalog: onBrowseCatalog,
                     showsBar: false
                 )
             }
