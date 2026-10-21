@@ -14,7 +14,7 @@ import java.time.format.DateTimeFormatter
 import java.util.Locale
 
 /** Fewer than this many Unicode scalars is trending, not a search. */
-const val CATALOG_MIN_QUERY = 2
+const val CATALOG_MIN_QUERY = 3
 
 const val CATALOG_DEBOUNCE_MS = 300L
 
@@ -27,7 +27,7 @@ sealed class CatalogQuery {
     data class Search(val q: String) : CatalogQuery()
 }
 
-/** Blank, or a single Unicode scalar (one emoji included), stays on trending. */
+/** Blank, or fewer than [CATALOG_MIN_QUERY] Unicode scalars (an emoji counts as one), stays on trending. */
 fun catalogQuery(raw: String): CatalogQuery {
     val trimmed = raw.trim()
     val scalars = trimmed.codePointCount(0, trimmed.length)

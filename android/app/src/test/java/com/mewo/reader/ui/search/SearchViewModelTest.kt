@@ -426,6 +426,7 @@ class SearchViewModelTest {
         assertEquals(listOf("" to 1), catalog.pageCalls)
 
         vm.setQuery("e")
+        vm.setQuery("em")
         advanceTimeBy(1_000)
         runCurrent()
         assertEquals(listOf("" to 1), catalog.pageCalls)

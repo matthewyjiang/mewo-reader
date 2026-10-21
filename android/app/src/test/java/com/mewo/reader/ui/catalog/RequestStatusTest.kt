@@ -113,14 +113,16 @@ class RequestStatusTest {
     }
 
     @Test
-    fun oneScalarStaysOnTrendingIncludingAnEmoji() {
+    fun fewerThanThreeScalarsStayOnTrendingIncludingAnEmoji() {
         assertTrue(catalogQuery("") is CatalogQuery.Browse)
         assertTrue(catalogQuery("  ") is CatalogQuery.Browse)
         assertTrue(catalogQuery("a") is CatalogQuery.Browse)
         assertTrue(catalogQuery("  a ") is CatalogQuery.Browse)
+        assertTrue(catalogQuery("ab") is CatalogQuery.Browse)
         assertTrue(catalogQuery("📚") is CatalogQuery.Browse)
-        assertEquals(CatalogQuery.Search("ab"), catalogQuery("  ab  "))
-        assertEquals(CatalogQuery.Search("📚a"), catalogQuery("📚a"))
+        assertTrue(catalogQuery("📚a") is CatalogQuery.Browse)
+        assertEquals(CatalogQuery.Search("abc"), catalogQuery("  abc  "))
+        assertEquals(CatalogQuery.Search("📚ab"), catalogQuery("📚ab"))
     }
 
     @Test
