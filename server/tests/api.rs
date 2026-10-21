@@ -1805,6 +1805,9 @@ async fn search_rejects_bad_queries_and_sanitizes_fts() {
         .await;
         assert_eq!(status, StatusCode::OK, "{kind} {body}");
         assert!(body["nextCursor"].is_null(), "{body}");
+        let (status, body) = search(&app, Some(&token), "d", kind, None).await;
+        assert_eq!(status, StatusCode::OK, "{kind} one character {body}");
+        assert!(body["items"].is_array(), "{kind} {body}");
     }
     // A cursor belongs to a typed query. Browse ignores it, including a junk one.
     let (status, body) = search(&app, Some(&token), "", "books", Some("%%%")).await;

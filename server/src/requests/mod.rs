@@ -30,6 +30,7 @@ use std::collections::HashMap;
 use uuid::Uuid;
 
 const ACTIVE_CAP: i64 = 5;
+const MIN_QUERY_CHARS: usize = 2;
 const MAX_QUERY_CHARS: usize = 100;
 const MAX_TITLE: usize = 500;
 const MAX_AUTHOR: usize = 300;
@@ -338,6 +339,11 @@ async fn catalog_search(
         return catalog_trending(state, authed, query.page).await;
     }
     let asked = q.chars().count();
+    if asked < MIN_QUERY_CHARS {
+        return Err(ApiError::BadRequest(
+            "Type at least 2 characters to search the catalog.".into(),
+        ));
+    }
     if asked > MAX_QUERY_CHARS {
         return Err(ApiError::BadRequest(format!(
             "Search is longer than {MAX_QUERY_CHARS} characters (asked {asked})."

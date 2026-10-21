@@ -1197,6 +1197,52 @@ async fn catalog_upstream_failure_is_502() {
 }
 
 #[tokio::test]
+async fn catalog_search_rejects_a_query_shorter_than_two_characters() {
+    let catalog = Arc::new(Mutex::new(Catalog::default()));
+    let (_state, app, _data, token) = catalog_app(Arc::clone(&catalog)).await;
+    for q in ["d", " d ", "é"] {
+        let path = format!("/v1/catalog/search?q={}", percent_encode(q));
+        let (status, body) = empty_req(&app, "GET", &path, Some(&token)).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{q:?} {body}");
+        assert_eq!(
+            body["error"],
+            "Type at least 2 characters to search the catalog."
+        );
+    }
+    assert!(
+        catalog.lock().await.hits.is_empty(),
+        "short queries must not call Open Library: {:?}",
+        catalog.lock().await.hits
+    );
+
+    let (status, body) = empty_req(&app, "GET", "/v1/catalog/search?q=%20%20", Some(&token)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(body["items"].is_array(), "{body}");
+    assert_eq!(catalog.lock().await.hits, vec!["trending".to_string()]);
+
+    let (status, body) = empty_req(&app, "GET", "/v1/catalog/search?q=du", Some(&token)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["items"][0]["title"], "Dune");
+    assert_eq!(
+        catalog.lock().await.hits,
+        vec!["trending".to_string(), "q=du".to_string()]
+    );
+}
+
+fn percent_encode(value: &str) -> String {
+    let mut out = String::new();
+    for b in value.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(b as char);
+            }
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    out
+}
+
+#[tokio::test]
 async fn cancel_races_worker() {
     let world = world().await;
     world.prowlarr.lock().await.key_ok = true;
