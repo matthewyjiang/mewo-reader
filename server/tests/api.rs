@@ -2646,16 +2646,15 @@ async fn private_reposts_leave_other_feeds_and_counts() {
 
     let ted_after = feed_all(&app, &ted).await;
     assert!(ted_after.is_empty(), "{ted_after:?}");
+    // Unsharing hides everyone else's rows again, including from the owner.
     let matt_after = feed_all(&app, &matt).await;
-    assert_eq!(matt_after.len(), 6, "{matt_after:?}");
-    assert!(matt_after.iter().any(|row| {
-        row["actor"]["username"] == "matt"
-            && row["book"]["id"] == shared_id
-            && row["type"] == "repost"
-    }));
+    assert_eq!(matt_after.len(), 4, "{matt_after:?}");
     assert!(matt_after
         .iter()
-        .any(|row| row["actor"]["username"] == "ted" && row["type"] == "repost"));
+        .all(|row| row["actor"]["username"] == "matt"));
+    assert!(matt_after
+        .iter()
+        .any(|row| { row["book"]["id"] == shared_id && row["type"] == "repost" }));
     assert!(matt_after.iter().any(|row| row["book"]["id"] == private_id));
 
     let (status, ted_reposts) = empty_req(&app, "GET", "/v1/users/ted/reposts", Some(&ted)).await;
@@ -4814,4 +4813,190 @@ async fn a_missing_user_still_verifies_and_a_taken_name_does_not_hash() {
         first.2,
         second.2
     );
+}
+
+fn table_froms(sql: &str) -> usize {
+    let lower = sql.to_ascii_lowercase();
+    ["from comments", "from reposts"]
+        .into_iter()
+        .map(|needle| {
+            let mut count = 0;
+            let mut start = 0;
+            while let Some(pos) = lower[start..].find(needle) {
+                let at = start + pos + needle.len();
+                let boundary = lower
+                    .as_bytes()
+                    .get(at)
+                    .is_none_or(|byte| !byte.is_ascii_alphanumeric());
+                if boundary {
+                    count += 1;
+                }
+                start += pos + needle.len();
+            }
+            count
+        })
+        .sum()
+}
+
+struct SqlLiteral {
+    value: String,
+    end: usize,
+}
+
+/// String literals in `source`, so the social-read guard looks at SQL text
+/// and not at comments. Byte index `end` is just past the closing quote.
+fn rust_string_literals(source: &str) -> Vec<SqlLiteral> {
+    let bytes = source.as_bytes();
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < bytes.len() {
+        if !source.is_char_boundary(i) {
+            i += 1;
+            continue;
+        }
+        if bytes[i] >= 128 {
+            i += source[i..].chars().next().unwrap().len_utf8();
+            continue;
+        }
+        if bytes[i] == b'/' && i + 1 < bytes.len() && bytes[i + 1] == b'/' {
+            i += 2;
+            while i < bytes.len() && bytes[i] != b'\n' {
+                i += 1;
+            }
+            continue;
+        }
+        if bytes[i] == b'/' && i + 1 < bytes.len() && bytes[i + 1] == b'*' {
+            i += 2;
+            while i + 1 < bytes.len() && !(bytes[i] == b'*' && bytes[i + 1] == b'/') {
+                i += 1;
+            }
+            i = (i + 2).min(bytes.len());
+            continue;
+        }
+        if bytes[i] == b'\'' {
+            i += 1;
+            if i < bytes.len() && bytes[i] == b'\\' {
+                i += 1;
+            }
+            if i < bytes.len() && source.is_char_boundary(i) {
+                i += source[i..].chars().next().unwrap().len_utf8();
+            }
+            if i < bytes.len() && bytes[i] == b'\'' {
+                i += 1;
+            }
+            continue;
+        }
+        if bytes[i] == b'r' {
+            let hashes = source[i + 1..]
+                .bytes()
+                .take_while(|byte| *byte == b'#')
+                .count();
+            let quote = i + 1 + hashes;
+            if quote < bytes.len() && bytes[quote] == b'"' {
+                let content = quote + 1;
+                let closer = format!("\"{}", "#".repeat(hashes));
+                if let Some(rel) = source[content..].find(&closer) {
+                    let end_content = content + rel;
+                    out.push(SqlLiteral {
+                        value: source[content..end_content].to_string(),
+                        end: end_content + closer.len(),
+                    });
+                    i = end_content + closer.len();
+                    continue;
+                }
+            }
+        }
+        if bytes[i] == b'"' {
+            let mut j = i + 1;
+            let mut value = String::new();
+            while j < bytes.len() {
+                if bytes[j] == b'\\' && j + 1 < bytes.len() {
+                    value.push(bytes[j + 1] as char);
+                    j += 2;
+                    continue;
+                }
+                if bytes[j] == b'"' {
+                    out.push(SqlLiteral { value, end: j + 1 });
+                    i = j + 1;
+                    break;
+                }
+                let ch = source[j..].chars().next().unwrap();
+                value.push(ch);
+                j += ch.len_utf8();
+            }
+            if j >= bytes.len() {
+                break;
+            }
+            continue;
+        }
+        i += 1;
+    }
+    out
+}
+
+/// SQL strings that read `comments` or `reposts` without `social_visible`
+/// and without an `-- own rows only` tag. The fragment may be a `format!`
+/// argument after the string; the scan stops at the next query.
+fn uncovered_social_reads(source: &str) -> Vec<String> {
+    let mut misses = Vec::new();
+    for literal in rust_string_literals(source) {
+        let froms = table_froms(&literal.value);
+        if froms == 0 || literal.value.contains("-- own rows only") {
+            continue;
+        }
+        let after = &source[literal.end..];
+        let end = [after.find("format!"), after.find("sqlx::query")]
+            .into_iter()
+            .flatten()
+            .min()
+            .unwrap_or(after.len());
+        let visibles = after[..end].matches("social_visible").count()
+            + literal.value.matches("social_visible").count();
+        if visibles < froms {
+            let snippet: String = literal.value.chars().take(80).collect();
+            misses.push(format!(
+                "{froms} FROM, {visibles} social_visible: {snippet}"
+            ));
+        }
+    }
+    misses
+}
+
+#[test]
+fn every_social_read_uses_social_visible() {
+    let bare = "fn read() { sqlx::query(\"SELECT * FROM comments c\"); }\n";
+    assert!(
+        !uncovered_social_reads(bare).is_empty(),
+        "a comments query with no fragment must fail the scan"
+    );
+    let tagged =
+        "fn read() { sqlx::query(\"DELETE FROM comments WHERE id = ? -- own rows only\"); }\n";
+    assert!(uncovered_social_reads(tagged).is_empty(), "{tagged}");
+    let formatted = "fn read() { let _ = format!(\"SELECT * FROM comments c WHERE {s}\", s = social_visible(\"c\")); }\n";
+    assert!(uncovered_social_reads(formatted).is_empty(), "{formatted}");
+    let one_short = "fn read() { let _ = format!(\"SELECT * FROM comments c UNION ALL SELECT * FROM reposts r\", s = social_visible(\"c\")); }\n";
+    assert!(
+        !uncovered_social_reads(one_short).is_empty(),
+        "two reads need two fragments"
+    );
+
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let mut misses = Vec::new();
+    let mut stack = vec![root];
+    while let Some(dir) = stack.pop() {
+        for entry in std::fs::read_dir(&dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                stack.push(path);
+                continue;
+            }
+            if path.extension().is_some_and(|ext| ext == "rs") {
+                let text = std::fs::read_to_string(&path).unwrap();
+                for miss in uncovered_social_reads(&text) {
+                    misses.push(format!("{}: {miss}", path.display()));
+                }
+            }
+        }
+    }
+    assert!(misses.is_empty(), "{misses:#?}");
 }

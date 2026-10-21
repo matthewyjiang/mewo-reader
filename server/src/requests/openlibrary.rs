@@ -120,13 +120,20 @@ pub(crate) async fn work_context(
     if let Some(hit) = state.work_cache.get(work_key) {
         return Ok(hit);
     }
-    let ctx = fetch_context(state, work_key).await?;
-    state.work_cache.insert(work_key, ctx.clone());
+    let (canonical, ctx) = fetch_context(state, work_key).await?;
+    state.work_cache.insert(work_key, &canonical, ctx.clone());
     Ok(ctx)
 }
 
+#[derive(Clone)]
+struct CachedWork {
+    at: Instant,
+    canonical: String,
+    ctx: WorkContext,
+}
+
 pub(crate) struct WorkCache {
-    entries: std::sync::Mutex<HashMap<String, (Instant, WorkContext)>>,
+    entries: std::sync::Mutex<HashMap<String, CachedWork>>,
 }
 
 impl WorkCache {
@@ -137,25 +144,42 @@ impl WorkCache {
     }
 
     fn get(&self, key: &str) -> Option<WorkContext> {
+        self.fresh(key).map(|hit| hit.ctx)
+    }
+
+    /// Canonical work key when this process already fetched `asked` and followed
+    /// a redirect. A miss does not call Open Library.
+    pub(crate) fn cached_canonical(&self, asked: &str) -> Option<String> {
+        self.fresh(asked).map(|hit| hit.canonical)
+    }
+
+    fn fresh(&self, key: &str) -> Option<CachedWork> {
         let mut entries = self.entries.lock().unwrap_or_else(|err| err.into_inner());
         let now = Instant::now();
-        let stale = entries.get(key).is_some_and(|(at, _)| !fresh(*at, now));
+        let stale = entries.get(key).is_some_and(|hit| !fresh(hit.at, now));
         if stale {
             entries.remove(key);
             return None;
         }
-        entries.get(key).map(|(_, ctx)| ctx.clone())
+        entries.get(key).cloned()
     }
 
-    fn insert(&self, key: &str, ctx: WorkContext) {
+    fn insert(&self, key: &str, canonical: &str, ctx: WorkContext) {
         let now = Instant::now();
-        self.remember(key, ctx, now, now);
+        self.remember(key, canonical, ctx, now, now);
     }
 
-    fn remember(&self, key: &str, ctx: WorkContext, at: Instant, now: Instant) {
+    fn remember(&self, key: &str, canonical: &str, ctx: WorkContext, at: Instant, now: Instant) {
         let mut entries = self.entries.lock().unwrap_or_else(|err| err.into_inner());
-        entries.retain(|_, (stored, _)| fresh(*stored, now));
-        entries.insert(key.to_string(), (at, ctx));
+        entries.retain(|_, hit| fresh(hit.at, now));
+        entries.insert(
+            key.to_string(),
+            CachedWork {
+                at,
+                canonical: canonical.to_string(),
+                ctx,
+            },
+        );
     }
 }
 
@@ -163,7 +187,10 @@ fn fresh(at: Instant, now: Instant) -> bool {
     now.saturating_duration_since(at) < CACHE_FOR
 }
 
-async fn fetch_context(state: &AppState, work_key: &str) -> Result<WorkContext, UpstreamError> {
+async fn fetch_context(
+    state: &AppState,
+    work_key: &str,
+) -> Result<(String, WorkContext), UpstreamError> {
     state.catalog_limit.pace().await;
     let base = base_url(&state.openlibrary_url)?;
     let q = format!("key:{work_key}");
@@ -183,6 +210,7 @@ async fn fetch_context(state: &AppState, work_key: &str) -> Result<WorkContext, 
             2 * 1024 * 1024,
         )
         .await?;
+    let mut canonical = work_key.to_string();
     let doc = match body
         .docs
         .into_iter()
@@ -193,8 +221,9 @@ async fn fetch_context(state: &AppState, work_key: &str) -> Result<WorkContext, 
             let Some(next) = merged_work(state, &base, work_key).await? else {
                 return Err(UpstreamError::Shape);
             };
+            canonical = next;
             state.catalog_limit.pace().await;
-            let q = format!("key:{next}");
+            let q = format!("key:{canonical}");
             let body: Search<WorkDoc> = state
                 .upstream
                 .get_json(
@@ -249,7 +278,7 @@ async fn fetch_context(state: &AppState, work_key: &str) -> Result<WorkContext, 
     } else {
         Vec::new()
     };
-    Ok(assemble(doc, siblings))
+    Ok((canonical, assemble(doc, siblings)))
 }
 
 fn sibling_key(doc: &WorkDoc) -> Option<String> {
@@ -491,10 +520,15 @@ mod tests {
             siblings: vec![],
         };
         let then = Instant::now();
-        cache.remember("old", ctx.clone(), then, then);
+        cache.remember("old", "/works/OL1W", ctx.clone(), then, then);
         let later = then + CACHE_FOR + Duration::from_secs(1);
-        cache.remember("new", ctx, later, later);
+        cache.remember("new", "/works/OL2W", ctx, later, later);
         assert!(cache.get("old").is_none());
         assert!(cache.get("new").is_some());
+        assert_eq!(
+            cache.cached_canonical("new").as_deref(),
+            Some("/works/OL2W")
+        );
+        assert!(cache.cached_canonical("missing").is_none());
     }
 }

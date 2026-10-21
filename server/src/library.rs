@@ -201,11 +201,13 @@ pub(crate) async fn import(
         mine: true,
         shared: false,
         owner_username: owner.username.to_string(),
+        held: false,
     })
 }
 
 /// Deletes a book this process just inserted. Used when a cancel wins the
-/// compare-and-set after import.
+/// compare-and-set after import. `files_user_id` is still null, so the
+/// directory is under `user_id`.
 pub(crate) async fn remove(state: &AppState, user_id: &str, book_id: &str) -> Result<(), ApiError> {
     sqlx::query("DELETE FROM books WHERE id = ? AND user_id = ?")
         .bind(book_id)
@@ -214,6 +216,104 @@ pub(crate) async fn remove(state: &AppState, user_id: &str, book_id: &str) -> Re
         .await?;
     let _ = tokio::fs::remove_dir_all(book_dir(&state.data_dir, user_id, book_id)).await;
     Ok(())
+}
+
+/// The epub directory. `files_owner` is `books.files_user_id`, or `user_id`
+/// when that column is null. Transfers change the owner row and leave the
+/// directory here.
+pub(crate) fn book_dir(data_dir: &Path, files_owner: &str, book_id: &str) -> PathBuf {
+    data_dir.join("books").join(files_owner).join(book_id)
+}
+
+/// The owner is deleting a book someone else holds. The earliest holder
+/// becomes the owner, sharing goes back to private, and the previous owner's
+/// rows on this book go away. The file stays put.
+///
+/// Account deletion does not exist (`admin` only grants and revokes). If it
+/// is added, it must call this before the `users` cascade, or a held book
+/// disappears with the account that first imported it.
+pub(crate) async fn pass_ownership(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    book_id: &str,
+    from_user: &str,
+    to_user: &str,
+) -> Result<(), ApiError> {
+    let updated = sqlx::query(
+        "UPDATE books
+         SET user_id = ?, files_user_id = COALESCE(files_user_id, user_id), shared = 0
+         WHERE id = ? AND user_id = ?",
+    )
+    .bind(to_user)
+    .bind(book_id)
+    .bind(from_user)
+    .execute(&mut **tx)
+    .await?
+    .rows_affected();
+    if updated == 0 {
+        return Err(ApiError::NotFound);
+    }
+    for table in ["comments", "reposts", "likes", "book_progress"] {
+        sqlx::query(&format!(
+            "DELETE FROM {table} WHERE book_id = ? AND user_id = ?"
+        ))
+        .bind(book_id)
+        .bind(from_user)
+        .execute(&mut **tx)
+        .await?;
+    }
+    crate::requests::cancel_imported(&mut **tx, from_user, book_id).await?;
+    Ok(())
+}
+
+/// A holder is leaving the book. Their access and the rows they wrote while
+/// the book was private go away. Rows written while it was shared stay, and
+/// the file is untouched. Returns false when this account does not hold it.
+pub(crate) async fn release_hold(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    user_id: &str,
+    book_id: &str,
+) -> Result<bool, ApiError> {
+    let now = now_ms();
+    let changed = sqlx::query(
+        "UPDATE book_requests
+         SET state = 'canceled', book_id = NULL, error = NULL, download_id = NULL,
+             updated_at = ?, next_check_at = ?
+         WHERE book_id = ? AND user_id = ? AND state = 'imported'",
+    )
+    .bind(now)
+    .bind(now)
+    .bind(book_id)
+    .bind(user_id)
+    .execute(&mut **tx)
+    .await?
+    .rows_affected();
+    if changed == 0 {
+        return Ok(false);
+    }
+    for table in ["book_progress", "likes"] {
+        sqlx::query(&format!(
+            "DELETE FROM {table} WHERE user_id = ? AND book_id = ?"
+        ))
+        .bind(user_id)
+        .bind(book_id)
+        .execute(&mut **tx)
+        .await?;
+    }
+    sqlx::query(
+        "DELETE FROM comments WHERE user_id = ? AND book_id = ? AND private = 1 -- own rows only",
+    )
+    .bind(user_id)
+    .bind(book_id)
+    .execute(&mut **tx)
+    .await?;
+    sqlx::query(
+        "DELETE FROM reposts WHERE user_id = ? AND book_id = ? AND private = 1 -- own rows only",
+    )
+    .bind(user_id)
+    .bind(book_id)
+    .execute(&mut **tx)
+    .await?;
+    Ok(true)
 }
 
 pub(crate) async fn parse_epub(path: PathBuf) -> Result<crate::epub::ParsedEpub, ApiError> {
@@ -303,10 +403,6 @@ async fn copy_limited(src: &Path, dest: &Path, limit: u64) -> Result<(), ApiErro
     }
     output.flush().await?;
     Ok(())
-}
-
-fn book_dir(data_dir: &Path, user_id: &str, book_id: &str) -> PathBuf {
-    data_dir.join("books").join(user_id).join(book_id)
 }
 
 async fn owned_book(

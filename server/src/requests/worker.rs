@@ -172,6 +172,9 @@ pub async fn tick_at(state: &AppState, now_ms: i64) -> Result<(), ApiError> {
     let Some(ready) = ready(state).await? else {
         return Ok(());
     };
+    if let Err(err) = clear_follower_jobs(state, &ready).await {
+        tracing::error!(error = %err, "could not drop a follower download");
+    }
     let rows = due(&state.pool, now_ms).await?;
     for row in rows {
         let request_id = row.id.clone();
@@ -251,7 +254,8 @@ async fn due(pool: &SqlitePool, now_ms: i64) -> Result<Vec<Due>, ApiError> {
                 r.created_at, r.updated_at
          FROM book_requests r
          JOIN users u ON u.id = r.user_id
-         WHERE r.state IN ('requested', 'downloading') AND r.next_check_at <= ?
+         WHERE r.state IN ('requested', 'downloading') AND r.follows IS NULL
+           AND r.next_check_at <= ?
          ORDER BY r.next_check_at ASC
          LIMIT ?",
     )
@@ -350,7 +354,7 @@ async fn requested(
             None => NO_RELEASE_YET.to_string(),
         };
         if gave_up {
-            return fail_from(&state.pool, &row.id, "requested", &message, now_ms).await;
+            return fail_from(state, &row.id, "requested", &message, now_ms).await;
         }
         return note(
             &state.pool,
@@ -473,14 +477,7 @@ async fn poll_or_time_out(
 ) -> Result<(), ApiError> {
     if now_ms.saturating_sub(row.updated_at) > DOWNLOAD_TIMEOUT_MS {
         discard(sab, nzo).await;
-        return fail_from(
-            &state.pool,
-            &row.id,
-            "downloading",
-            DOWNLOAD_TIMEOUT,
-            now_ms,
-        )
-        .await;
+        return fail_from(state, &row.id, "downloading", DOWNLOAD_TIMEOUT, now_ms).await;
     }
     let _ = cas!(
         &state.pool,
@@ -511,36 +508,15 @@ async fn completed(
     let folder = job_folder(storage, &job);
     if !folder_ok(&job, &folder) {
         discard(sab, nzo).await;
-        return fail_from(
-            &state.pool,
-            &row.id,
-            "downloading",
-            UNEXPECTED_FOLDER,
-            now_ms,
-        )
-        .await;
+        return fail_from(state, &row.id, "downloading", UNEXPECTED_FOLDER, now_ms).await;
     }
     let Some(downloads) = state.downloads_dir.as_deref() else {
         discard(sab, nzo).await;
-        return fail_from(
-            &state.pool,
-            &row.id,
-            "downloading",
-            UNEXPECTED_FOLDER,
-            now_ms,
-        )
-        .await;
+        return fail_from(state, &row.id, "downloading", UNEXPECTED_FOLDER, now_ms).await;
     };
     let Some(dir) = confined(downloads, &folder).await else {
         discard(sab, nzo).await;
-        return fail_from(
-            &state.pool,
-            &row.id,
-            "downloading",
-            UNEXPECTED_FOLDER,
-            now_ms,
-        )
-        .await;
+        return fail_from(state, &row.id, "downloading", UNEXPECTED_FOLDER, now_ms).await;
     };
     let ctx = match openlibrary::work_context(state, &row.work_key).await {
         Ok(ctx) => ctx,
@@ -592,23 +568,43 @@ async fn completed(
             return retry_or_fail(state, sab, row, nzo, &err.to_string(), Some(&dir), now_ms).await
         }
     };
-    let won = cas!(
-        &state.pool,
+    let mut tx = state.pool.begin_with("BEGIN IMMEDIATE").await?;
+    let won = sqlx::query(
         "UPDATE book_requests
          SET state = 'imported', book_id = ?, progress = 100, error = NULL,
              download_id = NULL, next_check_at = ?, updated_at = ?
          WHERE id = ? AND state = 'downloading'",
-        &book.id,
-        now_ms,
-        now_ms,
-        &row.id,
-    );
+    )
+    .bind(&book.id)
+    .bind(now_ms)
+    .bind(now_ms)
+    .bind(&row.id)
+    .execute(&mut *tx)
+    .await?
+    .rows_affected()
+        > 0;
     if !won {
+        // A cancel already handed the followers off. The book we just wrote
+        // belongs to a request that is no longer downloading.
+        tx.rollback().await?;
         if !existed {
             library::remove(state, &row.user_id, &book.id).await?;
         }
         return Ok(());
     }
+    sqlx::query(
+        "UPDATE book_requests
+         SET state = 'imported', book_id = ?, progress = 100, error = NULL, follows = NULL,
+             download_id = NULL, next_check_at = ?, updated_at = ?
+         WHERE follows = ? AND state = 'requested'",
+    )
+    .bind(&book.id)
+    .bind(now_ms)
+    .bind(now_ms)
+    .bind(&row.id)
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
     remove_download(&dir).await;
     discard(sab, nzo).await;
     Ok(())
@@ -646,7 +642,7 @@ async fn retry_or_fail(
             &row.id,
         );
     } else {
-        fail_from(&state.pool, &row.id, "downloading", message, now_ms).await?;
+        fail_from(state, &row.id, "downloading", message, now_ms).await?;
     }
     Ok(())
 }
@@ -713,7 +709,7 @@ async fn open_library_or_give_up(
             }
             remove_download(dir).await;
         }
-        return fail_from(&state.pool, &row.id, from, &message, now_ms).await;
+        return fail_from(state, &row.id, from, &message, now_ms).await;
     }
     hold(&state.pool, &row.id, from, "Open Library", err, now_ms).await
 }
@@ -747,7 +743,7 @@ async fn note(
 }
 
 async fn fail_from(
-    pool: &SqlitePool,
+    state: &AppState,
     id: &str,
     from: &str,
     error: &str,
@@ -762,7 +758,60 @@ async fn fail_from(
          SET state = 'failed', error = ?, next_check_at = ?, updated_at = ?
          WHERE id = ? AND state = 'requested'"
     };
-    let _ = cas!(pool, sql, error, now_ms, now_ms, id);
+    let mut tx = state.pool.begin_with("BEGIN IMMEDIATE").await?;
+    let changed = sqlx::query(sql)
+        .bind(error)
+        .bind(now_ms)
+        .bind(now_ms)
+        .bind(id)
+        .execute(&mut *tx)
+        .await?
+        .rows_affected();
+    if changed > 0 {
+        // The leader row is already failed, so the unique index allows the
+        // oldest follower to take the work with the releases already tried.
+        super::hand_off(&mut tx, id, now_ms).await?;
+    }
+    tx.commit().await?;
+    if changed > 0 {
+        state.worker.notify_one();
+    }
+    Ok(())
+}
+
+/// A row demoted to follower can still name a SABnzbd job. Delete it. The
+/// follower never steps, so nothing else would.
+async fn clear_follower_jobs(state: &AppState, ready: &Ready) -> Result<(), ApiError> {
+    let rows: Vec<(String, String)> = sqlx::query_as(
+        "SELECT id, download_id FROM book_requests
+         WHERE follows IS NOT NULL AND download_id IS NOT NULL",
+    )
+    .fetch_all(&state.pool)
+    .await?;
+    if rows.is_empty() {
+        return Ok(());
+    }
+    let clients = match clients(state, ready) {
+        Ok(clients) => clients,
+        Err(err) => {
+            tracing::error!(error = %err, "book request upstream is not usable");
+            return Ok(());
+        }
+    };
+    for (id, nzo) in rows {
+        if let Err(err) = clients.sab.delete(&nzo).await {
+            tracing::error!(error = %err, "sab delete of a follower job failed");
+            continue;
+        }
+        sqlx::query(
+            "UPDATE book_requests SET download_id = NULL
+             WHERE id = ? AND follows IS NOT NULL AND download_id = ?",
+        )
+        .bind(&id)
+        .bind(&nzo)
+        .execute(&state.pool)
+        .await?;
+    }
     Ok(())
 }
 

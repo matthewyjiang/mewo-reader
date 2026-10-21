@@ -17,8 +17,12 @@ pub struct BookRecord {
     pub mine: bool,
     /// Owner chose to show this book on other accounts' shelves.
     pub shared: bool,
-    /// Username of the account that added the book.
+    /// Username of the account that added the book. Empty when `held` is set,
+    /// so a holder of a private copy is not told who else has it.
     pub owner_username: String,
+    /// The viewer holds a private copy they do not own.
+    #[serde(default)]
+    pub held: bool,
 }
 
 #[derive(Debug, FromRow)]
@@ -34,10 +38,24 @@ pub struct BookRow {
     pub shared: i64,
     pub owner_id: String,
     pub owner_username: String,
+    /// Directory owner. Missing from selects that never open the file.
+    #[sqlx(default)]
+    pub files_owner: Option<String>,
 }
 
 impl BookRow {
+    /// Account id the epub directory is stored under. An ownership transfer
+    /// leaves the file where the first importer wrote it.
+    pub(crate) fn dir_owner(&self) -> &str {
+        self.files_owner.as_deref().unwrap_or(&self.owner_id)
+    }
+
     pub fn into_record(self, user_id: &str) -> BookRecord {
+        let mine = self.owner_id == user_id;
+        let shared = self.shared != 0;
+        let is_sample = self.is_sample != 0;
+        // Reaching a private book without owning it means the viewer holds it.
+        let held = !mine && !shared && !is_sample;
         BookRecord {
             id: self.id,
             title: self.title,
@@ -46,10 +64,15 @@ impl BookRow {
             imported_at: self.imported_at,
             post_count: self.post_count as i32,
             progress_index: self.progress_index as i32,
-            is_sample: self.is_sample != 0,
-            mine: self.owner_id == user_id,
-            shared: self.shared != 0,
-            owner_username: self.owner_username,
+            is_sample,
+            mine,
+            shared,
+            owner_username: if held {
+                String::new()
+            } else {
+                self.owner_username
+            },
+            held,
         }
     }
 }

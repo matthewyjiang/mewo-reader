@@ -342,6 +342,7 @@ impl PostHitRow {
             shared: self.shared,
             owner_id: self.owner_id,
             owner_username: self.owner_username,
+            files_owner: None,
         }
         .into_record(viewer);
         Ok(PostHitRecord {
@@ -743,7 +744,8 @@ pub(crate) async fn read_posts(dir: &Path) -> Result<Option<Vec<u8>>, ApiError> 
 /// An unreadable EPUB with no `posts.json` is marked `-1` and left alone.
 pub(crate) async fn backfill(state: AppState) {
     let pending = sqlx::query_as::<_, (String, String)>(
-        "SELECT id, user_id FROM books WHERE posts_indexed = 0 ORDER BY imported_at ASC, id ASC",
+        "SELECT id, COALESCE(files_user_id, user_id)
+         FROM books WHERE posts_indexed = 0 ORDER BY imported_at ASC, id ASC",
     )
     .fetch_all(&state.pool)
     .await;
@@ -755,8 +757,8 @@ pub(crate) async fn backfill(state: AppState) {
         }
     };
     let mut indexed = 0u64;
-    for (offset, (book_id, user_id)) in pending.iter().enumerate() {
-        match index_pending(&state, book_id, user_id).await {
+    for (offset, (book_id, files_owner)) in pending.iter().enumerate() {
+        match index_pending(&state, book_id, files_owner).await {
             Ok(true) => indexed += 1,
             Ok(false) => {}
             Err(err) => {
@@ -774,7 +776,11 @@ pub(crate) async fn backfill(state: AppState) {
 
 /// `Ok(true)` when this call stored the feed. `Ok(false)` when another caller
 /// indexed the book after the pending list was read.
-async fn index_pending(state: &AppState, book_id: &str, user_id: &str) -> Result<bool, ApiError> {
+async fn index_pending(
+    state: &AppState,
+    book_id: &str,
+    files_owner: &str,
+) -> Result<bool, ApiError> {
     let _guard = state.lazy_parse_lock.lock().await;
     let indexed: Option<i64> = sqlx::query_scalar("SELECT posts_indexed FROM books WHERE id = ?")
         .bind(book_id)
@@ -783,7 +789,7 @@ async fn index_pending(state: &AppState, book_id: &str, user_id: &str) -> Result
     if indexed != Some(0) {
         return Ok(false);
     }
-    let dir = book_dir(&state.data_dir, user_id, book_id);
+    let dir = crate::library::book_dir(&state.data_dir, files_owner, book_id);
     let posts = match read_posts(&dir).await? {
         Some(bytes) => serde_json::from_slice::<Posts>(&bytes).map_err(|err| {
             tracing::error!(error = %err, book_id, "posts.json is not a feed");
@@ -822,10 +828,6 @@ async fn posts_from_epub(path: PathBuf) -> Result<Posts, ApiError> {
     Ok(Posts {
         posts: parsed.posts,
     })
-}
-
-fn book_dir(data_dir: &Path, user_id: &str, book_id: &str) -> PathBuf {
-    data_dir.join("books").join(user_id).join(book_id)
 }
 
 #[cfg(test)]

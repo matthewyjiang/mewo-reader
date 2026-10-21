@@ -22,6 +22,35 @@ const privateBook = {
   shared: false,
 };
 
+const heldBook = {
+  ...book,
+  id: 'b3',
+  title: 'Mansfield',
+  mine: false,
+  shared: false,
+  held: true,
+  ownerUsername: 'secret',
+};
+
+const sharedBook = {
+  ...book,
+  id: 'b4',
+  title: 'Sanditon',
+  mine: false,
+  shared: true,
+  held: false,
+  ownerUsername: 'mary',
+};
+
+const namelessBook = {
+  ...book,
+  id: 'b5',
+  title: 'Lady Susan',
+  mine: false,
+  shared: true,
+  ownerUsername: '',
+};
+
 const post = {
   id: '0',
   kind: 'Body',
@@ -62,7 +91,7 @@ async function answer(route: Route) {
     contentType: 'application/json',
     body: JSON.stringify(body),
   });
-  if (path === '/v1/library') return json({ books: [book, privateBook] });
+  if (path === '/v1/library') return json({ books: [book, privateBook, heldBook, sharedBook, namelessBook] });
   if (path === '/v1/feed') {
     return json({
       items: [
@@ -220,6 +249,13 @@ test('home opens on Feed and Books keeps the shelf', async ({ page }) => {
   await expect(page).toHaveURL(/tab=books/);
   await expect(page.getByText('Emma', { exact: true })).toBeVisible();
   await expect(page.getByText('Persuasion')).toBeVisible();
+  await expect(page.getByText('Mansfield', { exact: true })).toBeVisible();
+  await expect(page.getByText('Sanditon', { exact: true })).toBeVisible();
+  await expect(page.getByText('Lady Susan', { exact: true })).toBeVisible();
+  await expect(page.getByText('Shared by @mary')).toBeVisible();
+  await expect(page.getByText(/Added by/)).toHaveCount(0);
+  await expect(page.getByText('secret')).toHaveCount(0);
+  await expect(page.getByText('Shared by @', { exact: true })).toHaveCount(0);
 });
 
 test('the drawer Profile row opens your profile', async ({ page }) => {
