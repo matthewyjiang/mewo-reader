@@ -126,14 +126,14 @@ class CatalogFeedTest {
         store.pageHandler = { _, _ ->
             throw CatalogException(
                 CatalogException.Reason.Failed,
-                "Could not load the catalog. Try again.",
+                "Couldn't load the catalog.",
             )
         }
         feed.show()
         assertTrue(feed.state.value.phase is CatalogPhase.Loaded)
         runCurrent()
         val failed = feed.state.value.phase as CatalogPhase.Failed
-        assertEquals("Could not load the catalog. Try again.", failed.message)
+        assertEquals("Couldn't load the catalog.", failed.message)
         assertFalse(failed.message.contains("HTTP"))
 
         feed.hide()
@@ -151,7 +151,7 @@ class CatalogFeedTest {
             else {
                 throw CatalogException(
                     CatalogException.Reason.Network,
-                    "Could not reach the server. Check your connection and try again.",
+                    "Couldn't reach the server. Check your connection.",
                 )
             }
         }
@@ -181,6 +181,25 @@ class CatalogFeedTest {
         feed.bindSession("ada")
         assertEquals("Trending", loaded(feed).items.single().title)
         feed.hide()
+    }
+
+    @Test
+    fun aCanceledRowRequestsAgainThroughRetry() = runTest {
+        val store = FakeCatalogStore()
+        val work = CatalogWork(
+            workKey = "/works/OL1W",
+            title = "Dune",
+            author = "Herbert",
+            request = BookRequest(id = "r1", workKey = "/works/OL1W", title = "Dune", state = "canceled"),
+        )
+        store.retryHandler = {
+            BookRequest(id = "r1", workKey = "/works/OL1W", title = "Dune", state = "requested")
+        }
+        val feed = feed(store, this)
+        assertEquals(RowAction.Again, rowAction(work.request, work.onServer))
+        feed.act(work)
+        assertEquals(listOf("r1"), store.retries)
+        assertTrue(store.requestCalls.isEmpty())
     }
 
     @Test

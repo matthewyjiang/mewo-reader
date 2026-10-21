@@ -17,8 +17,8 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.outlined.MenuBook
 import androidx.compose.material.icons.outlined.Add
-import androidx.compose.material.icons.outlined.Book
 import androidx.compose.material.icons.outlined.Refresh
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
@@ -217,7 +217,7 @@ private fun toneColor(tone: BadgeTone) = when (tone) {
 /** A live row already says its status, so it has no trailing control. */
 private fun rowIcon(action: RowAction): ImageVector? = when (action) {
     RowAction.Request, RowAction.Again -> Icons.Outlined.Add
-    RowAction.Open -> Icons.Outlined.Book
+    RowAction.Open -> Icons.AutoMirrored.Outlined.MenuBook
     RowAction.Retry -> Icons.Outlined.Refresh
     RowAction.Pending -> null
 }

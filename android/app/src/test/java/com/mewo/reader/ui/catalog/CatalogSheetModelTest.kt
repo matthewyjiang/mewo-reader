@@ -160,6 +160,24 @@ class CatalogSheetModelTest {
     }
 
     @Test
+    fun requestAgainPostsANewRequest() = runTest {
+        val store = FakeCatalogStore()
+        store.workHandler = { detail(request("imported", "imported")) }
+        val model = model(store, this)
+        model.start()
+        runCurrent()
+        assertTrue(model.state.value.status is SheetStatus.RequestAgain)
+        store.requestHandler = { book("requested") }
+        store.workHandler = { detail(request("requested", "searching")) }
+        model.request()
+        runCurrent()
+        assertEquals(listOf(KEY), store.requestCalls)
+        assertTrue(store.retries.isEmpty())
+        assertTrue(model.state.value.status is SheetStatus.Live)
+        model.stop()
+    }
+
+    @Test
     fun aFirstRequestStaysRequestedAfterThePost() = runTest {
         val store = FakeCatalogStore()
         store.workHandler = { detail(null) }
