@@ -203,11 +203,12 @@ test('Request flips the icon', async ({ page }) => {
   await page.goto('/search');
   await page.getByRole('tab', { name: 'Catalog' }).click();
   await page.getByPlaceholder('Search').fill('dune');
-  const row = page.getByRole('button', { name: 'Request' });
+  const row = page.getByRole('button', { name: 'Request', exact: true });
   await expect(row).toBeEnabled();
   await row.click();
-  await expect(page.getByRole('button', { name: 'Searching', exact: true })).toBeDisabled();
-  await expect(page.getByRole('button', { name: 'Request' })).toHaveCount(0);
+  await expect(page.getByRole('button', { name: 'Dune, Frank Herbert, 1965, Searching' })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Request', exact: true })).toHaveCount(0);
+  await expect(page.locator('.book-row > .row-action')).toHaveCount(0);
 });
 
 test('the Requests page shows Downloading 42% and cancel works', async ({ page }) => {

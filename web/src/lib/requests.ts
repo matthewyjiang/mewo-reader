@@ -87,17 +87,34 @@ export function isLivePhase(phase: RequestPhase | undefined): boolean {
 }
 
 /** The catalog row's trailing action. A copy the viewer can open wins over Request,
- *  except while their own request is still running or failed. */
+ *  except while their own request is still running or failed.
+ *  `retry` is failed only. `again` is a new ask: canceled still posts /retry,
+ *  and an imported row with no book posts /v1/requests. */
 export function rowAction(
   request: BookRequest | null,
   onServer?: ServerCopy | null,
-): 'request' | 'pending' | 'open' | 'retry' {
+): 'request' | 'pending' | 'open' | 'retry' | 'again' {
   if (request && (request.state === 'requested' || request.state === 'downloading')) return 'pending';
   if (request?.state === 'failed') return 'retry';
   if (request?.state === 'imported' && request.bookId) return 'open';
   if (onServer?.bookId) return 'open';
-  if (request && (request.state === 'canceled' || request.state === 'imported')) return 'retry';
+  if (request?.state === 'canceled' || request?.state === 'imported') return 'again';
   return 'request';
+}
+
+const RAW_STATUS = /^(?:server returned \d+|http \d+)\b/i;
+
+/** Failure copy for the catalog list and the sheet. The Try again control sits
+ *  beside it, so the sentence itself never ends that way. */
+export function catalogErrorText(status: number, message: string): string {
+  if (status === 0) return "Couldn't reach the server. Check your connection.";
+  if (status === 401) return 'Sign in again.';
+  if (status === 403) return 'Requests are off.';
+  if (status === 404) return 'That book is no longer in the catalog.';
+  const trimmed = message.trim();
+  if (!trimmed || RAW_STATUS.test(trimmed)) return "Couldn't load the catalog.";
+  const sentence = trimmed.replace(/(?:^|\s)Try again\.$/, '').trim();
+  return sentence || "Couldn't load the catalog.";
 }
 
 /** Held and owned copies say "On your shelf". Someone else's shared copy says "On server". */

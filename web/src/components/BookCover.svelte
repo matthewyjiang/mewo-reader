@@ -30,7 +30,7 @@
   height: 60px;
   border: .6px solid var(--line);
   border-radius: 3px;
-  background: color-mix(in srgb, var(--mute) 14%, var(--ground));
+  background: var(--hover);
   color: var(--mute);
   overflow: hidden;
   line-height: 1;

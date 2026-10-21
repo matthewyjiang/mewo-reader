@@ -1,6 +1,6 @@
 <script lang="ts">
   import type { BookRequest, CatalogWork } from '../lib/models';
-  import { badge, badgeTone, catalogRowLabel, coverUrl, openLabel, rowAction, stateLabel } from '../lib/requests';
+  import { badge, badgeTone, catalogRowLabel, coverUrl, openLabel, rowAction } from '../lib/requests';
   import BookCover from './BookCover.svelte';
   import Icon from './Icon.svelte';
 
@@ -15,51 +15,49 @@
   let label = $derived(badge(work, request));
   let tone = $derived(label ? badgeTone(label) : 'progress');
   let actionName = $derived(
-    action === 'request' ? 'Request'
-      : action === 'pending' && request ? stateLabel(request)
+    action === 'again' ? 'Request again'
+      : action === 'retry' ? 'Retry'
         : action === 'open' ? openLabel(work, request)
-          : 'Retry',
+          : 'Request',
+  );
+  let icon = $derived<'plus' | 'book' | 'retry'>(
+    action === 'open' ? 'book' : action === 'retry' ? 'retry' : 'plus',
   );
 </script>
 
-<div class="book-row">
+<div class="book-row" class:live={action === 'pending'}>
   <button type="button" class="book-link" aria-label={catalogRowLabel(work, request)} onclick={onopen}>
     <BookCover title={work.title} src={coverUrl(work.coverId)} />
     <span class="post-column">
-      <span class="post-meta">
-        <strong class="truncate">{work.title}</strong>
-      </span>
-      <span class="meta author">{work.author}{work.year != null ? ` · ${work.year}` : ''}</span>
+      <strong class="title truncate">{work.title}</strong>
+      <span class="author">{work.author}{work.year != null ? ` · ${work.year}` : ''}</span>
       {#if label}
-        <span class="meta badge">
+        <span class="badge">
           <span class="dot {tone}"></span>
           {label}
         </span>
       {/if}
     </span>
   </button>
-  <div class="book-actions">
-    <button
-      type="button"
-      class="icon-button"
-      aria-label={actionName}
-      disabled={action === 'pending'}
-      onclick={onact}
-    >
-      <Icon
-        name={action === 'request' ? 'plus' : action === 'pending' ? 'clock' : action === 'open' ? 'check' : 'retry'}
-        size={18}
-      />
+  {#if action !== 'pending'}
+    <button type="button" class="row-action" aria-label={actionName} onclick={onact}>
+      <span class="circle">
+        <Icon name={icon} size={16} />
+      </span>
     </button>
-  </div>
+  {/if}
 </div>
 
 <style>
   .book-row {
     display: flex;
-    align-items: flex-start;
+    align-items: center;
     border-bottom: .6px solid var(--line);
-    padding-right: 12px;
+    padding: 12px 4px 12px 0;
+  }
+
+  .book-row.live {
+    padding-right: 0;
   }
 
   .book-row:hover {
@@ -70,26 +68,43 @@
     flex: 1;
     min-width: 0;
     display: flex;
+    align-items: center;
     gap: 12px;
-    padding: 12px 4px 16px 16px;
+    padding: 0 0 0 16px;
     text-align: left;
     font: inherit;
     color: inherit;
   }
 
-  .author, .badge {
-    display: block;
-    margin-top: 3px;
+  .book-row.live .book-link {
+    padding-right: 16px;
+  }
+
+  .book-link .post-column {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+  }
+
+  .title {
+    font-size: 1.0625rem;
+    line-height: 22px;
+    font-weight: 700;
+  }
+
+  .author {
+    color: var(--mute);
     font-size: .9375rem;
-    line-height: 1.33;
+    line-height: 20px;
   }
 
   .badge {
     display: flex;
     align-items: center;
     gap: 6px;
+    color: var(--ink);
     font-size: .8125rem;
-    line-height: 1.23;
+    line-height: 16px;
   }
 
   .dot {
@@ -116,29 +131,24 @@
     background: var(--mute);
   }
 
-  .book-row .post-meta {
-    height: 21px;
-  }
-
-  .book-row .post-meta strong {
-    font-size: 1.0625rem;
-    line-height: 21px;
-  }
-
-  .book-actions {
+  .row-action {
     display: flex;
     align-items: center;
-    flex: 0 0 auto;
-    margin-top: 12px;
-    height: 21px;
-    min-height: 0;
+    justify-content: center;
+    flex: 0 0 44px;
+    width: 44px;
+    height: 44px;
+    padding: 0;
+    color: var(--accent);
   }
 
-  .book-actions > .icon-button {
-    width: 40px;
-    height: 40px;
-    padding: 0;
-    line-height: 0;
-    color: var(--mute);
+  .circle {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 32px;
+    height: 32px;
+    border: 1.5px solid var(--accent);
+    border-radius: 50%;
   }
 </style>

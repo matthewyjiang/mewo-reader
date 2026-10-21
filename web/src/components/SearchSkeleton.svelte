@@ -27,11 +27,10 @@
     {:else if kind === 'catalog'}
       <div class="catalog" role="listitem">
         <span class="bone cover"></span>
-        <span class="lines">
-          <span class="bone line wide"></span>
-          <span class="bone line"></span>
+        <span class="lines catalog-lines">
+          <span class="bone line title-line"></span>
+          <span class="bone line author-line"></span>
         </span>
-        <span class="bone slot"></span>
       </div>
     {:else}
       <div class="post" role="listitem">
@@ -68,7 +67,23 @@
   }
 
   .catalog {
-    min-height: 88px;
+    align-items: center;
+    padding: 12px 16px;
+    min-height: 0;
+  }
+
+  .catalog-lines {
+    gap: 8px;
+  }
+
+  .catalog .title-line {
+    width: 60%;
+    height: 14px;
+  }
+
+  .catalog .author-line {
+    width: 40%;
+    height: 14px;
   }
 
   .bone {
@@ -105,14 +120,6 @@
     height: 60px;
     flex: 0 0 40px;
     border-radius: 3px;
-  }
-
-  .slot {
-    width: 40px;
-    height: 40px;
-    flex: 0 0 40px;
-    border-radius: 50%;
-    margin-top: 0;
   }
 
   .line {

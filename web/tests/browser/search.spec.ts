@@ -181,6 +181,18 @@ function detailFor(stage: string, info: boolean) {
       held: false,
     };
   }
+  if (stage === 'imported-empty') {
+    request = {
+      ...base,
+      state: 'imported',
+      progress: 100,
+      phase: 'imported',
+      bookId: null,
+    };
+  }
+  if (stage === 'canceled') {
+    request = { ...base, state: 'canceled', phase: 'canceled', error: null };
+  }
   return {
     workKey: '/works/OL893415W',
     info: info ? {
@@ -236,6 +248,7 @@ async function install(
     accounts?: { username: string; mine: boolean }[];
     emptyQuery?: string;
     info?: boolean;
+    theme?: 'x_light' | 'x_lights_out';
   } = {},
 ) {
   const state = {
@@ -256,15 +269,22 @@ async function install(
     holdDetail: false,
     releaseDetail: () => {},
     retryTo: null as string | null,
+    items: null as null | ReturnType<typeof work>[],
+    emptyBrowse: false,
+    holdCatalog: false,
+    releaseCatalog: () => {},
+    requestPosts: [] as string[],
+    details: null as null | Record<string, unknown>,
+    shelf: false,
   };
   state.booksGate = new Promise((resolve) => { state.releaseBooks = resolve; });
-  await page.addInitScript((kind) => {
+  await page.addInitScript(({ kind, theme }) => {
     localStorage.setItem('mewo.session', JSON.stringify({ token: 'token', username: 'ada' }));
     localStorage.setItem('mewo.display', JSON.stringify({
-      theme: 'x_light', step: 2, mewo: false, keepBars: true,
+      theme, step: 2, mewo: false, keepBars: true,
     }));
     if (kind) localStorage.setItem('mewo.search.kind', JSON.stringify(kind));
-  }, options.kind ?? 'books');
+  }, { kind: options.kind ?? 'books', theme: options.theme ?? 'x_light' });
   await page.route('**/covers.openlibrary.org/**', (route) => route.fulfill({
     status: 200, contentType: 'image/jpeg', body: COVER,
   }));
@@ -281,8 +301,10 @@ async function answer(route: Route, state: Awaited<ReturnType<typeof install>>) 
     contentType: 'application/json',
     body: JSON.stringify(body),
   });
+  if (method === 'POST' && path.startsWith('/v1/requests')) state.requestPosts.push(path);
   if (path === '/v1/me') return json({ username: 'ada', isAdmin: true, canRequest: true });
   if (path === '/v1/library') {
+    if (state.shelf) return json({ books: [book('b1', 'Emma', 'Austen')] });
     return json({ books: state.stage === 'imported' ? [shelfBook] : [] });
   }
   if (path === '/v1/feed') return json({ items: [], nextCursor: null });
@@ -304,10 +326,20 @@ async function answer(route: Route, state: Awaited<ReturnType<typeof install>>) 
   if (path === '/v1/catalog/search') {
     const q = url.searchParams.get('q') ?? '';
     state.catalogQueries.push(q);
+    if (state.holdCatalog) {
+      state.holdCatalog = false;
+      await new Promise<void>((resolve) => { state.releaseCatalog = resolve; });
+    }
     const failure = state.catalogFailure;
     if (failure && q === failure.query) return json({ error: failure.error }, failure.status);
+    if (state.emptyBrowse && q === '') return json({ items: [], nextPage: null });
     if (state.miss && q === state.miss) return json({ items: [], nextPage: null });
-    return json({ items: trending, nextPage: null });
+    return json({ items: state.items ?? trending, nextPage: null });
+  }
+  if (path.startsWith('/v1/catalog/works/')) {
+    const olid = decodeURIComponent(path.slice('/v1/catalog/works/'.length));
+    if (state.details?.[olid]) return json(state.details[olid]);
+    if (olid !== 'OL893415W') return json({});
   }
   if (path === '/v1/catalog/works/OL893415W') {
     if (state.holdDetail) {
@@ -421,6 +453,7 @@ test('a catalog row opens a sheet and follows the request through to the book', 
   // Click in the page. Playwright's click would scroll this first row into view first.
   await page.getByRole('button', { name: 'Dune, Frank Herbert, 1965' }).evaluate((el: HTMLElement) => el.click());
   const sheet = page.getByRole('dialog', { name: 'Dune' });
+  await expect(sheet.getByRole('heading', { name: 'Dune' })).toHaveCount(1);
   await expect(sheet.locator('.hero')).toContainText('Frank Herbert · 1965');
   await expect(sheet.locator('.hero .dot')).toHaveCount(0);
   await expect(sheet.getByText('Science fiction · Arrakis · Deserts')).toBeVisible();
@@ -555,7 +588,7 @@ test('a catalog search error replaces the list', async ({ page }) => {
     error: 'Open Library is not answering. Try again.',
   };
   await page.getByRole('button', { name: 'Try again' }).click();
-  await expect(alert).toHaveText('Open Library is not answering. Try again.');
+  await expect(alert).toHaveText('Open Library is not answering.');
   await expect(page.getByRole('button', { name: 'Dune, Frank Herbert, 1965' })).toHaveCount(0);
 
   state.catalogFailure = null;
@@ -575,4 +608,322 @@ test('an Open Library miss keeps the row and still requests', async ({ page }) =
   await sheet.getByRole('button', { name: 'Request', exact: true }).click();
   await expect(sheet.getByText('Looking for a release…')).toBeVisible();
   expect(state.stage).toBe('searching');
+});
+
+test('an imported book with no copy is requested again', async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  const state = await install(page, { kind: 'catalog' });
+  state.stage = 'imported-empty';
+  state.items = [work('OL893415W', 'Dune', 'Frank Herbert', 1965, {
+    request: {
+      id: 'req-1',
+      workKey: '/works/OL893415W',
+      title: 'Dune',
+      author: 'Frank Herbert',
+      year: 1965,
+      coverId: 11481354,
+      state: 'imported',
+      progress: 100,
+      error: null,
+      bookId: null,
+      requester: 'ada',
+      createdAt: 1,
+      updatedAt: 1,
+    },
+  })];
+  await page.goto('/search');
+  await page.getByRole('button', { name: 'Request again', exact: true }).click();
+  await expect.poll(() => state.requestPosts.slice()).toEqual(['/v1/requests']);
+
+  state.requestPosts.length = 0;
+  state.stage = 'imported-empty';
+  await page.reload();
+  await page.getByRole('button', { name: 'Dune, Frank Herbert, 1965', exact: true }).click();
+  const sheet = page.getByRole('dialog', { name: 'Dune' });
+  await expect(sheet.getByText('On your shelf')).toHaveCount(0);
+  await expect(sheet.getByRole('button', { name: 'Open book' })).toHaveCount(0);
+  await expect(sheet.getByRole('heading', { name: 'Dune' })).toHaveCount(1);
+  await sheet.getByRole('button', { name: 'Request again', exact: true }).click();
+  await expect.poll(() => state.requestPosts.slice()).toEqual(['/v1/requests']);
+});
+
+test('a live catalog row has no trailing control', async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  const state = await install(page, { kind: 'catalog' });
+  state.items = [work('OL893415W', 'Dune', 'Frank Herbert', 1965, {
+    request: {
+      id: 'req-1',
+      workKey: '/works/OL893415W',
+      title: 'Dune',
+      author: 'Frank Herbert',
+      year: 1965,
+      coverId: 11481354,
+      state: 'requested',
+      progress: 0,
+      error: null,
+      bookId: null,
+      requester: 'ada',
+      createdAt: 1,
+      updatedAt: 1,
+    },
+  })];
+  await page.goto('/search');
+  await expect(page.getByRole('button', { name: 'Dune, Frank Herbert, 1965, Searching' })).toBeVisible();
+  await expect(page.locator('.book-row.live')).toHaveCount(1);
+  await expect(page.locator('.book-row > .row-action')).toHaveCount(0);
+  await expect(page.getByRole('button', { name: 'Searching', exact: true })).toHaveCount(0);
+});
+
+test('the trending header hides when the list is empty or failed', async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  const state = await install(page, { kind: 'catalog' });
+  await page.goto('/search');
+  await page.getByPlaceholder('Search').fill('du');
+  await expect(page.getByRole('heading', { name: 'Trending on Open Library' })).toBeVisible();
+
+  state.emptyBrowse = true;
+  await page.reload();
+  await expect(page.getByRole('heading', { name: /No trending books/ })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Trending on Open Library' })).toHaveCount(0);
+
+  state.emptyBrowse = false;
+  state.catalogFailure = {
+    query: '',
+    status: 502,
+    error: "Couldn't search the catalog right now.",
+  };
+  await page.reload();
+  await expect(page.getByRole('alert')).toHaveText("Couldn't search the catalog right now.");
+  await expect(page.getByRole('heading', { name: 'Trending on Open Library' })).toHaveCount(0);
+  await expect(page.getByRole('button', { name: 'Try again' })).toBeVisible();
+});
+
+test('Browse catalog opens the Catalog tab', async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await install(page, { kind: 'accounts' });
+  await page.goto('/search');
+  await expect(page.getByRole('tab', { name: 'Accounts' })).toHaveAttribute('aria-selected', 'true');
+  await page.getByPlaceholder('Search').fill('du');
+  await page.getByRole('link', { name: 'Home' }).click();
+  await page.getByRole('tab', { name: 'Books' }).click();
+  const add = page.getByRole('button', { name: 'Add a book', exact: true });
+  await add.click();
+  const menu = page.getByRole('menu');
+  await expect(menu.getByRole('menuitem')).toHaveText(['Upload EPUB', 'Browse catalog']);
+  await page.keyboard.press('Escape');
+  await expect(menu).toHaveCount(0);
+  await add.click();
+  await page.getByRole('banner').click();
+  await expect(menu).toHaveCount(0);
+  await add.click();
+  await menu.getByRole('menuitem', { name: 'Browse catalog' }).click();
+  await expect(page).toHaveURL(/\/search$/);
+  await expect(page.getByRole('tab', { name: 'Catalog' })).toHaveAttribute('aria-selected', 'true');
+  await expect(page.getByPlaceholder('Search')).toHaveValue('du');
+  await expect(page.getByRole('heading', { name: 'Trending on Open Library' })).toBeVisible();
+
+  // Search is already mounted. Switching away and browsing again must select Catalog.
+  await page.getByRole('tab', { name: 'Accounts' }).click();
+  await expect(page.getByRole('tab', { name: 'Accounts' })).toHaveAttribute('aria-selected', 'true');
+  await page.getByRole('link', { name: 'Home' }).click();
+  await page.getByRole('tab', { name: 'Books' }).click();
+  await page.getByRole('button', { name: 'Add a book', exact: true }).click();
+  await page.getByRole('menuitem', { name: 'Browse catalog' }).click();
+  await expect(page.getByRole('tab', { name: 'Catalog' })).toHaveAttribute('aria-selected', 'true');
+  await expect(page.getByPlaceholder('Search')).toHaveValue('du');
+});
+
+function parityRequest(id: string, olid: string, title: string, over: Record<string, unknown> = {}) {
+  return {
+    id,
+    workKey: `/works/${olid}`,
+    title,
+    author: 'Frank Herbert',
+    year: 1965,
+    coverId: null,
+    state: 'requested',
+    progress: 0,
+    error: null as string | null,
+    bookId: null as string | null,
+    requester: 'ada',
+    createdAt: 1,
+    updatedAt: 1,
+    ...over,
+  };
+}
+
+function parityDetail(item: ReturnType<typeof work>, phase: string | null) {
+  const request = item.request ? {
+    ...item.request,
+    attempts: 1,
+    maxAttempts: 3,
+    nextCheckAt: null,
+    releaseTitle: null,
+    releaseSize: null,
+    phase,
+  } : null;
+  return {
+    workKey: item.workKey,
+    info: {
+      canonicalKey: item.workKey,
+      title: item.title,
+      subtitle: null,
+      authors: ['Frank Herbert'],
+      year: 1965,
+      coverId: null,
+      description: 'Set on the desert planet Arrakis.',
+      subjects: ['Science fiction'],
+      awards: [],
+      series: [],
+      editionCount: 1,
+      pagesMedian: 608,
+      languages: ['English'],
+      hasAcceptedEdition: true,
+      rating: { average: 4.3, count: 10 },
+    },
+    infoError: null,
+    status: {
+      request,
+      onServer: item.onServer ?? null,
+      active: 0,
+      cap: 5,
+      otherRequests: [],
+    },
+  };
+}
+
+test('catalog parity shots', async ({ browser }) => {
+  test.skip(!process.env.MEWO_SHOTS, 'set MEWO_SHOTS=1 to write screenshots');
+  test.setTimeout(180_000);
+  const requestable = work('OL1W', 'Dune', 'Frank Herbert', 1965, { coverId: null });
+  const searching = work('OL2W', 'Searching Dune', 'Frank Herbert', 1965, {
+    coverId: null,
+    request: parityRequest('req-search', 'OL2W', 'Searching Dune'),
+  });
+  const downloading = work('OL3W', 'Downloading Dune', 'Frank Herbert', 1965, {
+    coverId: null,
+    request: parityRequest('req-dl', 'OL3W', 'Downloading Dune', { state: 'downloading', progress: 42 }),
+  });
+  const failed = work('OL4W', 'Failed Dune', 'Frank Herbert', 1965, {
+    coverId: null,
+    request: parityRequest('req-fail', 'OL4W', 'Failed Dune', {
+      state: 'failed', error: 'No release found.',
+    }),
+  });
+  const canceled = work('OL5W', 'Canceled Dune', 'Frank Herbert', 1965, {
+    coverId: null,
+    request: parityRequest('req-cancel', 'OL5W', 'Canceled Dune', { state: 'canceled' }),
+  });
+  const shelf = work('OL6W', 'Shelf Dune', 'Frank Herbert', 1965, {
+    coverId: null,
+    onServer: { bookId: 'book-dune', ownerUsername: 'ada', mine: true, shared: false, held: false },
+  });
+  const server = work('OL7W', 'Server Dune', 'Frank Herbert', 1965, {
+    coverId: null,
+    onServer: { bookId: 'book-bea', ownerUsername: 'bea', mine: false, shared: true, held: false },
+  });
+  const imported = work('OL8W', 'Imported Dune', 'Frank Herbert', 1965, {
+    coverId: null,
+    request: parityRequest('req-import', 'OL8W', 'Imported Dune', {
+      state: 'imported', progress: 100, bookId: null,
+    }),
+  });
+  const rows = [requestable, searching, downloading, failed, canceled, shelf, server, imported];
+  const details: Record<string, unknown> = {
+    OL1W: parityDetail(requestable, null),
+    OL2W: parityDetail(searching, 'searching'),
+    OL3W: parityDetail(downloading, 'downloading'),
+    OL4W: parityDetail(failed, 'failed'),
+    OL5W: parityDetail(canceled, 'canceled'),
+    OL6W: parityDetail(shelf, null),
+    OL7W: parityDetail(server, null),
+    OL8W: parityDetail(imported, 'imported'),
+  };
+
+  for (const theme of ['x_light', 'x_lights_out'] as const) {
+    const context = await browser.newContext({
+      viewport: { width: 390, height: 844 },
+      baseURL: 'http://127.0.0.1:4173',
+    });
+    const page = await context.newPage();
+    const state = await install(page, { kind: 'catalog', theme });
+    state.items = rows;
+    state.details = details;
+    state.holdCatalog = true;
+    await page.goto('/search');
+    await expect(page.locator('.skeletons .catalog').first()).toBeVisible();
+    await expect(page.locator('.slot')).toHaveCount(0);
+    await expect(page.getByRole('heading', { name: 'Trending on Open Library' })).toBeVisible();
+    await shot(page, `catalog-loading-${theme}`);
+    state.releaseCatalog();
+    await expect(page.getByRole('button', { name: 'Request', exact: true })).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Request again', exact: true })).toHaveCount(2);
+    await expect(page.getByRole('button', { name: 'Retry', exact: true })).toBeVisible();
+    await expect(page.locator('.book-row.live')).toHaveCount(2);
+    await shot(page, `catalog-rows-${theme}`);
+    await page.locator('main').evaluate((el) => { el.scrollTop = el.scrollHeight; });
+    await shot(page, `catalog-rows-end-${theme}`);
+    await page.locator('main').evaluate((el) => { el.scrollTop = 0; });
+
+    await page.getByPlaceholder('Search').fill('du');
+    await expect(page.getByRole('heading', { name: 'Trending on Open Library' })).toBeVisible();
+    await shot(page, `catalog-short-du-${theme}`);
+    await page.getByPlaceholder('Search').fill('');
+    await expect(page.getByText('Imported Dune')).toBeVisible();
+
+    const openSheet = async (name: string, file: string, ready: string) => {
+      await page.getByRole('button', { name, exact: true }).click();
+      const sheet = page.getByRole('dialog');
+      await expect(sheet.getByText(ready).first()).toBeVisible();
+      await expect(sheet.getByRole('link', { name: 'View on Open Library' })).toBeVisible();
+      await shot(page, `${file}-${theme}`);
+      await sheet.getByRole('button', { name: 'Close' }).click();
+      await expect(sheet).toHaveCount(0);
+    };
+    await page.getByRole('button', { name: 'Dune, Frank Herbert, 1965', exact: true }).click();
+    const sheet = page.getByRole('dialog', { name: 'Dune' });
+    await expect(sheet.getByRole('heading', { name: 'Dune' })).toHaveCount(1);
+    await expect(sheet.getByRole('button', { name: 'Request', exact: true })).toBeVisible();
+    await expect(sheet.getByRole('link', { name: 'View on Open Library' })).toBeVisible();
+    await shot(page, `sheet-requestable-${theme}`);
+    await sheet.getByRole('button', { name: 'Close' }).click();
+
+    await openSheet('Searching Dune, Frank Herbert, 1965, Searching', 'sheet-searching', 'Looking for a release');
+    await openSheet('Downloading Dune, Frank Herbert, 1965, Downloading 42%', 'sheet-downloading', 'Downloading 42%');
+    await openSheet('Failed Dune, Frank Herbert, 1965, Failed: No release found.', 'sheet-failed', 'No release found.');
+    await openSheet('Shelf Dune, Frank Herbert, 1965, On your shelf', 'sheet-shelf', 'Open book');
+    await page.getByRole('button', { name: 'Imported Dune, Frank Herbert, 1965', exact: true }).click();
+    const again = page.getByRole('dialog', { name: 'Imported Dune' });
+    await expect(again.getByRole('button', { name: 'Request again', exact: true })).toBeVisible();
+    await expect(again.getByRole('button', { name: 'Open book' })).toHaveCount(0);
+    await expect(again.getByText('On your shelf')).toHaveCount(0);
+    await expect(again.getByRole('link', { name: 'View on Open Library' })).toBeVisible();
+    await shot(page, `sheet-imported-${theme}`);
+    await again.getByRole('button', { name: 'Close' }).click();
+    await openSheet('Canceled Dune, Frank Herbert, 1965', 'sheet-canceled', 'Request again');
+
+    state.emptyBrowse = true;
+    await page.reload();
+    await expect(page.getByRole('heading', { name: /No trending books/ })).toBeVisible();
+    await expect(page.getByRole('heading', { name: 'Trending on Open Library' })).toHaveCount(0);
+    await shot(page, `catalog-empty-${theme}`);
+
+    state.emptyBrowse = false;
+    state.catalogFailure = {
+      query: 'dune',
+      status: 502,
+      error: 'Open Library is not answering. Try again.',
+    };
+    await page.getByPlaceholder('Search').fill('dune');
+    await expect(page.getByRole('alert')).toHaveText('Open Library is not answering.');
+    await expect(page.getByRole('heading', { name: 'Trending on Open Library' })).toHaveCount(0);
+    await shot(page, `catalog-error-${theme}`);
+
+    await page.goto('/');
+    await page.getByRole('tab', { name: 'Books' }).click();
+    await page.getByRole('button', { name: 'Add a book', exact: true }).click();
+    await expect(page.getByRole('menu')).toBeVisible();
+    await shot(page, `add-menu-${theme}`);
+    await context.close();
+  }
 });

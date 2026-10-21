@@ -9,9 +9,10 @@
   import SearchSkeleton from '../components/SearchSkeleton.svelte';
   import UnderlineTabs from '../components/UnderlineTabs.svelte';
   import Avatar from '../components/Avatar.svelte';
+  import { ApiError } from '../lib/api';
   import type { BookRequest, CatalogWork, SearchKind } from '../lib/models';
   import { message } from '../lib/store.svelte';
-  import { rowAction } from '../lib/requests';
+  import { catalogErrorText, rowAction } from '../lib/requests';
   import { readerUrl, router } from '../lib/router.svelte';
   import { restoreScroll } from '../lib/screen';
   import type { FeedScreenProps } from '../lib/screen';
@@ -20,8 +21,9 @@
   import { readStored, writeStored } from '../lib/storage';
   import { store } from '../lib/store.svelte';
 
-  let { scroller, query, oncomment, onprofile, onadd }: FeedScreenProps & {
+  let { scroller, query, catalogPick = 0, oncomment, onprofile, onadd }: FeedScreenProps & {
     query: string;
+    catalogPick?: number;
     onprofile: (username: string) => void;
     onadd: () => void;
   } = $props();
@@ -46,20 +48,30 @@
   let restoreY = 0;
   const model = new SearchModel(
     async (request) => {
-      if (request.kind !== 'catalog') {
-        return store.api.search(request.query, request.kind, request.cursor, request.signal);
+      try {
+        if (request.kind !== 'catalog') {
+          return store.api.search(request.query, request.kind, request.cursor, request.signal);
+        }
+        const pageNumber = request.cursor ? Number(request.cursor) : 1;
+        const result = await store.api.catalog(
+          request.query,
+          Number.isFinite(pageNumber) && pageNumber > 0 ? pageNumber : 1,
+          request.signal,
+        );
+        return {
+          type: 'catalog' as const,
+          items: result.items,
+          nextCursor: result.nextPage == null ? null : String(result.nextPage),
+        };
+      } catch (error) {
+        if (request.kind !== 'catalog') throw error;
+        if (error instanceof DOMException && error.name === 'AbortError') throw error;
+        const status = error instanceof ApiError ? error.status : -1;
+        const text = error instanceof Error && error.message
+          ? error.message
+          : 'Something went wrong. Try again.';
+        throw new Error(catalogErrorText(status, text));
       }
-      const page = request.cursor ? Number(request.cursor) : 1;
-      const result = await store.api.catalog(
-        request.query,
-        Number.isFinite(page) && page > 0 ? page : 1,
-        request.signal,
-      );
-      return {
-        type: 'catalog' as const,
-        items: result.items,
-        nextCursor: result.nextPage == null ? null : String(result.nextPage),
-      };
     },
     (next) => { searchState = next; },
     (fn, ms) => setTimeout(fn, ms),
@@ -80,13 +92,25 @@
   ]);
   let page = $derived(visiblePage(searchState));
   let browse = $derived(isBrowse(searchState));
-  let section = $derived(browse && searchState.session ? sectionFor(searchState.kind) : null);
+  let section = $derived.by(() => {
+    if (!browse || !searchState.session) return null;
+    if (searchState.kind === 'catalog') {
+      if (searchState.phase.status === 'failed') return null;
+      if (searchState.phase.status === 'loaded' && (page?.items.length ?? 0) === 0) return null;
+      if (searchState.phase.status !== 'loading' && searchState.phase.status !== 'loaded') return null;
+    }
+    return sectionFor(searchState.kind);
+  });
   let blank = $derived(emptyKind(searchState));
   let showSkeleton = $derived(searchState.phase.status === 'loading' && !page);
 
   export function capture(): void {
     router.scroll.set(entryKey, scroller.scrollTop);
     router.tabScroll.set('search', scroller.scrollTop);
+  }
+
+  export function showCatalog(): void {
+    void select('catalog');
   }
 
   onMount(() => restoreScroll(scroller));
@@ -105,6 +129,14 @@
       }
       model.setQuery(text);
     });
+  });
+
+  // Ignore the value this screen mounted with. A later increment, while this
+  // screen is already open, is what switches the tab.
+  const seenPick = untrack(() => catalogPick);
+  $effect(() => {
+    if (catalogPick === seenPick) return;
+    untrack(() => { void select('catalog'); });
   });
 
   $effect(() => {
@@ -159,9 +191,9 @@
     const current = shown(work);
     const action = rowAction(current, work.onServer);
     try {
-      if (action === 'request') {
+      if (action === 'request' || (action === 'again' && current?.state !== 'canceled')) {
         onRequest(work.workKey, await store.api.requestBook(work));
-      } else if (action === 'retry' && current) {
+      } else if ((action === 'retry' || action === 'again') && current) {
         onRequest(work.workKey, await store.api.retryRequest(current.id));
       } else if (action === 'open') {
         const id = current?.bookId || work.onServer?.bookId;
@@ -195,7 +227,7 @@
 {#if searchState.phase.status === 'failed'}
   <div class="status-row">
     <span class="error" role="alert">{searchState.phase.error}</span>
-    <button class="text-button" type="button" onclick={() => model.retry()}>Try again</button>
+    <button class="text-button retry" type="button" onclick={() => model.retry()}>Try again</button>
   </div>
 {/if}
 {#if section}
@@ -266,3 +298,10 @@
     onclose={() => openWork = null}
   />
 {/if}
+
+<style>
+  .retry {
+    font-size: .9375rem;
+    font-weight: 700;
+  }
+</style>

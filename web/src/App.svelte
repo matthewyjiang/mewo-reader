@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount, untrack } from 'svelte';
   import AccountDrawer from './components/AccountDrawer.svelte';
+  import AddBookMenu from './components/AddBookMenu.svelte';
   import CommentSheet from './components/CommentSheet.svelte';
   import FeedStatus from './components/FeedStatus.svelte';
   import Icon from './components/Icon.svelte';
@@ -26,11 +27,13 @@
   import { router, readerUrl, profileUrl, homeTab, homeUrl } from './lib/router.svelte';
   import { pullOffset, refreshGap, shouldRefresh } from './lib/pull';
   import { store, message } from './lib/store.svelte';
+  import { writeStored } from './lib/storage';
 
   let main = $state<HTMLElement>();
   let fileInput = $state<HTMLInputElement>();
   let reader = $state<{ openChapters: () => void; capture: () => void }>();
-  let search = $state<{ capture: () => void }>();
+  let search = $state<{ capture: () => void; showCatalog: () => void }>();
+  let catalogPick = $state(0);
   let profile = $state<{ refresh: () => Promise<void> }>();
   let drawer = $state(false);
   let commentTarget = $state<PostHit | null>(null);
@@ -192,6 +195,13 @@
   });
 
   function pickFile(): void { fileInput?.click(); }
+
+  function browseCatalog(): void {
+    writeStored('mewo.search.kind', 'catalog');
+    catalogPick += 1;
+    if (path === '/search') search?.showCatalog();
+    else router.go('/search');
+  }
 
   async function upload(file: File, sample = false): Promise<void> {
     if (uploading) return;
@@ -369,6 +379,7 @@
                 scroller={main}
                 {uploading}
                 onadd={pickFile}
+                onbrowse={browseCatalog}
                 onsample={sample}
                 onremove={(book) => removeTarget = book}
               />
@@ -387,6 +398,7 @@
                 bind:this={search}
                 scroller={main}
                 {query}
+                {catalogPick}
                 oncomment={openComments}
                 onprofile={openProfile}
                 onadd={pickFile}
@@ -439,9 +451,15 @@
         </div>
       {/if}
       {#if path === '/' && section === 'books' && store.books.length}
-        <button class="fab" aria-label="Add an EPUB" disabled={uploading} onclick={pickFile}>
+        <AddBookMenu
+          variant="fab"
+          canRequest={store.me?.canRequest === true}
+          {uploading}
+          onupload={pickFile}
+          onbrowse={browseCatalog}
+        >
           <Icon name="plus" size={28} />
-        </button>
+        </AddBookMenu>
       {/if}
       {#if !settings}<Navigation onaccount={() => drawer = true} />{/if}
       {#if store.notice}
@@ -571,25 +589,6 @@
 }
 
 
-.fab {
-  position: absolute;
-  right: 16px;
-  bottom: 68px;
-  z-index: 4;
-  border-radius: 50%;
-  width: 56px;
-  height: 56px;
-  background: var(--accent);
-  color: #fff;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-}
-
-.fab:hover:not(:disabled) {
-  background: color-mix(in srgb, var(--accent) 85%, var(--ink));
-}
-
 .notice {
   position: absolute;
   z-index: 10;
@@ -652,9 +651,6 @@ progress::-moz-progress-bar {
 @media (min-width: 1000px) {
   .timeline {
     padding-bottom: 0;
-  }
-  .fab {
-    bottom: 24px;
   }
   .notice, .upload-status {
     bottom: 16px;

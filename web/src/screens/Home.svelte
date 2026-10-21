@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onMount } from 'svelte';
+  import AddBookMenu from '../components/AddBookMenu.svelte';
   import BookRow from '../components/BookRow.svelte';
   import { shelfGroups } from '../lib/models';
   import { showEmpty } from '../lib/shelf';
@@ -7,10 +8,11 @@
   import { restoreScroll } from '../lib/screen';
   import { store } from '../lib/store.svelte';
 
-  let { scroller, uploading, onadd, onsample, onremove }: {
+  let { scroller, uploading, onadd, onbrowse, onsample, onremove }: {
     scroller: HTMLElement;
     uploading: boolean;
     onadd: () => void;
+    onbrowse: () => void;
     onsample: () => void;
     onremove: (book: BookRecord) => void;
   } = $props();
@@ -28,7 +30,14 @@
 {#if showEmpty(store.shelf)}
   <div class="empty-state shelf-empty">
     <h2>No books</h2>
-    <button class="pill" disabled={uploading} onclick={onadd}>Add a book</button>
+    <AddBookMenu
+      canRequest={store.me?.canRequest === true}
+      {uploading}
+      {onbrowse}
+      onupload={onadd}
+    >
+      Add a book
+    </AddBookMenu>
     <button class="text-button" disabled={uploading} onclick={onsample}>
       Open a sample
     </button>
