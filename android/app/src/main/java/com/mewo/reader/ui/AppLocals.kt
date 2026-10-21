@@ -3,6 +3,7 @@ package com.mewo.reader.ui
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.staticCompositionLocalOf
 import com.mewo.reader.data.BackendKind
+import com.mewo.reader.data.CatalogStore
 import com.mewo.reader.data.HostedSession
 import com.mewo.reader.data.LibraryStore
 import com.mewo.reader.data.LocalProfile
@@ -41,6 +42,10 @@ val LocalHostedAuth = staticCompositionLocalOf<HostedAuthController> {
 
 val LocalLibraryStore = staticCompositionLocalOf<LibraryStore> {
     error("LibraryStore missing")
+}
+
+val LocalCatalogStore = staticCompositionLocalOf<CatalogStore> {
+    error("CatalogStore missing")
 }
 
 val LocalProfile = staticCompositionLocalOf<LocalProfileController> {

@@ -5,13 +5,20 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.outlined.Add
 import androidx.compose.material3.DrawerValue
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Text
 import androidx.compose.material3.rememberDrawerState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
@@ -26,6 +33,14 @@ import app.cash.paparazzi.Paparazzi
 import com.mewo.reader.data.AccountHit
 import com.mewo.reader.data.BackendKind
 import com.mewo.reader.data.BookRecord
+import com.mewo.reader.data.BookRequest
+import com.mewo.reader.data.CatalogWork
+import com.mewo.reader.data.Rating
+import com.mewo.reader.data.RequestDetail
+import com.mewo.reader.data.ServerCopy
+import com.mewo.reader.data.WorkDetail
+import com.mewo.reader.data.WorkInfo
+import com.mewo.reader.data.WorkStatus
 import com.mewo.reader.data.CommentIndex
 import com.mewo.reader.data.FeedPost
 import com.mewo.reader.data.hasReposted
@@ -34,7 +49,11 @@ import com.mewo.reader.data.HostedSession
 import com.mewo.reader.data.LocalProfile
 import com.mewo.reader.data.PostKind
 import com.mewo.reader.data.ProfileRecord
+import com.mewo.reader.ui.catalog.CatalogRow
+import com.mewo.reader.ui.catalog.CatalogSheetContent
+import com.mewo.reader.ui.catalog.CatalogSheetState
 import com.mewo.reader.ui.components.AccountDrawer
+import com.mewo.reader.ui.components.ErrorStatus
 import com.mewo.reader.ui.components.AppTab
 import com.mewo.reader.ui.components.BrandMark
 import com.mewo.reader.ui.components.HomeTabBar
@@ -49,7 +68,9 @@ import com.mewo.reader.ui.reader.TimelinePost
 import com.mewo.reader.ui.reader.relativeTime
 import com.mewo.reader.ui.search.AccountHitRow
 import com.mewo.reader.ui.search.SearchField
+import com.mewo.reader.ui.library.AddBookAnchor
 import com.mewo.reader.ui.library.BookPost
+import com.mewo.reader.ui.library.addBookOptions
 import com.mewo.reader.ui.library.EmptyTimeline
 import com.mewo.reader.ui.library.LibraryLoading
 import com.mewo.reader.ui.library.LibraryNotice
@@ -59,6 +80,7 @@ import com.mewo.reader.ui.likes.EmptyLikes
 import com.mewo.reader.ui.onboarding.OnboardingScreen
 import com.mewo.reader.ui.profile.EmptyPosts
 import com.mewo.reader.ui.search.SearchEmpty
+import com.mewo.reader.ui.search.searchTabs
 import com.mewo.reader.ui.settings.AppBuild
 import com.mewo.reader.ui.settings.ServerVersionState
 import com.mewo.reader.ui.settings.SettingsAboutPage
@@ -278,6 +300,97 @@ class SurfaceScreenshots {
         }
     }
 
+    @Test
+    fun catalogTrending() = shoot("catalog-trending") {
+        SearchChrome("catalog", query = "", tabs = searchTabs(hosted = true, canRequest = true)) {
+            CatalogHeadingShot()
+            CatalogRow(work = duneWork, request = null, onOpen = {}, onAct = {})
+            CatalogRow(work = emmaWork, request = null, onOpen = {}, onAct = {})
+            CatalogRow(work = longWork, request = longWork.request, onOpen = {}, onAct = {})
+        }
+    }
+
+    @Test
+    fun catalogError() = shoot("catalog-error") {
+        SearchChrome("catalog", query = "", tabs = searchTabs(hosted = true, canRequest = true)) {
+            ErrorStatus(
+                message = "Could not reach the server. Check your connection and try again.",
+                onRetry = {},
+            )
+        }
+    }
+
+    @Test
+    fun catalogSheetRequest() = shoot("catalog-sheet-request") {
+        catalogSheet(duneSheet(WorkStatus(active = 1, cap = 5, otherRequests = otherRequests)))
+    }
+
+    @Test
+    fun catalogSheetDownloading() = shoot("catalog-sheet-downloading") {
+        catalogSheet(
+            duneSheet(
+                WorkStatus(
+                    request = detailRequest(state = "downloading", phase = "downloading", progress = 42),
+                    cap = 5,
+                ),
+            ),
+        )
+    }
+
+    @Test
+    fun catalogSheetFailed() = shoot("catalog-sheet-failed") {
+        catalogSheet(
+            duneSheet(
+                WorkStatus(
+                    request = detailRequest(
+                        state = "failed",
+                        phase = "failed",
+                        error = "No release found.",
+                    ),
+                    cap = 5,
+                ),
+            ),
+        )
+    }
+
+    @Test
+    fun catalogSheetOpen() = shoot("catalog-sheet-open") {
+        catalogSheet(
+            duneSheet(WorkStatus(onServer = ServerCopy(bookId = "b1", mine = true), cap = 5)),
+        )
+    }
+
+    @Test
+    fun addBookMenu() = shoot("add-book-menu") {
+        Column(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)) {
+            MewoAppBar(leading = { ProfileButton(onClick = {}) }, center = { BrandMark() })
+            Box(Modifier.weight(1f).fillMaxWidth()) {
+                Column {
+                    SectionLabel("My books")
+                    shelfBook(privateBook)
+                }
+                AddBookAnchor(
+                    options = addBookOptions(canRequest = true),
+                    onUpload = {},
+                    onBrowseCatalog = {},
+                    menuAlignment = Alignment.End,
+                    startExpanded = true,
+                    modifier = Modifier.align(Alignment.BottomEnd).padding(16.dp),
+                ) { open ->
+                    FloatingActionButton(
+                        onClick = open,
+                        containerColor = MaterialTheme.colorScheme.primary,
+                        contentColor = MaterialTheme.colorScheme.onPrimary,
+                        shape = CircleShape,
+                    ) {
+                        Icon(Icons.Outlined.Add, contentDescription = "Add a book")
+                    }
+                }
+            }
+            HomeTabBar(selected = AppTab.Home, onSelect = {})
+        }
+    }
+
     private fun shoot(
         name: String,
         signedIn: Boolean = true,
@@ -304,6 +417,105 @@ class SurfaceScreenshots {
         }
     }
 }
+
+@Composable
+private fun CatalogHeadingShot() {
+    com.mewo.reader.ui.catalog.CatalogHeading("Trending on Open Library")
+}
+
+@Composable
+private fun catalogSheet(state: CatalogSheetState) {
+    Box(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)) {
+        CatalogSheetContent(
+            state = state,
+            onRequest = {},
+            onCancel = {},
+            onRetry = {},
+            onOpen = {},
+            onReload = {},
+            onToggleDescription = {},
+            onDismiss = {},
+            modifier = Modifier.fillMaxSize(),
+        )
+    }
+}
+
+private fun duneSheet(status: WorkStatus) = CatalogSheetState(
+    work = duneWork,
+    detail = WorkDetail(
+        workKey = duneWork.workKey,
+        info = duneInfo,
+        status = status,
+    ),
+    loading = false,
+)
+
+private fun detailRequest(
+    state: String,
+    phase: String,
+    progress: Int = 0,
+    error: String? = null,
+) = RequestDetail(
+    id = "r1",
+    workKey = duneWork.workKey,
+    title = duneWork.title,
+    author = duneWork.author,
+    year = duneWork.year,
+    state = state,
+    progress = progress,
+    error = error,
+    phase = phase,
+)
+
+private val duneWork = CatalogWork(
+    workKey = "/works/OL893415W",
+    title = "Dune",
+    author = "Frank Herbert",
+    year = 1965,
+)
+
+private val emmaWork = CatalogWork(
+    workKey = "/works/OL53924W",
+    title = "Emma",
+    author = "Jane Austen",
+    year = 1815,
+    onServer = ServerCopy(bookId = "emma", ownerUsername = "austen", shared = true),
+)
+
+private val longWork = CatalogWork(
+    workKey = "/works/OL1W",
+    title = "The Particular Sadness of Lemon Cake and Other Stories from a Very Long Shelf",
+    author = "Aimee Bender",
+    year = 2010,
+    request = BookRequest(
+        id = "r-long",
+        workKey = "/works/OL1W",
+        title = "The Particular Sadness of Lemon Cake and Other Stories from a Very Long Shelf",
+        author = "Aimee Bender",
+        year = 2010,
+        state = "downloading",
+        progress = 40,
+    ),
+)
+
+private val otherRequests = listOf(
+    BookRequest(id = "r2", workKey = duneWork.workKey, title = "Dune", state = "requested", requester = "bea"),
+    BookRequest(id = "r3", workKey = duneWork.workKey, title = "Dune", state = "requested", requester = "ada"),
+)
+
+private val duneInfo = WorkInfo(
+    canonicalKey = "/works/OL893415W",
+    title = "Dune",
+    authors = listOf("Frank Herbert"),
+    year = 1965,
+    description = "Set on the desert planet Arrakis, Dune follows Paul Atreides as his family takes control of the only source of the spice melange. The story follows the politics of the great houses, the ecology of the desert, and the people who live in it. Paul learns what the spice costs the planet, and what it will cost him to survive it.",
+    subjects = listOf("Science fiction", "Desert", "Politics", "Ecology", "Arrakis"),
+    awards = listOf("Hugo Award"),
+    series = listOf("Dune"),
+    pagesMedian = 412,
+    hasAcceptedEdition = true,
+    rating = Rating(average = 4.2, count = 1000),
+)
 
 @Composable
 private fun Surface(content: @Composable () -> Unit) {
@@ -400,7 +612,16 @@ private fun HostedLibrary() {
 }
 
 @Composable
-private fun SearchChrome(tab: String, content: @Composable () -> Unit) {
+private fun SearchChrome(
+    tab: String,
+    query: String = SearchQuery,
+    tabs: List<Pair<String, String>> = listOf(
+        "accounts" to "Accounts",
+        "books" to "Books",
+        "posts" to "Posts",
+    ),
+    content: @Composable () -> Unit,
+) {
     val focus = remember { FocusRequester() }
     // The shot is a typed query, so the field is focused the way the web shot is.
     SideEffect { focus.requestFocus() }
@@ -409,7 +630,7 @@ private fun SearchChrome(tab: String, content: @Composable () -> Unit) {
             leading = { ProfileButton(onClick = {}) },
             content = {
                 SearchField(
-                    query = SearchQuery,
+                    query = query,
                     onQueryChange = {},
                     hosted = true,
                     focusRequester = focus,
@@ -420,7 +641,7 @@ private fun SearchChrome(tab: String, content: @Composable () -> Unit) {
             },
         )
         UnderlineTabs(
-            tabs = listOf("accounts" to "Accounts", "books" to "Books", "posts" to "Posts"),
+            tabs = tabs,
             selected = tab,
             onSelect = {},
         )

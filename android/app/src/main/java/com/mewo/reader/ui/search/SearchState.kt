@@ -7,6 +7,23 @@ import com.mewo.reader.data.kind
 
 const val SEARCH_DEBOUNCE_MS = 250L
 
+/** Accounts, books, and posts. Catalog joins them only when requests are on. */
+fun searchTabs(hosted: Boolean, canRequest: Boolean): List<Pair<String, String>> {
+    val tabs = if (hosted) {
+        listOf(
+            "accounts" to "Accounts",
+            "books" to "Books",
+            "posts" to "Posts",
+        )
+    } else {
+        listOf(
+            "books" to "Books",
+            "posts" to "Posts",
+        )
+    }
+    return if (canRequest) tabs + ("catalog" to "Catalog") else tabs
+}
+
 sealed class SearchPhase {
     data object Idle : SearchPhase()
     data class Loading(val previous: SearchPage? = null) : SearchPhase()
@@ -54,6 +71,7 @@ class PrefSearchKind(context: android.content.Context) : SearchKindMemory {
         "accounts" -> SearchKind.Accounts
         "books" -> SearchKind.Books
         "posts" -> SearchKind.Posts
+        "catalog" -> SearchKind.Catalog
         else -> null
     }
 

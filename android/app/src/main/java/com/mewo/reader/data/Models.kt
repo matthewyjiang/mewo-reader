@@ -150,6 +150,8 @@ enum class SearchKind {
     Accounts,
     Books,
     Posts,
+    /** Open Library. Never sent as `type` on `/v1/search`. */
+    Catalog,
     ;
 
     val wire: String get() = name.lowercase()

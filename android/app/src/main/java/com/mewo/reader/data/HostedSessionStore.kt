@@ -68,3 +68,13 @@ class HostedSessionStore(context: Context) {
         private const val KEY_TOKEN = "token"
     }
 }
+
+/** A 401 for the session still on screen signs it out. The error still propagates. */
+internal fun <T> HostedSessionStore.expireOn401(session: HostedSession, block: () -> T): T {
+    return try {
+        block()
+    } catch (err: HostedException) {
+        if (err.code == 401 && this.session.value.token == session.token) signOut()
+        throw err
+    }
+}

@@ -75,6 +75,7 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.mewo.reader.data.BackendKind
 import com.mewo.reader.data.BookRecord
+import com.mewo.reader.data.CatalogAccess
 import com.mewo.reader.data.FeedPhase
 import com.mewo.reader.data.FeedPost
 import com.mewo.reader.data.FileHomeFeedCache
@@ -85,6 +86,7 @@ import com.mewo.reader.data.cachedBooks
 import com.mewo.reader.data.isRefreshing
 import com.mewo.reader.data.showEmpty
 import com.mewo.reader.ui.LocalBackend
+import com.mewo.reader.ui.LocalCatalogStore
 import com.mewo.reader.ui.LocalHostedAuth
 import com.mewo.reader.ui.LocalLibraryStore
 import com.mewo.reader.ui.components.UnderlineTabs
@@ -112,6 +114,7 @@ fun LibraryScreen(
     onOpenAccount: () -> Unit,
     onOpenProfile: (handle: String, name: String) -> Unit,
     hideOnScroll: HideOnScrollState,
+    onBrowseCatalog: () -> Unit,
 ) {
     val state by viewModel.state.collectAsStateWithLifecycle()
     val load = state.load
@@ -126,6 +129,8 @@ fun LibraryScreen(
         if (!hosted) home = "books"
     }
     val onBooks = !hosted || home == "books"
+    val canRequest = LocalCatalogStore.current.access.collectAsStateWithLifecycle().value == CatalogAccess.On
+    val addOptions = addBookOptions(canRequest)
     val feedCache = remember { FileHomeFeedCache(File(context.filesDir, "home-feeds")) }
     val feedViewModel: FeedViewModel = composeViewModel(
         factory = FeedViewModel.factory(library, feedCache),
@@ -139,6 +144,9 @@ fun LibraryScreen(
         ActivityResultContracts.OpenDocument(),
     ) { uri: Uri? ->
         if (uri != null) viewModel.import(uri, hosted)
+    }
+    val uploadEpub = {
+        picker.launch(arrayOf("application/epub+zip", "application/octet-stream"))
     }
 
     Box(
@@ -222,8 +230,10 @@ fun LibraryScreen(
                         onRetry = viewModel::refresh,
                     )
                     load.showEmpty() -> EmptyTimeline(
-                        onAdd = { picker.launch(arrayOf("application/epub+zip", "application/octet-stream")) },
+                        onAdd = uploadEpub,
                         onSample = viewModel::importSample,
+                        canRequest = canRequest,
+                        onBrowseCatalog = onBrowseCatalog,
                     )
                     else -> {
                         val listState = rememberLazyListState()
@@ -266,17 +276,24 @@ fun LibraryScreen(
         }
 
         if (onBooks) {
-            FloatingActionButton(
-                onClick = { picker.launch(arrayOf("application/epub+zip", "application/octet-stream")) },
-                containerColor = MaterialTheme.colorScheme.primary,
-                contentColor = MaterialTheme.colorScheme.onPrimary,
-                shape = CircleShape,
+            AddBookAnchor(
+                options = addOptions,
+                onUpload = uploadEpub,
+                onBrowseCatalog = onBrowseCatalog,
+                menuAlignment = Alignment.End,
                 modifier = Modifier
                     .align(Alignment.BottomEnd)
-                    .padding(end = 16.dp, bottom = 16.dp)
-                    .size(56.dp),
-            ) {
-                Icon(Icons.Outlined.Add, contentDescription = "Add an EPUB")
+                    .padding(end = 16.dp, bottom = 16.dp),
+            ) { open ->
+                FloatingActionButton(
+                    onClick = open,
+                    containerColor = MaterialTheme.colorScheme.primary,
+                    contentColor = MaterialTheme.colorScheme.onPrimary,
+                    shape = CircleShape,
+                    modifier = Modifier.size(56.dp),
+                ) {
+                    Icon(Icons.Outlined.Add, contentDescription = "Add a book")
+                }
             }
         }
 
@@ -528,6 +545,8 @@ private fun QuietColumn(content: @Composable () -> Unit) {
 internal fun EmptyTimeline(
     onAdd: () -> Unit,
     onSample: () -> Unit,
+    canRequest: Boolean = false,
+    onBrowseCatalog: () -> Unit = {},
 ) {
     QuietColumn {
         Text(
@@ -535,14 +554,20 @@ internal fun EmptyTimeline(
             style = MaterialTheme.typography.headlineLarge,
         )
         Spacer(Modifier.height(20.dp))
-        TextButton(
-            onClick = onAdd,
-            modifier = Modifier
-                .clip(RoundedCornerShape(999.dp))
-                .background(MaterialTheme.colorScheme.primary)
-                .padding(horizontal = 8.dp),
-        ) {
-            Text("Add a book", color = MaterialTheme.colorScheme.onPrimary)
+        AddBookAnchor(
+            options = addBookOptions(canRequest),
+            onUpload = onAdd,
+            onBrowseCatalog = onBrowseCatalog,
+        ) { open ->
+            TextButton(
+                onClick = open,
+                modifier = Modifier
+                    .clip(RoundedCornerShape(999.dp))
+                    .background(MaterialTheme.colorScheme.primary)
+                    .padding(horizontal = 8.dp),
+            ) {
+                Text("Add a book", color = MaterialTheme.colorScheme.onPrimary)
+            }
         }
         TextButton(
             onClick = onSample,

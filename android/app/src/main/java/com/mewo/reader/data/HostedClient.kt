@@ -215,10 +215,52 @@ open class HostedClient(
     }
 
     fun search(session: HostedSession, query: String, kind: SearchKind, cursor: String?): SearchPage {
+        if (kind == SearchKind.Catalog) error("Catalog does not use /v1/search.")
         val q = android.net.Uri.encode(query)
         val type = android.net.Uri.encode(kind.wire)
         val cursorPart = if (cursor.isNullOrEmpty()) "" else "&cursor=${android.net.Uri.encode(cursor)}"
         return get(session, "/v1/search?q=$q&type=$type$cursorPart")
+    }
+
+    open fun me(session: HostedSession): Me = get(session, "/v1/me")
+
+    /** Blank [query] is trending: `q` stays off the URL. */
+    open fun catalog(session: HostedSession, query: String, page: Int): CatalogPage {
+        val trimmed = query.trim()
+        val q = if (trimmed.isEmpty()) "" else "&q=${android.net.Uri.encode(trimmed)}"
+        return get(session, "/v1/catalog/search?page=$page$q")
+    }
+
+    open fun catalogWork(session: HostedSession, olid: String): WorkDetail {
+        return get(session, "/v1/catalog/works/${android.net.Uri.encode(olid)}")
+    }
+
+    open fun requestBook(session: HostedSession, work: CatalogWork): BookRequest {
+        val body = RequestBookBody(
+            workKey = work.workKey,
+            title = work.title,
+            author = work.author,
+            year = work.year,
+            coverId = work.coverId,
+        )
+        val req = request(session.api("/v1/requests"), session.token)
+            .post(json.encodeToString(body).toRequestBody(JSON))
+            .build()
+        return http.newCall(req).execute().use { it.decode() }
+    }
+
+    open fun cancelRequest(session: HostedSession, id: String) {
+        val req = request(session.api("/v1/requests/${android.net.Uri.encode(id)}"), session.token)
+            .delete()
+            .build()
+        http.newCall(req).execute().use { it.expectOk() }
+    }
+
+    open fun retryRequest(session: HostedSession, id: String): BookRequest {
+        val req = request(session.api("/v1/requests/${android.net.Uri.encode(id)}/retry"), session.token)
+            .post(ByteArray(0).toRequestBody(null))
+            .build()
+        return http.newCall(req).execute().use { it.decode() }
     }
 
     fun user(session: HostedSession, username: String): ProfileRecord {

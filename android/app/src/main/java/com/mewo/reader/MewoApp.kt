@@ -2,8 +2,10 @@ package com.mewo.reader
 
 import android.app.Application
 import com.mewo.reader.data.BackendStore
+import com.mewo.reader.data.CatalogStore
 import com.mewo.reader.data.EpubOpener
 import com.mewo.reader.data.HostedAuth
+import com.mewo.reader.data.HostedCatalogStore
 import com.mewo.reader.data.HostedClient
 import com.mewo.reader.data.HostedLibraryStore
 import com.mewo.reader.data.HostedSessionStore
@@ -22,6 +24,8 @@ class MewoApp : Application() {
     private val appScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
 
     lateinit var library: LibraryStore
+        private set
+    lateinit var catalog: CatalogStore
         private set
     lateinit var backendStore: BackendStore
         private set
@@ -60,6 +64,12 @@ class MewoApp : Application() {
                 scope = appScope,
             ),
             kind = backendStore.kind,
+            scope = appScope,
+        )
+        catalog = HostedCatalogStore(
+            sessions = hostedSession,
+            client = client,
+            backend = backendStore.kind,
             scope = appScope,
         )
         themeStore = ThemeStore(this)

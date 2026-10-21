@@ -10,6 +10,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.mewo.reader.ui.BackendController
 import com.mewo.reader.ui.HostedAuthController
 import com.mewo.reader.ui.LocalBackend
+import com.mewo.reader.ui.LocalCatalogStore
 import com.mewo.reader.ui.LocalHostedAuth
 import com.mewo.reader.ui.LocalLibraryStore
 import com.mewo.reader.ui.LocalProfile
@@ -73,6 +74,7 @@ class MainActivity : ComponentActivity() {
                         signOut = app.hostedAuth::signOut,
                     ),
                     LocalLibraryStore provides app.library,
+                    LocalCatalogStore provides app.catalog,
                     LocalProfile provides LocalProfileController(
                         profile = profile,
                         save = app.localProfileStore::save,
