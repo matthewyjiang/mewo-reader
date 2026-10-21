@@ -129,7 +129,7 @@ final class CatalogFeed {
                 return .openBook(id)
             }
             return .done
-        case .request:
+        case .request, .again:
             await send(work.workKey) { try await self.service.request(NewBookRequest(work)) }
             return .done
         case .retry:

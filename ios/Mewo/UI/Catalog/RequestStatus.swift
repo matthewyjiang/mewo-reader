@@ -119,16 +119,41 @@ func stateLabel(_ request: BookRequest, phase explicit: String? = nil) -> String
 }
 
 enum RowAction: String, Equatable, Sendable {
-    case request, pending, open, retry
+    case request, pending, open, retry, again
 }
 
+/// Retry is only legal for a failed or canceled row. Anything else is a 409.
+/// An imported row with no book, and no copy already on the server, starts over
+/// with POST /v1/requests.
 func rowAction(_ request: BookRequest?, _ onServer: ServerCopy? = nil) -> RowAction {
     if let request, request.state == "requested" || request.state == "downloading" { return .pending }
     if request?.state == "failed" { return .retry }
     if request?.state == "imported", request?.bookId != nil { return .open }
     if onServer?.bookId != nil { return .open }
-    if let request, request.state == "canceled" || request.state == "imported" { return .retry }
+    if request?.state == "canceled" { return .retry }
+    if request?.state == "imported" { return .again }
     return .request
+}
+
+func rowActionLabel(_ action: RowAction, _ work: CatalogWork, _ request: BookRequest?) -> String {
+    switch action {
+    case .request: return "Request"
+    case .again: return "Request again"
+    case .pending: return request.map { stateLabel($0) } ?? "Request"
+    case .open: return openLabel(work, request)
+    case .retry: return "Retry"
+    }
+}
+
+/// A live row already says its status. No trailing control, so a clock does not
+/// sit beside that line looking like a button.
+func rowSymbol(_ action: RowAction) -> String? {
+    switch action {
+    case .request, .again: return "plus"
+    case .open: return "book"
+    case .retry: return "arrow.clockwise"
+    case .pending: return nil
+    }
 }
 
 func openLabel(_ work: CatalogWork, _ request: BookRequest?) -> String {

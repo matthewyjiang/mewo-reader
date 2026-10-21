@@ -6,6 +6,29 @@ struct CatalogResults: View {
     var onOpenBook: (String) -> Void
 
     var body: some View {
+        ZStack(alignment: .bottom) {
+            results
+            if let notice = feed.notice {
+                banner(notice)
+                    .padding(.horizontal, 16)
+                    .padding(.bottom, 16)
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+        .sheet(item: Binding(
+            get: { feed.sheet },
+            set: { if $0 == nil { feed.close() } }
+        )) { model in
+            CatalogSheet(model: model) { id in
+                feed.close()
+                onOpenBook(id)
+            }
+            .presentationDetents([.large])
+        }
+    }
+
+    @ViewBuilder
+    private var results: some View {
         Group {
             if let failure = feed.failure {
                 failureBlock(failure)
@@ -42,16 +65,31 @@ struct CatalogResults: View {
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-        .sheet(item: Binding(
-            get: { feed.sheet },
-            set: { if $0 == nil { feed.close() } }
-        )) { model in
-            CatalogSheet(model: model) { id in
-                feed.close()
-                onOpenBook(id)
+    }
+
+    private func banner(_ message: String) -> some View {
+        HStack(alignment: .center, spacing: 8) {
+            Text(message)
+                .font(MewoFont.regular(15))
+                .foregroundStyle(mewo.ink)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            Button {
+                feed.notice = nil
+            } label: {
+                Image(systemName: "xmark")
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundStyle(mewo.mute)
+                    .frame(width: 40, height: 40)
             }
-            .presentationDetents([.large])
+            .buttonStyle(.plain)
+            .accessibilityLabel("Dismiss message")
         }
+        .padding(.leading, 16)
+        .padding(.trailing, 8)
+        .padding(.vertical, 8)
+        .background(mewo.hover)
+        .overlay(Rectangle().stroke(mewo.line, lineWidth: 1))
+        .accessibilityIdentifier("catalog-notice")
     }
 
     private var list: some View {
@@ -73,14 +111,6 @@ struct CatalogResults: View {
                         .frame(maxWidth: .infinity)
                         .padding(.vertical, 12)
                         .accessibilityIdentifier("catalog-loading")
-                }
-                if let notice = feed.notice {
-                    Text(notice)
-                        .font(MewoFont.regular(15))
-                        .foregroundStyle(mewo.ink)
-                        .padding(.horizontal, 16)
-                        .padding(.vertical, 8)
-                        .accessibilityIdentifier("catalog-notice")
                 }
                 ForEach(feed.items) { work in
                     CatalogRow(

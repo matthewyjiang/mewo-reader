@@ -60,13 +60,20 @@ final class CatalogCopyTests: XCTestCase {
         XCTAssertEqual(rowAction(bookRequest()), .pending)
         XCTAssertEqual(rowAction(bookRequest(state: "downloading", progress: 42)), .pending)
         XCTAssertEqual(rowAction(bookRequest(state: "imported", bookId: "req-1")), .open)
-        XCTAssertEqual(rowAction(bookRequest(state: "imported")), .retry)
+        XCTAssertEqual(rowAction(bookRequest(state: "imported")), .again)
         XCTAssertEqual(rowAction(bookRequest(state: "failed", error: "x")), .retry)
         XCTAssertEqual(rowAction(bookRequest(state: "canceled")), .retry)
         XCTAssertEqual(rowAction(nil, sharedCopy()), .open)
         XCTAssertEqual(rowAction(bookRequest(), sharedCopy()), .pending)
         XCTAssertEqual(rowAction(bookRequest(state: "failed", error: "x"), sharedCopy()), .retry)
         XCTAssertEqual(rowAction(bookRequest(state: "canceled"), sharedCopy()), .open)
+        XCTAssertEqual(rowAction(bookRequest(state: "imported"), sharedCopy()), .open)
+        XCTAssertEqual(rowActionLabel(.again, work(), bookRequest(state: "imported")), "Request again")
+        XCTAssertNil(rowSymbol(.pending))
+        XCTAssertNil(rowSymbol(rowAction(bookRequest(state: "downloading", progress: 100))))
+        XCTAssertEqual(rowSymbol(.open), "book")
+        XCTAssertEqual(rowSymbol(.again), "plus")
+        XCTAssertEqual(rowSymbol(.retry), "arrow.clockwise")
 
         XCTAssertEqual(openLabel(work(onServer: sharedCopy()), nil), "On server")
         XCTAssertEqual(openLabel(work(onServer: heldCopy()), nil), "On your shelf")
@@ -499,6 +506,40 @@ final class CatalogModelTests: XCTestCase {
         XCTAssertEqual(again, .openBook("book-1"))
         XCTAssertEqual(imports, 1)
         XCTAssertEqual(fake.requestLog.count, 1)
+    }
+
+    func testImportedWithoutABookPostsInsteadOfRetrying() async {
+        fake = FakeCatalog()
+        let feed = CatalogFeed(service: fake, debounceNanos: 0)
+        let imported = bookRequest(state: "imported")
+        XCTAssertNil(imported.bookId)
+        let item = work(request: imported)
+        fake.requestResult = .success(bookRequest(state: "requested"))
+        let outcome = await feed.act(item)
+        XCTAssertEqual(outcome, .done)
+        XCTAssertEqual(fake.requestLog.map(\.workKey), [item.workKey])
+        XCTAssertTrue(fake.retryLog.isEmpty)
+        XCTAssertEqual(feed.shown(item)?.state, "requested")
+    }
+
+    func testRowFailureStaysANotice() async {
+        fake = FakeCatalog()
+        fake.pageResult = .success(CatalogPage(items: [work()], nextPage: nil))
+        let feed = CatalogFeed(service: fake, debounceNanos: 0)
+        feed.show()
+        await waitPages(1)
+        await feed.loadTask?.value
+        fake.requestResult = .failure(HostedException(
+            message: "Only a failed or canceled request can be retried.",
+            code: 409
+        ))
+        let outcome = await feed.act(work())
+        XCTAssertEqual(outcome, .done)
+        XCTAssertEqual(feed.notice, "Only a failed or canceled request can be retried.")
+        XCTAssertEqual(feed.items.map(\.title), ["Dune"])
+        XCTAssertNil(feed.failure)
+        feed.notice = nil
+        XCTAssertNil(feed.notice)
     }
 
     func testOpenBookDoesNotRequest() async {
@@ -1058,6 +1099,7 @@ private func sharedCopy() -> ServerCopy {
 private func work(
     title: String = "Dune",
     key: String = "/works/OL893415W",
+    request: BookRequest? = nil,
     onServer: ServerCopy? = nil
 ) -> CatalogWork {
     CatalogWork(
@@ -1066,7 +1108,7 @@ private func work(
         author: "Frank Herbert",
         year: 1965,
         coverId: nil,
-        request: nil,
+        request: request,
         onServer: onServer
     )
 }

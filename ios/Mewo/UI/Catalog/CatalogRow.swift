@@ -9,24 +9,7 @@ struct CatalogRow: View {
 
     private var action: RowAction { rowAction(request, work.onServer) }
     private var label: String? { Mewo.badge(work, request) }
-
-    private var actionName: String {
-        switch action {
-        case .request: return "Request"
-        case .pending: return request.map { stateLabel($0) } ?? "Request"
-        case .open: return openLabel(work, request)
-        case .retry: return "Retry"
-        }
-    }
-
-    private var symbol: String {
-        switch action {
-        case .request: return "plus"
-        case .pending: return "clock"
-        case .open: return "checkmark"
-        case .retry: return "arrow.clockwise"
-        }
-    }
+    private var symbol: String? { rowSymbol(action) }
 
     var body: some View {
         HStack(alignment: .center, spacing: 0) {
@@ -61,19 +44,22 @@ struct CatalogRow: View {
             .buttonStyle(.plain)
             .accessibilityLabel(catalogRowLabel(work, request))
             .accessibilityIdentifier("catalog-\(catalogOlid(work.workKey))")
-            Button(action: onAct) {
-                Image(systemName: symbol)
-                    .font(.system(size: 18))
-                    .foregroundStyle(mewo.mute)
-                    .frame(width: 44, height: 44)
+            if let symbol {
+                Button(action: onAct) {
+                    Image(systemName: symbol)
+                        .font(.system(size: 16, weight: .semibold))
+                        .foregroundStyle(mewo.accent)
+                        .frame(width: 32, height: 32)
+                        .overlay(Circle().strokeBorder(mewo.accent, lineWidth: 1.5))
+                        .frame(width: 44, height: 44)
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel(rowActionLabel(action, work, request))
+                .accessibilityIdentifier("catalog-act-\(catalogOlid(work.workKey))")
             }
-            .buttonStyle(.plain)
-            .disabled(action == .pending)
-            .accessibilityLabel(actionName)
-            .accessibilityIdentifier("catalog-act-\(catalogOlid(work.workKey))")
         }
         .padding(.leading, 16)
-        .padding(.trailing, 4)
+        .padding(.trailing, symbol == nil ? 16 : 4)
         .padding(.vertical, 8)
     }
 

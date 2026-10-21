@@ -34,14 +34,9 @@ struct CatalogSheet: View {
             }
             .buttonStyle(.plain)
             .accessibilityLabel("Close")
-            Text(model.work.title)
-                .font(MewoFont.bold(17))
-                .foregroundStyle(mewo.ink)
-                .lineLimit(1)
             Spacer(minLength: 0)
         }
         .padding(.leading, 4)
-        .padding(.trailing, 16)
     }
 
     private var hero: some View {
