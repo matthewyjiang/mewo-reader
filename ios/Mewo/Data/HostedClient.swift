@@ -188,7 +188,54 @@ final class HostedClient: Sendable {
         return try await get(hosted, path: "/v1/profiles/\(encoded)/replies")
     }
 
+    func me(_ hosted: HostedSession) async throws -> Me {
+        try await get(hosted, path: "/v1/me")
+    }
+
+    func catalog(_ hosted: HostedSession, query: String?, page: Int) async throws -> CatalogPage {
+        try await get(hosted, path: catalogSearchPath(query: query, page: page))
+    }
+
+    func catalogWork(_ hosted: HostedSession, olid: String) async throws -> WorkDetail {
+        try await get(hosted, path: "/v1/catalog/works/\(pathUser(olid))")
+    }
+
+    func requestBook(_ hosted: HostedSession, body: NewBookRequest) async throws -> BookRequest {
+        var request = try authorized(hosted, path: "/v1/requests")
+        request.httpMethod = "POST"
+        request.setValue("application/json; charset=utf-8", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try JSONFiles.encoder.encode(body)
+        return try await decode(request)
+    }
+
+    func cancelRequest(_ hosted: HostedSession, id: String) async throws {
+        var request = try authorized(hosted, path: "/v1/requests/\(pathUser(id))")
+        request.httpMethod = "DELETE"
+        _ = try await expectOk(request)
+    }
+
+    func retryRequest(_ hosted: HostedSession, id: String) async throws -> BookRequest {
+        var request = try authorized(hosted, path: "/v1/requests/\(pathUser(id))/retry")
+        request.httpMethod = "POST"
+        request.httpBody = Data()
+        return try await decode(request)
+    }
+
+    func catalogSearchPath(query: String?, page: Int) -> String {
+        var items = [URLQueryItem(name: "page", value: String(max(page, 1)))]
+        if let query {
+            let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !trimmed.isEmpty {
+                items.append(URLQueryItem(name: "q", value: trimmed))
+            }
+        }
+        return pathWithQuery("/v1/catalog/search", items)
+    }
+
     func search(_ hosted: HostedSession, query: String, type: String, cursor: String?) async throws -> SearchPage {
+        if SearchTab(rawValue: type) == .catalog {
+            throw CatalogError(reason: .notSearch, message: "Catalog is not a library search.")
+        }
         var items = [
             URLQueryItem(name: "q", value: query),
             URLQueryItem(name: "type", value: type),

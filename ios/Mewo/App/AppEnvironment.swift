@@ -21,6 +21,7 @@ final class AppEnvironment {
     let hostedLibrary: HostedLibraryStore
     let library: SwitchingLibraryStore
     let homeFeed: HomeFeedStore
+    let catalog: HostedCatalogService
     let client = HostedClient()
 
     init() {
@@ -48,6 +49,7 @@ final class AppEnvironment {
             files: files,
             refreshesOnInit: backend.kind == .hosted
         )
+        catalog = HostedCatalogService(sessions: hostedSession, client: client, backend: backend)
     }
 
     var readerIdentity: ReaderIdentity {

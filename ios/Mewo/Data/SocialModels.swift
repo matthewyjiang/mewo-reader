@@ -1,7 +1,7 @@
 import Foundation
 
 enum SearchTab: String, Codable, CaseIterable, Identifiable, Sendable {
-    case accounts, books, posts
+    case accounts, books, posts, catalog
 
     var id: String { rawValue }
 
@@ -10,8 +10,22 @@ enum SearchTab: String, Codable, CaseIterable, Identifiable, Sendable {
         case .accounts: return "Accounts"
         case .books: return "Books"
         case .posts: return "Posts"
+        case .catalog: return "Catalog"
         }
     }
+}
+
+/// Catalog is a different endpoint. It is never a `type` on `/v1/search`.
+func librarySearchType(_ tab: SearchTab) -> String? {
+    switch tab {
+    case .accounts, .books, .posts: return tab.rawValue
+    case .catalog: return nil
+    }
+}
+
+func searchTabs(hosted: Bool, canRequest: Bool) -> [SearchTab] {
+    if !hosted { return [.books, .posts] }
+    return canRequest ? [.accounts, .books, .posts, .catalog] : [.accounts, .books, .posts]
 }
 
 struct AccountRecord: Codable, Equatable, Hashable, Identifiable, Sendable {
@@ -44,6 +58,12 @@ extension SearchPage: Decodable {
             books = try container.decode([BookRecord].self, forKey: .items)
         case .posts:
             posts = try container.decode([PostHit].self, forKey: .items)
+        case .catalog:
+            throw DecodingError.dataCorruptedError(
+                forKey: .type,
+                in: container,
+                debugDescription: "Catalog is not a library search page."
+            )
         }
     }
 }

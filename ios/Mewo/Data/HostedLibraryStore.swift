@@ -567,18 +567,26 @@ final class HostedLibraryStore: LibraryStore {
     }
 
     private func expireOn401<T>(_ session: HostedSession, _ block: () async throws -> T) async throws -> T {
-        do {
-            return try await block()
-        } catch let err as HostedException where err.code == 401 {
-            if sessions.session.token == session.token {
-                sessions.signOut()
-            }
-            throw err
-        }
+        try await expireOn401(sessions: sessions, session: session, operation: block)
     }
 
     private func bookDir(_ id: String) -> URL {
         root.appendingPathComponent(id, isDirectory: true)
+    }
+}
+
+func expireOn401<T>(
+    sessions: HostedSessionStore,
+    session: HostedSession,
+    operation: () async throws -> T
+) async throws -> T {
+    do {
+        return try await operation()
+    } catch let err as HostedException where err.code == 401 {
+        if sessions.session.token == session.token {
+            sessions.signOut()
+        }
+        throw err
     }
 }
 
