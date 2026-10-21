@@ -115,7 +115,8 @@ function isBook(value: unknown): value is BookRecord {
     && typeof book.isSample === 'boolean'
     && typeof book.mine === 'boolean'
     && typeof book.shared === 'boolean'
-    && (book.ownerUsername === undefined || typeof book.ownerUsername === 'string');
+    && (book.ownerUsername === undefined || typeof book.ownerUsername === 'string')
+    && (book.held === undefined || typeof book.held === 'boolean');
 }
 
 export function readShelf(

@@ -11,8 +11,14 @@ export interface BookRecord {
   mine: boolean;
   /** Owner chose to show this book on other accounts' shelves. */
   shared: boolean;
-  /** Username of the account that added the book. */
+  /** Username of the account that added the book. Empty when the viewer holds a private copy. */
   ownerUsername: string;
+  /**
+   * The viewer has this book through a request and is not the owner.
+   * Older shelves omit it. A private hold hides the owner name even if
+   * `ownerUsername` is filled in. A shared book keeps the name.
+   */
+  held?: boolean;
 }
 
 export interface FeedPost {
@@ -210,6 +216,18 @@ export const isFinished = (book: BookRecord): boolean =>
 
 /** The sample stays readable by every account. Other books need the owner to share them. */
 export const visibleToOthers = (book: BookRecord): boolean => book.shared || book.isSample;
+
+/** "Added by" / "Shared by" is for a shared book whose owner we can name. */
+export function showOwner(book: {
+  mine: boolean;
+  held?: boolean;
+  shared?: boolean;
+  ownerUsername?: string;
+}): boolean {
+  if (book.mine || !book.ownerUsername) return false;
+  if (book.held === true && book.shared !== true) return false;
+  return true;
+}
 
 export function shelfGroups(books: BookRecord[]): {
   mine: BookRecord[];

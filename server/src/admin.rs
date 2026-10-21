@@ -144,7 +144,7 @@ async fn server_info(State(state): State<AppState>) -> Result<Json<ServerInfo>, 
         "SELECT
             (SELECT COUNT(*) FROM users) AS users,
             (SELECT COUNT(*) FROM books) AS books,
-            (SELECT COUNT(*) FROM comments) AS comments,
+            (SELECT COUNT(*) FROM comments) AS comments, -- own rows only
             (SELECT COUNT(*) FROM reposts) AS reposts",
     )
     .fetch_one(&state.pool)

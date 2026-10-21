@@ -13,7 +13,7 @@ use crate::models::{
 };
 use crate::search::{self, PROFILE_POSTS_LIMIT};
 use crate::version::VersionInfo;
-use crate::visibility::{BOOK_SELECT, BOOK_VISIBLE_TO};
+use crate::visibility::{social_visible, BOOK_SELECT, BOOK_VISIBLE_TO};
 use crate::AppState;
 use axum::extract::{Multipart, Path, Query, State};
 use axum::http::header::{CONTENT_DISPOSITION, CONTENT_TYPE};
@@ -155,6 +155,7 @@ pub async fn library(
     ))
     .bind(&authed.user_id)
     .bind(&authed.user_id)
+    .bind(&authed.user_id)
     .fetch_all(&state.pool)
     .await?;
     Ok(Json(LibrarySnapshot {
@@ -198,12 +199,32 @@ pub async fn delete_book(
     Path(id): Path<String>,
 ) -> Result<axum::http::StatusCode, ApiError> {
     let row = visible_book(&state, &authed.user_id, &id).await?;
-    if row.owner_id != authed.user_id {
-        return Err(ApiError::Forbidden(
-            "Only the person who added this book can remove it.".into(),
-        ));
-    }
     let mut tx = state.pool.begin_with("BEGIN IMMEDIATE").await?;
+    if row.owner_id != authed.user_id {
+        let released = library::release_hold(&mut tx, &authed.user_id, &row.id).await?;
+        if !released {
+            return Err(ApiError::Forbidden(
+                "Only the person who added this book can remove it.".into(),
+            ));
+        }
+        tx.commit().await?;
+        return Ok(axum::http::StatusCode::NO_CONTENT);
+    }
+    let holder: Option<String> = sqlx::query_scalar(
+        "SELECT user_id FROM book_requests
+         WHERE book_id = ? AND state = 'imported' AND user_id <> ?
+         ORDER BY created_at ASC, id ASC
+         LIMIT 1",
+    )
+    .bind(&row.id)
+    .bind(&row.owner_id)
+    .fetch_optional(&mut *tx)
+    .await?;
+    if let Some(holder) = holder {
+        library::pass_ownership(&mut tx, &row.id, &row.owner_id, &holder).await?;
+        tx.commit().await?;
+        return Ok(axum::http::StatusCode::NO_CONTENT);
+    }
     crate::requests::cancel_imported(&mut *tx, &authed.user_id, &row.id).await?;
     sqlx::query("DELETE FROM books WHERE id = ? AND user_id = ?")
         .bind(&row.id)
@@ -211,7 +232,7 @@ pub async fn delete_book(
         .execute(&mut *tx)
         .await?;
     tx.commit().await?;
-    let dest = book_dir(&state.data_dir, &row.owner_id, &row.id);
+    let dest = library::book_dir(&state.data_dir, row.dir_owner(), &row.id);
     let _ = tokio::fs::remove_dir_all(dest).await;
     Ok(axum::http::StatusCode::NO_CONTENT)
 }
@@ -260,7 +281,7 @@ pub async fn download_epub(
     Path(id): Path<String>,
 ) -> Result<impl IntoResponse, ApiError> {
     let row = visible_book(&state, &authed.user_id, &id).await?;
-    let path = book_dir(&state.data_dir, &row.owner_id, &row.id).join("book.epub");
+    let path = library::book_dir(&state.data_dir, row.dir_owner(), &row.id).join("book.epub");
     file_response(path, "application/epub+zip", "book.epub").await
 }
 
@@ -270,7 +291,7 @@ pub async fn download_cover(
     Path(id): Path<String>,
 ) -> Result<impl IntoResponse, ApiError> {
     let row = visible_book(&state, &authed.user_id, &id).await?;
-    let path = book_dir(&state.data_dir, &row.owner_id, &row.id).join("cover.jpg");
+    let path = library::book_dir(&state.data_dir, row.dir_owner(), &row.id).join("cover.jpg");
     if !path.exists() {
         return Err(ApiError::NotFound);
     }
@@ -304,7 +325,7 @@ pub async fn get_posts(
     Path(id): Path<String>,
 ) -> Result<impl IntoResponse, ApiError> {
     let row = visible_book(&state, &authed.user_id, &id).await?;
-    let dir = book_dir(&state.data_dir, &row.owner_id, &row.id);
+    let dir = library::book_dir(&state.data_dir, row.dir_owner(), &row.id);
     let bytes = match search::read_posts(&dir).await? {
         Some(bytes) => bytes,
         None => fill_posts(&state, &row.id, &dir).await?,
@@ -380,27 +401,37 @@ pub async fn comment_index(
     Path(id): Path<String>,
 ) -> Result<Json<CommentIndex>, ApiError> {
     let book = visible_book(&state, &authed.user_id, &id).await?;
-    let counts = sqlx::query_as::<_, (String, i64)>(
-        "SELECT post_id, COUNT(*) FROM comments WHERE book_id = ? GROUP BY post_id",
-    )
+    let counts = sqlx::query_as::<_, (String, i64)>(&format!(
+        "SELECT c.post_id, COUNT(*) FROM comments c
+         JOIN books b ON b.id = c.book_id
+         WHERE c.book_id = ? AND {social}
+         GROUP BY c.post_id",
+        social = social_visible("c"),
+    ))
     .bind(&book.id)
+    .bind(&authed.user_id)
     .fetch_all(&state.pool)
     .await?;
     let mine = sqlx::query_scalar::<_, String>(
-        "SELECT DISTINCT post_id FROM comments WHERE book_id = ? AND user_id = ?",
+        "SELECT DISTINCT post_id FROM comments WHERE book_id = ? AND user_id = ? -- own rows only",
     )
     .bind(&book.id)
     .bind(&authed.user_id)
     .fetch_all(&state.pool)
     .await?;
-    let reposts = sqlx::query_as::<_, (String, i64)>(
-        "SELECT post_id, COUNT(*) FROM reposts WHERE book_id = ? GROUP BY post_id",
-    )
+    let reposts = sqlx::query_as::<_, (String, i64)>(&format!(
+        "SELECT r.post_id, COUNT(*) FROM reposts r
+         JOIN books b ON b.id = r.book_id
+         WHERE r.book_id = ? AND {social}
+         GROUP BY r.post_id",
+        social = social_visible("r"),
+    ))
     .bind(&book.id)
+    .bind(&authed.user_id)
     .fetch_all(&state.pool)
     .await?;
     let reposted = sqlx::query_scalar::<_, String>(
-        "SELECT post_id FROM reposts WHERE book_id = ? AND user_id = ?",
+        "SELECT post_id FROM reposts WHERE book_id = ? AND user_id = ? -- own rows only",
     )
     .bind(&book.id)
     .bind(&authed.user_id)
@@ -451,7 +482,7 @@ pub async fn delete_repost(
             // Drop only their row. The count of everyone else's reposts stays hidden.
             let book_id = parse_book_id(&id)?.to_string();
             let deleted = sqlx::query(
-                "DELETE FROM reposts WHERE user_id = ? AND book_id = ? AND post_id = ?",
+                "DELETE FROM reposts WHERE user_id = ? AND book_id = ? AND post_id = ? -- own rows only",
             )
             .bind(&authed.user_id)
             .bind(&book_id)
@@ -468,12 +499,14 @@ pub async fn delete_repost(
         }
         Err(err) => return Err(err),
     };
-    sqlx::query("DELETE FROM reposts WHERE user_id = ? AND book_id = ? AND post_id = ?")
-        .bind(&authed.user_id)
-        .bind(&book.id)
-        .bind(&post_id)
-        .execute(&state.pool)
-        .await?;
+    sqlx::query(
+        "DELETE FROM reposts WHERE user_id = ? AND book_id = ? AND post_id = ? -- own rows only",
+    )
+    .bind(&authed.user_id)
+    .bind(&book.id)
+    .bind(&post_id)
+    .execute(&state.pool)
+    .await?;
     Ok(Json(
         repost_state(&state, &authed.user_id, &book.id, &post_id).await?,
     ))
@@ -485,15 +518,19 @@ async fn repost_state(
     book_id: &str,
     post_id: &str,
 ) -> Result<RepostState, ApiError> {
-    let reposts = sqlx::query_scalar::<_, i64>(
-        "SELECT COUNT(*) FROM reposts WHERE book_id = ? AND post_id = ?",
-    )
+    let reposts = sqlx::query_scalar::<_, i64>(&format!(
+        "SELECT COUNT(*) FROM reposts r
+         JOIN books b ON b.id = r.book_id
+         WHERE r.book_id = ? AND r.post_id = ? AND {social}",
+        social = social_visible("r"),
+    ))
     .bind(book_id)
     .bind(post_id)
+    .bind(user_id)
     .fetch_one(&state.pool)
     .await?;
     let mine = sqlx::query_scalar::<_, i64>(
-        "SELECT COUNT(*) FROM reposts WHERE user_id = ? AND book_id = ? AND post_id = ?",
+        "SELECT COUNT(*) FROM reposts WHERE user_id = ? AND book_id = ? AND post_id = ? -- own rows only",
     )
     .bind(user_id)
     .bind(book_id)
@@ -632,18 +669,20 @@ pub async fn profile_posts(
          JOIN users owner ON owner.id = b.user_id
          LEFT JOIN book_progress p ON p.book_id = b.id AND p.user_id = ?
          {comment_posts}
-         WHERE c.user_id = ? AND {BOOK_VISIBLE_TO}
+         WHERE c.user_id = ? AND {BOOK_VISIBLE_TO} AND {comment_social}
            AND (
              ? = 0
              OR c.created_at < ?
              OR (c.created_at = ? AND c.id < ?)
            )
          ORDER BY c.created_at DESC, c.id DESC
-         LIMIT ?"
+         LIMIT ?",
+        comment_social = social_visible("c"),
     );
     let mut rows = sqlx::query_as::<_, ProfilePostRow>(&sql)
         .bind(&authed.user_id)
         .bind(&user_id)
+        .bind(&authed.user_id)
         .bind(&authed.user_id)
         .bind(has_cursor)
         .bind(created_at)
@@ -692,7 +731,7 @@ pub async fn profile_reposts(
          JOIN users owner ON owner.id = b.user_id
          LEFT JOIN book_progress p ON p.book_id = b.id AND p.user_id = ?
          {repost_posts}
-         WHERE r.user_id = ? AND {BOOK_VISIBLE_TO}
+         WHERE r.user_id = ? AND {BOOK_VISIBLE_TO} AND {repost_social}
            AND (
              ? = 0
              OR r.created_at < ?
@@ -700,11 +739,13 @@ pub async fn profile_reposts(
              OR (r.created_at = ? AND r.book_id = ? AND r.post_id < ?)
            )
          ORDER BY r.created_at DESC, r.book_id DESC, r.post_id DESC
-         LIMIT ?"
+         LIMIT ?",
+        repost_social = social_visible("r"),
     );
     let mut rows = sqlx::query_as::<_, ProfileRepostRow>(&sql)
         .bind(&authed.user_id)
         .bind(&user_id)
+        .bind(&authed.user_id)
         .bind(&authed.user_id)
         .bind(has_cursor)
         .bind(created_at)
@@ -741,6 +782,7 @@ pub async fn profile_books(
         "{BOOK_SELECT} WHERE b.user_id = ? AND b.shared = 1 AND b.is_sample = 0 AND {BOOK_VISIBLE_TO}
          ORDER BY b.imported_at DESC, b.id ASC"
     ))
+    .bind(&authed.user_id)
     .bind(&authed.user_id)
     .bind(&user_id)
     .bind(&authed.user_id)
@@ -789,7 +831,7 @@ pub async fn feed(
                  JOIN users owner ON owner.id = b.user_id
                  LEFT JOIN book_progress p ON p.book_id = b.id AND p.user_id = ?
                  {comment_posts}
-                 WHERE {BOOK_VISIBLE_TO}
+                 WHERE {BOOK_VISIBLE_TO} AND {comment_social}
                    AND (
                      ? = 0
                      OR c.created_at < ?
@@ -822,7 +864,7 @@ pub async fn feed(
                  JOIN users owner ON owner.id = b.user_id
                  LEFT JOIN book_progress p ON p.book_id = b.id AND p.user_id = ?
                  {repost_posts}
-                 WHERE {BOOK_VISIBLE_TO}
+                 WHERE {BOOK_VISIBLE_TO} AND {repost_social}
                    AND (
                      ? = 0
                      OR r.created_at < ?
@@ -834,12 +876,15 @@ pub async fn feed(
              )
          )
          ORDER BY at DESC, kind DESC, id DESC
-         LIMIT ?"
+         LIMIT ?",
+        comment_social = social_visible("c"),
+        repost_social = social_visible("r"),
     );
     let limit = FEED_LIMIT + 1;
     let mut query = sqlx::query_as::<_, FeedRow>(&sql);
     for _ in 0..2 {
         query = query
+            .bind(&authed.user_id)
             .bind(&authed.user_id)
             .bind(&authed.user_id)
             .bind(has_cursor)
@@ -919,6 +964,8 @@ impl ProfileRepostRow {
             shared: self.shared,
             owner_id: self.owner_id,
             owner_username: self.owner_username,
+            files_owner: None,
+            holds: 0,
         }
         .into_record(viewer);
         Ok(ProfileRepostRecord {
@@ -976,6 +1023,8 @@ impl FeedRow {
             shared: self.shared,
             owner_id: self.owner_id,
             owner_username: self.owner_username,
+            files_owner: None,
+            holds: 0,
         }
         .into_record(viewer);
         let post = stored_post(
@@ -1074,6 +1123,8 @@ impl ProfilePostRow {
             shared: self.shared,
             owner_id: self.owner_id,
             owner_username: self.owner_username,
+            files_owner: None,
+            holds: 0,
         }
         .into_record(viewer);
         Ok(ProfilePostRecord {
@@ -1120,9 +1171,11 @@ async fn visible_reply_count(
          FROM comments c
          JOIN books b ON b.id = c.book_id
          {comment_posts}
-         WHERE c.user_id = ? AND {BOOK_VISIBLE_TO}"
+         WHERE c.user_id = ? AND {BOOK_VISIBLE_TO} AND {comment_social}",
+        comment_social = social_visible("c"),
     ))
     .bind(user_id)
+    .bind(viewer)
     .bind(viewer)
     .fetch_one(&state.pool)
     .await?;
@@ -1140,9 +1193,11 @@ async fn visible_repost_count(
          FROM reposts r
          JOIN books b ON b.id = r.book_id
          {repost_posts}
-         WHERE r.user_id = ? AND {BOOK_VISIBLE_TO}"
+         WHERE r.user_id = ? AND {BOOK_VISIBLE_TO} AND {repost_social}",
+        repost_social = social_visible("r"),
     ))
     .bind(user_id)
+    .bind(viewer)
     .bind(viewer)
     .fetch_one(&state.pool)
     .await?;
@@ -1172,10 +1227,12 @@ pub async fn profile_replies(
          FROM comments c
          JOIN users u ON u.id = c.user_id
          JOIN books b ON b.id = c.book_id
-         WHERE c.user_id = ? AND {BOOK_VISIBLE_TO}
-         ORDER BY c.created_at DESC, c.id DESC"
+         WHERE c.user_id = ? AND {BOOK_VISIBLE_TO} AND {comment_social}
+         ORDER BY c.created_at DESC, c.id DESC",
+        comment_social = social_visible("c"),
     ))
     .bind(&user_id)
+    .bind(&authed.user_id)
     .bind(&authed.user_id)
     .fetch_all(&state.pool)
     .await?;
@@ -1206,7 +1263,7 @@ pub async fn delete_comment(
     let post_id = parse_post_id(&post_id)?;
     let _ = visible_book(&state, &authed.user_id, &id).await?;
     let owner = sqlx::query_scalar::<_, String>(
-        "SELECT user_id FROM comments WHERE id = ? AND book_id = ? AND post_id = ?",
+        "SELECT user_id FROM comments WHERE id = ? AND book_id = ? AND post_id = ? -- own rows only",
     )
     .bind(&comment_id)
     .bind(&id)
@@ -1221,7 +1278,7 @@ pub async fn delete_comment(
             "You can only delete your own comment.".into(),
         ));
     }
-    sqlx::query("DELETE FROM comments WHERE id = ?")
+    sqlx::query("DELETE FROM comments WHERE id = ? -- own rows only")
         .bind(&comment_id)
         .execute(&state.pool)
         .await?;
@@ -1254,6 +1311,7 @@ async fn visible_book(state: &AppState, user_id: &str, id: &str) -> Result<BookR
     let row = sqlx::query_as::<_, BookRow>(&format!(
         "{BOOK_SELECT} WHERE b.id = ? AND {BOOK_VISIBLE_TO}"
     ))
+    .bind(user_id)
     .bind(user_id)
     .bind(&id)
     .bind(user_id)
@@ -1327,15 +1385,18 @@ async fn thread_for(
     book_id: &str,
     post_id: &str,
 ) -> Result<CommentThread, ApiError> {
-    let rows = sqlx::query_as::<_, CommentRow>(
+    let rows = sqlx::query_as::<_, CommentRow>(&format!(
         "SELECT c.id, u.username, c.text, c.created_at, c.user_id
          FROM comments c
          JOIN users u ON u.id = c.user_id
-         WHERE c.book_id = ? AND c.post_id = ?
+         JOIN books b ON b.id = c.book_id
+         WHERE c.book_id = ? AND c.post_id = ? AND {social}
          ORDER BY c.created_at ASC",
-    )
+        social = social_visible("c"),
+    ))
     .bind(book_id)
     .bind(post_id)
+    .bind(user_id)
     .fetch_all(&state.pool)
     .await?;
     Ok(CommentThread {
@@ -1355,10 +1416,6 @@ async fn likes_for(state: &AppState, user_id: &str, book_id: &str) -> Result<Lik
     .fetch_all(&state.pool)
     .await?;
     Ok(LikeSet { ids })
-}
-
-fn book_dir(data_dir: &std::path::Path, user_id: &str, book_id: &str) -> PathBuf {
-    data_dir.join("books").join(user_id).join(book_id)
 }
 
 async fn read_upload(state: &AppState, mut multipart: Multipart) -> Result<Staged, ApiError> {

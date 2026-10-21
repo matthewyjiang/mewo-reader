@@ -2032,3 +2032,1608 @@ async fn one_open_library_pair_per_request() {
     assert_eq!(row.error.as_deref(), Some("No release yet."));
     assert!(world.sab.lock().await.adds.is_empty());
 }
+
+struct Account {
+    token: String,
+    id: String,
+}
+
+async fn account(world: &World, username: &str) -> Account {
+    let token = register(&world.app, username, "password1").await;
+    let id: String = sqlx::query_scalar("SELECT id FROM users WHERE username = ?")
+        .bind(username)
+        .fetch_one(&world.state.pool)
+        .await
+        .unwrap();
+    Account { token, id }
+}
+
+async fn post_work(world: &World, token: &str, work: &str) -> (StatusCode, Value) {
+    json_req(
+        &world.app,
+        "POST",
+        "/v1/requests",
+        Some(token),
+        json!({
+            "workKey": work,
+            "title": "Dune",
+            "author": "Frank Herbert",
+            "year": 1965,
+            "coverId": 11481354
+        }),
+    )
+    .await
+}
+
+async fn follows_of(pool: &SqlitePool, id: &str) -> Option<String> {
+    sqlx::query_scalar("SELECT follows FROM book_requests WHERE id = ?")
+        .bind(id)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+}
+
+fn epub_file(world: &World, owner: &str, book: &str) -> std::path::PathBuf {
+    world
+        .state
+        .data_dir
+        .join("books")
+        .join(owner)
+        .join(book)
+        .join("book.epub")
+}
+
+async fn book_count(pool: &SqlitePool) -> i64 {
+    sqlx::query_scalar("SELECT COUNT(*) FROM books")
+        .fetch_one(pool)
+        .await
+        .unwrap()
+}
+
+fn two_releases(origin: &str) -> Vec<Value> {
+    vec![
+        release(origin, "g1", "Frank.Herbert.Dune.1965.RETAIL.EPUB", 10),
+        release(origin, "g2", "Frank.Herbert.Dune.1965.EPUB", 1),
+    ]
+}
+
+#[tokio::test]
+async fn reuse_of_a_private_copy_skips_the_download() {
+    let world = world().await;
+    let book_id = bring_in(&world, "/works/OL893414W").await;
+    let queries = world.prowlarr.lock().await.queries.len();
+    let adds = world.sab.lock().await.adds.len();
+    let ada = account(&world, "ada").await;
+    let carol = account(&world, "carol").await;
+
+    let (status, body) = post_work(&world, &ada.token, "/works/OL893414W").await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    assert_eq!(body["state"], "imported");
+    assert_eq!(body["progress"], 100);
+    assert_eq!(body["bookId"], book_id);
+    assert_eq!(body["requester"], "ada");
+    assert!(body.get("follows").is_none(), "{body}");
+    let ada_request = body["id"].as_str().unwrap();
+    assert_ne!(ada_request, book_id);
+
+    assert_eq!(book_count(&world.state.pool).await, 1);
+    assert!(epub_file(&world, &world.user_id, &book_id).is_file());
+    assert!(!epub_file(&world, &ada.id, &book_id).exists());
+    assert_eq!(world.prowlarr.lock().await.queries.len(), queries);
+    assert_eq!(world.sab.lock().await.adds.len(), adds);
+
+    let (status, again) = post_work(&world, &ada.token, "/works/OL893414W").await;
+    assert_eq!(status, StatusCode::OK, "{again}");
+    assert_eq!(again["id"], ada_request);
+
+    let (status, library) = empty_req(&world.app, "GET", "/v1/library", Some(&ada.token)).await;
+    assert_eq!(status, StatusCode::OK, "{library}");
+    let held = library["books"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|book| book["id"] == book_id)
+        .unwrap();
+    assert_eq!(held["held"], true);
+    assert_eq!(held["ownerUsername"], "");
+    assert_eq!(held["mine"], false);
+    assert_eq!(held["shared"], false);
+
+    let (status, _) = empty_req(
+        &world.app,
+        "GET",
+        &format!("/v1/books/{book_id}/epub"),
+        Some(&ada.token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, missing) = empty_req(
+        &world.app,
+        "GET",
+        &format!("/v1/books/{book_id}"),
+        Some(&carol.token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{missing}");
+    let (status, _) = empty_req(
+        &world.app,
+        "GET",
+        &format!("/v1/books/{book_id}/epub"),
+        Some(&carol.token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn a_follower_completes_with_the_leader() {
+    let world = world().await;
+    world.prowlarr.lock().await.key_ok = true;
+    let created = ask(&world, "/works/OL893414W").await;
+    let leader = created["id"].as_str().unwrap().to_string();
+    let now = created["createdAt"].as_i64().unwrap();
+    worker::tick_at(&world.state, now).await.unwrap();
+    world.sab.lock().await.jobs[0].percent = 40;
+    worker::tick_at(&world.state, now + POLL).await.unwrap();
+
+    let ada = account(&world, "ada").await;
+    let (status, body) = post_work(&world, &ada.token, "/works/OL893414W").await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    assert_eq!(body["state"], "downloading");
+    assert_eq!(body["progress"], 40);
+    assert_eq!(body["requester"], "ada");
+    assert!(body.get("follows").is_none(), "{body}");
+    assert!(!body.to_string().contains("matt"), "{body}");
+    let ada_id = body["id"].as_str().unwrap().to_string();
+    assert_eq!(
+        follows_of(&world.state.pool, &ada_id).await.as_deref(),
+        Some(leader.as_str())
+    );
+    assert_eq!(world.sab.lock().await.adds.len(), 1);
+
+    let (status, mine) = empty_req(&world.app, "GET", "/v1/requests", Some(&ada.token)).await;
+    assert_eq!(status, StatusCode::OK, "{mine}");
+    assert!(mine["items"][0].get("follows").is_none(), "{mine}");
+    let (status, all) =
+        empty_req(&world.app, "GET", "/v1/requests?all=1", Some(&world.token)).await;
+    assert_eq!(status, StatusCode::OK, "{all}");
+    let admin = all["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["id"] == ada_id)
+        .unwrap();
+    assert_eq!(admin["follows"], "matt");
+    assert_eq!(admin["state"], "downloading");
+
+    sqlx::query("UPDATE book_requests SET download_id = 'follower-job' WHERE id = ?")
+        .bind(&ada_id)
+        .execute(&world.state.pool)
+        .await
+        .unwrap();
+    worker::tick_at(&world.state, now + POLL).await.unwrap();
+    assert!(stored(&world.state.pool, &ada_id)
+        .await
+        .download_id
+        .is_none());
+    assert!(world
+        .sab
+        .lock()
+        .await
+        .deletes
+        .iter()
+        .any(|nzo| nzo == "follower-job"));
+    assert_eq!(
+        stored(&world.state.pool, &leader).await.state,
+        "downloading"
+    );
+
+    let nzo = world.sab.lock().await.adds[0].nzo.clone();
+    finish_job(&world, &nzo, &format!("/data/mewo-{leader}")).await;
+    write_epub(
+        &world.downloads.path().join(format!("mewo-{leader}")),
+        "Dune.epub",
+        &common::epub(),
+    );
+    worker::tick_at(&world.state, now + POLL * 2).await.unwrap();
+
+    let lead = stored(&world.state.pool, &leader).await;
+    let follow = stored(&world.state.pool, &ada_id).await;
+    assert_eq!(lead.state, "imported");
+    assert_eq!(follow.state, "imported");
+    assert_eq!(lead.book_id.as_deref(), Some(leader.as_str()));
+    assert_eq!(follow.book_id, lead.book_id);
+    assert_eq!(follow.progress, 100);
+    assert!(follows_of(&world.state.pool, &ada_id).await.is_none());
+    assert_eq!(book_count(&world.state.pool).await, 1);
+    assert_eq!(world.sab.lock().await.adds.len(), 1);
+}
+
+#[tokio::test]
+async fn follower_takes_over_when_the_leader_cancels() {
+    let world = world().await;
+    {
+        let mut prowl = world.prowlarr.lock().await;
+        prowl.key_ok = true;
+        let origin = prowl.origin.clone();
+        prowl.releases = two_releases(&origin);
+    }
+    let created = ask(&world, "/works/OL893414W").await;
+    let leader = created["id"].as_str().unwrap().to_string();
+    let now = created["createdAt"].as_i64().unwrap();
+    worker::tick_at(&world.state, now).await.unwrap();
+    let tried = stored(&world.state.pool, &leader).await.tried_guids;
+    assert!(tried.contains("g1"), "{tried}");
+    let nzo = world.sab.lock().await.adds[0].nzo.clone();
+
+    let ada = account(&world, "ada").await;
+    let (status, body) = post_work(&world, &ada.token, "/works/OL893414W").await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    let ada_id = body["id"].as_str().unwrap().to_string();
+
+    let (status, _) = empty_req(
+        &world.app,
+        "DELETE",
+        &format!("/v1/requests/{leader}"),
+        Some(&world.token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    assert_eq!(stored(&world.state.pool, &leader).await.state, "canceled");
+    assert!(world.sab.lock().await.deletes.iter().any(|id| id == &nzo));
+
+    let promoted = stored(&world.state.pool, &ada_id).await;
+    assert_eq!(promoted.state, "requested");
+    assert!(follows_of(&world.state.pool, &ada_id).await.is_none());
+    assert_eq!(promoted.attempts, 0);
+    assert_eq!(promoted.tried_guids, tried);
+    assert_eq!(promoted.next_check_at, promoted.updated_at);
+    assert_eq!(promoted.progress, 0);
+
+    worker::tick_at(&world.state, promoted.next_check_at)
+        .await
+        .unwrap();
+    let promoted = stored(&world.state.pool, &ada_id).await;
+    assert_eq!(promoted.state, "downloading");
+    assert_eq!(promoted.attempts, 1);
+    assert!(
+        promoted.tried_guids.contains("g2"),
+        "{}",
+        promoted.tried_guids
+    );
+    let urls: Vec<String> = world
+        .sab
+        .lock()
+        .await
+        .adds
+        .iter()
+        .map(|add| add.name.clone())
+        .collect();
+    assert_eq!(urls.len(), 2);
+    assert!(urls[1].contains("/nzb/g2"), "{urls:?}");
+}
+
+#[tokio::test]
+async fn follower_takes_over_when_the_leader_fails() {
+    let world = world().await;
+    world.prowlarr.lock().await.key_ok = true;
+    let created = ask(&world, "/works/OL893414W").await;
+    let leader = created["id"].as_str().unwrap().to_string();
+    let now = created["createdAt"].as_i64().unwrap();
+    worker::tick_at(&world.state, now).await.unwrap();
+    let tried = stored(&world.state.pool, &leader).await.tried_guids;
+    sqlx::query("UPDATE book_requests SET attempts = 3 WHERE id = ?")
+        .bind(&leader)
+        .execute(&world.state.pool)
+        .await
+        .unwrap();
+
+    let ada = account(&world, "ada").await;
+    let bea = account(&world, "bea").await;
+    let carol = account(&world, "carol").await;
+    let mut ids = Vec::new();
+    for account in [&ada, &bea, &carol] {
+        let (status, body) = post_work(&world, &account.token, "/works/OL893414W").await;
+        assert_eq!(status, StatusCode::CREATED, "{body}");
+        ids.push(body["id"].as_str().unwrap().to_string());
+    }
+
+    fail_current(&world, "CRC error").await;
+    worker::tick_at(&world.state, now + POLL).await.unwrap();
+    let failed = stored(&world.state.pool, &leader).await;
+    assert_eq!(failed.state, "failed");
+    assert_eq!(failed.error.as_deref(), Some("Download failed: CRC error"));
+
+    let promoted = stored(&world.state.pool, &ids[0]).await;
+    assert_eq!(promoted.state, "requested");
+    assert_eq!(promoted.attempts, 0);
+    assert_eq!(promoted.tried_guids, tried);
+    assert!(follows_of(&world.state.pool, &ids[0]).await.is_none());
+    assert_eq!(
+        follows_of(&world.state.pool, &ids[1]).await.as_deref(),
+        Some(ids[0].as_str())
+    );
+    assert_eq!(
+        follows_of(&world.state.pool, &ids[2]).await.as_deref(),
+        Some(ids[0].as_str())
+    );
+    let leaders: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM book_requests
+         WHERE work_key = '/works/OL893414W' AND follows IS NULL
+           AND state IN ('requested', 'downloading')",
+    )
+    .fetch_one(&world.state.pool)
+    .await
+    .unwrap();
+    assert_eq!(leaders, 1);
+}
+
+#[tokio::test]
+async fn one_leader_under_concurrent_requests() {
+    let world = world().await;
+    let ada = account(&world, "ada").await;
+    let bea = account(&world, "bea").await;
+    let work = "/works/OLCONC";
+    let (left, right) = tokio::join!(
+        post_work(&world, &ada.token, work),
+        post_work(&world, &bea.token, work),
+    );
+    assert_eq!(left.0, StatusCode::CREATED, "{}", left.1);
+    assert_eq!(right.0, StatusCode::CREATED, "{}", right.1);
+    let leaders: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM book_requests
+         WHERE work_key = ? AND follows IS NULL AND state = 'requested'",
+    )
+    .bind(work)
+    .fetch_one(&world.state.pool)
+    .await
+    .unwrap();
+    let followers: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM book_requests
+         WHERE work_key = ? AND follows IS NOT NULL AND state = 'requested'",
+    )
+    .bind(work)
+    .fetch_one(&world.state.pool)
+    .await
+    .unwrap();
+    assert_eq!(leaders, 1);
+    assert_eq!(followers, 1);
+
+    let err = sqlx::query(
+        "INSERT INTO book_requests
+         (id, user_id, work_key, title, author, state, next_check_at, created_at, updated_at)
+         VALUES ('second-leader', ?, ?, 'Dune', 'Frank Herbert', 'requested', 1, 1, 1)",
+    )
+    .bind(&world.user_id)
+    .bind(work)
+    .execute(&world.state.pool)
+    .await
+    .unwrap_err();
+    let message = err.to_string();
+    assert!(
+        message.contains("work_key") && !message.contains("user_id"),
+        "{message}"
+    );
+}
+
+#[tokio::test]
+async fn followers_and_reuses_do_not_count_toward_the_cap() {
+    let world = world().await;
+    let ada = account(&world, "ada").await;
+    for n in 0..5 {
+        let (status, body) = post_work(&world, &ada.token, &format!("/works/OLCAP{n}W")).await;
+        assert_eq!(status, StatusCode::CREATED, "{body}");
+    }
+    let (status, body) = post_work(&world, &ada.token, "/works/OLCAP6W").await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_eq!(body["error"], "You have 5 requests in progress.");
+
+    let (status, body) = post_work(&world, &world.token, "/works/OLCAPLEAD").await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    let (status, body) = post_work(&world, &ada.token, "/works/OLCAPLEAD").await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    assert_eq!(body["state"], "requested");
+    assert!(follows_of(&world.state.pool, body["id"].as_str().unwrap())
+        .await
+        .is_some());
+    let (status, body) = post_work(&world, &ada.token, "/works/OLCAP7W").await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_eq!(body["error"], "You have 5 requests in progress.");
+    let leaders: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM book_requests
+         WHERE user_id = ? AND follows IS NULL AND state IN ('requested', 'downloading')",
+    )
+    .bind(&ada.id)
+    .fetch_one(&world.state.pool)
+    .await
+    .unwrap();
+    assert_eq!(leaders, 5);
+}
+
+async fn give_up(world: &World, token: &str, work: &str) -> String {
+    let (status, body) = post_work(world, token, work).await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    let id = body["id"].as_str().unwrap().to_string();
+    let now = body["createdAt"].as_i64().unwrap();
+    worker::tick_at(&world.state, now).await.unwrap();
+    worker::tick_at(&world.state, now + 14 * DAY + 1)
+        .await
+        .unwrap();
+    assert_eq!(stored(&world.state.pool, &id).await.state, "failed");
+    id
+}
+
+#[tokio::test]
+async fn retry_reuses_follows_or_leads() {
+    let world = world().await;
+    let ada = account(&world, "ada").await;
+    let reuse = give_up(&world, &ada.token, "/works/OLREUSE").await;
+    let follow = give_up(&world, &ada.token, "/works/OLFOLLOW").await;
+    let lead = give_up(&world, &ada.token, "/works/OLLEAD").await;
+    world.prowlarr.lock().await.key_ok = true;
+
+    let book_id = bring_in(&world, "/works/OLREUSE").await;
+    let (status, body) = empty_req(
+        &world.app,
+        "POST",
+        &format!("/v1/requests/{reuse}/retry"),
+        Some(&ada.token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["state"], "imported");
+    assert_eq!(body["bookId"], book_id);
+    assert_eq!(body["progress"], 100);
+    assert_eq!(book_count(&world.state.pool).await, 1);
+
+    let created = ask(&world, "/works/OLFOLLOW").await;
+    let leader = created["id"].as_str().unwrap().to_string();
+    let now = created["createdAt"].as_i64().unwrap();
+    worker::tick_at(&world.state, now).await.unwrap();
+    let adds = world.sab.lock().await.adds.len();
+    let (status, body) = empty_req(
+        &world.app,
+        "POST",
+        &format!("/v1/requests/{follow}/retry"),
+        Some(&ada.token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["state"], "downloading");
+    assert_eq!(body["requester"], "ada");
+    assert!(body.get("follows").is_none(), "{body}");
+    assert_eq!(
+        follows_of(&world.state.pool, &follow).await.as_deref(),
+        Some(leader.as_str())
+    );
+    assert_eq!(world.sab.lock().await.adds.len(), adds);
+
+    let (status, body) = empty_req(
+        &world.app,
+        "POST",
+        &format!("/v1/requests/{lead}/retry"),
+        Some(&ada.token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["state"], "requested");
+    assert!(follows_of(&world.state.pool, &lead).await.is_none());
+    let due = stored(&world.state.pool, &lead).await.next_check_at;
+    worker::tick_at(&world.state, due).await.unwrap();
+    let row = stored(&world.state.pool, &lead).await;
+    assert_eq!(row.state, "downloading");
+    assert_eq!(row.attempts, 1);
+}
+
+async fn say(world: &World, token: &str, book: &str, text: &str) {
+    let (status, body) = json_req(
+        &world.app,
+        "POST",
+        &format!("/v1/books/{book}/comments/0"),
+        Some(token),
+        json!({ "text": text }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+}
+
+async fn thread_texts(world: &World, token: &str, book: &str) -> Vec<String> {
+    let (status, thread) = empty_req(
+        &world.app,
+        "GET",
+        &format!("/v1/books/{book}/comments/0"),
+        Some(token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{thread}");
+    thread["comments"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|row| row["text"].as_str().unwrap().to_string())
+        .collect()
+}
+
+#[tokio::test]
+async fn private_holders_do_not_see_each_others_activity() {
+    let world = world().await;
+    let book = bring_in(&world, "/works/OL893414W").await;
+    let ada = account(&world, "ada").await;
+    let carol = account(&world, "carol").await;
+    let (status, body) = post_work(&world, &ada.token, "/works/OL893414W").await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+
+    say(&world, &world.token, &book, "owner note").await;
+    say(&world, &ada.token, &book, "holder note").await;
+    for token in [&world.token, &ada.token] {
+        let (status, body) = empty_req(
+            &world.app,
+            "PUT",
+            &format!("/v1/books/{book}/posts/0/repost"),
+            Some(token),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let (status, body) = empty_req(
+            &world.app,
+            "POST",
+            &format!("/v1/books/{book}/likes/0"),
+            Some(token),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["ids"], json!(["0"]));
+    }
+    let likes: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM likes WHERE book_id = ? AND post_id = '0'")
+            .bind(&book)
+            .fetch_one(&world.state.pool)
+            .await
+            .unwrap();
+    assert_eq!(likes, 2);
+
+    let (status, _) = empty_req(
+        &world.app,
+        "GET",
+        &format!("/v1/books/{book}"),
+        Some(&carol.token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+
+    for (token, name, text) in [
+        (world.token.as_str(), "matt", "owner note"),
+        (ada.token.as_str(), "ada", "holder note"),
+    ] {
+        let (status, index) = empty_req(
+            &world.app,
+            "GET",
+            &format!("/v1/books/{book}/comments"),
+            Some(token),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{index}");
+        assert_eq!(index["counts"]["0"], 1, "{name} {index}");
+        assert_eq!(index["reposts"]["0"], 1, "{name} {index}");
+
+        let (status, thread) = empty_req(
+            &world.app,
+            "GET",
+            &format!("/v1/books/{book}/comments/0"),
+            Some(token),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{thread}");
+        assert_eq!(thread["comments"].as_array().unwrap().len(), 1);
+        assert_eq!(thread["comments"][0]["text"], text);
+        assert_eq!(thread["comments"][0]["username"], name);
+
+        let (status, state) = empty_req(
+            &world.app,
+            "PUT",
+            &format!("/v1/books/{book}/posts/0/repost"),
+            Some(token),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{state}");
+        assert_eq!(state["reposts"], 1);
+        assert_eq!(state["reposted"], true);
+
+        let (status, feed) = empty_req(&world.app, "GET", "/v1/feed", Some(token)).await;
+        assert_eq!(status, StatusCode::OK, "{feed}");
+        let items = feed["items"].as_array().unwrap();
+        assert_eq!(items.len(), 2, "{name} {feed}");
+        assert!(items.iter().all(|item| item["actor"]["username"] == name));
+
+        let (status, posts) = empty_req(
+            &world.app,
+            "GET",
+            &format!("/v1/users/{name}/posts"),
+            Some(token),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{posts}");
+        assert_eq!(posts["items"].as_array().unwrap().len(), 1);
+        let (status, reposts) = empty_req(
+            &world.app,
+            "GET",
+            &format!("/v1/users/{name}/reposts"),
+            Some(token),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{reposts}");
+        assert_eq!(reposts["items"].as_array().unwrap().len(), 1);
+        let (status, replies) = empty_req(
+            &world.app,
+            "GET",
+            &format!("/v1/profiles/{name}/replies"),
+            Some(token),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{replies}");
+        assert_eq!(replies["replies"].as_array().unwrap().len(), 1);
+        let (status, profile) =
+            empty_req(&world.app, "GET", &format!("/v1/users/{name}"), Some(token)).await;
+        assert_eq!(status, StatusCode::OK, "{profile}");
+        assert_eq!(profile["postCount"], 1);
+        assert_eq!(profile["repostCount"], 1);
+    }
+
+    for (viewer, subject) in [(&ada.token, "matt"), (&world.token, "ada")] {
+        let (status, posts) = empty_req(
+            &world.app,
+            "GET",
+            &format!("/v1/users/{subject}/posts"),
+            Some(viewer),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{posts}");
+        assert_eq!(posts["items"].as_array().unwrap().len(), 0, "{posts}");
+        let (status, reposts) = empty_req(
+            &world.app,
+            "GET",
+            &format!("/v1/users/{subject}/reposts"),
+            Some(viewer),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{reposts}");
+        assert_eq!(reposts["items"].as_array().unwrap().len(), 0, "{reposts}");
+        let (status, replies) = empty_req(
+            &world.app,
+            "GET",
+            &format!("/v1/profiles/{subject}/replies"),
+            Some(viewer),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{replies}");
+        assert_eq!(replies["replies"].as_array().unwrap().len(), 0, "{replies}");
+        let (status, profile) = empty_req(
+            &world.app,
+            "GET",
+            &format!("/v1/users/{subject}"),
+            Some(viewer),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{profile}");
+        assert_eq!(profile["postCount"], 0, "{profile}");
+        assert_eq!(profile["repostCount"], 0, "{profile}");
+        let (status, feed) = empty_req(&world.app, "GET", "/v1/feed", Some(viewer)).await;
+        assert_eq!(status, StatusCode::OK, "{feed}");
+        assert!(feed["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|item| item["actor"]["username"] != subject));
+    }
+}
+
+#[tokio::test]
+async fn sharing_hides_replies_that_were_written_while_private() {
+    let world = world().await;
+    let book = bring_in(&world, "/works/OL893414W").await;
+    let ada = account(&world, "ada").await;
+    let carol = account(&world, "carol").await;
+    let (status, _) = post_work(&world, &ada.token, "/works/OL893414W").await;
+    assert_eq!(status, StatusCode::CREATED);
+    say(&world, &world.token, &book, "owner note").await;
+    say(&world, &ada.token, &book, "holder private").await;
+
+    let (status, _) = json_req(
+        &world.app,
+        "PATCH",
+        &format!("/v1/books/{book}"),
+        Some(&world.token),
+        json!({ "shared": true }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let carol_texts = thread_texts(&world, &carol.token, &book).await;
+    assert_eq!(carol_texts, vec!["owner note".to_string()]);
+    let ada_texts = thread_texts(&world, &ada.token, &book).await;
+    assert!(
+        ada_texts.contains(&"owner note".to_string()),
+        "{ada_texts:?}"
+    );
+    assert!(
+        ada_texts.contains(&"holder private".to_string()),
+        "{ada_texts:?}"
+    );
+    let matt_texts = thread_texts(&world, &world.token, &book).await;
+    assert_eq!(matt_texts, vec!["owner note".to_string()]);
+
+    say(&world, &ada.token, &book, "holder public").await;
+    let carol_texts = thread_texts(&world, &carol.token, &book).await;
+    assert_eq!(
+        carol_texts,
+        vec!["owner note".to_string(), "holder public".to_string()]
+    );
+    assert!(!carol_texts.iter().any(|text| text == "holder private"));
+
+    let (status, _) = json_req(
+        &world.app,
+        "PATCH",
+        &format!("/v1/books/{book}"),
+        Some(&world.token),
+        json!({ "shared": false }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, _) = empty_req(
+        &world.app,
+        "GET",
+        &format!("/v1/books/{book}"),
+        Some(&carol.token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let matt_texts = thread_texts(&world, &world.token, &book).await;
+    assert_eq!(matt_texts, vec!["owner note".to_string()]);
+    let ada_texts = thread_texts(&world, &ada.token, &book).await;
+    assert!(ada_texts.contains(&"holder private".to_string()));
+    assert!(ada_texts.contains(&"holder public".to_string()));
+    assert!(!ada_texts.iter().any(|text| text == "owner note"));
+
+    let (status, _) = json_req(
+        &world.app,
+        "PATCH",
+        &format!("/v1/books/{book}"),
+        Some(&world.token),
+        json!({ "shared": true }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let carol_texts = thread_texts(&world, &carol.token, &book).await;
+    assert!(carol_texts.iter().any(|text| text == "holder public"));
+    assert!(carol_texts.iter().any(|text| text == "owner note"));
+    assert!(!carol_texts.iter().any(|text| text == "holder private"));
+}
+
+#[tokio::test]
+async fn the_private_flag_is_set_by_a_trigger() {
+    let world = world().await;
+    let ada = account(&world, "ada").await;
+    sqlx::query(
+        "INSERT INTO books (id, user_id, title, author, handle, imported_at, is_sample, shared)
+         VALUES ('private-book', ?, 'Dune', 'Frank', 'dune', 1, 0, 0),
+                ('sample-book', ?, 'Sample', 'Mewo', 'mewo', 1, 1, 0),
+                ('shared-book', ?, 'Shared', 'Frank', 'shared', 1, 0, 1)",
+    )
+    .bind(&world.user_id)
+    .bind(&world.user_id)
+    .bind(&world.user_id)
+    .execute(&world.state.pool)
+    .await
+    .unwrap();
+
+    for (id, user, book) in [
+        ("c-holder", ada.id.as_str(), "private-book"),
+        ("c-owner", world.user_id.as_str(), "private-book"),
+        ("c-sample", ada.id.as_str(), "sample-book"),
+        ("c-shared", ada.id.as_str(), "shared-book"),
+    ] {
+        sqlx::query(
+            "INSERT INTO comments (id, user_id, book_id, post_id, text, created_at)
+             VALUES (?, ?, ?, '0', 'hi', 1)",
+        )
+        .bind(id)
+        .bind(user)
+        .bind(book)
+        .execute(&world.state.pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO reposts (user_id, book_id, post_id, created_at) VALUES (?, ?, '0', 1)",
+        )
+        .bind(user)
+        .bind(book)
+        .execute(&world.state.pool)
+        .await
+        .unwrap();
+    }
+    let comment_private = async |id| -> i64 {
+        sqlx::query_scalar("SELECT private FROM comments WHERE id = ?")
+            .bind(id)
+            .fetch_one(&world.state.pool)
+            .await
+            .unwrap()
+    };
+    assert_eq!(comment_private("c-holder").await, 1);
+    assert_eq!(comment_private("c-owner").await, 0);
+    assert_eq!(comment_private("c-sample").await, 0);
+    assert_eq!(comment_private("c-shared").await, 0);
+    let repost_flag = async |book, user: &str| -> i64 {
+        sqlx::query_scalar("SELECT private FROM reposts WHERE user_id = ? AND book_id = ?")
+            .bind(user)
+            .bind(book)
+            .fetch_one(&world.state.pool)
+            .await
+            .unwrap()
+    };
+    assert_eq!(repost_flag("private-book", &ada.id).await, 1);
+    assert_eq!(repost_flag("private-book", &world.user_id).await, 0);
+    assert_eq!(repost_flag("sample-book", &ada.id).await, 0);
+}
+
+#[tokio::test]
+async fn owner_delete_passes_the_book_to_the_earliest_holder() {
+    let world = world().await;
+    let book = bring_in(&world, "/works/OL893414W").await;
+    let ada = account(&world, "ada").await;
+    let bea = account(&world, "bea").await;
+    for account in [&ada, &bea] {
+        let (status, body) = post_work(&world, &account.token, "/works/OL893414W").await;
+        assert_eq!(status, StatusCode::CREATED, "{body}");
+    }
+    say(&world, &world.token, &book, "owner note").await;
+    say(&world, &ada.token, &book, "ada note").await;
+    say(&world, &bea.token, &book, "bea note").await;
+    let (status, _) = empty_req(
+        &world.app,
+        "POST",
+        &format!("/v1/books/{book}/likes/0"),
+        Some(&world.token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, _) = json_req(
+        &world.app,
+        "PATCH",
+        &format!("/v1/books/{book}"),
+        Some(&world.token),
+        json!({ "shared": true, "progressIndex": 4 }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let path = epub_file(&world, &world.user_id, &book);
+    let before = std::fs::read(&path).unwrap();
+
+    let (status, _) = empty_req(
+        &world.app,
+        "DELETE",
+        &format!("/v1/books/{book}"),
+        Some(&world.token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+
+    let row: (String, String, i64) =
+        sqlx::query_as("SELECT user_id, files_user_id, shared FROM books WHERE id = ?")
+            .bind(&book)
+            .fetch_one(&world.state.pool)
+            .await
+            .unwrap();
+    assert_eq!(row.0, ada.id);
+    assert_eq!(row.1, world.user_id);
+    assert_eq!(row.2, 0);
+    assert_eq!(std::fs::read(&path).unwrap(), before);
+    assert!(!epub_file(&world, &ada.id, &book).exists());
+
+    let matt_comments: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM comments WHERE book_id = ? AND user_id = ?")
+            .bind(&book)
+            .bind(&world.user_id)
+            .fetch_one(&world.state.pool)
+            .await
+            .unwrap();
+    assert_eq!(matt_comments, 0);
+    let matt_likes: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM likes WHERE book_id = ? AND user_id = ?")
+            .bind(&book)
+            .bind(&world.user_id)
+            .fetch_one(&world.state.pool)
+            .await
+            .unwrap();
+    assert_eq!(matt_likes, 0);
+    let matt_progress: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM book_progress WHERE book_id = ? AND user_id = ?")
+            .bind(&book)
+            .bind(&world.user_id)
+            .fetch_one(&world.state.pool)
+            .await
+            .unwrap();
+    assert_eq!(matt_progress, 0);
+    let matt_request: String = sqlx::query_scalar(
+        "SELECT state FROM book_requests WHERE user_id = ? AND work_key = '/works/OL893414W'",
+    )
+    .bind(&world.user_id)
+    .fetch_one(&world.state.pool)
+    .await
+    .unwrap();
+    assert_eq!(matt_request, "canceled");
+
+    let (status, _) = empty_req(
+        &world.app,
+        "GET",
+        &format!("/v1/books/{book}"),
+        Some(&world.token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let (status, owned) = empty_req(
+        &world.app,
+        "GET",
+        &format!("/v1/books/{book}"),
+        Some(&ada.token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{owned}");
+    assert_eq!(owned["mine"], true);
+    assert_eq!(owned["held"], false);
+    assert_eq!(owned["shared"], false);
+    let (status, held) = empty_req(
+        &world.app,
+        "GET",
+        &format!("/v1/books/{book}"),
+        Some(&bea.token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{held}");
+    assert_eq!(held["held"], true);
+    assert_eq!(held["ownerUsername"], "");
+
+    let (status, _) = json_req(
+        &world.app,
+        "PATCH",
+        &format!("/v1/books/{book}"),
+        Some(&ada.token),
+        json!({ "shared": true }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, thread) = empty_req(
+        &world.app,
+        "GET",
+        &format!("/v1/books/{book}/comments/0"),
+        Some(&bea.token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{thread}");
+    let texts: Vec<&str> = thread["comments"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|row| row["text"].as_str().unwrap())
+        .collect();
+    assert_eq!(texts, vec!["bea note"]);
+    let ada_private: i64 =
+        sqlx::query_scalar("SELECT private FROM comments WHERE book_id = ? AND user_id = ?")
+            .bind(&book)
+            .bind(&ada.id)
+            .fetch_one(&world.state.pool)
+            .await
+            .unwrap();
+    assert_eq!(ada_private, 1);
+}
+
+#[tokio::test]
+async fn holder_remove_drops_only_their_access() {
+    let world = world().await;
+    let book = bring_in(&world, "/works/OL893414W").await;
+    let ada = account(&world, "ada").await;
+    let carol = account(&world, "carol").await;
+    let (status, body) = post_work(&world, &ada.token, "/works/OL893414W").await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    let request_id = body["id"].as_str().unwrap().to_string();
+    say(&world, &ada.token, &book, "holder private").await;
+    let (status, _) = json_req(
+        &world.app,
+        "PATCH",
+        &format!("/v1/books/{book}"),
+        Some(&ada.token),
+        json!({ "progressIndex": 2 }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, _) = empty_req(
+        &world.app,
+        "POST",
+        &format!("/v1/books/{book}/likes/0"),
+        Some(&ada.token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, shared) = json_req(
+        &world.app,
+        "PATCH",
+        &format!("/v1/books/{book}"),
+        Some(&world.token),
+        json!({ "shared": true }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{shared}");
+    say(&world, &ada.token, &book, "holder public").await;
+    let (status, denied) = empty_req(
+        &world.app,
+        "DELETE",
+        &format!("/v1/books/{book}"),
+        Some(&carol.token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{denied}");
+
+    let (status, _) = empty_req(
+        &world.app,
+        "DELETE",
+        &format!("/v1/books/{book}"),
+        Some(&ada.token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let request = stored(&world.state.pool, &request_id).await;
+    assert_eq!(request.state, "canceled");
+    assert!(request.book_id.is_none());
+    let private_left: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM comments WHERE book_id = ? AND user_id = ? AND text = 'holder private'",
+    )
+    .bind(&book)
+    .bind(&ada.id)
+    .fetch_one(&world.state.pool)
+    .await
+    .unwrap();
+    assert_eq!(private_left, 0);
+    let public_left: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM comments WHERE book_id = ? AND text = 'holder public'",
+    )
+    .bind(&book)
+    .fetch_one(&world.state.pool)
+    .await
+    .unwrap();
+    assert_eq!(public_left, 1);
+    let progress: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM book_progress WHERE book_id = ? AND user_id = ?")
+            .bind(&book)
+            .bind(&ada.id)
+            .fetch_one(&world.state.pool)
+            .await
+            .unwrap();
+    assert_eq!(progress, 0);
+    let likes: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM likes WHERE book_id = ? AND user_id = ?")
+            .bind(&book)
+            .bind(&ada.id)
+            .fetch_one(&world.state.pool)
+            .await
+            .unwrap();
+    assert_eq!(likes, 0);
+    let owner: String = sqlx::query_scalar("SELECT user_id FROM books WHERE id = ?")
+        .bind(&book)
+        .fetch_one(&world.state.pool)
+        .await
+        .unwrap();
+    assert_eq!(owner, world.user_id);
+    assert!(epub_file(&world, &world.user_id, &book).is_file());
+
+    let (status, still) = empty_req(
+        &world.app,
+        "GET",
+        &format!("/v1/books/{book}"),
+        Some(&ada.token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{still}");
+    assert_eq!(still["held"], false);
+    assert_eq!(still["shared"], true);
+    assert_eq!(still["ownerUsername"], "matt");
+}
+
+#[tokio::test]
+async fn migration_008_demotes_duplicate_active_requests() {
+    let tmp = TempDir::new().unwrap();
+    let url = format!("sqlite://{}?mode=rwc", tmp.path().join("mewo.db").display());
+    let pool = SqlitePool::connect(&url).await.unwrap();
+    let migrator = sqlx::migrate!("./migrations");
+    let mut conn = pool.acquire().await.unwrap();
+    Migrate::ensure_migrations_table(&mut *conn).await.unwrap();
+    for migration in migrator.iter() {
+        if migration.version < 8 {
+            Migrate::apply(&mut *conn, migration).await.unwrap();
+        }
+    }
+    drop(conn);
+    sqlx::query(
+        "INSERT INTO users (id, username, username_norm, password_hash, created_at)
+         VALUES ('u1', 'ann', 'ann', 'x', 1), ('u2', 'bob', 'bob', 'x', 2)",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO book_requests
+         (id, user_id, work_key, title, author, state, download_id, next_check_at, created_at, updated_at)
+         VALUES
+         ('m1-old', 'u1', '/works/OLM1', 'Dune', 'Frank', 'downloading', 'sab-1', 1, 1700000000001, 1),
+         ('m1-new', 'u2', '/works/OLM1', 'Dune', 'Frank', 'requested', NULL, 1, 1700000000002, 1),
+         ('m2-b', 'u1', '/works/OLM2', 'Dune', 'Frank', 'downloading', 'sab-2', 1, 1700000000005, 1),
+         ('m2-a', 'u2', '/works/OLM2', 'Dune', 'Frank', 'requested', NULL, 1, 1700000000005, 1),
+         ('m3-old', 'u1', '/works/OLM3', 'Dune', 'Frank', 'requested', NULL, 1, 1700000000010, 1),
+         ('m3-new', 'u2', '/works/OLM3', 'Dune', 'Frank', 'downloading', 'sab-3', 1, 1700000000020, 1)",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::migrate!("./migrations").run(&pool).await.unwrap();
+
+    let row = |id: &'static str, pool: SqlitePool| async move {
+        sqlx::query_as::<_, (String, Option<String>, Option<String>)>(
+            "SELECT state, follows, download_id FROM book_requests WHERE id = ?",
+        )
+        .bind(id)
+        .fetch_one(&pool)
+        .await
+        .unwrap()
+    };
+    let oldest = row("m1-old", pool.clone()).await;
+    assert_eq!(oldest.0, "downloading");
+    assert!(oldest.1.is_none());
+    let newer = row("m1-new", pool.clone()).await;
+    assert_eq!(newer.0, "requested");
+    assert_eq!(newer.1.as_deref(), Some("m1-old"));
+    let same_time = row("m2-a", pool.clone()).await;
+    assert_eq!(same_time.0, "requested");
+    assert_eq!(same_time.1.as_deref(), Some("m2-b"));
+    let downloading = row("m2-b", pool.clone()).await;
+    assert_eq!(downloading.0, "downloading");
+    assert!(downloading.1.is_none());
+    assert_eq!(downloading.2.as_deref(), Some("sab-2"));
+    let older_requested = row("m3-old", pool.clone()).await;
+    assert_eq!(older_requested.0, "requested");
+    assert_eq!(older_requested.1.as_deref(), Some("m3-new"));
+    let newer_download = row("m3-new", pool.clone()).await;
+    assert_eq!(newer_download.0, "downloading");
+    assert!(newer_download.1.is_none());
+    assert_eq!(newer_download.2.as_deref(), Some("sab-3"));
+
+    let err = sqlx::query(
+        "INSERT INTO book_requests
+         (id, user_id, work_key, title, author, state, next_check_at, created_at, updated_at)
+         VALUES ('m1-third', 'u1', '/works/OLM1', 'Dune', 'Frank', 'requested', 1, 1700000000003, 1)",
+    )
+    .execute(&pool)
+    .await
+    .unwrap_err();
+    assert!(err.to_string().contains("work_key"), "{err}");
+    let files: Option<String> =
+        sqlx::query_scalar("SELECT files_user_id FROM books WHERE id = 'missing'")
+            .fetch_optional(&pool)
+            .await
+            .unwrap();
+    assert!(files.is_none());
+}
+
+#[tokio::test]
+async fn canceled_follower_keeps_its_own_state() {
+    let world = world().await;
+    world.prowlarr.lock().await.key_ok = true;
+    let created = ask(&world, "/works/OL893414W").await;
+    let leader = created["id"].as_str().unwrap().to_string();
+    let now = created["createdAt"].as_i64().unwrap();
+    worker::tick_at(&world.state, now).await.unwrap();
+    world.sab.lock().await.jobs[0].percent = 40;
+    worker::tick_at(&world.state, now + POLL).await.unwrap();
+    assert_eq!(stored(&world.state.pool, &leader).await.progress, 40);
+
+    let ada = account(&world, "ada").await;
+    let (status, body) = post_work(&world, &ada.token, "/works/OL893414W").await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    let ada_id = body["id"].as_str().unwrap().to_string();
+
+    let (status, _) = empty_req(
+        &world.app,
+        "DELETE",
+        &format!("/v1/requests/{ada_id}"),
+        Some(&ada.token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    assert!(follows_of(&world.state.pool, &ada_id).await.is_none());
+
+    let (status, mine) = empty_req(&world.app, "GET", "/v1/requests", Some(&ada.token)).await;
+    assert_eq!(status, StatusCode::OK, "{mine}");
+    assert_eq!(mine["items"][0]["id"], ada_id);
+    assert_eq!(mine["items"][0]["state"], "canceled");
+    assert_eq!(mine["items"][0]["progress"], 0);
+    assert!(mine["items"][0]["bookId"].is_null());
+    assert!(mine["items"][0].get("follows").is_none(), "{mine}");
+
+    let (status, page) = empty_req(
+        &world.app,
+        "GET",
+        "/v1/catalog/search?q=dune&page=1",
+        Some(&ada.token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{page}");
+    let item = page["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["workKey"] == "/works/OL893414W")
+        .unwrap();
+    assert_eq!(item["request"]["id"], ada_id);
+    assert_eq!(item["request"]["state"], "canceled");
+    assert_eq!(item["request"]["progress"], 0);
+    assert!(item["request"]["bookId"].is_null());
+
+    let (status, all) =
+        empty_req(&world.app, "GET", "/v1/requests?all=1", Some(&world.token)).await;
+    assert_eq!(status, StatusCode::OK, "{all}");
+    let admin = all["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["id"] == ada_id)
+        .unwrap();
+    assert_eq!(admin["state"], "canceled");
+    assert_eq!(admin["progress"], 0);
+    assert!(admin["bookId"].is_null());
+    assert!(admin.get("follows").is_none(), "{admin}");
+
+    let nzo = world.sab.lock().await.adds[0].nzo.clone();
+    finish_job(&world, &nzo, &format!("/data/mewo-{leader}")).await;
+    write_epub(
+        &world.downloads.path().join(format!("mewo-{leader}")),
+        "Dune.epub",
+        &common::epub(),
+    );
+    worker::tick_at(&world.state, now + POLL * 2).await.unwrap();
+    assert_eq!(stored(&world.state.pool, &leader).await.state, "imported");
+    let ada_row = stored(&world.state.pool, &ada_id).await;
+    assert_eq!(ada_row.state, "canceled");
+    assert!(ada_row.book_id.is_none());
+
+    let (status, mine) = empty_req(&world.app, "GET", "/v1/requests", Some(&ada.token)).await;
+    assert_eq!(status, StatusCode::OK, "{mine}");
+    assert_eq!(mine["items"][0]["state"], "canceled");
+    assert!(mine["items"][0]["bookId"].is_null(), "{mine}");
+    let (status, page) = empty_req(
+        &world.app,
+        "GET",
+        "/v1/catalog/search?q=dune&page=1",
+        Some(&ada.token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{page}");
+    let item = page["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["workKey"] == "/works/OL893414W")
+        .unwrap();
+    assert_eq!(item["request"]["state"], "canceled");
+    assert!(item["request"]["bookId"].is_null(), "{item}");
+}
+
+#[tokio::test]
+async fn holder_search_does_not_match_a_private_owners_name() {
+    let world = world().await;
+    let book_id = bring_in(&world, "/works/OL893414W").await;
+    let ada = account(&world, "ada").await;
+    let (status, body) = post_work(&world, &ada.token, "/works/OL893414W").await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    assert_eq!(body["bookId"], book_id);
+
+    let (status, by_owner) = empty_req(
+        &world.app,
+        "GET",
+        "/v1/search?q=matt&type=books",
+        Some(&ada.token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{by_owner}");
+    assert!(
+        by_owner["items"].as_array().unwrap().is_empty(),
+        "{by_owner}"
+    );
+
+    let (status, by_title) = empty_req(
+        &world.app,
+        "GET",
+        "/v1/search?q=Dune&type=books",
+        Some(&ada.token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{by_title}");
+    assert_eq!(by_title["items"][0]["id"], book_id);
+
+    let (status, owner_hits) = empty_req(
+        &world.app,
+        "GET",
+        "/v1/search?q=matt&type=books",
+        Some(&world.token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{owner_hits}");
+    assert_eq!(owner_hits["items"][0]["id"], book_id);
+
+    let (status, shared) = json_req(
+        &world.app,
+        "PATCH",
+        &format!("/v1/books/{book_id}"),
+        Some(&world.token),
+        json!({ "shared": true }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{shared}");
+    let (status, named) = empty_req(
+        &world.app,
+        "GET",
+        "/v1/search?q=matt&type=books",
+        Some(&ada.token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{named}");
+    assert_eq!(named["items"][0]["id"], book_id);
+}
+
+#[tokio::test]
+async fn sweep_promotes_followers_of_an_inactive_leader() {
+    let world = world().await;
+    {
+        let mut prowl = world.prowlarr.lock().await;
+        prowl.key_ok = true;
+        let origin = prowl.origin.clone();
+        prowl.releases = two_releases(&origin);
+    }
+    let created = ask(&world, "/works/OL893414W").await;
+    let leader = created["id"].as_str().unwrap().to_string();
+    let now = created["createdAt"].as_i64().unwrap();
+    worker::tick_at(&world.state, now).await.unwrap();
+
+    let ada = account(&world, "ada").await;
+    let bea = account(&world, "bea").await;
+    let (status, body) = post_work(&world, &ada.token, "/works/OL893414W").await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    let ada_id = body["id"].as_str().unwrap().to_string();
+    let (status, body) = post_work(&world, &bea.token, "/works/OL893414W").await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    let bea_id = body["id"].as_str().unwrap().to_string();
+
+    // The residue of a cancel that read `leading` before a promotion committed:
+    // the new leader is canceled and the followers still point at it.
+    sqlx::query(
+        "UPDATE book_requests
+         SET state = 'canceled', download_id = NULL, follows = NULL, updated_at = ?
+         WHERE id = ?",
+    )
+    .bind(now)
+    .bind(&leader)
+    .execute(&world.state.pool)
+    .await
+    .unwrap();
+
+    worker::tick_at(&world.state, now + POLL).await.unwrap();
+    assert_eq!(stored(&world.state.pool, &leader).await.state, "canceled");
+    assert!(follows_of(&world.state.pool, &ada_id).await.is_none());
+    let promoted = stored(&world.state.pool, &ada_id).await;
+    assert_eq!(promoted.state, "downloading");
+    assert_eq!(promoted.attempts, 1);
+    assert_eq!(
+        follows_of(&world.state.pool, &bea_id).await.as_deref(),
+        Some(ada_id.as_str())
+    );
+    assert_eq!(stored(&world.state.pool, &bea_id).await.state, "requested");
+}
+
+#[tokio::test]
+async fn sweep_follows_an_existing_leader_and_the_tick_continues() {
+    let world = world().await;
+    world.prowlarr.lock().await.key_ok = true;
+    let created = ask(&world, "/works/OLSTUCK").await;
+    let canceled = created["id"].as_str().unwrap().to_string();
+    let now = created["createdAt"].as_i64().unwrap();
+    worker::tick_at(&world.state, now).await.unwrap();
+
+    let ada = account(&world, "ada").await;
+    let bea = account(&world, "bea").await;
+    let (status, body) = post_work(&world, &ada.token, "/works/OLSTUCK").await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    let ada_id = body["id"].as_str().unwrap().to_string();
+    sqlx::query(
+        "UPDATE book_requests
+         SET state = 'canceled', download_id = NULL, follows = NULL, updated_at = ?
+         WHERE id = ?",
+    )
+    .bind(now)
+    .bind(&canceled)
+    .execute(&world.state.pool)
+    .await
+    .unwrap();
+
+    let (status, body) = post_work(&world, &bea.token, "/works/OLSTUCK").await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    let leader = body["id"].as_str().unwrap().to_string();
+    assert!(follows_of(&world.state.pool, &leader).await.is_none());
+    let (status, body) = post_work(&world, &world.token, "/works/OLOTHER").await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    let other = body["id"].as_str().unwrap().to_string();
+    let due = stored(&world.state.pool, &other).await.next_check_at;
+
+    worker::tick_at(&world.state, due).await.unwrap();
+    assert_eq!(
+        follows_of(&world.state.pool, &ada_id).await.as_deref(),
+        Some(leader.as_str())
+    );
+    assert_eq!(stored(&world.state.pool, &ada_id).await.state, "requested");
+    assert!(follows_of(&world.state.pool, &leader).await.is_none());
+    assert_eq!(stored(&world.state.pool, &other).await.state, "downloading");
+    worker::tick_at(&world.state, due + POLL).await.unwrap();
+}
+
+#[tokio::test]
+async fn a_holder_of_a_shared_book_still_holds_it() {
+    let world = world().await;
+    let book_id = bring_in(&world, "/works/OL893414W").await;
+    let ada = account(&world, "ada").await;
+    let carol = account(&world, "carol").await;
+    let (status, body) = post_work(&world, &ada.token, "/works/OL893414W").await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    assert_eq!(body["state"], "imported");
+
+    let (status, shared) = json_req(
+        &world.app,
+        "PATCH",
+        &format!("/v1/books/{book_id}"),
+        Some(&world.token),
+        json!({ "shared": true }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{shared}");
+
+    let (status, library) = empty_req(&world.app, "GET", "/v1/library", Some(&ada.token)).await;
+    assert_eq!(status, StatusCode::OK, "{library}");
+    let held = library["books"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|book| book["id"] == book_id)
+        .unwrap();
+    assert_eq!(held["held"], true);
+    assert_eq!(held["mine"], false);
+    assert_eq!(held["shared"], true);
+    assert_eq!(held["ownerUsername"], "matt");
+
+    let (status, book) = empty_req(
+        &world.app,
+        "GET",
+        &format!("/v1/books/{book_id}"),
+        Some(&ada.token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{book}");
+    assert_eq!(book["held"], true);
+    assert_eq!(book["ownerUsername"], "matt");
+
+    let (status, library) = empty_req(&world.app, "GET", "/v1/library", Some(&carol.token)).await;
+    assert_eq!(status, StatusCode::OK, "{library}");
+    let seen = library["books"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|book| book["id"] == book_id)
+        .unwrap();
+    assert_eq!(seen["held"], false);
+    assert_eq!(seen["shared"], true);
+    assert_eq!(seen["ownerUsername"], "matt");
+}
+
+#[tokio::test]
+async fn retry_of_an_old_row_conflicts_with_a_live_request() {
+    let world = world().await;
+    world.prowlarr.lock().await.key_ok = true;
+    let created = ask(&world, "/works/OL893414W").await;
+    let now = created["createdAt"].as_i64().unwrap();
+    worker::tick_at(&world.state, now).await.unwrap();
+
+    let ada = account(&world, "ada").await;
+    let (status, body) = post_work(&world, &ada.token, "/works/OL893414W").await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    let old = body["id"].as_str().unwrap().to_string();
+    let (status, _) = empty_req(
+        &world.app,
+        "DELETE",
+        &format!("/v1/requests/{old}"),
+        Some(&ada.token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+
+    let (status, body) = post_work(&world, &ada.token, "/works/OL893414W").await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    let live = body["id"].as_str().unwrap().to_string();
+
+    let (status, body) = empty_req(
+        &world.app,
+        "POST",
+        &format!("/v1/requests/{old}/retry"),
+        Some(&ada.token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_eq!(body["error"], "You already have a request for this book.");
+    assert_eq!(stored(&world.state.pool, &old).await.state, "canceled");
+    assert_eq!(stored(&world.state.pool, &live).await.state, "requested");
+    assert!(follows_of(&world.state.pool, &live).await.is_some());
+}
+
+#[tokio::test]
+async fn retry_reuse_does_not_import_a_second_row() {
+    let world = world().await;
+    world.prowlarr.lock().await.key_ok = true;
+    let created = ask(&world, "/works/OL893414W").await;
+    let leader = created["id"].as_str().unwrap().to_string();
+    let now = created["createdAt"].as_i64().unwrap();
+    worker::tick_at(&world.state, now).await.unwrap();
+
+    let ada = account(&world, "ada").await;
+    let (status, body) = post_work(&world, &ada.token, "/works/OL893414W").await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    let old = body["id"].as_str().unwrap().to_string();
+    let (status, _) = empty_req(
+        &world.app,
+        "DELETE",
+        &format!("/v1/requests/{old}"),
+        Some(&ada.token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+
+    let nzo = world.sab.lock().await.adds[0].nzo.clone();
+    finish_job(&world, &nzo, &format!("/data/mewo-{leader}")).await;
+    write_epub(
+        &world.downloads.path().join(format!("mewo-{leader}")),
+        "Dune.epub",
+        &common::epub(),
+    );
+    worker::tick_at(&world.state, now + POLL * 2).await.unwrap();
+    assert_eq!(stored(&world.state.pool, &leader).await.state, "imported");
+
+    let (status, body) = post_work(&world, &ada.token, "/works/OL893414W").await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    assert_eq!(body["state"], "imported");
+    let imported = body["id"].as_str().unwrap().to_string();
+    assert_ne!(imported, old);
+
+    let (status, body) = empty_req(
+        &world.app,
+        "POST",
+        &format!("/v1/requests/{old}/retry"),
+        Some(&ada.token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["id"], imported);
+    assert_eq!(body["state"], "imported");
+    assert_eq!(body["bookId"], leader);
+    assert_eq!(stored(&world.state.pool, &old).await.state, "canceled");
+    assert!(stored(&world.state.pool, &old).await.book_id.is_none());
+    let imported_rows: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM book_requests
+         WHERE user_id = ? AND work_key = '/works/OL893414W' AND state = 'imported'",
+    )
+    .bind(&ada.id)
+    .fetch_one(&world.state.pool)
+    .await
+    .unwrap();
+    assert_eq!(imported_rows, 1);
+}

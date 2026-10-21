@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
+import { showOwner } from '../src/lib/models.ts';
 import { MemoryPosts, loadCachedPosts, postKey, postPrefix } from '../src/lib/posts.ts';
 import { pullOffset, PULL_THRESHOLD, REFRESH_GAP, refreshGap, shouldRefresh } from '../src/lib/pull.ts';
 import {
@@ -22,6 +23,7 @@ function book(id, extra = {}) {
     mine: extra.mine ?? true,
     shared: extra.shared ?? false,
     ownerUsername: extra.ownerUsername ?? 'ada',
+    held: extra.held,
   };
 }
 
@@ -33,6 +35,30 @@ function memoryStore() {
     removeItem: (key) => rows.delete(key),
   };
 }
+
+test('a held book and an empty owner name hide who added it', () => {
+  const held = book('held', { mine: false, shared: false, held: true, ownerUsername: 'secret' });
+  const named = book('named', { mine: false, shared: true, ownerUsername: 'mary' });
+  const blank = book('blank', { mine: false, shared: true, ownerUsername: '' });
+  const mine = book('mine', { mine: true, ownerUsername: 'ada' });
+  assert.equal(showOwner(held), false);
+  assert.equal(showOwner(named), true);
+  const sharedHold = book('both', {
+    mine: false, shared: true, held: true, ownerUsername: 'mary',
+  });
+  assert.equal(showOwner(sharedHold), true);
+  assert.equal(showOwner(blank), false);
+  assert.equal(showOwner(mine), false);
+
+  const store = memoryStore();
+  writeShelf(server, 'ada', [held, book('old', { ownerUsername: 'ada' })], store);
+  const read = readShelf(server, 'ada', store);
+  assert.equal(read.length, 2);
+  assert.equal(read.find((row) => row.id === 'held').held, true);
+
+  writeShelf(server, 'ada', [book('bad', { held: 'yes' })], store);
+  assert.equal(readShelf(server, 'ada', store), null);
+});
 
 test('empty copy waits for a successful fetch', () => {
   const loading = { status: 'loading' };

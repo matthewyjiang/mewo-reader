@@ -17,8 +17,14 @@ pub struct BookRecord {
     pub mine: bool,
     /// Owner chose to show this book on other accounts' shelves.
     pub shared: bool,
-    /// Username of the account that added the book.
+    /// Username of the account that added the book. Empty for a private hold,
+    /// so that account is not told who else has the copy. A shared book still
+    /// names the owner.
     pub owner_username: String,
+    /// The viewer has an imported request for this book and is not the owner.
+    /// Set whether or not the book is shared, so they can drop their own copy.
+    #[serde(default)]
+    pub held: bool,
 }
 
 #[derive(Debug, FromRow)]
@@ -34,10 +40,30 @@ pub struct BookRow {
     pub shared: i64,
     pub owner_id: String,
     pub owner_username: String,
+    /// Directory owner. Missing from selects that never open the file.
+    #[sqlx(default)]
+    pub files_owner: Option<String>,
+    /// 1 when this viewer has an imported request for the book.
+    /// Selects that never needed it leave the column out.
+    #[sqlx(default)]
+    pub holds: i64,
 }
 
 impl BookRow {
+    /// Account id the epub directory is stored under. An ownership transfer
+    /// leaves the file where the first importer wrote it.
+    pub(crate) fn dir_owner(&self) -> &str {
+        self.files_owner.as_deref().unwrap_or(&self.owner_id)
+    }
+
     pub fn into_record(self, user_id: &str) -> BookRecord {
+        let mine = self.owner_id == user_id;
+        let shared = self.shared != 0;
+        let is_sample = self.is_sample != 0;
+        // A private book is visible to a non-owner only because they hold it.
+        // `holds` covers the same fact once the book is shared.
+        let private_hold = !mine && !shared && !is_sample;
+        let held = !mine && (self.holds != 0 || private_hold);
         BookRecord {
             id: self.id,
             title: self.title,
@@ -46,10 +72,15 @@ impl BookRow {
             imported_at: self.imported_at,
             post_count: self.post_count as i32,
             progress_index: self.progress_index as i32,
-            is_sample: self.is_sample != 0,
-            mine: self.owner_id == user_id,
-            shared: self.shared != 0,
-            owner_username: self.owner_username,
+            is_sample,
+            mine,
+            shared,
+            owner_username: if private_hold {
+                String::new()
+            } else {
+                self.owner_username
+            },
+            held,
         }
     }
 }

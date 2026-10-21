@@ -1,6 +1,6 @@
 <script lang="ts">
   import type { BookRecord } from '../lib/models';
-  import { statusLine } from '../lib/models';
+  import { showOwner, statusLine } from '../lib/models';
   import { store, message } from '../lib/store.svelte';
   import { router, readerUrl } from '../lib/router.svelte';
   import Avatar from './Avatar.svelte';
@@ -33,28 +33,30 @@
         <span class="meta truncate">@{book.handle}</span>
       </div>
       <p>{statusLine(book)}</p>
-      {#if !book.mine && book.ownerUsername}
+      {#if showOwner(book)}
         <p class="owner">
           {book.shared ? 'Shared' : 'Added'} by @{book.ownerUsername}
         </p>
       {/if}
     </div>
   </a>
-  {#if book.mine}
+  {#if book.mine || book.held}
     <div class="book-actions">
-      <button
-        class="icon-button"
-        title={book.shared ? 'Make private' : 'Share'}
-        aria-label={book.shared ? 'Make private' : 'Share'}
-        aria-pressed={book.shared}
-        onclick={() => { void share(!book.shared); }}
-      >
-        <Icon name={book.shared ? 'people' : 'lock'} filled size={18} />
-      </button>
+      {#if book.mine}
+        <button
+          class="icon-button"
+          title={book.shared ? 'Make private' : 'Share'}
+          aria-label={book.shared ? 'Make private' : 'Share'}
+          aria-pressed={book.shared}
+          onclick={() => { void share(!book.shared); }}
+        >
+          <Icon name={book.shared ? 'people' : 'lock'} filled size={18} />
+        </button>
+      {/if}
       {#if onremove}
         <button
           class="icon-button"
-          aria-label={`Remove ${book.title}`}
+          aria-label={book.held ? 'Remove from library' : `Remove ${book.title}`}
           onclick={() => onremove?.(book)}
         >
           <Icon name="trash" size={18} />
