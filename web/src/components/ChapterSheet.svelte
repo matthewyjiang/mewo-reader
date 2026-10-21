@@ -25,7 +25,7 @@
   });
 </script>
 
-<Sheet label={`Chapters, ${title}`} {onclose}>
+<Sheet label={`Chapters, ${title}`} kind="toc" {onclose}>
   <header class="sheet-bar">
     <h2>{title}</h2>
     <button class="icon-button" aria-label="Close chapters" onclick={onclose}>
@@ -55,7 +55,9 @@
 <style>
   .chapter-list {
     overflow-y: auto;
-    max-height: calc(85dvh - 56px - env(safe-area-inset-bottom));
+    /* Dialog border is 2px. The sheet's own padding is the safe area. */
+    max-height: calc(var(--toc-max) - 56px - 2px - env(safe-area-inset-bottom));
+    overscroll-behavior: contain;
   }
 
   .chapter-row {
