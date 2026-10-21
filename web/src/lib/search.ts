@@ -3,10 +3,9 @@ import type { BookRequest, SearchKind, SearchPage } from './models';
 export const SEARCH_DEBOUNCE_MS = 250;
 export const CATALOG_DEBOUNCE_MS = 300;
 export const BROWSE_REVALIDATE_MS = 60_000;
-/** Catalog search starts at two characters. Shorter text is the trending browse. */
-export const CATALOG_MIN_QUERY_CHARS = 2;
+/** Catalog search starts at three characters. Shorter text is the trending browse. */
+export const CATALOG_MIN_QUERY_CHARS = 3;
 const MEMO_LIMIT = 8;
-const RAW_HTTP_STATUS = /^HTTP \d{3}$/;
 
 /** No session. A signed-in empty field is a browse request, not this. */
 export interface SearchIdle {
@@ -94,30 +93,19 @@ export function visiblePage(state: SearchState): SearchPage | undefined {
   return undefined;
 }
 
-/** Blank text is browse, including spaces. A catalog query under two characters is browse too. */
+/** Blank text is browse, including spaces. A catalog query under three characters is browse too. */
 export function isBrowse(state: SearchState): boolean {
   return !searchedQuery(state.kind, state.query);
 }
 
 /**
- * Query sent to the server. Catalog text under two characters stays on trending,
+ * Query sent to the server. Catalog text under three characters stays on trending,
  * so it searches as blank and does not ask Open Library.
  */
 export function searchedQuery(kind: SearchKind, query: string): string {
   const trimmed = query.trim();
   if (kind === 'catalog' && [...trimmed].length < CATALOG_MIN_QUERY_CHARS) return '';
   return trimmed;
-}
-
-/** A bare `HTTP 422` is the upstream status. Catalog shows a sentence, or the server's own message. */
-export function failureMessage(error: unknown, kind: SearchKind): string {
-  const message = error instanceof Error && error.message
-    ? error.message
-    : 'Something went wrong. Try again.';
-  if (kind === 'catalog' && RAW_HTTP_STATUS.test(message.trim())) {
-    return "Couldn't search the catalog.";
-  }
-  return message;
 }
 
 export type EmptyKind = 'none' | 'noMatches' | 'nothingYet';
@@ -406,10 +394,10 @@ export class SearchModel {
       const shown = visiblePage(this.state);
       // A failed catalog page replaces the list. Load-more keeps the page it was extending.
       const previous = kind === 'catalog' && !cursor ? undefined : shown;
-      this.update({
-        ...this.state,
-        phase: { status: 'failed', error: failureMessage(error, kind), previous },
-      });
+      const message = error instanceof Error && error.message
+        ? error.message
+        : 'Something went wrong. Try again.';
+      this.update({ ...this.state, phase: { status: 'failed', error: message, previous } });
     } finally {
       if (this.abort === abort) this.abort = undefined;
     }

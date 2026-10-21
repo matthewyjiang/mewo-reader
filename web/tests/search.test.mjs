@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { describe, test } from 'node:test';
 import {
-  BROWSE_REVALIDATE_MS, CATALOG_DEBOUNCE_MS, clearSearchMemos, emptyKind, failureMessage, isBrowse,
+  BROWSE_REVALIDATE_MS, CATALOG_DEBOUNCE_MS, clearSearchMemos, emptyKind, isBrowse,
   SearchModel, SEARCH_DEBOUNCE_MS, searchMemo, searchedQuery, sectionFor, visiblePage,
 } from '../src/lib/search.ts';
 
@@ -418,12 +418,14 @@ describe('SearchModel', { concurrency: false }, () => {
     assert.equal(isBrowse({ ...base, query: '  ', phase: { status: 'idle' } }), true);
     assert.equal(isBrowse({ ...base, query: 'a', phase: { status: 'idle' } }), false);
     assert.equal(isBrowse({ ...base, kind: 'catalog', query: 'd', phase: { status: 'idle' } }), true);
-    assert.equal(isBrowse({ ...base, kind: 'catalog', query: ' du ', phase: { status: 'idle' } }), false);
-    assert.equal(searchedQuery('catalog', ' d '), '');
+    assert.equal(isBrowse({ ...base, kind: 'catalog', query: ' du ', phase: { status: 'idle' } }), true);
+    assert.equal(isBrowse({ ...base, kind: 'catalog', query: 'dun', phase: { status: 'idle' } }), false);
+    assert.equal(searchedQuery('catalog', ' 书 '), '');
+    assert.equal(searchedQuery('catalog', 'dun'), 'dun');
     assert.equal(searchedQuery('books', 'd'), 'd');
   });
 
-  test('one character on catalog stays on trending and does not search', async () => {
+  test('one or two characters on catalog stay on trending and do not search', async () => {
     const trending = {
       type: 'catalog', items: [{ workKey: '/works/OL1W', title: 'Dune' }], nextCursor: null,
     };
@@ -438,17 +440,18 @@ describe('SearchModel', { concurrency: false }, () => {
     assert.equal(model.state.phase.page, trending);
     assert.equal(calls.length, before);
     assert.equal(timers.length, 0);
-    model.setQuery('  d  ');
+    model.setQuery('du');
+    model.setQuery(' 书 ');
     assert.equal(model.state.phase.page, trending);
     assert.equal(calls.length, before);
     assert.equal(timers.length, 0);
 
     replace();
-    model.setQuery('du');
+    model.setQuery('dun');
     assert.equal(isBrowse(model.state), false);
     assert.equal(timers.length, 1);
     fire();
-    assert.equal(calls.at(-1).query, 'du');
+    assert.equal(calls.at(-1).query, 'dun');
     assert.equal(calls.at(-1).kind, 'catalog');
   });
 
@@ -473,7 +476,7 @@ describe('SearchModel', { concurrency: false }, () => {
     }
   });
 
-  test('a catalog failure replaces the list and prefers a server sentence', async () => {
+  test('a catalog failure replaces the list and shows the server message', async () => {
     const trending = {
       type: 'catalog', items: [{ workKey: '/works/OL1W', title: 'Dune' }], nextCursor: '2',
     };
@@ -483,16 +486,11 @@ describe('SearchModel', { concurrency: false }, () => {
     replace();
     model.setQuery('dune');
     fire();
-    await fail(new Error('HTTP 502'));
+    await fail(new Error("Couldn't search the catalog right now."));
     assert.equal(model.state.phase.status, 'failed');
-    assert.equal(model.state.phase.error, "Couldn't search the catalog.");
+    assert.equal(model.state.phase.error, "Couldn't search the catalog right now.");
     assert.equal(model.state.phase.previous, undefined);
     assert.equal(visiblePage(model.state), undefined);
-    assert.equal(failureMessage(new Error('HTTP 422'), 'books'), 'HTTP 422');
-    assert.equal(
-      failureMessage(new Error('Type at least 2 characters to search the catalog.'), 'catalog'),
-      'Type at least 2 characters to search the catalog.',
-    );
 
     replace();
     model.retry();
@@ -516,9 +514,9 @@ describe('SearchModel', { concurrency: false }, () => {
     await settle(page);
     replace();
     model.loadMore();
-    await fail(new Error('HTTP 500'));
+    await fail(new Error("Couldn't search the catalog right now."));
     assert.equal(model.state.phase.status, 'failed');
-    assert.equal(model.state.phase.error, "Couldn't search the catalog.");
+    assert.equal(model.state.phase.error, "Couldn't search the catalog right now.");
     assert.equal(model.state.phase.previous, page);
     assert.equal(visiblePage(model.state), page);
   });

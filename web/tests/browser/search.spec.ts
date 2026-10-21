@@ -507,7 +507,7 @@ test('retry updates the sheet before the next detail load', async ({ page }) => 
   state.releaseDetail();
 });
 
-test('one character on Catalog keeps trending', async ({ page }) => {
+test('one or two characters on Catalog keep trending', async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 });
   const state = await install(page, { kind: 'catalog' });
   await page.goto('/search');
@@ -517,29 +517,35 @@ test('one character on Catalog keeps trending', async ({ page }) => {
 
   await page.getByPlaceholder('Search').fill('d');
   await page.waitForTimeout(500);
+  await page.getByPlaceholder('Search').fill('du');
+  await page.waitForTimeout(500);
   expect(state.catalogQueries.slice(before)).toEqual([]);
   await expect(page.getByRole('alert')).toHaveCount(0);
   await expect(page.getByText('Type at least')).toHaveCount(0);
   await expect(page.getByRole('heading', { name: 'Trending on Open Library' })).toBeVisible();
   await expect(page.getByRole('button', { name: 'Dune, Frank Herbert, 1965' })).toBeVisible();
 
-  await page.getByPlaceholder('Search').fill('du');
-  await expect.poll(() => state.catalogQueries.includes('du')).toBe(true);
+  await page.getByPlaceholder('Search').fill('dun');
+  await expect.poll(() => state.catalogQueries.includes('dun')).toBe(true);
   expect(state.catalogQueries.includes('d')).toBe(false);
+  expect(state.catalogQueries.includes('du')).toBe(false);
 });
 
 test('a catalog search error replaces the list', async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 });
   const state = await install(page, { kind: 'catalog' });
-  state.catalogFailure = { query: 'dune', status: 502, error: 'HTTP 500' };
+  state.catalogFailure = {
+    query: 'dune',
+    status: 502,
+    error: "Couldn't search the catalog right now.",
+  };
   await page.goto('/search');
   await expect(page.getByRole('button', { name: 'Dune, Frank Herbert, 1965' })).toBeVisible();
 
   await page.getByPlaceholder('Search').fill('dune');
   const alert = page.getByRole('alert');
-  await expect(alert).toHaveText("Couldn't search the catalog.");
+  await expect(alert).toHaveText("Couldn't search the catalog right now.");
   await expect(page.getByRole('button', { name: 'Try again' })).toBeVisible();
-  await expect(page.getByText('HTTP 500')).toHaveCount(0);
   await expect(page.getByRole('heading', { name: 'Trending on Open Library' })).toHaveCount(0);
   await expect(page.getByRole('button', { name: 'Dune, Frank Herbert, 1965' })).toHaveCount(0);
 
