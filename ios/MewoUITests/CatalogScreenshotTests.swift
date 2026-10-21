@@ -7,6 +7,9 @@ import XCTest
 ///   cd ios && xcodegen generate && (python3 MewoUITests/Fixtures/social-fixture.py &) && xcodebuild test -project Mewo.xcodeproj -scheme Mewo -destination 'platform=iOS Simulator,name=iPhone 17' -only-testing:MewoUITests/CatalogScreenshotTests
 /// Shots land in /tmp/mewo-catalog-shots.
 final class CatalogScreenshotTests: XCTestCase {
+    private static let slideToTypeCoachFinger = "sliding your finger"
+    private static let slideToTypeCoachPrefix = "Speed up your typing"
+
     func testCatalogTrendingAndDetail() throws {
         guard fixtureReady() else {
             XCTFail("social fixture is not reachable on 127.0.0.1:8766")
@@ -143,6 +146,13 @@ final class CatalogScreenshotTests: XCTestCase {
         shot(app, "add-book-menu")
     }
 
+    func testSlideToTypeCoachLabelMatchesTheFreshSimulatorCopy() {
+        XCTAssertTrue(slideToTypeCoachLabel("Speed up your typing by sliding your finger from letter to letter."))
+        XCTAssertTrue(slideToTypeCoachLabel("Speed up your typing by sliding your finger across the letters to compose a word."))
+        XCTAssertFalse(slideToTypeCoachLabel("Continue"))
+        XCTAssertFalse(slideToTypeCoachLabel("Trending on Open Library"))
+    }
+
     private func openRow(_ app: XCUIApplication, _ olid: String) {
         let row = app.buttons["catalog-\(olid)"]
         revealElement(app, row)
@@ -191,19 +201,94 @@ final class CatalogScreenshotTests: XCTestCase {
     }
 
     private func shot(_ app: XCUIApplication, _ name: String) {
+        assertNoTypingCoach(app)
         let dir = URL(fileURLWithPath: "/tmp/mewo-catalog-shots", isDirectory: true)
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         let file = dir.appendingPathComponent("\(name).png")
         try? XCUIScreen.main.screenshot().pngRepresentation.write(to: file)
     }
 
-    private func dismissKeyboard(_ app: XCUIApplication) {
-        guard app.keyboards.element.exists else { return }
-        if app.keyboards.buttons["Search"].exists {
-            app.keyboards.buttons["Search"].tap()
-        } else if app.keyboards.buttons["return"].exists {
-            app.keyboards.buttons["return"].tap()
+    /// A fresh simulator covers the keyboard with the slide-to-type coach. Its
+    /// Continue button is the control that removes it; the keys underneath have
+    /// no hit point until then.
+    private func dismissKeyboard(_ app: XCUIApplication, file: StaticString = #filePath, line: UInt = #line) {
+        guard dismissTypingCoach(app, file: file, line: line) else { return }
+        if app.keyboards.element.exists {
+            let search = app.keyboards.buttons["Search"]
+            let ret = app.keyboards.buttons["return"]
+            if search.exists {
+                tapKeyboardKey(search, app: app, file: file, line: line)
+            } else if ret.exists {
+                tapKeyboardKey(ret, app: app, file: file, line: line)
+            }
         }
+        assertNoTypingCoach(app, file: file, line: line)
+    }
+
+    private func dismissTypingCoach(_ app: XCUIApplication, file: StaticString = #filePath, line: UInt = #line) -> Bool {
+        guard let button = typingCoachContinue(app) else { return true }
+        button.tap()
+        let intro = typingCoachView(app)
+        let copy = slideToTypeCoach(app)
+        let introGone = intro.exists ? intro.waitForNonExistence(timeout: 3) : true
+        let copyGone = copy.exists ? copy.waitForNonExistence(timeout: 3) : true
+        guard introGone, copyGone else {
+            XCTFail("slide-to-type coach stayed on screen", file: file, line: line)
+            return false
+        }
+        return true
+    }
+
+    private func typingCoachContinue(_ app: XCUIApplication) -> XCUIElement? {
+        let intro = typingCoachView(app)
+        if intro.exists {
+            let nested = intro.buttons["Continue"]
+            if nested.exists { return nested }
+        }
+        guard intro.exists || slideToTypeCoach(app).exists else { return nil }
+        if app.buttons["Continue"].exists { return app.buttons["Continue"] }
+        let onKeyboard = app.keyboards.buttons["Continue"]
+        return onKeyboard.exists ? onKeyboard : nil
+    }
+
+    private func typingCoachView(_ app: XCUIApplication) -> XCUIElement {
+        app.descendants(matching: .any)["UIContinuousPathIntroductionView"]
+    }
+
+    private func slideToTypeCoach(_ app: XCUIApplication) -> XCUIElement {
+        app.descendants(matching: .any).matching(
+            NSPredicate(
+                format: "label CONTAINS %@ OR label BEGINSWITH %@",
+                Self.slideToTypeCoachFinger,
+                Self.slideToTypeCoachPrefix
+            )
+        ).firstMatch
+    }
+
+    private func slideToTypeCoachLabel(_ label: String) -> Bool {
+        label.contains(Self.slideToTypeCoachFinger) || label.hasPrefix(Self.slideToTypeCoachPrefix)
+    }
+
+    private func assertNoTypingCoach(_ app: XCUIApplication, file: StaticString = #filePath, line: UInt = #line) {
+        XCTAssertFalse(slideToTypeCoach(app).exists, "slide-to-type coach is covering the screen", file: file, line: line)
+        XCTAssertFalse(typingCoachView(app).exists, "slide-to-type coach is covering the screen", file: file, line: line)
+    }
+
+    private func tapKeyboardKey(
+        _ key: XCUIElement,
+        app: XCUIApplication,
+        file: StaticString,
+        line: UInt
+    ) {
+        let deadline = Date().addingTimeInterval(2)
+        while Date() < deadline, key.exists, !key.isHittable {
+            if typingCoachContinue(app) != nil {
+                guard dismissTypingCoach(app, file: file, line: line) else { return }
+            }
+            if key.isHittable { break }
+            RunLoop.current.run(until: Date().addingTimeInterval(0.05))
+        }
+        key.tap()
     }
 
     private func fixtureReady() -> Bool {
