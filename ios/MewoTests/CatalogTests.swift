@@ -225,23 +225,26 @@ final class CatalogCopyTests: XCTestCase {
         XCTAssertNil(capNote(WorkStatus(request: nil, onServer: nil, active: 4, cap: 5)))
     }
 
-    func testQueryGateTreatsOneScalarAsTrending() {
+    func testQueryGateStaysOnTrendingBelowThreeScalars() {
         XCTAssertEqual(catalogQuery(""), .browse)
         XCTAssertEqual(catalogQuery("  \n"), .browse)
         XCTAssertEqual(catalogQuery("a"), .browse)
         XCTAssertEqual(catalogQuery("  b "), .browse)
+        XCTAssertEqual(catalogQuery("ab"), .browse)
         XCTAssertEqual(catalogQuery("📚"), .browse)
-        XCTAssertEqual(catalogQuery("📚📚"), .search("📚📚"))
+        XCTAssertEqual(catalogQuery("📚📚"), .browse)
+        XCTAssertEqual(catalogQuery("📚📚📚"), .search("📚📚📚"))
         XCTAssertEqual(catalogQuery("  dune  "), .search("dune"))
         XCTAssertEqual(catalogHeading(""), "Trending on Open Library")
         XCTAssertEqual(catalogHeading("   "), "Trending on Open Library")
         XCTAssertNil(catalogHeading("a"))
-        XCTAssertNil(catalogHeading("📚"))
+        XCTAssertNil(catalogHeading("ab"))
+        XCTAssertNil(catalogHeading("📚📚"))
         XCTAssertNil(catalogHeading("dune"))
         XCTAssertTrue(catalogEmptyCopy("dune").contains("“dune”"))
         XCTAssertEqual(catalogDebounceNanos, 300_000_000)
         XCTAssertEqual(catalogPollNanos, 10_000_000_000)
-        XCTAssertEqual(catalogMinScalars, 2)
+        XCTAssertEqual(catalogMinScalars, 3)
     }
 
     func testErrorTextNeverShowsARawStatus() {
@@ -344,7 +347,7 @@ final class CatalogModelTests: XCTestCase {
         feed.show()
         await waitPages(1)
         XCTAssertEqual(fake.pageLog.first?.query, nil)
-        feed.setQuery("du")
+        feed.setQuery("dun")
         feed.setQuery("dune")
         await waitPages(2)
         XCTAssertEqual(fake.pageLog.map(\.query), [nil, "dune"])
@@ -359,18 +362,20 @@ final class CatalogModelTests: XCTestCase {
         guard !fake.pageLog.isEmpty else { return }
         await feed.loadTask?.value
         feed.setQuery("a")
+        feed.setQuery("ab")
         feed.setQuery("📚")
+        feed.setQuery("📚📚")
         feed.setQuery(" ")
         try? await Task.sleep(nanoseconds: 50_000_000)
         XCTAssertEqual(fake.pageLog.count, 1)
         XCTAssertEqual(fake.pageLog.first?.query, nil)
         XCTAssertEqual(feed.items.map(\.title), ["Dune"])
 
-        feed.setQuery("📚📚")
+        feed.setQuery("📚📚📚")
         await waitPages(2)
         await feed.loadTask?.value
-        XCTAssertEqual(fake.pageLog.map(\.query), [nil, "📚📚"])
-        XCTAssertFalse(fake.pageLog.contains { $0.query == "a" || $0.query == "📚" })
+        XCTAssertEqual(fake.pageLog.map(\.query), [nil, "📚📚📚"])
+        XCTAssertFalse(fake.pageLog.contains { $0.query == "a" || $0.query == "ab" || $0.query == "📚" || $0.query == "📚📚" })
     }
 
     func testStalePageDoesNotReplaceTheLatestQuery() async {
@@ -884,14 +889,16 @@ final class CatalogHTTPTests: XCTestCase {
         await settle(service)
 
         _ = try await service.page(query: "a", page: 1)
-        _ = try await service.page(query: "📚", page: 1)
+        _ = try await service.page(query: "ab", page: 1)
+        _ = try await service.page(query: "📚📚", page: 1)
         _ = try await service.page(query: "  dune  ", page: 2)
         let searches = CatalogHTTP.calls.filter { $0.url.contains("/v1/catalog/search") }
-        XCTAssertEqual(searches.count, 3)
+        XCTAssertEqual(searches.count, 4)
         XCTAssertNil(queryValue(searches[0].url, "q"))
         XCTAssertNil(queryValue(searches[1].url, "q"))
-        XCTAssertEqual(queryValue(searches[2].url, "q"), "dune")
-        XCTAssertEqual(queryValue(searches[2].url, "page"), "2")
+        XCTAssertNil(queryValue(searches[2].url, "q"))
+        XCTAssertEqual(queryValue(searches[3].url, "q"), "dune")
+        XCTAssertEqual(queryValue(searches[3].url, "page"), "2")
 
         CatalogHTTP.reply("/v1/catalog/search", status: 403, body: Data(#"{"error":"Requests are off."}"#.utf8))
         do {

@@ -24,7 +24,7 @@ enum RequestPhase: String, Equatable, Sendable {
     }
 }
 
-let catalogMinScalars = 2
+let catalogMinScalars = 3
 let catalogDebounceNanos: UInt64 = 300_000_000
 let catalogPollNanos: UInt64 = 10_000_000_000
 
@@ -33,14 +33,14 @@ enum CatalogQuery: Equatable, Sendable {
     case search(String)
 }
 
-/// Blank, or a single Unicode scalar, stays on trending. Search starts at two.
+/// Blank, or fewer than 3 Unicode scalars, stays on trending.
 func catalogQuery(_ raw: String) -> CatalogQuery {
     let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
     if trimmed.unicodeScalars.count < catalogMinScalars { return .browse }
     return .search(trimmed)
 }
 
-/// Only a blank field gets the trending header. One character is still browse.
+/// Only a blank field gets the trending header. A short query is still browse.
 func catalogHeading(_ query: String) -> String? {
     query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "Trending on Open Library" : nil
 }
