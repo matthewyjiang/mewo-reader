@@ -1,8 +1,9 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import {
-  alsoRequested, badge, catalogRowLabel, copyLabel, coverUrl, heldCopy, noMatchCopy, openLabel,
-  requestPhase, rowAction, stateLabel, subjectLine, workStats,
+  actionErrorText, alsoRequested, badge, catalogErrorText, catalogRowLabel, copyLabel, coverUrl,
+  heldCopy,
+  noMatchCopy, openLabel, requestPhase, rowAction, stateLabel, subjectLine, workStats,
 } from '../src/lib/requests.ts';
 
 function request(over = {}) {
@@ -35,14 +36,54 @@ test('stateLabel distinguishes searching, waiting, and the other states', () => 
   assert.equal(stateLabel(request({ state: 'canceled' })), 'Canceled');
 });
 
-test('rowAction is request, pending, open, or retry', () => {
+test('rowAction is request, pending, open, retry, or again', () => {
   assert.equal(rowAction(null), 'request');
   assert.equal(rowAction(request()), 'pending');
   assert.equal(rowAction(request({ state: 'downloading', progress: 42 })), 'pending');
   assert.equal(rowAction(request({ state: 'imported', bookId: 'req-1' })), 'open');
-  assert.equal(rowAction(request({ state: 'imported', bookId: null })), 'retry');
+  assert.equal(rowAction(request({ state: 'imported', bookId: null })), 'again');
   assert.equal(rowAction(request({ state: 'failed', error: 'Download failed: missing' })), 'retry');
-  assert.equal(rowAction(request({ state: 'canceled' })), 'retry');
+  assert.equal(rowAction(request({ state: 'canceled' })), 'again');
+});
+
+test('catalogErrorText maps status codes and never ends in Try again', () => {
+  assert.equal(
+    catalogErrorText(0, 'Could not reach the server. Check your connection and try again.'),
+    "Couldn't reach the server. Check your connection.",
+  );
+  assert.equal(catalogErrorText(401, 'expired'), 'Sign in again.');
+  assert.equal(catalogErrorText(403, 'off'), 'Requests are off.');
+  assert.equal(catalogErrorText(404, 'missing'), 'That book is no longer in the catalog.');
+  assert.equal(
+    catalogErrorText(502, "Couldn't search the catalog right now."),
+    "Couldn't search the catalog right now.",
+  );
+  assert.equal(
+    catalogErrorText(502, 'Open Library is not answering. Try again.'),
+    'Open Library is not answering.',
+  );
+  assert.equal(catalogErrorText(500, 'Server returned 500. Try again.'), "Couldn't load the catalog.");
+  assert.equal(catalogErrorText(500, 'HTTP 500'), "Couldn't load the catalog.");
+  assert.equal(catalogErrorText(502, 'Prowlarr: HTTP 500'), 'Prowlarr: HTTP 500');
+});
+
+test('actionErrorText strips Try again without the catalog fallback', () => {
+  assert.equal(
+    actionErrorText(0, 'Could not reach the server. Check your connection and try again.'),
+    "Couldn't reach the server. Check your connection.",
+  );
+  assert.equal(actionErrorText(401, 'expired'), 'Sign in again.');
+  assert.equal(
+    actionErrorText(500, 'Server returned 500. Try again.'),
+    'Something went wrong.',
+  );
+  assert.equal(actionErrorText(500, 'HTTP 500'), 'Something went wrong.');
+  assert.equal(
+    actionErrorText(502, 'No indexer is configured. Try again.'),
+    'No indexer is configured.',
+  );
+  assert.equal(actionErrorText(502, 'Prowlarr: HTTP 500'), 'Prowlarr: HTTP 500');
+  assert.notEqual(actionErrorText(500, 'HTTP 500'), "Couldn't load the catalog.");
 });
 
 const held = {
@@ -144,6 +185,7 @@ test('rowAction opens a server copy and keeps a failed request on retry', () => 
   assert.equal(rowAction(request(), shared), 'pending');
   assert.equal(rowAction(request({ state: 'failed', error: 'x' }), shared), 'retry');
   assert.equal(rowAction(request({ state: 'canceled' }), shared), 'open');
+  assert.equal(rowAction(request({ state: 'imported', bookId: null }), shared), 'open');
   assert.equal(openLabel({ onServer: shared }, null), 'On server');
   assert.equal(openLabel({ onServer: held }, null), 'On your shelf');
   assert.equal(openLabel({ onServer: null }, request({ state: 'imported', bookId: 'req-1' })), 'On your shelf');

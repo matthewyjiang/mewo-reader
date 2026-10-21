@@ -15,7 +15,7 @@
   let quoted = $derived(`“${query.trim()}”`);
 </script>
 
-<div class="empty-state">
+<div class="empty-state" class:catalog={kind === 'catalog'}>
   {#if kind === 'accounts' && mode === 'noMatches'}
     <h2>No accounts match {quoted}</h2>
   {:else if kind === 'accounts'}
@@ -53,5 +53,10 @@
   code {
     font-family: ui-monospace, monospace;
     font-size: .9em;
+  }
+
+  .catalog h2 {
+    font-size: 1.375rem;
+    line-height: 26px;
   }
 </style>

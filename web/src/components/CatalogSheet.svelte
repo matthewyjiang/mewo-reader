@@ -1,8 +1,10 @@
 <script lang="ts">
   import { untrack } from 'svelte';
+  import { ApiError } from '../lib/api';
   import type { BookRequest, CatalogWork, RequestDetail, WorkDetail } from '../lib/models';
   import {
-    alsoRequested, catalogOlid, copyLabel, coverUrl, heldCopy, isLivePhase,
+    actionErrorText, alsoRequested, catalogErrorText, catalogOlid, copyLabel, coverUrl, heldCopy,
+    isLivePhase,
     noMatchCopy, requestPhase, subjectLine, waitingCopy, workStats,
   } from '../lib/requests';
   import { readerUrl, router } from '../lib/router.svelte';
@@ -20,6 +22,7 @@
 
   let detail = $state<WorkDetail | null>(null);
   let detailError = $state('');
+  let actionError = $state('');
   let loading = $state(true);
   let acting = $state(false);
   let attempt = $state(0);
@@ -97,7 +100,8 @@
         if (!alive || ctrl.signal.aborted) return;
         if (error instanceof DOMException && error.name === 'AbortError') return;
         if (detail == null) {
-          detailError = message(error);
+          const status = error instanceof ApiError ? error.status : -1;
+          detailError = catalogErrorText(status, message(error));
           loading = false;
         }
         timer = setTimeout(() => { void pull(); }, 10_000);
@@ -125,6 +129,7 @@
   async function requestBook(): Promise<void> {
     if (acting || atCap) return;
     acting = true;
+    actionError = '';
     try {
       const next = await store.api.requestBook(work);
       onchange(next);
@@ -134,16 +139,22 @@
       }
       attempt += 1;
     } catch (error) {
-      store.notice = message(error);
+      noteActionError(error);
     } finally {
       acting = false;
     }
+  }
+
+  function noteActionError(error: unknown): void {
+    const status = error instanceof ApiError ? error.status : -1;
+    actionError = actionErrorText(status, message(error));
   }
 
   async function cancel(): Promise<void> {
     const current = liveRequest;
     if (acting || !current) return;
     acting = true;
+    actionError = '';
     try {
       await store.api.cancelRequest(current.id);
       const next = { ...current, state: 'canceled' as const, error: null, phase: 'canceled' as const };
@@ -159,7 +170,7 @@
       onchange(next);
       attempt += 1;
     } catch (error) {
-      store.notice = message(error);
+      noteActionError(error);
     } finally {
       acting = false;
     }
@@ -169,6 +180,7 @@
     const current = liveRequest;
     if (acting || atCap || !current) return;
     acting = true;
+    actionError = '';
     try {
       const next = await store.api.retryRequest(current.id);
       if (detail?.status.request) {
@@ -187,7 +199,7 @@
       }
       attempt += 1;
     } catch (error) {
-      store.notice = message(error);
+      noteActionError(error);
     } finally {
       acting = false;
     }
@@ -212,7 +224,6 @@
       <button type="button" class="icon-button" aria-label="Close" onclick={onclose}>
         <Icon name="close" />
       </button>
-      <h2 class="truncate">{title}</h2>
     </header>
     <div class="sheet-scroll">
       <div class="hero">
@@ -255,11 +266,16 @@
             Retry
           </button>
           {#if atCap}<p class="muted">You have {detail?.status.cap} requests in progress</p>{/if}
-        {:else if copy || phase === 'imported'}
+        {:else if copy?.bookId || (phase === 'imported' && liveRequest?.bookId)}
           <p>{copy ? copyLabel(copy, 'sheet') : 'On your shelf'}</p>
           <button class="pill action" type="button" disabled={!bookId} onclick={openBook}>Open book</button>
         {:else if phase === 'canceled'}
           <button class="pill action" type="button" disabled={acting || atCap} onclick={() => { void retry(); }}>
+            Request again
+          </button>
+          {#if atCap}<p class="muted">You have {detail?.status.cap} requests in progress</p>{/if}
+        {:else if phase === 'imported'}
+          <button class="pill action" type="button" disabled={acting || atCap} onclick={() => { void requestBook(); }}>
             Request again
           </button>
           {#if atCap}<p class="muted">You have {detail?.status.cap} requests in progress</p>{/if}
@@ -275,25 +291,28 @@
         {#if holders.length > 0}
           <p class="muted">{alsoRequested(holders)}</p>
         {/if}
+        {#if actionError}
+          <p class="action-error" role="alert">{actionError}</p>
+        {/if}
       </section>
 
       {#if loading && !info}
-        <div class="about" aria-busy="true">
+        <div class="bones" aria-busy="true">
           <p class="sr-only" role="status">Loading details…</p>
           <span class="bone"></span>
-          <span class="bone short"></span>
+          <span class="bone mid"></span>
           <span class="bone"></span>
         </div>
       {:else if detailError}
-        <p class="muted retry-line">
-          {detailError}
+        <div class="detail-error">
+          <p class="muted">{detailError}</p>
           <button type="button" class="text-button" onclick={() => attempt += 1}>Try again</button>
-        </p>
+        </div>
       {:else if detail && !info}
-        <p class="muted retry-line">
-          Couldn't load details from Open Library.
+        <div class="detail-error">
+          <p class="muted">Couldn't load details from Open Library.</p>
           <button type="button" class="text-button" onclick={() => attempt += 1}>Try again</button>
-        </p>
+        </div>
       {:else if info}
         <div class="about">
           {#if info.description}
@@ -323,9 +342,9 @@
             </div>
           {/if}
           {#if info.subjects.length}
-            <p class="muted">{subjectLine(info.subjects)}</p>
+            <p class="subjects">{subjectLine(info.subjects)}</p>
           {/if}
-          {#if workStats(info)}<p>{workStats(info)}</p>{/if}
+          {#if workStats(info)}<p class="stats">{workStats(info)}</p>{/if}
           <a
             class="library"
             href="https://openlibrary.org{info.canonicalKey}"
@@ -370,6 +389,8 @@
 
   .hero .meta {
     margin-top: 4px;
+    font-size: .9375rem;
+    line-height: 20px;
   }
 
   .status {
@@ -380,13 +401,23 @@
     margin: 24px 16px 0;
   }
 
-  .status p {
-    line-height: 1.4;
+  .status > p:not(.muted):not(.action-error) {
+    font-size: 1.0625rem;
+    line-height: 24px;
+  }
+
+  .action-error {
+    margin: 0;
+    color: var(--like);
+    font-size: .9375rem;
+    line-height: 20px;
   }
 
   .action {
     width: 100%;
     box-sizing: border-box;
+    min-height: 44px;
+    font-size: .9375rem;
   }
 
   .action.secondary {
@@ -403,6 +434,7 @@
     width: 100%;
     height: 4px;
     border: 0;
+    border-radius: 999px;
     background: var(--line);
     accent-color: var(--accent);
   }
@@ -428,7 +460,8 @@
   }
 
   .description {
-    line-height: 1.45;
+    font-size: 1.0625rem;
+    line-height: 24px;
     white-space: pre-wrap;
     overflow-wrap: anywhere;
   }
@@ -452,11 +485,23 @@
     display: grid;
     grid-template-columns: 4.75rem 1fr;
     column-gap: 16px;
-    line-height: 1.4;
+    font-size: 1.0625rem;
+    line-height: 24px;
   }
 
   .row span:first-child {
     color: var(--mute);
+  }
+
+  .subjects {
+    color: var(--mute);
+    font-size: .9375rem;
+    line-height: 20px;
+  }
+
+  .stats {
+    font-size: .9375rem;
+    line-height: 20px;
   }
 
   .library {
@@ -464,18 +509,39 @@
     align-items: center;
     gap: 6px;
     min-height: 40px;
+    padding: 0;
     color: var(--accent);
+    font-size: .9375rem;
+    font-weight: 700;
   }
 
-  .retry-line {
+  .text-button {
+    padding-left: 0;
+    padding-right: 0;
+    font-size: .9375rem;
+    font-weight: 700;
+  }
+
+  .detail-error {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
     margin-top: 28px;
     padding: 0 16px 16px;
   }
 
-  .retry-line .text-button {
-    display: inline;
-    min-height: 0;
-    padding: 0;
+  .detail-error p {
+    font-size: .9375rem;
+    line-height: 20px;
+  }
+
+  .bones {
+    display: flex;
+    flex-direction: column;
+    align-items: stretch;
+    gap: 10px;
+    margin-top: 28px;
+    padding: 0 16px;
   }
 
   .bone {
@@ -486,7 +552,7 @@
     background: color-mix(in srgb, var(--mute) 16%, var(--ground));
   }
 
-  .bone.short {
+  .bone.mid {
     width: 64%;
   }
 </style>
