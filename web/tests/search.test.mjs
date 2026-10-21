@@ -1,8 +1,8 @@
 import assert from 'node:assert/strict';
 import { describe, test } from 'node:test';
 import {
-  BROWSE_REVALIDATE_MS, CATALOG_DEBOUNCE_MS, clearSearchMemos, emptyKind, isBrowse, SearchModel,
-  SEARCH_DEBOUNCE_MS, searchMemo, sectionFor,
+  BROWSE_REVALIDATE_MS, CATALOG_DEBOUNCE_MS, clearSearchMemos, emptyKind, failureMessage, isBrowse,
+  SearchModel, SEARCH_DEBOUNCE_MS, searchMemo, searchedQuery, sectionFor, visiblePage,
 } from '../src/lib/search.ts';
 
 function deferred() {
@@ -417,6 +417,110 @@ describe('SearchModel', { concurrency: false }, () => {
     assert.equal(isBrowse({ ...base, phase: { status: 'idle' } }), true);
     assert.equal(isBrowse({ ...base, query: '  ', phase: { status: 'idle' } }), true);
     assert.equal(isBrowse({ ...base, query: 'a', phase: { status: 'idle' } }), false);
+    assert.equal(isBrowse({ ...base, kind: 'catalog', query: 'd', phase: { status: 'idle' } }), true);
+    assert.equal(isBrowse({ ...base, kind: 'catalog', query: ' du ', phase: { status: 'idle' } }), false);
+    assert.equal(searchedQuery('catalog', ' d '), '');
+    assert.equal(searchedQuery('books', 'd'), 'd');
+  });
+
+  test('one character on catalog stays on trending and does not search', async () => {
+    const trending = {
+      type: 'catalog', items: [{ workKey: '/works/OL1W', title: 'Dune' }], nextCursor: null,
+    };
+    const { model, calls, timers, fire, settle, replace } = harness('short', 'catalog');
+    fire(0);
+    await settle(trending);
+    const before = calls.length;
+    model.setQuery('d');
+    assert.equal(model.state.query, 'd');
+    assert.equal(isBrowse(model.state), true);
+    assert.equal(model.state.phase.status, 'loaded');
+    assert.equal(model.state.phase.page, trending);
+    assert.equal(calls.length, before);
+    assert.equal(timers.length, 0);
+    model.setQuery('  d  ');
+    assert.equal(model.state.phase.page, trending);
+    assert.equal(calls.length, before);
+    assert.equal(timers.length, 0);
+
+    replace();
+    model.setQuery('du');
+    assert.equal(isBrowse(model.state), false);
+    assert.equal(timers.length, 1);
+    fire();
+    assert.equal(calls.at(-1).query, 'du');
+    assert.equal(calls.at(-1).kind, 'catalog');
+  });
+
+  test('opening catalog on one character asks for trending', () => {
+    const { model, calls, fire } = harness('open-short', 'catalog', () => 0, false, 'd');
+    assert.equal(model.state.phase.status, 'loading');
+    assert.equal(isBrowse(model.state), true);
+    fire(0);
+    assert.equal(calls[0].query, '');
+    assert.equal(calls[0].kind, 'catalog');
+  });
+
+  test('one character still searches accounts, books, and posts', () => {
+    for (const kind of ['accounts', 'books', 'posts']) {
+      const { model, fire, calls } = harness(`one-${kind}`, kind);
+      model.setQuery('d');
+      assert.equal(isBrowse(model.state), false);
+      fire();
+      assert.equal(calls.length, 1);
+      assert.equal(calls[0].query, 'd');
+      assert.equal(calls[0].kind, kind);
+    }
+  });
+
+  test('a catalog failure replaces the list and prefers a server sentence', async () => {
+    const trending = {
+      type: 'catalog', items: [{ workKey: '/works/OL1W', title: 'Dune' }], nextCursor: '2',
+    };
+    const { model, fire, settle, fail, replace, calls } = harness('cat-err', 'catalog');
+    fire(0);
+    await settle(trending);
+    replace();
+    model.setQuery('dune');
+    fire();
+    await fail(new Error('HTTP 502'));
+    assert.equal(model.state.phase.status, 'failed');
+    assert.equal(model.state.phase.error, "Couldn't search the catalog.");
+    assert.equal(model.state.phase.previous, undefined);
+    assert.equal(visiblePage(model.state), undefined);
+    assert.equal(failureMessage(new Error('HTTP 422'), 'books'), 'HTTP 422');
+    assert.equal(
+      failureMessage(new Error('Type at least 2 characters to search the catalog.'), 'catalog'),
+      'Type at least 2 characters to search the catalog.',
+    );
+
+    replace();
+    model.retry();
+    assert.equal(calls.at(-1).query, 'dune');
+    await fail(new Error('Open Library is not answering. Try again.'));
+    assert.equal(model.state.phase.error, 'Open Library is not answering. Try again.');
+    assert.equal(visiblePage(model.state), undefined);
+
+    replace();
+    model.setQuery('');
+    assert.equal(model.state.phase.status, 'loaded');
+    assert.equal(model.state.phase.page, trending);
+  });
+
+  test('a catalog load-more failure keeps the page already shown', async () => {
+    const page = {
+      type: 'catalog', items: [{ workKey: '/works/OL1W', title: 'Dune' }], nextCursor: '2',
+    };
+    const { model, fire, settle, fail, replace } = harness('more-err', 'catalog');
+    fire(0);
+    await settle(page);
+    replace();
+    model.loadMore();
+    await fail(new Error('HTTP 500'));
+    assert.equal(model.state.phase.status, 'failed');
+    assert.equal(model.state.phase.error, "Couldn't search the catalog.");
+    assert.equal(model.state.phase.previous, page);
+    assert.equal(visiblePage(model.state), page);
   });
 
   test('browse sections are a single title', () => {
