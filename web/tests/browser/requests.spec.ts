@@ -112,6 +112,11 @@ async function answer(route: Route, state: ReturnType<typeof freshState>) {
   }
   if (path === '/v1/library') return json({ books: [] });
   if (path === '/v1/feed') return json({ items: [], nextCursor: null });
+  if (path === '/v1/search') {
+    const type = url.searchParams.get('type');
+    const kind = type === 'books' || type === 'posts' || type === 'accounts' ? type : 'accounts';
+    return json({ type: kind, items: [], nextCursor: null });
+  }
   if (path === '/v1/catalog/search') {
     return json({
       items: state.catalog ?? [{
@@ -201,7 +206,7 @@ test('Request flips the icon', async ({ page }) => {
   const row = page.getByRole('button', { name: 'Request' });
   await expect(row).toBeEnabled();
   await row.click();
-  await expect(page.getByRole('button', { name: 'Searching' })).toBeDisabled();
+  await expect(page.getByRole('button', { name: 'Searching', exact: true })).toBeDisabled();
   await expect(page.getByRole('button', { name: 'Request' })).toHaveCount(0);
 });
 

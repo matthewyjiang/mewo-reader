@@ -1,9 +1,11 @@
-import type { SearchKind, SearchPage } from './models';
+import type { BookRequest, SearchKind, SearchPage } from './models';
 
 export const SEARCH_DEBOUNCE_MS = 250;
 export const CATALOG_DEBOUNCE_MS = 300;
+export const BROWSE_REVALIDATE_MS = 60_000;
+const MEMO_LIMIT = 8;
 
-/** Nothing to ask yet. An empty field is this, not "No matches". */
+/** No session. A signed-in empty field is a browse request, not this. */
 export interface SearchIdle {
   status: 'idle';
 }
@@ -48,6 +50,33 @@ export interface SearchRequest {
 
 export type SearchFetch = (request: SearchRequest) => Promise<SearchPage>;
 
+interface MemoEntry {
+  page: SearchPage;
+  at: number;
+}
+
+const memos = new Map<string, Map<string, MemoEntry>>();
+
+/** Pages for one signed-in session. A token change drops the previous map. */
+export function searchMemo(token: string): Map<string, MemoEntry> {
+  let memo = memos.get(token);
+  if (!memo) {
+    memo = new Map();
+    memos.set(token, memo);
+  }
+  return memo;
+}
+
+function dropMemo(token: string): void {
+  const memo = memos.get(token);
+  memo?.clear();
+  memos.delete(token);
+}
+
+function memoKey(kind: SearchKind, query: string): string {
+  return `${kind}\u0000${query}`;
+}
+
 export function visiblePage(state: SearchState): SearchPage | undefined {
   if (state.phase.status === 'loaded') return state.phase.page;
   if (state.phase.status === 'loading') return state.phase.previous;
@@ -55,11 +84,37 @@ export function visiblePage(state: SearchState): SearchPage | undefined {
   return undefined;
 }
 
-/** True only after a successful page for this query and tab came back empty. */
-export function showNoMatches(state: SearchState): boolean {
-  if (!state.query.trim()) return false;
-  if (state.phase.status !== 'loaded' || state.phase.more) return false;
-  return state.phase.page.type === state.kind && state.phase.page.items.length === 0;
+/** An empty field is browse, including a field of only spaces. */
+export function isBrowse(state: SearchState): boolean {
+  return !state.query.trim();
+}
+
+export type EmptyKind = 'none' | 'noMatches' | 'nothingYet';
+
+/** A finished empty page. Browse and a typed query use different copy. */
+export function emptyKind(state: SearchState): EmptyKind {
+  const phase = state.phase;
+  if (phase.status !== 'loaded' || phase.more) return 'none';
+  if (phase.page.type !== state.kind || phase.page.items.length > 0) return 'none';
+  return isBrowse(state) ? 'nothingYet' : 'noMatches';
+}
+
+export function sectionFor(kind: SearchKind, languages: string[]): { title: string; note?: string } {
+  if (kind === 'books') return { title: 'Popular on this server' };
+  if (kind === 'accounts') return { title: 'Suggested accounts' };
+  if (kind === 'posts') return {
+    title: 'Top posts',
+    note: 'Most replied and reposted in the last 30 days',
+  };
+  return { title: 'Trending on Open Library', note: trendingNote(languages) };
+}
+
+export function trendingNote(names: string[]): string {
+  if (names.length === 0) return 'This week';
+  const list = names.length === 1
+    ? names[0]
+    : `${names.slice(0, -1).join(', ')} and ${names[names.length - 1]}`;
+  return `This week · showing books with editions in ${list}`;
 }
 
 export function concatPages(current: SearchPage, next: SearchPage): SearchPage {
@@ -82,7 +137,7 @@ export function concatPages(current: SearchPage, next: SearchPage): SearchPage {
 /**
  * One search box. Keystrokes and tab changes share a generation: the request
  * that belongs to an older one, or to a session that has since signed out,
- * cannot publish.
+ * cannot publish. A blank query asks for that tab's browse page.
  */
 export class SearchModel {
   state: SearchState;
@@ -95,6 +150,7 @@ export class SearchModel {
   private readonly emit: (state: SearchState) => void;
   private readonly schedule: (fn: () => void, ms: number) => ReturnType<typeof setTimeout>;
   private readonly cancelTimer: (id: ReturnType<typeof setTimeout>) => void;
+  private readonly now: () => number;
 
   constructor(
     fetchPage: SearchFetch,
@@ -103,20 +159,31 @@ export class SearchModel {
     cancelTimer: (id: ReturnType<typeof setTimeout>) => void = (id) => clearTimeout(id),
     session: string | null = null,
     kind: SearchKind = 'accounts',
+    now: () => number = () => Date.now(),
+    initialQuery = '',
   ) {
     this.fetchPage = fetchPage;
     this.emit = emit;
     this.schedule = schedule;
     this.cancelTimer = cancelTimer;
-    this.state = { query: '', kind, phase: { status: 'idle' }, session };
+    this.now = now;
+    this.state = { query: initialQuery, kind, phase: { status: 'idle' }, session };
+    if (session) this.publishCurrent();
   }
 
   setSession(session: string | null): void {
     if (session === this.state.session) return;
+    const previous = this.state.session;
+    if (previous) dropMemo(previous);
     this.generation += 1;
     this.stop();
     this.pendingCursor = null;
-    this.update({ ...this.state, session, phase: { status: 'idle' } });
+    this.state = { ...this.state, session };
+    if (!session) {
+      this.update({ ...this.state, phase: { status: 'idle' } });
+      return;
+    }
+    this.publishCurrent();
   }
 
   setQuery(query: string): void {
@@ -128,8 +195,14 @@ export class SearchModel {
     this.generation += 1;
     this.stop();
     this.pendingCursor = null;
-    if (!trimmed || !this.state.session) {
+    if (!this.state.session) {
       this.update({ ...this.state, query, phase: { status: 'idle' } });
+      return;
+    }
+    const hit = this.recall(this.state.kind, trimmed);
+    if (hit) {
+      this.update({ ...this.state, query, phase: { status: 'loaded', page: hit.page, more: false } });
+      if (this.stale(hit, trimmed)) this.arm(null, true);
       return;
     }
     const previous = visiblePage(this.state);
@@ -143,56 +216,139 @@ export class SearchModel {
     this.generation += 1;
     this.stop();
     this.pendingCursor = null;
+    if (!this.state.session) {
+      this.update({ ...this.state, kind, phase: { status: 'idle' } });
+      return;
+    }
+    const trimmed = this.state.query.trim();
+    const hit = this.recall(kind, trimmed);
+    if (hit) {
+      this.update({ ...this.state, kind, phase: { status: 'loaded', page: hit.page, more: false } });
+      if (this.stale(hit, trimmed)) this.arm(null, true);
+      return;
+    }
     const previous = visiblePage(this.state);
     const kept = previous?.type === kind ? previous : undefined;
-    const asking = !!this.state.query.trim() && !!this.state.session;
-    this.update({
-      ...this.state,
-      kind,
-      phase: asking ? { status: 'loading', previous: kept } : { status: 'idle' },
-    });
-    if (asking) this.arm(null);
+    this.update({ ...this.state, kind, phase: { status: 'loading', previous: kept } });
+    this.arm(null);
   }
 
   retry(): void {
     if (this.state.phase.status !== 'failed') return;
     const session = this.state.session;
+    if (!session) return;
     const query = this.state.query.trim();
-    if (!session || !query) return;
     const cursor = this.pendingCursor;
     const previous = this.state.phase.previous;
     this.generation += 1;
     this.stop();
     this.update({ ...this.state, phase: { status: 'loading', previous } });
-    void this.run(this.generation, session, query, this.state.kind, cursor);
+    void this.run(this.generation, session, query, this.state.kind, cursor, false);
   }
 
   loadMore(): void {
     const phase = this.state.phase;
     if (phase.status !== 'loaded' || phase.more || !phase.page.nextCursor) return;
     const session = this.state.session;
+    if (!session) return;
     const query = this.state.query.trim();
-    if (!session || !query) return;
     const cursor = phase.page.nextCursor;
     this.generation += 1;
     this.stop();
     this.pendingCursor = cursor;
     this.update({ ...this.state, phase: { status: 'loaded', page: phase.page, more: true } });
-    void this.run(this.generation, session, query, this.state.kind, cursor);
+    void this.run(this.generation, session, query, this.state.kind, cursor, false);
   }
 
-  private arm(cursor: string | null): void {
+  /** Keep a request the sheet learned about on the cached catalog page. */
+  noteRequest(workKey: string, request: BookRequest | null): void {
+    const session = this.state.session;
+    if (!session) return;
+    const apply = (page: SearchPage): SearchPage => {
+      if (page.type !== 'catalog') return page;
+      if (!page.items.some((work) => work.workKey === workKey)) return page;
+      return {
+        type: 'catalog',
+        nextCursor: page.nextCursor,
+        items: page.items.map((work) => work.workKey === workKey ? { ...work, request } : work),
+      };
+    };
+    const memo = searchMemo(session);
+    for (const [key, entry] of memo) {
+      const page = apply(entry.page);
+      if (page !== entry.page) memo.set(key, { ...entry, page });
+    }
+    const phase = this.state.phase;
+    if (phase.status === 'loaded') {
+      const page = apply(phase.page);
+      if (page !== phase.page) this.update({ ...this.state, phase: { ...phase, page } });
+      return;
+    }
+    if ((phase.status === 'loading' || phase.status === 'failed') && phase.previous) {
+      const previous = apply(phase.previous);
+      if (previous !== phase.previous) {
+        this.update({ ...this.state, phase: { ...phase, previous } });
+      }
+    }
+  }
+
+  private publishCurrent(): void {
+    const session = this.state.session;
+    if (!session) {
+      this.update({ ...this.state, phase: { status: 'idle' } });
+      return;
+    }
+    const trimmed = this.state.query.trim();
+    const hit = this.recall(this.state.kind, trimmed);
+    if (hit) {
+      this.update({ ...this.state, phase: { status: 'loaded', page: hit.page, more: false } });
+      if (this.stale(hit, trimmed)) this.arm(null, true);
+      return;
+    }
+    this.update({ ...this.state, phase: { status: 'loading' } });
+    this.arm(null);
+  }
+
+  private recall(kind: SearchKind, query: string): MemoEntry | undefined {
+    const session = this.state.session;
+    if (!session) return undefined;
+    return searchMemo(session).get(memoKey(kind, query));
+  }
+
+  private stale(entry: MemoEntry, query: string): boolean {
+    if (query) return false;
+    return this.now() - entry.at > BROWSE_REVALIDATE_MS;
+  }
+
+  private remember(page: SearchPage): void {
+    const session = this.state.session;
+    if (!session) return;
+    const key = memoKey(page.type, this.state.query.trim());
+    const memo = searchMemo(session);
+    if (memo.has(key)) memo.delete(key);
+    memo.set(key, { page, at: this.now() });
+    while (memo.size > MEMO_LIMIT) {
+      const oldest = memo.keys().next().value;
+      if (oldest === undefined) break;
+      memo.delete(oldest);
+    }
+  }
+
+  private arm(cursor: string | null, quiet = false): void {
     const generation = this.generation;
     const session = this.state.session;
     const query = this.state.query.trim();
     const kind = this.state.kind;
-    if (!session || !query) return;
+    if (!session) return;
     this.pendingCursor = cursor;
+    const delay = query
+      ? (kind === 'catalog' ? CATALOG_DEBOUNCE_MS : SEARCH_DEBOUNCE_MS)
+      : 0;
     this.timer = this.schedule(() => {
       this.timer = undefined;
       if (generation !== this.generation) return;
-      void this.run(generation, session, query, kind, cursor);
-    }, kind === 'catalog' ? CATALOG_DEBOUNCE_MS : SEARCH_DEBOUNCE_MS);
+      void this.run(generation, session, query, kind, cursor, quiet);
+    }, delay);
   }
 
   private async run(
@@ -201,6 +357,7 @@ export class SearchModel {
     query: string,
     kind: SearchKind,
     cursor: string | null,
+    quiet: boolean,
   ): Promise<void> {
     if (!this.current(generation, session, query, kind)) return;
     const abort = new AbortController();
@@ -212,9 +369,11 @@ export class SearchModel {
       if (page.type !== kind) return;
       const shown = visiblePage(this.state);
       const merged = cursor && shown && shown.type === page.type ? concatPages(shown, page) : page;
+      this.remember(merged);
       this.update({ ...this.state, phase: { status: 'loaded', page: merged, more: false } });
     } catch (error) {
       if (abort.signal.aborted || !this.current(generation, session, query, kind)) return;
+      if (quiet && visiblePage(this.state)) return;
       const previous = visiblePage(this.state);
       const message = error instanceof Error && error.message
         ? error.message

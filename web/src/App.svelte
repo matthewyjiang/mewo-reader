@@ -389,6 +389,7 @@
                 {query}
                 oncomment={openComments}
                 onprofile={openProfile}
+                onadd={pickFile}
               />
             {:else if path === '/likes'}
               <Likes scroller={main} oncomment={openComments} />
