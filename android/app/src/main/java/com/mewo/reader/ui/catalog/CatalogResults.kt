@@ -21,10 +21,13 @@ import androidx.compose.material.icons.outlined.Close
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.LocalMinimumInteractiveComponentSize
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -38,10 +41,10 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.mewo.reader.data.BookRequest
 import com.mewo.reader.data.CatalogWork
 import com.mewo.reader.ui.components.BindListTop
-import com.mewo.reader.ui.components.ErrorStatus
 import com.mewo.reader.ui.components.HideOnScrollState
 import com.mewo.reader.ui.components.LoadWhenNearEnd
 import com.mewo.reader.ui.components.SpinnerStatus
+import com.mewo.reader.ui.components.StatusRow
 
 @Composable
 fun CatalogResults(
@@ -81,15 +84,11 @@ fun CatalogResults(
                 .nestedScroll(hideOnScroll.connection),
         ) {
             val emptyPage = loaded != null && !loaded.more && page != null && page.items.isEmpty()
-            val showTrending = catalogQuery(query) is CatalogQuery.Browse &&
-                failed == null &&
-                phase !is CatalogPhase.Idle &&
-                !emptyPage
-            if (showTrending) {
+            if (showTrendingHeader(query, phase)) {
                 item(key = "trending") { CatalogHeading("Trending on Open Library") }
             }
             if (failed != null) {
-                item(key = "error") { ErrorStatus(message = failed.message, onRetry = onRetry) }
+                item(key = "error") { CatalogErrorRow(message = failed.message, onRetry = onRetry) }
             } else {
                 if (loading && page == null) {
                     item(key = "loading") { CatalogSkeleton() }
@@ -107,7 +106,7 @@ fun CatalogResults(
                 if (loading && page != null) {
                     item(key = "more") { SpinnerStatus() }
                 }
-                if (loaded != null && !loaded.more && page != null && page.items.isEmpty()) {
+                if (emptyPage) {
                     item(key = "empty") { CatalogEmpty(query) }
                 }
             }
@@ -232,13 +231,39 @@ internal fun CatalogNotice(
                 color = MaterialTheme.colorScheme.onBackground,
                 modifier = Modifier.weight(1f),
             )
-            IconButton(onClick = onDismiss) {
-                Icon(
-                    imageVector = Icons.Outlined.Close,
-                    contentDescription = "Dismiss message",
-                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
+            CompositionLocalProvider(LocalMinimumInteractiveComponentSize provides 40.dp) {
+                IconButton(onClick = onDismiss) {
+                    Icon(
+                        imageVector = Icons.Outlined.Close,
+                        contentDescription = "Dismiss message",
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
             }
+        }
+    }
+}
+
+/** Same row as a search failure, with the catalog's 15 bold Try again. */
+@Composable
+internal fun CatalogErrorRow(
+    message: String,
+    onRetry: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    StatusRow(modifier) {
+        Text(
+            text = message,
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.error,
+            modifier = Modifier.weight(1f),
+        )
+        TextButton(onClick = onRetry) {
+            Text(
+                text = "Try again",
+                style = MaterialTheme.typography.titleSmall,
+                color = MaterialTheme.colorScheme.primary,
+            )
         }
     }
 }

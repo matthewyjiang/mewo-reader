@@ -34,6 +34,7 @@ import com.mewo.reader.data.AccountHit
 import com.mewo.reader.data.BackendKind
 import com.mewo.reader.data.BookRecord
 import com.mewo.reader.data.BookRequest
+import com.mewo.reader.data.CatalogPage
 import com.mewo.reader.data.CatalogWork
 import com.mewo.reader.data.Rating
 import com.mewo.reader.data.RequestDetail
@@ -50,13 +51,16 @@ import com.mewo.reader.data.LocalProfile
 import com.mewo.reader.data.PostKind
 import com.mewo.reader.data.ProfileRecord
 import com.mewo.reader.ui.catalog.CatalogEmpty
+import com.mewo.reader.ui.catalog.CatalogErrorRow
+import com.mewo.reader.ui.catalog.CatalogHeading
 import com.mewo.reader.ui.catalog.CatalogNotice
+import com.mewo.reader.ui.catalog.CatalogPhase
 import com.mewo.reader.ui.catalog.CatalogRow
 import com.mewo.reader.ui.catalog.CatalogSheetContent
 import com.mewo.reader.ui.catalog.CatalogSheetState
 import com.mewo.reader.ui.catalog.CatalogSkeleton
+import com.mewo.reader.ui.catalog.showTrendingHeader
 import com.mewo.reader.ui.components.AccountDrawer
-import com.mewo.reader.ui.components.ErrorStatus
 import com.mewo.reader.ui.components.AppTab
 import com.mewo.reader.ui.components.BrandMark
 import com.mewo.reader.ui.components.HomeTabBar
@@ -306,7 +310,7 @@ class SurfaceScreenshots {
     @Test
     fun catalogTrending() = shoot("catalog-trending") {
         SearchChrome("catalog", query = "", tabs = searchTabs(hosted = true, canRequest = true)) {
-            CatalogHeadingShot()
+            CatalogHeader("", trendingPhase())
             CatalogRow(work = duneWork, request = null, onOpen = {}, onAct = {})
             CatalogRow(work = emmaWork, request = null, onOpen = {}, onAct = {})
             CatalogRow(work = longWork, request = longWork.request, onOpen = {}, onAct = {})
@@ -320,7 +324,7 @@ class SurfaceScreenshots {
     @Test
     fun catalogShortQuery() = shoot("catalog-short-query") {
         SearchChrome("catalog", query = "du", tabs = searchTabs(hosted = true, canRequest = true)) {
-            CatalogHeadingShot()
+            CatalogHeader("du", trendingPhase())
             CatalogRow(work = duneWork, request = null, onOpen = {}, onAct = {})
         }
     }
@@ -328,7 +332,7 @@ class SurfaceScreenshots {
     @Test
     fun catalogLoading() = shoot("catalog-loading") {
         SearchChrome("catalog", query = "", tabs = searchTabs(hosted = true, canRequest = true)) {
-            CatalogHeadingShot()
+            CatalogHeader("", CatalogPhase.Loading())
             CatalogSkeleton()
         }
     }
@@ -336,6 +340,7 @@ class SurfaceScreenshots {
     @Test
     fun catalogEmpty() = shoot("catalog-empty") {
         SearchChrome("catalog", query = "", tabs = searchTabs(hosted = true, canRequest = true)) {
+            CatalogHeader("", CatalogPhase.Loaded(CatalogPage()))
             CatalogEmpty("")
         }
     }
@@ -343,7 +348,8 @@ class SurfaceScreenshots {
     @Test
     fun catalogError() = shoot("catalog-error") {
         SearchChrome("catalog", query = "", tabs = searchTabs(hosted = true, canRequest = true)) {
-            ErrorStatus(
+            CatalogHeader("", CatalogPhase.Failed("Couldn't reach the server. Check your connection."))
+            CatalogErrorRow(
                 message = "Couldn't reach the server. Check your connection.",
                 onRetry = {},
             )
@@ -374,11 +380,11 @@ class SurfaceScreenshots {
             )
             Box(Modifier.weight(1f).fillMaxWidth()) {
                 Column {
-                    CatalogHeadingShot()
+                    CatalogHeader("", trendingPhase())
                     CatalogRow(work = duneWork, request = null, onOpen = {}, onAct = {})
                 }
                 CatalogNotice(
-                    message = "Could not request that book.",
+                    message = "Couldn't request that book.",
                     onDismiss = {},
                     modifier = Modifier
                         .align(Alignment.BottomCenter)
@@ -512,9 +518,13 @@ class SurfaceScreenshots {
     }
 }
 
+private fun trendingPhase() = CatalogPhase.Loaded(CatalogPage(items = listOf(duneWork)))
+
 @Composable
-private fun CatalogHeadingShot() {
-    com.mewo.reader.ui.catalog.CatalogHeading("Trending on Open Library")
+private fun CatalogHeader(query: String, phase: CatalogPhase) {
+    if (showTrendingHeader(query, phase)) {
+        CatalogHeading("Trending on Open Library")
+    }
 }
 
 @Composable

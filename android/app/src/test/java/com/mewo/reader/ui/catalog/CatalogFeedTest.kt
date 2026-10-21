@@ -203,6 +203,16 @@ class CatalogFeedTest {
     }
 
     @Test
+    fun aRequestWithNoMessageUsesTheCatalogNotice() = runTest {
+        val store = FakeCatalogStore()
+        val work = CatalogWork(workKey = "/works/OL1W", title = "Dune", author = "Herbert")
+        store.requestHandler = { throw Exception() }
+        val feed = feed(store, this)
+        feed.act(work)
+        assertEquals("Couldn't request that book.", feed.state.value.notice)
+    }
+
+    @Test
     fun anImportedRowWithNoBookRequestsAgain() = runTest {
         val store = FakeCatalogStore()
         val work = CatalogWork(

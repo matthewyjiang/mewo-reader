@@ -34,6 +34,17 @@ fun catalogQuery(raw: String): CatalogQuery {
     return if (scalars < CATALOG_MIN_QUERY) CatalogQuery.Browse else CatalogQuery.Search(trimmed)
 }
 
+/** The trending heading is only for browse, and only while those rows are loading or on screen. */
+internal fun showTrendingHeader(query: String, phase: CatalogPhase): Boolean {
+    if (catalogQuery(query) !is CatalogQuery.Browse) return false
+    return when (phase) {
+        CatalogPhase.Idle -> false
+        is CatalogPhase.Failed -> false
+        is CatalogPhase.Loading -> true
+        is CatalogPhase.Loaded -> phase.more || phase.page.items.isNotEmpty()
+    }
+}
+
 /** Service name from a held-upstream error, such as `SABnzbd: down`. */
 fun holdService(error: String?): String? {
     if (error.isNullOrEmpty()) return null

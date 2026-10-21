@@ -1,6 +1,7 @@
 package com.mewo.reader.ui.catalog
 
 import com.mewo.reader.data.BookRequest
+import com.mewo.reader.data.CatalogPage
 import com.mewo.reader.data.CatalogWork
 import com.mewo.reader.data.Rating
 import com.mewo.reader.data.RequestDetail
@@ -130,6 +131,17 @@ class RequestStatusTest {
         assertTrue(catalogQuery("📚a") is CatalogQuery.Browse)
         assertEquals(CatalogQuery.Search("abc"), catalogQuery("  abc  "))
         assertEquals(CatalogQuery.Search("📚ab"), catalogQuery("📚ab"))
+    }
+
+    @Test
+    fun trendingHeaderShowsForBrowseWhileLoadingOrFilled() {
+        val rows = CatalogPage(items = listOf(CatalogWork(workKey = "/works/OL1W", title = "Dune")))
+        val empty = CatalogPage()
+        assertTrue(showTrendingHeader("", CatalogPhase.Loading()))
+        assertTrue(showTrendingHeader("du", CatalogPhase.Loaded(rows)))
+        assertFalse(showTrendingHeader("", CatalogPhase.Loaded(empty)))
+        assertFalse(showTrendingHeader("", CatalogPhase.Failed("Couldn't load the catalog.")))
+        assertFalse(showTrendingHeader("dune", CatalogPhase.Loaded(rows)))
     }
 
     @Test

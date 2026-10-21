@@ -187,7 +187,7 @@ class CatalogFeed(
         } catch (error: CancellationException) {
             throw error
         } catch (error: Exception) {
-            _state.update { it.copy(notice = error.message ?: "Could not request that book.") }
+            _state.update { it.copy(notice = error.message ?: "Couldn't request that book.") }
         }
         return RowOutcome.Done
     }
