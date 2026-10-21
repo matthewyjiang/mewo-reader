@@ -29,6 +29,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
+import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.navigation.NavType
 import androidx.navigation.compose.NavHost
@@ -48,6 +49,7 @@ import com.mewo.reader.ui.profile.ProfileScreen
 import com.mewo.reader.ui.profile.ProfileViewModel
 import com.mewo.reader.ui.reader.ReaderScreen
 import com.mewo.reader.ui.reader.ReaderViewModel
+import com.mewo.reader.data.SearchKind
 import com.mewo.reader.ui.search.PrefSearchKind
 import com.mewo.reader.ui.search.SearchScreen
 import com.mewo.reader.ui.search.SearchViewModel
@@ -64,6 +66,7 @@ import kotlinx.coroutines.launch
 @Composable
 fun MewoNav() {
     val store = LocalLibraryStore.current
+    val catalog = LocalCatalogStore.current
     val context = LocalContext.current
     val searchKinds = remember { PrefSearchKind(context) }
     val nav = rememberNavController()
@@ -164,6 +167,17 @@ fun MewoNav() {
         nav.navigate(dest)
     }
 
+    fun browseCatalog() {
+        searchKinds.write(SearchKind.Catalog)
+        goTab(AppTab.Search)
+        val entry = nav.getBackStackEntry("search")
+        val vm = ViewModelProvider(
+            entry,
+            SearchViewModel.factory(store, searchKinds, catalog),
+        )[SearchViewModel::class.java]
+        vm.setKind(SearchKind.Catalog)
+    }
+
     fun openSettings() {
         hideIme()
         chrome.show()
@@ -203,11 +217,12 @@ fun MewoNav() {
                         onOpenAccount = openAccount,
                         onOpenProfile = ::openProfile,
                         hideOnScroll = chrome,
+                        onBrowseCatalog = ::browseCatalog,
                     )
                 }
                 composable("search") {
                     val vm: SearchViewModel = viewModel(
-                        factory = SearchViewModel.factory(store, searchKinds),
+                        factory = SearchViewModel.factory(store, searchKinds, catalog),
                     )
                     SearchScreen(
                         viewModel = vm,

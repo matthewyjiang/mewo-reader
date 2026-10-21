@@ -1,6 +1,7 @@
 package com.mewo.reader.ui.search
 
 import android.net.Uri
+import com.mewo.reader.data.CatalogAccess
 import com.mewo.reader.data.AccountHit
 import com.mewo.reader.data.BookRecord
 import com.mewo.reader.data.CommentIndex
@@ -18,6 +19,8 @@ import com.mewo.reader.data.SearchKind
 import com.mewo.reader.data.SearchPage
 import com.mewo.reader.data.SearchResult
 import com.mewo.reader.data.hasReposted
+import com.mewo.reader.ui.catalog.CATALOG_DEBOUNCE_MS
+import com.mewo.reader.ui.catalog.FakeCatalogStore
 import java.io.File
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
@@ -382,6 +385,81 @@ class SearchViewModelTest {
         store.reposts.getValue(BOOK).completeExceptionally(RuntimeException("offline"))
         advanceUntilIdle()
         assertFalse(vm.state.value.comments.getValue(BOOK).hasReposted("p1"))
+    }
+
+    @Test
+    fun searchTabsAddCatalogOnlyWhenRequestsAreOn() {
+        assertEquals(
+            listOf("books" to "Books", "posts" to "Posts"),
+            searchTabs(hosted = false, canRequest = false),
+        )
+        assertEquals(
+            listOf("books" to "Books", "posts" to "Posts", "catalog" to "Catalog"),
+            searchTabs(hosted = false, canRequest = true),
+        )
+        assertEquals(
+            listOf("accounts" to "Accounts", "books" to "Books", "posts" to "Posts"),
+            searchTabs(hosted = true, canRequest = false),
+        )
+        assertEquals(
+            listOf(
+                "accounts" to "Accounts",
+                "books" to "Books",
+                "posts" to "Posts",
+                "catalog" to "Catalog",
+            ),
+            searchTabs(hosted = true, canRequest = true),
+        )
+    }
+
+    @Test
+    fun catalogNeverAsksTheLibrarySearch() = runTest(main) {
+        val store = HostedFake()
+        val catalog = FakeCatalogStore()
+        val vm = SearchViewModel(store, catalogStore = catalog)
+        runCurrent()
+        vm.bindSession("token")
+        vm.setKind(SearchKind.Catalog)
+        runCurrent()
+        assertEquals(SearchKind.Catalog, vm.state.value.search.kind)
+        assertTrue(vm.state.value.search.phase is SearchPhase.Idle)
+        assertEquals(listOf("" to 1), catalog.pageCalls)
+
+        vm.setQuery("e")
+        advanceTimeBy(1_000)
+        runCurrent()
+        assertEquals(listOf("" to 1), catalog.pageCalls)
+        assertTrue(store.pages.isEmpty())
+
+        vm.setQuery("emma")
+        advanceTimeBy(CATALOG_DEBOUNCE_MS)
+        runCurrent()
+        assertEquals("emma", catalog.pageCalls.last().first)
+        assertTrue(store.pages.isEmpty())
+    }
+
+    @Test
+    fun requestsTurningOffLeavesTheCatalogTab() = runTest(main) {
+        val store = HostedFake()
+        val catalog = FakeCatalogStore()
+        val memory = MemorySearchKind()
+        memory.write(SearchKind.Catalog)
+        val vm = SearchViewModel(store, memory, catalog)
+        runCurrent()
+        assertEquals(SearchKind.Catalog, vm.state.value.search.kind)
+        catalog.setAccess(CatalogAccess.Off)
+        runCurrent()
+        assertEquals(SearchKind.Accounts, vm.state.value.search.kind)
+        assertTrue(store.pages.isEmpty())
+    }
+
+    @Test
+    fun aLocalReaderDoesNotRestoreTheCatalogTab() = runTest(main) {
+        val memory = MemorySearchKind()
+        memory.write(SearchKind.Catalog)
+        val vm = SearchViewModel(FakeStore(), memory)
+        runCurrent()
+        assertEquals(SearchKind.Books, vm.state.value.search.kind)
     }
 
     private fun TestScope.arm(vm: SearchViewModel, query: String) {

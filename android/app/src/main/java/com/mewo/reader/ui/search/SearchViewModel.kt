@@ -3,7 +3,10 @@ package com.mewo.reader.ui.search
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
+import com.mewo.reader.data.CatalogAccess
+import com.mewo.reader.data.CatalogStore
 import com.mewo.reader.data.CommentIndex
+import com.mewo.reader.data.DisabledCatalogStore
 import com.mewo.reader.data.LibraryStore
 import com.mewo.reader.data.PostComment
 import com.mewo.reader.data.SearchKind
@@ -11,6 +14,7 @@ import com.mewo.reader.data.SearchPage
 import com.mewo.reader.data.SearchResult
 import com.mewo.reader.data.cursor
 import com.mewo.reader.data.kind
+import com.mewo.reader.ui.catalog.CatalogFeed
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -32,12 +36,20 @@ data class SearchUiState(
 class SearchViewModel(
     private val store: LibraryStore,
     private val memory: SearchKindMemory = MemorySearchKind(),
+    private val catalogStore: CatalogStore = DisabledCatalogStore(),
 ) : ViewModel() {
     private val initialKind = rememberKind(memory.read(), store.hostedSocial)
     private val _state = MutableStateFlow(
         SearchUiState(search = SearchState(kind = initialKind, session = "local")),
     )
     val state: StateFlow<SearchUiState> = _state.asStateFlow()
+
+    val catalog = CatalogFeed(
+        store = catalogStore,
+        scope = viewModelScope,
+        onImported = { runCatching { store.load() } },
+    )
+    private var restoredCatalog = false
 
     private val social = BookSocial(store, viewModelScope) { likes, comments ->
         _state.update { it.copy(likes = likes, comments = comments) }
@@ -48,12 +60,44 @@ class SearchViewModel(
     private var session: String? = "local"
     private var pendingCursor: String? = null
 
+    init {
+        viewModelScope.launch {
+            catalogStore.access.collect { access ->
+                when (access) {
+                    CatalogAccess.Unknown -> Unit
+                    CatalogAccess.Off -> {
+                        if (_state.value.search.kind == SearchKind.Catalog) {
+                            val fallback = if (store.hostedSocial) SearchKind.Accounts else SearchKind.Books
+                            setKind(fallback)
+                        }
+                    }
+                    CatalogAccess.On -> {
+                        if (!restoredCatalog) {
+                            restoredCatalog = true
+                            if (memory.read() == SearchKind.Catalog &&
+                                _state.value.search.kind != SearchKind.Catalog
+                            ) {
+                                setKind(SearchKind.Catalog)
+                            }
+                        }
+                        if (_state.value.search.kind == SearchKind.Catalog) catalog.show()
+                    }
+                }
+            }
+        }
+    }
+
     /**
      * Shows [query] right away. The request waits [SEARCH_DEBOUNCE_MS], and a
      * newer keystroke or tab cancels it. A response for another session or
-     * query is dropped.
+     * query is dropped. The catalog tab never asks `/v1/search`.
      */
     fun setQuery(query: String) {
+        catalog.setQuery(query)
+        if (_state.value.search.kind == SearchKind.Catalog) {
+            _state.update { it.copy(search = it.search.copy(query = query)) }
+            return
+        }
         val trimmed = query.trim()
         val same = trimmed == _state.value.query.trim()
         if (same) {
@@ -78,11 +122,18 @@ class SearchViewModel(
 
     fun setKind(kind: SearchKind) {
         if (!store.hostedSocial && kind == SearchKind.Accounts) return
+        if (kind == SearchKind.Catalog && catalogStore.access.value != CatalogAccess.On) return
         if (kind == _state.value.search.kind) return
         memory.write(kind)
         val gen = ++generation
         searchJob?.cancel()
         pendingCursor = null
+        if (kind == SearchKind.Catalog) {
+            catalog.show()
+            _state.update { it.copy(search = it.search.copy(kind = kind, phase = SearchPhase.Idle)) }
+            return
+        }
+        catalog.hide()
         val asking = _state.value.query.isNotBlank() && session != null
         _state.update {
             it.copy(
@@ -96,6 +147,7 @@ class SearchViewModel(
     }
 
     fun bindSession(id: String?) {
+        catalog.bindSession(id)
         if (id == session) return
         session = id
         generation++
@@ -226,18 +278,22 @@ class SearchViewModel(
     }
 
     companion object {
-        fun factory(store: LibraryStore, memory: SearchKindMemory = MemorySearchKind()) =
-            object : ViewModelProvider.Factory {
-                @Suppress("UNCHECKED_CAST")
-                override fun <T : ViewModel> create(modelClass: Class<T>): T {
-                    return SearchViewModel(store, memory) as T
-                }
+        fun factory(
+            store: LibraryStore,
+            memory: SearchKindMemory = MemorySearchKind(),
+            catalog: CatalogStore = DisabledCatalogStore(),
+        ) = object : ViewModelProvider.Factory {
+            @Suppress("UNCHECKED_CAST")
+            override fun <T : ViewModel> create(modelClass: Class<T>): T {
+                return SearchViewModel(store, memory, catalog) as T
             }
+        }
     }
 }
 
 private fun rememberKind(saved: SearchKind?, hosted: Boolean): SearchKind = when {
     saved == SearchKind.Accounts && !hosted -> SearchKind.Books
+    saved == SearchKind.Catalog && !hosted -> SearchKind.Books
     saved != null -> saved
     hosted -> SearchKind.Accounts
     else -> SearchKind.Books
@@ -247,4 +303,5 @@ private fun localPage(kind: SearchKind, result: SearchResult): SearchPage = when
     SearchKind.Books -> SearchPage.Books(result.books)
     SearchKind.Posts -> SearchPage.Posts(result.posts.map { com.mewo.reader.data.PostHitRecord(it.book, it.post) })
     SearchKind.Accounts -> SearchPage.Accounts()
+    SearchKind.Catalog -> error("Catalog does not use /v1/search.")
 }

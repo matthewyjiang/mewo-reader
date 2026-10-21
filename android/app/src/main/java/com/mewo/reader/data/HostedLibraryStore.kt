@@ -236,7 +236,7 @@ class HostedLibraryStore(
         val session = requireSession()
         val safe = requireBookId(id)
         withContext(Dispatchers.IO) {
-            expireOn401(session) { client.delete(session, safe) }
+            sessions.expireOn401(session) { client.delete(session, safe) }
             bookDir(safe).deleteRecursively()
         }
         mutex.withLock {
@@ -251,7 +251,7 @@ class HostedLibraryStore(
         val safe = requireBookId(id)
         shares.setShared(safe, shared) {
             withContext(Dispatchers.IO) {
-                expireOn401(session) { client.setShared(session, safe, shared) }
+                sessions.expireOn401(session) { client.setShared(session, safe, shared) }
             }
         }
     }
@@ -267,7 +267,7 @@ class HostedLibraryStore(
         val session = requireSession()
         val safe = requireBookId(id)
         cachedFeed(safe)?.let { return@withContext it }
-        val posts = expireOn401(session) { client.posts(session, safe) }
+        val posts = sessions.expireOn401(session) { client.posts(session, safe) }
         val dir = bookDir(safe).apply { mkdirs() }
         // Builds before server parsing kept the EPUB and a Readium feed here.
         File(dir, "book.epub").delete()
@@ -284,7 +284,7 @@ class HostedLibraryStore(
         val session = requireSession()
         val safe = requireBookId(id)
         val updated = withContext(Dispatchers.IO) {
-            expireOn401(session) {
+            sessions.expireOn401(session) {
                 client.patch(session, safe, PatchBook(progressIndex = index.coerceAtLeast(0)))
             }
         }
@@ -294,34 +294,34 @@ class HostedLibraryStore(
     override suspend fun likes(id: String): Set<String> = withContext(Dispatchers.IO) {
         val session = requireSession()
         val safe = requireBookId(id)
-        expireOn401(session) { client.likes(session, safe) }
+        sessions.expireOn401(session) { client.likes(session, safe) }
     }
 
     override suspend fun toggleLike(id: String, postId: String): Set<String> =
         withContext(Dispatchers.IO) {
             val session = requireSession()
             val safe = requireBookId(id)
-            expireOn401(session) { client.toggleLike(session, safe, postId) }
+            sessions.expireOn401(session) { client.toggleLike(session, safe, postId) }
         }
 
     override suspend fun commentIndex(id: String): CommentIndex = withContext(Dispatchers.IO) {
         val session = requireSession()
         val safe = requireBookId(id)
-        expireOn401(session) { client.commentIndex(session, safe) }
+        sessions.expireOn401(session) { client.commentIndex(session, safe) }
     }
 
     override suspend fun comments(id: String, postId: String): List<PostComment> =
         withContext(Dispatchers.IO) {
             val session = requireSession()
             val safe = requireBookId(id)
-            expireOn401(session) { client.comments(session, safe, postId) }
+            sessions.expireOn401(session) { client.comments(session, safe, postId) }
         }
 
     override suspend fun addComment(id: String, postId: String, text: String): List<PostComment> =
         withContext(Dispatchers.IO) {
             val session = requireSession()
             val safe = requireBookId(id)
-            expireOn401(session) { client.addComment(session, safe, postId, text) }
+            sessions.expireOn401(session) { client.addComment(session, safe, postId, text) }
         }
 
     override suspend fun deleteComment(
@@ -331,47 +331,48 @@ class HostedLibraryStore(
     ): List<PostComment> = withContext(Dispatchers.IO) {
         val session = requireSession()
         val safe = requireBookId(id)
-        expireOn401(session) { client.deleteComment(session, safe, postId, commentId) }
+        sessions.expireOn401(session) { client.deleteComment(session, safe, postId, commentId) }
     }
 
     override suspend fun searchPage(query: String, kind: SearchKind, cursor: String?): SearchPage =
         withContext(Dispatchers.IO) {
+            if (kind == SearchKind.Catalog) error("Catalog does not use /v1/search.")
             val session = requireSession()
-            expireOn401(session) { client.search(session, query, kind, cursor) }
+            sessions.expireOn401(session) { client.search(session, query, kind, cursor) }
         }
 
     override suspend fun homeFeed(cursor: String?): HomeFeedPage = withContext(Dispatchers.IO) {
         val session = requireSession()
-        expireOn401(session) { client.homeFeed(session, cursor) }
+        sessions.expireOn401(session) { client.homeFeed(session, cursor) }
     }
 
     override suspend fun profile(username: String): ProfileRecord = withContext(Dispatchers.IO) {
         val session = requireSession()
-        expireOn401(session) { client.user(session, username) }
+        sessions.expireOn401(session) { client.user(session, username) }
     }
 
     override suspend fun profilePosts(username: String, cursor: String?): ProfilePostsPage =
         withContext(Dispatchers.IO) {
             val session = requireSession()
-            expireOn401(session) { client.userPosts(session, username, cursor) }
+            sessions.expireOn401(session) { client.userPosts(session, username, cursor) }
         }
 
     override suspend fun profileReposts(username: String, cursor: String?): ProfileRepostsPage =
         withContext(Dispatchers.IO) {
             val session = requireSession()
-            expireOn401(session) { client.userReposts(session, username, cursor) }
+            sessions.expireOn401(session) { client.userReposts(session, username, cursor) }
         }
 
     override suspend fun profileBooks(username: String): ProfileBooks = withContext(Dispatchers.IO) {
         val session = requireSession()
-        expireOn401(session) { client.userBooks(session, username) }
+        sessions.expireOn401(session) { client.userBooks(session, username) }
     }
 
     override suspend fun setRepost(id: String, postId: String, reposted: Boolean): RepostState =
         withContext(Dispatchers.IO) {
             val session = requireSession()
             val safe = requireBookId(id)
-            expireOn401(session) { client.setRepost(session, safe, postId, reposted) }
+            sessions.expireOn401(session) { client.setRepost(session, safe, postId, reposted) }
         }
 
     override suspend fun search(query: String): SearchResult = withContext(Dispatchers.IO) {
@@ -400,7 +401,7 @@ class HostedLibraryStore(
         val session = sessions.session.value
         if (!session.signedIn) return@withContext emptyList()
         _library.value.books.flatMap { book ->
-            val ids = expireOn401(session) { client.likes(session, book.id) }
+            val ids = sessions.expireOn401(session) { client.likes(session, book.id) }
             if (ids.isEmpty()) emptyList()
             else {
                 val posts = cachedFeed(book.id) ?: emptyList()
@@ -412,7 +413,7 @@ class HostedLibraryStore(
     override suspend fun profileReplies(handle: String): List<ProfileReply> =
         withContext(Dispatchers.IO) {
             val session = requireSession()
-            val remote = expireOn401(session) { client.profileReplies(session, handle) }
+            val remote = sessions.expireOn401(session) { client.profileReplies(session, handle) }
             val books = _library.value.books.associateBy { it.id }
             val feeds = mutableMapOf<String, Map<String, FeedPost>>()
             remote.replies.mapNotNull { row ->
@@ -435,7 +436,7 @@ class HostedLibraryStore(
         val meta = opener.metadata(epub)
         val cover = File(scratch, "cover.jpg")
         writeCover(cover, meta.cover)
-        val record = expireOn401(session) {
+        val record = sessions.expireOn401(session) {
             client.upload(
                 session = session,
                 epub = epub,
@@ -465,7 +466,7 @@ class HostedLibraryStore(
     private fun ensureCover(session: HostedSession, id: String) {
         val dest = File(bookDir(id), "cover.jpg")
         if (dest.exists() && dest.length() > 0L) return
-        expireOn401(session) { client.downloadCover(session, id, dest) }
+        sessions.expireOn401(session) { client.downloadCover(session, id, dest) }
     }
 
     private fun cachedFeed(id: String): List<FeedPost>? {
@@ -520,15 +521,6 @@ class HostedLibraryStore(
             error(HOSTED_NOT_SIGNED_IN)
         }
         return session
-    }
-
-    private fun <T> expireOn401(session: HostedSession, block: () -> T): T {
-        return try {
-            block()
-        } catch (err: HostedException) {
-            if (err.code == 401 && sessions.session.value.token == session.token) sessions.signOut()
-            throw err
-        }
     }
 
     private fun bookDir(id: String): File = File(root, id)

@@ -35,6 +35,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -56,6 +57,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.mewo.reader.data.AccountHit
 import com.mewo.reader.data.BackendKind
 import com.mewo.reader.data.BookRecord
+import com.mewo.reader.data.CatalogAccess
 import com.mewo.reader.data.FeedPost
 import com.mewo.reader.data.PostHitRecord
 import com.mewo.reader.data.SearchKind
@@ -64,8 +66,12 @@ import com.mewo.reader.data.cursor
 import com.mewo.reader.data.hasReposted
 import com.mewo.reader.data.repostCount
 import com.mewo.reader.ui.LocalBackend
+import com.mewo.reader.ui.LocalCatalogStore
 import com.mewo.reader.ui.LocalHostedAuth
 import com.mewo.reader.ui.LocalLibraryStore
+import com.mewo.reader.ui.catalog.CatalogPhase
+import com.mewo.reader.ui.catalog.CatalogResults
+import com.mewo.reader.ui.catalog.RowOutcome
 import com.mewo.reader.ui.components.Avatar
 import com.mewo.reader.ui.components.BindListTop
 import com.mewo.reader.ui.components.ErrorStatus
@@ -80,6 +86,7 @@ import com.mewo.reader.ui.library.BookPost
 import com.mewo.reader.ui.reader.CommentSheet
 import com.mewo.reader.ui.reader.CommentTarget
 import com.mewo.reader.ui.reader.TimelinePost
+import kotlinx.coroutines.launch
 
 @Composable
 fun SearchScreen(
@@ -119,7 +126,11 @@ fun SearchScreen(
     val loading = phase is SearchPhase.Loading
     val failed = phase as? SearchPhase.Failed
     val loaded = phase as? SearchPhase.Loaded
-    val tabs = if (hosted) hostedTabs else localTabs
+    val canRequest = LocalCatalogStore.current.access.collectAsStateWithLifecycle().value == CatalogAccess.On
+    val catalogState by viewModel.catalog.state.collectAsStateWithLifecycle()
+    val tabs = searchTabs(hosted, canRequest)
+    val scope = rememberCoroutineScope()
+    val onCatalog = search.kind == SearchKind.Catalog
 
     Column(Modifier.fillMaxSize()) {
         MewoAppBar(
@@ -143,12 +154,43 @@ fun SearchScreen(
                 val kind = when (id) {
                     "accounts" -> SearchKind.Accounts
                     "posts" -> SearchKind.Posts
+                    "catalog" -> SearchKind.Catalog
                     else -> SearchKind.Books
                 }
                 viewModel.setKind(kind)
             },
         )
-        hideOnScroll.ShowWhenIdle(state.query.isBlank() || page == null || page.isBlank())
+        val catalogIdle = onCatalog && (
+            state.query.isBlank() ||
+                catalogState.phase is CatalogPhase.Failed ||
+                (catalogState.phase as? CatalogPhase.Loaded)?.page?.items?.isEmpty() == true
+            )
+        hideOnScroll.ShowWhenIdle(
+            if (onCatalog) catalogIdle else state.query.isBlank() || page == null || page.isBlank(),
+        )
+        if (onCatalog) {
+            CatalogResults(
+                state = catalogState,
+                query = state.query,
+                hideOnScroll = hideOnScroll,
+                onOpen = viewModel.catalog::open,
+                onAct = { work ->
+                    scope.launch {
+                        when (val outcome = viewModel.catalog.act(work)) {
+                            is RowOutcome.OpenBook -> onOpenBook(outcome.id)
+                            RowOutcome.Done -> Unit
+                        }
+                    }
+                },
+                onRetry = viewModel.catalog::retry,
+                onLoadMore = viewModel.catalog::loadMore,
+                onDismissNotice = viewModel.catalog::dismissNotice,
+                onCloseSheet = viewModel.catalog::close,
+                onOpenBook = onOpenBook,
+                modifier = Modifier.weight(1f),
+            )
+            return@Column
+        }
         val listState = rememberLazyListState()
         hideOnScroll.BindListTop(listState)
         val more = loaded?.more == true
@@ -225,17 +267,6 @@ fun SearchScreen(
         }
     }
 }
-
-private val hostedTabs = listOf(
-    "accounts" to "Accounts",
-    "books" to "Books",
-    "posts" to "Posts",
-)
-
-private val localTabs = listOf(
-    "books" to "Books",
-    "posts" to "Posts",
-)
 
 private fun SearchPage.isBlank(): Boolean = when (this) {
     is SearchPage.Accounts -> items.isEmpty()
