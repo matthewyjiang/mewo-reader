@@ -32,8 +32,7 @@
   let main = $state<HTMLElement>();
   let fileInput = $state<HTMLInputElement>();
   let reader = $state<{ openChapters: () => void; capture: () => void }>();
-  let search = $state<{ capture: () => void; showCatalog: () => void }>();
-  let catalogPick = $state(0);
+  let search = $state<{ capture: () => void }>();
   let profile = $state<{ refresh: () => Promise<void> }>();
   let drawer = $state(false);
   let commentTarget = $state<PostHit | null>(null);
@@ -198,9 +197,7 @@
 
   function browseCatalog(): void {
     writeStored('mewo.search.kind', 'catalog');
-    catalogPick += 1;
-    if (path === '/search') search?.showCatalog();
-    else router.go('/search');
+    router.go('/search');
   }
 
   async function upload(file: File, sample = false): Promise<void> {
@@ -398,7 +395,6 @@
                 bind:this={search}
                 scroller={main}
                 {query}
-                {catalogPick}
                 oncomment={openComments}
                 onprofile={openProfile}
                 onadd={pickFile}

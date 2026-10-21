@@ -104,17 +104,29 @@ export function rowAction(
 
 const RAW_STATUS = /^(?:server returned \d+|http \d+)\b/i;
 
-/** Failure copy for the catalog list and the sheet. The Try again control sits
- *  beside it, so the sentence itself never ends that way. */
-export function catalogErrorText(status: number, message: string): string {
+/** Status lines shared by the catalog list and a sheet action. A raw status
+ *  uses `rawFallback` so an action does not say it failed to load the catalog. */
+function readableError(status: number, text: string, rawFallback: string): string {
   if (status === 0) return "Couldn't reach the server. Check your connection.";
   if (status === 401) return 'Sign in again.';
   if (status === 403) return 'Requests are off.';
   if (status === 404) return 'That book is no longer in the catalog.';
-  const trimmed = message.trim();
-  if (!trimmed || RAW_STATUS.test(trimmed)) return "Couldn't load the catalog.";
+  const trimmed = text.trim();
+  if (!trimmed || RAW_STATUS.test(trimmed)) return rawFallback;
   const sentence = trimmed.replace(/(?:^|\s)Try again\.$/, '').trim();
-  return sentence || "Couldn't load the catalog.";
+  return sentence || rawFallback;
+}
+
+/** Failure copy for the catalog list and the sheet's detail error. The Try again
+ *  control sits beside it, so the sentence itself never ends that way. */
+export function catalogErrorText(status: number, message: string): string {
+  return readableError(status, message, "Couldn't load the catalog.");
+}
+
+/** Inline failure under a sheet action. Same status lines, but a raw status is
+ *  a plain sentence rather than the catalog fallback. */
+export function actionErrorText(status: number, message: string): string {
+  return readableError(status, message, 'Something went wrong.');
 }
 
 /** Held and owned copies say "On your shelf". Someone else's shared copy says "On server". */

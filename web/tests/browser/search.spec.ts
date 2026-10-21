@@ -249,10 +249,17 @@ async function install(
     emptyQuery?: string;
     info?: boolean;
     theme?: 'x_light' | 'x_lights_out';
+    canRequest?: boolean;
   } = {},
 ) {
   const state = {
     stage: 'none',
+    canRequest: options.canRequest ?? true,
+    libraryBooks: null as null | ReturnType<typeof book>[],
+    catalogNextPage: null as number | null,
+    failCatalogPage: null as number | null,
+    searchFailure: null as null | { type: string; query: string; status: number; error: string },
+    requestFailure: null as null | { status: number; error: string | null },
     holdBooks: options.holdBooks ?? false,
     releaseBooks: () => {},
     booksGate: Promise.resolve(),
@@ -301,9 +308,18 @@ async function answer(route: Route, state: Awaited<ReturnType<typeof install>>) 
     contentType: 'application/json',
     body: JSON.stringify(body),
   });
-  if (method === 'POST' && path.startsWith('/v1/requests')) state.requestPosts.push(path);
-  if (path === '/v1/me') return json({ username: 'ada', isAdmin: true, canRequest: true });
+  if (method === 'POST' && path.startsWith('/v1/requests')) {
+    state.requestPosts.push(path);
+    if (state.requestFailure && path === '/v1/requests') {
+      const failure = state.requestFailure;
+      state.requestFailure = null;
+      if (failure.error) return json({ error: failure.error }, failure.status);
+      return route.fulfill({ status: failure.status, contentType: 'text/plain', body: 'nope' });
+    }
+  }
+  if (path === '/v1/me') return json({ username: 'ada', isAdmin: true, canRequest: state.canRequest });
   if (path === '/v1/library') {
+    if (state.libraryBooks) return json({ books: state.libraryBooks });
     if (state.shelf) return json({ books: [book('b1', 'Emma', 'Austen')] });
     return json({ books: state.stage === 'imported' ? [shelfBook] : [] });
   }
@@ -311,6 +327,9 @@ async function answer(route: Route, state: Awaited<ReturnType<typeof install>>) 
   if (path === '/v1/search') {
     const type = url.searchParams.get('type') ?? 'accounts';
     const q = url.searchParams.get('q') ?? '';
+    if (state.searchFailure && type === state.searchFailure.type && q === state.searchFailure.query) {
+      return json({ error: state.searchFailure.error }, state.searchFailure.status);
+    }
     if (type === 'books') {
       state.bookFetches += 1;
       if (state.holdBooks) {
@@ -325,7 +344,11 @@ async function answer(route: Route, state: Awaited<ReturnType<typeof install>>) 
   }
   if (path === '/v1/catalog/search') {
     const q = url.searchParams.get('q') ?? '';
+    const pageNo = Number(url.searchParams.get('page') ?? '1') || 1;
     state.catalogQueries.push(q);
+    if (state.failCatalogPage != null && pageNo === state.failCatalogPage) {
+      return json({ error: "Couldn't search the catalog right now." }, 502);
+    }
     if (state.holdCatalog) {
       state.holdCatalog = false;
       await new Promise<void>((resolve) => { state.releaseCatalog = resolve; });
@@ -334,7 +357,8 @@ async function answer(route: Route, state: Awaited<ReturnType<typeof install>>) 
     if (failure && q === failure.query) return json({ error: failure.error }, failure.status);
     if (state.emptyBrowse && q === '') return json({ items: [], nextPage: null });
     if (state.miss && q === state.miss) return json({ items: [], nextPage: null });
-    return json({ items: state.items ?? trending, nextPage: null });
+    const nextPage = pageNo === 1 ? state.catalogNextPage : null;
+    return json({ items: state.items ?? trending, nextPage });
   }
   if (path.startsWith('/v1/catalog/works/')) {
     const olid = decodeURIComponent(path.slice('/v1/catalog/works/'.length));
@@ -698,6 +722,68 @@ test('the trending header hides when the list is empty or failed', async ({ page
   await expect(page.getByRole('button', { name: 'Try again' })).toBeVisible();
 });
 
+test('a failed catalog load-more keeps the header above the rows', async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  const state = await install(page, { kind: 'catalog' });
+  state.catalogNextPage = 2;
+  state.failCatalogPage = 2;
+  await page.goto('/search');
+  await expect(page.getByRole('heading', { name: 'Trending on Open Library' })).toBeVisible();
+  await expect(page.getByText('Dune').first()).toBeVisible();
+  await page.locator('main').evaluate((el) => { el.scrollTop = el.scrollHeight; });
+  const alert = page.getByRole('alert');
+  await expect(alert).toHaveText("Couldn't search the catalog right now.");
+  await expect(page.getByRole('heading', { name: 'Trending on Open Library' })).toBeVisible();
+  await expect(page.getByText('Dune').first()).toBeVisible();
+  const message = await alert.evaluate((el) => getComputedStyle(el));
+  expect(message.flexGrow).toBe('1');
+  expect(message.lineHeight).toBe('20px');
+  const row = await page.locator('.status-row').boundingBox();
+  const again = await page.getByRole('button', { name: 'Try again' }).boundingBox();
+  expect(row).toBeTruthy();
+  expect(again).toBeTruthy();
+  expect(again!.x + again!.width).toBeGreaterThan((row!.x + row!.width) - 24);
+});
+
+test('Try again on Accounts, Books, and Posts stays the plain text button', async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  const state = await install(page, { kind: 'books' });
+  state.searchFailure = { type: 'books', query: '', status: 500, error: 'Search failed.' };
+  await page.goto('/search');
+  const again = page.getByRole('button', { name: 'Try again' });
+  await expect(again).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Popular on this server' })).toBeVisible();
+  const style = await again.evaluate((el) => getComputedStyle(el));
+  expect(style.fontWeight).toBe('400');
+  const message = await page.getByRole('alert').evaluate((el) => getComputedStyle(el));
+  expect(message.flexGrow).toBe('0');
+  expect(message.lineHeight).not.toBe('20px');
+});
+
+test('the empty-shelf menu opens without moving the pill', async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await install(page);
+  await page.goto('/');
+  await page.getByRole('tab', { name: 'Books' }).click();
+  const add = page.getByRole('button', { name: 'Add a book', exact: true });
+  const before = await add.boundingBox();
+  await add.click();
+  const menu = page.getByRole('menu');
+  await expect(menu.getByRole('menuitem')).toHaveText(['Upload EPUB', 'Browse catalog']);
+  const after = await add.boundingBox();
+  expect(before).toBeTruthy();
+  expect(after).toBeTruthy();
+  expect(after!.x).toBe(before!.x);
+  expect(after!.y).toBe(before!.y);
+  await expect(menu.getByRole('menuitem', { name: 'Upload EPUB' })).toBeFocused();
+  await page.keyboard.press('ArrowDown');
+  await expect(menu.getByRole('menuitem', { name: 'Browse catalog' })).toBeFocused();
+  await page.keyboard.press('ArrowUp');
+  await expect(menu.getByRole('menuitem', { name: 'Upload EPUB' })).toBeFocused();
+  await page.getByRole('tab', { name: 'Feed' }).focus();
+  await expect(menu).toHaveCount(0);
+});
+
 test('Browse catalog opens the Catalog tab', async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 });
   await install(page, { kind: 'accounts' });
@@ -722,7 +808,7 @@ test('Browse catalog opens the Catalog tab', async ({ page }) => {
   await expect(page.getByPlaceholder('Search')).toHaveValue('du');
   await expect(page.getByRole('heading', { name: 'Trending on Open Library' })).toBeVisible();
 
-  // Search is already mounted. Switching away and browsing again must select Catalog.
+  // Search unmounts on the way home. The next visit reads the kind stored before navigation.
   await page.getByRole('tab', { name: 'Accounts' }).click();
   await expect(page.getByRole('tab', { name: 'Accounts' })).toHaveAttribute('aria-selected', 'true');
   await page.getByRole('link', { name: 'Home' }).click();
@@ -731,6 +817,46 @@ test('Browse catalog opens the Catalog tab', async ({ page }) => {
   await page.getByRole('menuitem', { name: 'Browse catalog' }).click();
   await expect(page.getByRole('tab', { name: 'Catalog' })).toHaveAttribute('aria-selected', 'true');
   await expect(page.getByPlaceholder('Search')).toHaveValue('du');
+});
+
+test('without requests the add controls upload directly', async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  const state = await install(page, { canRequest: false });
+  await page.goto('/');
+  await page.getByRole('tab', { name: 'Books' }).click();
+  const pill = page.getByRole('button', { name: 'Add a book', exact: true });
+  await expect(pill).toBeVisible();
+  await expect(pill).not.toHaveAttribute('aria-label');
+  const firstChooser = page.waitForEvent('filechooser');
+  await pill.click();
+  await firstChooser;
+  await expect(page.getByRole('menu')).toHaveCount(0);
+
+  state.libraryBooks = [book('b1', 'Emma', 'Austen')];
+  await page.reload();
+  await page.getByRole('tab', { name: 'Books' }).click();
+  await expect(page.getByRole('heading', { name: 'My books' })).toBeVisible();
+  const fab = page.getByRole('button', { name: 'Add an EPUB' });
+  const secondChooser = page.waitForEvent('filechooser');
+  await fab.click();
+  await secondChooser;
+  await expect(page.getByRole('menu')).toHaveCount(0);
+  await expect(page.getByRole('button', { name: 'Add a book' })).toHaveCount(0);
+});
+
+test('a sheet action error does not end in Try again', async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  const state = await install(page, { kind: 'catalog' });
+  state.requestFailure = { status: 500, error: null };
+  await page.goto('/search');
+  await page.getByRole('button', { name: 'Dune, Frank Herbert, 1965', exact: true }).click();
+  const sheet = page.getByRole('dialog', { name: 'Dune' });
+  await sheet.getByRole('button', { name: 'Request', exact: true }).click();
+  const alert = sheet.getByRole('alert');
+  await expect(alert).toHaveText('Something went wrong.');
+  state.requestFailure = { status: 502, error: 'No indexer is configured. Try again.' };
+  await sheet.getByRole('button', { name: 'Request', exact: true }).click();
+  await expect(alert).toHaveText('No indexer is configured.');
 });
 
 function parityRequest(id: string, olid: string, title: string, over: Record<string, unknown> = {}) {

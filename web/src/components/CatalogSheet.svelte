@@ -3,7 +3,8 @@
   import { ApiError } from '../lib/api';
   import type { BookRequest, CatalogWork, RequestDetail, WorkDetail } from '../lib/models';
   import {
-    alsoRequested, catalogErrorText, catalogOlid, copyLabel, coverUrl, heldCopy, isLivePhase,
+    actionErrorText, alsoRequested, catalogErrorText, catalogOlid, copyLabel, coverUrl, heldCopy,
+    isLivePhase,
     noMatchCopy, requestPhase, subjectLine, waitingCopy, workStats,
   } from '../lib/requests';
   import { readerUrl, router } from '../lib/router.svelte';
@@ -138,10 +139,15 @@
       }
       attempt += 1;
     } catch (error) {
-      actionError = message(error);
+      noteActionError(error);
     } finally {
       acting = false;
     }
+  }
+
+  function noteActionError(error: unknown): void {
+    const status = error instanceof ApiError ? error.status : -1;
+    actionError = actionErrorText(status, message(error));
   }
 
   async function cancel(): Promise<void> {
@@ -164,7 +170,7 @@
       onchange(next);
       attempt += 1;
     } catch (error) {
-      actionError = message(error);
+      noteActionError(error);
     } finally {
       acting = false;
     }
@@ -193,7 +199,7 @@
       }
       attempt += 1;
     } catch (error) {
-      actionError = message(error);
+      noteActionError(error);
     } finally {
       acting = false;
     }

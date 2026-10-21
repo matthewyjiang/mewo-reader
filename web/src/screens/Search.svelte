@@ -21,9 +21,8 @@
   import { readStored, writeStored } from '../lib/storage';
   import { store } from '../lib/store.svelte';
 
-  let { scroller, query, catalogPick = 0, oncomment, onprofile, onadd }: FeedScreenProps & {
+  let { scroller, query, oncomment, onprofile, onadd }: FeedScreenProps & {
     query: string;
-    catalogPick?: number;
     onprofile: (username: string) => void;
     onadd: () => void;
   } = $props();
@@ -95,9 +94,9 @@
   let section = $derived.by(() => {
     if (!browse || !searchState.session) return null;
     if (searchState.kind === 'catalog') {
-      if (searchState.phase.status === 'failed') return null;
-      if (searchState.phase.status === 'loaded' && (page?.items.length ?? 0) === 0) return null;
-      if (searchState.phase.status !== 'loading' && searchState.phase.status !== 'loaded') return null;
+      const rows = page?.items.length ?? 0;
+      const loadingBare = searchState.phase.status === 'loading' && !page;
+      if (!loadingBare && rows === 0) return null;
     }
     return sectionFor(searchState.kind);
   });
@@ -107,10 +106,6 @@
   export function capture(): void {
     router.scroll.set(entryKey, scroller.scrollTop);
     router.tabScroll.set('search', scroller.scrollTop);
-  }
-
-  export function showCatalog(): void {
-    void select('catalog');
   }
 
   onMount(() => restoreScroll(scroller));
@@ -129,14 +124,6 @@
       }
       model.setQuery(text);
     });
-  });
-
-  // Ignore the value this screen mounted with. A later increment, while this
-  // screen is already open, is what switches the tab.
-  const seenPick = untrack(() => catalogPick);
-  $effect(() => {
-    if (catalogPick === seenPick) return;
-    untrack(() => { void select('catalog'); });
   });
 
   $effect(() => {
@@ -225,9 +212,14 @@
 <UnderlineTabs {tabs} selected={searchState.kind} fixed onselect={(id) => { void select(id); }} />
 
 {#if searchState.phase.status === 'failed'}
-  <div class="status-row">
+  <div class="status-row" class:catalog={searchState.kind === 'catalog'}>
     <span class="error" role="alert">{searchState.phase.error}</span>
-    <button class="text-button retry" type="button" onclick={() => model.retry()}>Try again</button>
+    <button
+      class="text-button"
+      class:retry={searchState.kind === 'catalog'}
+      type="button"
+      onclick={() => model.retry()}
+    >Try again</button>
   </div>
 {/if}
 {#if section}
@@ -300,6 +292,11 @@
 {/if}
 
 <style>
+  .status-row.catalog .error {
+    flex: 1;
+    line-height: 20px;
+  }
+
   .retry {
     font-size: .9375rem;
     font-weight: 700;

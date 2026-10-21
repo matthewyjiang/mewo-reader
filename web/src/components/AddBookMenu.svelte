@@ -19,8 +19,9 @@
 
   let open = $state(false);
   let root = $state<HTMLDivElement>();
+  let menuEl = $state<HTMLDivElement>();
   let label = $derived(
-    canRequest ? (variant === 'fab' ? 'Add a book' : undefined) : 'Add an EPUB',
+    variant === 'fab' ? (canRequest ? 'Add a book' : 'Add an EPUB') : undefined,
   );
 
   function activate(): void {
@@ -37,31 +38,59 @@
     run();
   }
 
+  function items(): HTMLButtonElement[] {
+    return [...(menuEl?.querySelectorAll<HTMLButtonElement>('button') ?? [])];
+  }
+
   $effect(() => {
     if (!open) return;
     const node = root;
+    const menu = menuEl;
+    if (!node || !menu) return;
     const onKey = (event: KeyboardEvent): void => {
-      if (event.key !== 'Escape') return;
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        open = false;
+        return;
+      }
+      if (event.key !== 'ArrowDown' && event.key !== 'ArrowUp') return;
+      const buttons = items();
+      if (!buttons.length) return;
       event.preventDefault();
-      open = false;
+      const index = buttons.indexOf(document.activeElement as HTMLButtonElement);
+      const delta = event.key === 'ArrowDown' ? 1 : -1;
+      const next = index < 0
+        ? (delta > 0 ? 0 : buttons.length - 1)
+        : (index + delta + buttons.length) % buttons.length;
+      buttons[next]?.focus();
     };
     const onPointer = (event: PointerEvent): void => {
       const target = event.target;
-      if (node && target instanceof Node && node.contains(target)) return;
+      if (target instanceof Node && node.contains(target)) return;
+      open = false;
+    };
+    const onFocusOut = (event: FocusEvent): void => {
+      // Removing the menu drops focus and fires this during that update.
+      if (!open) return;
+      const next = event.relatedTarget;
+      if (next instanceof Node && node.contains(next)) return;
       open = false;
     };
     document.addEventListener('keydown', onKey);
     document.addEventListener('pointerdown', onPointer);
+    node.addEventListener('focusout', onFocusOut);
+    items()[0]?.focus();
     return () => {
       document.removeEventListener('keydown', onKey);
       document.removeEventListener('pointerdown', onPointer);
+      node.removeEventListener('focusout', onFocusOut);
     };
   });
 </script>
 
 <div class="anchor" class:fab={variant === 'fab'} bind:this={root}>
   {#if open}
-    <div class="menu" role="menu">
+    <div class="menu" role="menu" bind:this={menuEl}>
       <button type="button" role="menuitem" onclick={() => choose(onupload)}>Upload EPUB</button>
       <button type="button" role="menuitem" onclick={() => choose(onbrowse)}>Browse catalog</button>
     </div>
@@ -83,8 +112,6 @@
   .anchor {
     position: relative;
     display: inline-flex;
-    flex-direction: column;
-    align-items: flex-start;
   }
 
   .anchor.fab {
@@ -92,15 +119,21 @@
     right: 16px;
     bottom: 68px;
     z-index: 4;
-    display: flex;
-    align-items: flex-end;
   }
 
   .menu {
-    margin-bottom: 8px;
+    position: absolute;
+    bottom: calc(100% + 8px);
+    left: 0;
+    z-index: 1;
     min-width: max-content;
     background: var(--hover);
     border: 1px solid var(--line);
+  }
+
+  .anchor.fab .menu {
+    left: auto;
+    right: 0;
   }
 
   .menu button {
@@ -117,7 +150,8 @@
     white-space: nowrap;
   }
 
-  .menu button:hover {
+  .menu button:hover,
+  .menu button:focus-visible {
     background: color-mix(in srgb, var(--ink) 8%, var(--hover));
   }
 

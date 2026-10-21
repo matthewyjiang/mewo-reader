@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import {
-  alsoRequested, badge, catalogErrorText, catalogRowLabel, copyLabel, coverUrl, heldCopy,
+  actionErrorText, alsoRequested, badge, catalogErrorText, catalogRowLabel, copyLabel, coverUrl,
+  heldCopy,
   noMatchCopy, openLabel, requestPhase, rowAction, stateLabel, subjectLine, workStats,
 } from '../src/lib/requests.ts';
 
@@ -64,6 +65,25 @@ test('catalogErrorText maps status codes and never ends in Try again', () => {
   assert.equal(catalogErrorText(500, 'Server returned 500. Try again.'), "Couldn't load the catalog.");
   assert.equal(catalogErrorText(500, 'HTTP 500'), "Couldn't load the catalog.");
   assert.equal(catalogErrorText(502, 'Prowlarr: HTTP 500'), 'Prowlarr: HTTP 500');
+});
+
+test('actionErrorText strips Try again without the catalog fallback', () => {
+  assert.equal(
+    actionErrorText(0, 'Could not reach the server. Check your connection and try again.'),
+    "Couldn't reach the server. Check your connection.",
+  );
+  assert.equal(actionErrorText(401, 'expired'), 'Sign in again.');
+  assert.equal(
+    actionErrorText(500, 'Server returned 500. Try again.'),
+    'Something went wrong.',
+  );
+  assert.equal(actionErrorText(500, 'HTTP 500'), 'Something went wrong.');
+  assert.equal(
+    actionErrorText(502, 'No indexer is configured. Try again.'),
+    'No indexer is configured.',
+  );
+  assert.equal(actionErrorText(502, 'Prowlarr: HTTP 500'), 'Prowlarr: HTTP 500');
+  assert.notEqual(actionErrorText(500, 'HTTP 500'), "Couldn't load the catalog.");
 });
 
 const held = {
