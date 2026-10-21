@@ -4,6 +4,12 @@ import { mkdir } from 'node:fs/promises';
 
 const COVER = readFileSync(new URL('../fixtures/cover.jpg', import.meta.url));
 
+async function expectSection(page: Page, title: string): Promise<void> {
+  const header = page.locator('header.search-section');
+  await expect(header).toBeVisible();
+  await expect(header).toHaveText(title);
+}
+
 async function shot(page: Page, name: string): Promise<void> {
   if (!process.env.MEWO_SHOTS) return;
   const dir = process.env.MEWO_SHOTS_DIR ?? 'test-results/search-shots';
@@ -274,20 +280,6 @@ async function answer(route: Route, state: Awaited<ReturnType<typeof install>>) 
     body: JSON.stringify(body),
   });
   if (path === '/v1/me') return json({ username: 'ada', isAdmin: true, canRequest: true });
-  if (path === '/v1/admin/settings') {
-    return json({
-      allowSignup: true,
-      maxEpubBytes: 64 * 1024 * 1024,
-      requestsEnabled: true,
-      prowlarrUrl: '',
-      sabnzbdUrl: '',
-      sabnzbdCategory: 'books',
-      languages: ['en'],
-      supportedLanguages: [{ code: 'en', name: 'English' }, { code: 'de', name: 'German' }],
-      downloadsDir: null,
-      secrets: { prowlarrApiKey: false, sabnzbdApiKey: false },
-    });
-  }
   if (path === '/v1/library') {
     return json({ books: state.stage === 'imported' ? [shelfBook] : [] });
   }
@@ -351,7 +343,7 @@ test('empty search shows a browse page, keeps each tab, and restores scroll', as
   await page.goto('/search');
   await expect(page.locator('[aria-busy="true"]')).toBeVisible();
   state.releaseBooks();
-  await expect(page.getByRole('heading', { name: 'Popular on this server' })).toBeVisible();
+  await expectSection(page, 'Popular on this server');
   await expect(page.getByText('Emma').first()).toBeVisible();
   await shot(page, 'search-books');
 
@@ -362,7 +354,7 @@ test('empty search shows a browse page, keeps each tab, and restores scroll', as
   const fetches = state.bookFetches;
 
   await page.getByRole('tab', { name: 'Accounts' }).click();
-  await expect(page.getByRole('heading', { name: 'Suggested accounts' })).toBeVisible();
+  await expectSection(page, 'Suggested accounts');
   await expect(page.getByText('@grace')).toBeVisible();
   await shot(page, 'search-accounts');
 
@@ -372,14 +364,12 @@ test('empty search shows a browse page, keeps each tab, and restores scroll', as
   expect(await main.evaluate((el) => el.scrollTop)).toBe(booksScroll);
 
   await page.getByRole('tab', { name: 'Posts' }).click();
-  await expect(page.getByRole('heading', { name: 'Top posts' })).toBeVisible();
-  await expect(page.getByText('Most replied and reposted in the last 30 days')).toBeVisible();
+  await expectSection(page, 'Top posts');
   await expect(page.getByText('Emma Woodhouse, handsome, clever, and rich.')).toBeVisible();
   await shot(page, 'search-posts');
 
   await page.getByRole('tab', { name: 'Catalog' }).click();
-  await expect(page.getByRole('heading', { name: 'Trending on Open Library' })).toBeVisible();
-  await expect(page.getByText('This week · showing books with editions in English')).toBeVisible();
+  await expectSection(page, 'Trending on Open Library');
   const held = page.getByRole('button', { name: 'Foundation, Isaac Asimov, 1951, On your shelf' });
   await expect(held).toBeVisible();
   await expect(held).not.toContainText('secret');

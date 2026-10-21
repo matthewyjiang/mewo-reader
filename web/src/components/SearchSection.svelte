@@ -1,10 +1,9 @@
 <script lang="ts">
-  let { title, note }: { title: string; note?: string } = $props();
+  let { title }: { title: string } = $props();
 </script>
 
-<header class="search-section" class:noted={!!note}>
+<header class="search-section">
   <h2>{title}</h2>
-  {#if note}<p>{note}</p>{/if}
 </header>
 
 <style>
@@ -12,29 +11,14 @@
     box-sizing: border-box;
     height: 44px;
     display: flex;
-    flex-direction: column;
-    justify-content: center;
-    gap: 2px;
+    align-items: center;
     padding: 0 16px;
     border-bottom: .6px solid var(--line);
-  }
-
-  .search-section.noted {
-    height: 64px;
   }
 
   h2 {
     font-size: .9375rem;
     line-height: 1.25;
     font-weight: 700;
-  }
-
-  p {
-    color: var(--mute);
-    font-size: .8125rem;
-    line-height: 1.25;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
   }
 </style>

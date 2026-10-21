@@ -40,7 +40,6 @@
   });
   let overrides = $state<Record<string, BookRequest | null>>({});
   let openWork = $state<CatalogWork | null>(null);
-  let editionLanguages = $state<string[]>([]);
   let restoredCatalog = false;
   const scrollByKind = new Map<SearchKind, number>();
   let restoreKind = $state<SearchKind | null>(null);
@@ -81,7 +80,7 @@
   ]);
   let page = $derived(visiblePage(searchState));
   let browse = $derived(isBrowse(searchState));
-  let section = $derived(browse && searchState.session ? sectionFor(searchState.kind, editionLanguages) : null);
+  let section = $derived(browse && searchState.session ? sectionFor(searchState.kind) : null);
   let blank = $derived(emptyKind(searchState));
   let showSkeleton = $derived(searchState.phase.status === 'loading' && !page);
 
@@ -106,20 +105,6 @@
       }
       model.setQuery(text);
     });
-  });
-
-  $effect(() => {
-    if (!isAdmin) {
-      editionLanguages = [];
-      return;
-    }
-    let alive = true;
-    void store.api.serverSettings().then((settings) => {
-      if (!alive) return;
-      editionLanguages = settings.languages.map((code) =>
-        settings.supportedLanguages.find((item) => item.code === code)?.name ?? code);
-    }).catch(() => {});
-    return () => { alive = false; };
   });
 
   $effect(() => {
@@ -214,7 +199,7 @@
   </div>
 {/if}
 {#if section}
-  <SearchSection title={section.title} note={section.note} />
+  <SearchSection title={section.title} />
 {/if}
 {#if showSkeleton}
   <SearchSkeleton kind={searchState.kind} />

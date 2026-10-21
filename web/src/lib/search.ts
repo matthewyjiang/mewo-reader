@@ -106,22 +106,11 @@ export function emptyKind(state: SearchState): EmptyKind {
   return isBrowse(state) ? 'nothingYet' : 'noMatches';
 }
 
-export function sectionFor(kind: SearchKind, languages: string[]): { title: string; note?: string } {
+export function sectionFor(kind: SearchKind): { title: string } {
   if (kind === 'books') return { title: 'Popular on this server' };
   if (kind === 'accounts') return { title: 'Suggested accounts' };
-  if (kind === 'posts') return {
-    title: 'Top posts',
-    note: 'Most replied and reposted in the last 30 days',
-  };
-  return { title: 'Trending on Open Library', note: trendingNote(languages) };
-}
-
-export function trendingNote(names: string[]): string {
-  if (names.length === 0) return 'This week';
-  const list = names.length === 1
-    ? names[0]
-    : `${names.slice(0, -1).join(', ')} and ${names[names.length - 1]}`;
-  return `This week · showing books with editions in ${list}`;
+  if (kind === 'posts') return { title: 'Top posts' };
+  return { title: 'Trending on Open Library' };
 }
 
 export function concatPages(current: SearchPage, next: SearchPage): SearchPage {

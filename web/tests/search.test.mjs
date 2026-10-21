@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { describe, test } from 'node:test';
 import {
   BROWSE_REVALIDATE_MS, CATALOG_DEBOUNCE_MS, clearSearchMemos, emptyKind, isBrowse, SearchModel,
-  SEARCH_DEBOUNCE_MS, searchMemo, trendingNote,
+  SEARCH_DEBOUNCE_MS, searchMemo, sectionFor,
 } from '../src/lib/search.ts';
 
 function deferred() {
@@ -417,11 +417,12 @@ describe('SearchModel', { concurrency: false }, () => {
     assert.equal(isBrowse({ ...base, phase: { status: 'idle' } }), true);
     assert.equal(isBrowse({ ...base, query: '  ', phase: { status: 'idle' } }), true);
     assert.equal(isBrowse({ ...base, query: 'a', phase: { status: 'idle' } }), false);
-    assert.equal(trendingNote([]), 'This week');
-    assert.equal(trendingNote(['English']), 'This week · showing books with editions in English');
-    assert.equal(
-      trendingNote(['English', 'German']),
-      'This week · showing books with editions in English and German',
-    );
+  });
+
+  test('browse sections are a single title', () => {
+    assert.deepEqual(sectionFor('books'), { title: 'Popular on this server' });
+    assert.deepEqual(sectionFor('accounts'), { title: 'Suggested accounts' });
+    assert.deepEqual(sectionFor('posts'), { title: 'Top posts' });
+    assert.deepEqual(sectionFor('catalog'), { title: 'Trending on Open Library' });
   });
 });
