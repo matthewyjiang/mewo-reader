@@ -416,17 +416,19 @@ test('a catalog row opens a sheet and follows the request through to the book', 
   // Click in the page. Playwright's click would scroll this first row into view first.
   await page.getByRole('button', { name: 'Dune, Frank Herbert, 1965' }).evaluate((el: HTMLElement) => el.click());
   const sheet = page.getByRole('dialog', { name: 'Dune' });
-  await expect(sheet.locator('.hero')).toContainText('Frank Herbert');
-  await expect(sheet.getByText('Arrakis', { exact: true })).toBeVisible();
-  await expect(sheet.getByText('First published 1965 · 155 editions · ~608 pages · ★ 4.3 (448)')).toBeVisible();
-  await expect(sheet.getByText('Editions in English, German, French')).toBeVisible();
-  await expect(sheet.getByText('Series: Dune')).toBeVisible();
-  await expect(sheet.getByRole('heading', { name: 'Awards' })).toBeVisible();
-  await expect(sheet.getByText('Hugo Award 1966')).toBeVisible();
-  await expect(sheet.getByRole('link', { name: 'View on Open Library' })).toHaveAttribute(
-    'href',
-    'https://openlibrary.org/works/OL893415W',
-  );
+  await expect(sheet.locator('.hero')).toContainText('Frank Herbert · 1965');
+  await expect(sheet.locator('.hero .dot')).toHaveCount(0);
+  await expect(sheet.getByText('Science fiction · Arrakis · Deserts')).toBeVisible();
+  await expect(sheet.getByRole('button', { name: 'Science fiction' })).toHaveCount(0);
+  await expect(sheet.getByText('First published 1965 · ~608 pages · ★ 4.3')).toBeVisible();
+  await expect(sheet.getByText('155 editions')).toHaveCount(0);
+  await expect(sheet.getByText(/Editions in/)).toHaveCount(0);
+  await expect(sheet.locator('.row').filter({ hasText: 'Series' })).toContainText('Dune');
+  await expect(sheet.locator('.row').filter({ hasText: 'Awards' })).toContainText('Hugo Award 1966');
+  await expect(sheet.getByRole('heading', { name: 'Awards' })).toHaveCount(0);
+  const openLibrary = sheet.getByRole('link', { name: 'View on Open Library' });
+  await expect(openLibrary).toHaveAttribute('href', 'https://openlibrary.org/works/OL893415W');
+  await expect(openLibrary.locator('svg')).toBeVisible();
   await sheet.getByRole('button', { name: 'Close' }).click();
   await expect(sheet).toHaveCount(0);
   expect(await main.evaluate((el) => el.scrollTop)).toBe(scroll);
@@ -436,28 +438,33 @@ test('a catalog row opens a sheet and follows the request through to the book', 
   await page.clock.install({ time: new Date('2026-10-21T15:00:00Z') });
   await open.getByRole('button', { name: 'Request', exact: true }).click();
   await expect(open.getByText('Looking for a release…')).toBeVisible();
-  await expect(open.getByText('Searching')).toBeVisible();
+  await expect(open.locator('.hero')).not.toContainText('Searching');
+  const cancel = open.getByRole('button', { name: 'Cancel request' });
+  await expect(cancel).toBeVisible();
+  await expect(cancel).toHaveClass(/secondary/);
+  await expect(open.getByText(/^Requested/)).toHaveCount(0);
   await shot(page, 'catalog-sheet-requested');
 
   state.stage = 'downloading';
   await page.clock.runFor(10_000);
   await expect(open.getByRole('progressbar', { name: 'Downloading 40%' })).toBeVisible();
-  await expect(open.getByText('Dune - Frank Herbert.epub')).toBeVisible();
-  await expect(open.getByText('Also requested by')).toBeVisible();
-  await expect(open.getByText(/@lin/)).toBeVisible();
+  await expect(open.getByText('Dune - Frank Herbert.epub')).toHaveCount(0);
+  await expect(open.getByText('Also requested by @lin')).toBeVisible();
+  await expect(open.getByText(/@lin ·/)).toHaveCount(0);
   await shot(page, 'catalog-sheet-downloading');
 
   state.stage = 'failed';
   await page.clock.runFor(10_000);
   await expect(open.getByRole('button', { name: 'Retry' })).toBeVisible();
-  await expect(open.getByText('Tried 2 of 3 releases')).toBeVisible();
+  await expect(open.getByText('No EPUB in the download.')).toBeVisible();
+  await expect(open.getByText('Tried 2 of 3 releases')).toHaveCount(0);
 
   const library = page.waitForResponse((response) =>
     response.url().includes('/v1/library') && response.request().method() === 'GET');
   await open.getByRole('button', { name: 'Retry' }).click();
   await library;
   await expect(open.getByRole('button', { name: 'Open book' })).toBeVisible();
-  await expect(open.getByText('On your shelf').first()).toBeVisible();
+  await expect(open.getByText('On your shelf')).toHaveCount(1);
   await shot(page, 'catalog-sheet-imported');
   await open.getByRole('button', { name: 'Open book' }).click();
   await expect(page).toHaveURL(/\/books\/book-dune/);
@@ -475,7 +482,7 @@ test('a canceled request with a server copy opens the book', async ({ page }) =>
   await page.getByRole('button', { name: 'Dune, Frank Herbert, 1965' }).click();
   const sheet = page.getByRole('dialog', { name: 'Dune' });
   await expect(sheet.getByRole('button', { name: 'Open book' })).toBeVisible();
-  await expect(sheet.getByText('On your shelf').first()).toBeVisible();
+  await expect(sheet.getByText('On your shelf')).toHaveCount(1);
   await expect(sheet.getByRole('button', { name: 'Request again' })).toHaveCount(0);
 });
 

@@ -1,8 +1,8 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import {
-  badge, catalogRowLabel, copyLabel, coverUrl, heldCopy, noMatchCopy, openLabel,
-  requestPhase, rowAction, stateLabel,
+  alsoRequested, badge, catalogRowLabel, copyLabel, coverUrl, heldCopy, noMatchCopy, openLabel,
+  requestPhase, rowAction, stateLabel, subjectLine, workStats,
 } from '../src/lib/requests.ts';
 
 function request(over = {}) {
@@ -155,6 +155,25 @@ test('sheet copy names the closest book and the held service', () => {
   assert.match(noMatchCopy(error, 1_700_000_000_000), /Searching again/);
   assert.equal(heldCopy('SABnzbd: paused'), 'Waiting on SABnzbd: paused');
   assert.equal(heldCopy('Prowlarr: down'), 'Waiting on Prowlarr: down');
+});
+
+test('also requested names three people and counts the rest', () => {
+  assert.equal(alsoRequested(['lin']), 'Also requested by @lin');
+  assert.equal(alsoRequested(['lin', 'ada', 'noor']), 'Also requested by @lin, @ada, @noor');
+  assert.equal(alsoRequested(['lin', 'ada', 'noor', 'grace']), 'Also requested by @lin, @ada, @noor +1');
+});
+
+test('sheet stats omit edition count, rating count, and languages', () => {
+  assert.equal(workStats({
+    year: 1965,
+    pagesMedian: 608,
+    rating: { average: 4.3 },
+  }), 'First published 1965 · ~608 pages · ★ 4.3');
+  assert.equal(workStats({ year: null, pagesMedian: null, rating: null }), '');
+  assert.equal(
+    subjectLine(['Science fiction', 'Arrakis', 'Deserts', 'Sand', 'Politics', 'Ecology']),
+    'Science fiction · Arrakis · Deserts · Sand · Politics',
+  );
 });
 
 test('coverUrl points at the Open Library cover CDN', () => {

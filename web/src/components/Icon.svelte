@@ -3,7 +3,7 @@
     | 'home' | 'search' | 'heart' | 'comment' | 'quote' | 'share'
     | 'back' | 'close' | 'plus' | 'trash' | 'settings' | 'chevron'
     | 'more' | 'book' | 'lock' | 'people' | 'refresh' | 'person' | 'repost' | 'shield'
-    | 'clock' | 'check' | 'retry';
+    | 'clock' | 'check' | 'retry' | 'external';
   const paths: Record<IconName, string> = {
     home: 'M3 10 12 3l9 7v10a1 1 0 0 1-1 1h-5v-7H9v7H4a1 1 0 0 1-1-1Z',
     search: 'M21 21l-5-5M18 10a8 8 0 1 1-16 0 8 8 0 0 1 16 0',
@@ -39,6 +39,7 @@
     clock: 'M12 21a9 9 0 1 0 0-18 9 9 0 0 0 0 18M12 7v5l3 2',
     check: 'm5 12.5 4.5 4.5L19 7',
     retry: 'M20 12a8 8 0 1 1-2.3-5.7M20 4v5h-5',
+    external: 'M14 5h5v5M19 5l-9 9M9 5H5v14h14v-4',
   };
   const filledPaths: Partial<Record<IconName, string>> = {
     person: 'M12 12c2.21 0 4-1.79 4-4s-1.79-4-4-4-4 1.79-4 4 1.79 4 4 4zm0 2c-2.67 0-8 1.34-8 4v2h16v-2c0-2.66-5.33-4-8-4z',

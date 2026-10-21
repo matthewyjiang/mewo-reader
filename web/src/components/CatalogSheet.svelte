@@ -1,10 +1,9 @@
 <script lang="ts">
   import { untrack } from 'svelte';
-  import type { BookRequest, CatalogWork, RequestDetail, WorkDetail, WorkInfo } from '../lib/models';
-  import { relativeTime } from '../lib/models';
+  import type { BookRequest, CatalogWork, RequestDetail, WorkDetail } from '../lib/models';
   import {
-    badge, badgeTone, catalogOlid, copyLabel, coverUrl, heldCopy, isLivePhase,
-    noMatchCopy, requestPhase, stateLabel, waitingCopy,
+    alsoRequested, catalogOlid, copyLabel, coverUrl, heldCopy, isLivePhase,
+    noMatchCopy, requestPhase, subjectLine, waitingCopy, workStats,
   } from '../lib/requests';
   import { readerUrl, router } from '../lib/router.svelte';
   import { message, store } from '../lib/store.svelte';
@@ -36,10 +35,8 @@
   let author = $derived(info?.authors.length ? info.authors.join(', ') : work.author);
   let year = $derived(info?.year ?? work.year);
   let coverId = $derived(info?.coverId ?? work.coverId);
-  let shownWork = $derived({ ...work, onServer: copy });
-  let badgeLabel = $derived(badge(shownWork, liveRequest));
-  let tone = $derived(badgeLabel ? badgeTone(badgeLabel) : 'progress');
   let atCap = $derived(detail != null && detail.status.active >= detail.status.cap);
+  let holders = $derived(detail?.status.otherRequests.map((row) => row.requester) ?? []);
   let bookId = $derived(
     detail?.status.request?.bookId
       ?? detail?.status.onServer?.bookId
@@ -123,26 +120,6 @@
     update();
     const frame = requestAnimationFrame(update);
     return { destroy: () => cancelAnimationFrame(frame) };
-  }
-
-  function facts(value: WorkInfo): string {
-    const parts: string[] = [];
-    if (value.year != null) parts.push(`First published ${value.year}`);
-    if (value.editionCount != null) parts.push(`${value.editionCount.toLocaleString()} editions`);
-    if (value.pagesMedian != null) parts.push(`~${value.pagesMedian.toLocaleString()} pages`);
-    if (value.rating) {
-      const average = value.rating.average.toFixed(1);
-      parts.push(`★ ${average} (${value.rating.count.toLocaleString()})`);
-    }
-    return parts.join(' · ');
-  }
-
-  function editionLine(languages: string[]): string {
-    if (languages.length === 0) return '';
-    const shown = languages.slice(0, 6);
-    const extra = languages.length - shown.length;
-    const list = shown.join(', ');
-    return extra > 0 ? `Editions in ${list} +${extra}` : `Editions in ${list}`;
   }
 
   async function requestBook(): Promise<void> {
@@ -242,11 +219,7 @@
         <BookCover {title} src={coverUrl(coverId)} width={72} height={108} />
         <div class="post-column">
           <h3>{title}</h3>
-          {#if info?.subtitle}<p class="meta">{info.subtitle}</p>{/if}
           <p class="meta">{author}{year != null ? ` · ${year}` : ''}</p>
-          {#if badgeLabel}
-            <p class="meta badge"><span class="dot {tone}"></span>{badgeLabel}</p>
-          {/if}
         </div>
       </div>
 
@@ -267,52 +240,40 @@
               value={liveRequest?.progress ?? 0}
               aria-label={`Downloading ${liveRequest?.progress ?? 0}%`}
             ></progress>
-            {#if detailRequest?.releaseTitle}
-              <p class="meta truncate">{detailRequest.releaseTitle}</p>
-            {/if}
           {:else if phase === 'retrying'}
-            {#if liveRequest?.error}<p>{liveRequest.error}</p>{/if}
-            <p class="meta">Trying another release…</p>
+            <p>{liveRequest?.error || 'Trying another release…'}</p>
           {:else}
             <p>Checking and importing…</p>
+            <progress max="100" value={liveRequest?.progress ?? 0} aria-label="Importing"></progress>
           {/if}
-          <button class="text-button danger" type="button" disabled={acting} onclick={() => { void cancel(); }}>
+          <button class="pill action secondary" type="button" disabled={acting} onclick={() => { void cancel(); }}>
             Cancel request
           </button>
-          {#if liveRequest}
-            <p class="meta">Requested {relativeTime(liveRequest.createdAt)}</p>
-          {/if}
         {:else if phase === 'failed' && liveRequest}
           <p>{liveRequest.error ?? 'The download failed.'}</p>
-          {#if detailRequest}
-            <p class="meta">Tried {detailRequest.attempts} of {detailRequest.maxAttempts} releases</p>
-          {/if}
-          <button class="pill" type="button" disabled={acting || atCap} onclick={() => { void retry(); }}>Retry</button>
-          {#if atCap}<p class="meta">You have {detail?.status.cap} requests in progress</p>{/if}
+          <button class="pill action" type="button" disabled={acting || atCap} onclick={() => { void retry(); }}>
+            Retry
+          </button>
+          {#if atCap}<p class="muted">You have {detail?.status.cap} requests in progress</p>{/if}
         {:else if copy || phase === 'imported'}
           <p>{copy ? copyLabel(copy, 'sheet') : 'On your shelf'}</p>
-          <button class="pill" type="button" disabled={!bookId} onclick={openBook}>Open book</button>
+          <button class="pill action" type="button" disabled={!bookId} onclick={openBook}>Open book</button>
         {:else if phase === 'canceled'}
-          <button class="pill" type="button" disabled={acting || atCap} onclick={() => { void retry(); }}>
+          <button class="pill action" type="button" disabled={acting || atCap} onclick={() => { void retry(); }}>
             Request again
           </button>
-          {#if atCap}<p class="meta">You have {detail?.status.cap} requests in progress</p>{/if}
+          {#if atCap}<p class="muted">You have {detail?.status.cap} requests in progress</p>{/if}
         {:else}
-          <button class="pill" type="button" disabled={acting || atCap} onclick={() => { void requestBook(); }}>
+          <button class="pill action" type="button" disabled={acting || atCap} onclick={() => { void requestBook(); }}>
             Request
           </button>
-          {#if atCap}<p class="meta">You have {detail?.status.cap} requests in progress</p>{/if}
+          {#if atCap}<p class="muted">You have {detail?.status.cap} requests in progress</p>{/if}
           {#if info && !info.hasAcceptedEdition}
-            <p class="meta">No English edition listed on Open Library</p>
+            <p class="muted">No English edition listed on Open Library</p>
           {/if}
         {/if}
-        {#if detail && detail.status.otherRequests.length > 0}
-          <h3 class="also">Also requested by</h3>
-          <ul>
-            {#each detail.status.otherRequests as row (row.id)}
-              <li>@{row.requester} · {stateLabel(row)} · {relativeTime(row.updatedAt)}</li>
-            {/each}
-          </ul>
+        {#if holders.length > 0}
+          <p class="muted">{alsoRequested(holders)}</p>
         {/if}
       </section>
 
@@ -336,34 +297,44 @@
       {:else if info}
         <div class="about">
           {#if info.description}
-            <p class="description" class:clamped={!expanded} use:measure>{info.description}</p>
-            {#if overflow || expanded}
-              <button type="button" class="text-button" onclick={() => expanded = !expanded}>
-                {expanded ? 'Less' : 'More'}
-              </button>
-            {/if}
+            <div class="blurb">
+              <p class="description" class:clamped={!expanded} use:measure>{info.description}</p>
+              {#if overflow || expanded}
+                <button type="button" class="text-button" onclick={() => expanded = !expanded}>
+                  {expanded ? 'Less' : 'More'}
+                </button>
+              {/if}
+            </div>
           {/if}
-          {#if info.series.length}
-            <p>Series: {info.series.join(', ')}</p>
-          {/if}
-          {#if info.awards.length}
-            <h3 class="also">Awards</h3>
-            <ul class="awards">
-              {#each info.awards as award (award)}<li>{award}</li>{/each}
-            </ul>
+          {#if info.series.length || info.awards.length}
+            <div class="rows">
+              {#if info.series.length}
+                <div class="row">
+                  <span>Series</span>
+                  <span>{info.series.join(' · ')}</span>
+                </div>
+              {/if}
+              {#if info.awards.length}
+                <div class="row">
+                  <span>Awards</span>
+                  <span>{info.awards.join(' · ')}</span>
+                </div>
+              {/if}
+            </div>
           {/if}
           {#if info.subjects.length}
-            <ul class="chips">
-              {#each info.subjects as subject (subject)}<li>{subject}</li>{/each}
-            </ul>
+            <p class="muted">{subjectLine(info.subjects)}</p>
           {/if}
-          {#if facts(info)}<p class="facts">{facts(info)}</p>{/if}
-          {#if editionLine(info.languages)}<p class="meta">{editionLine(info.languages)}</p>{/if}
+          {#if workStats(info)}<p>{workStats(info)}</p>{/if}
           <a
+            class="library"
             href="https://openlibrary.org{info.canonicalKey}"
             target="_blank"
             rel="noopener"
-          >View on Open Library</a>
+          >
+            View on Open Library
+            <Icon name="external" size={16} />
+          </a>
         </div>
       {/if}
     </div>
@@ -387,10 +358,11 @@
   .hero {
     display: flex;
     gap: 16px;
-    padding: 16px 16px 8px;
+    padding: 16px 16px 0;
   }
 
   h3 {
+    margin: 0;
     font-size: 1.25rem;
     line-height: 1.25;
     font-weight: 700;
@@ -400,42 +372,31 @@
     margin-top: 4px;
   }
 
-  .badge {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-  }
-
-  .dot {
-    width: 8px;
-    height: 8px;
-    flex: 0 0 8px;
-    border-radius: 50%;
-    background: var(--accent);
-  }
-
-  .dot.shelf { background: var(--green); }
-  .dot.failed { background: var(--like); }
-  .dot.server { background: var(--accent); }
-  .dot.progress { background: var(--mute); }
-
   .status {
-    margin: 8px 16px 16px;
-    padding: 12px;
-    border: .6px solid var(--line);
-    border-radius: 12px;
     display: flex;
     flex-direction: column;
-    align-items: flex-start;
-    gap: 8px;
+    align-items: stretch;
+    gap: 12px;
+    margin: 24px 16px 0;
   }
 
   .status p {
     line-height: 1.4;
   }
 
-  .status .pill, .status .text-button {
-    margin-top: 4px;
+  .action {
+    width: 100%;
+    box-sizing: border-box;
+  }
+
+  .action.secondary {
+    background: transparent;
+    color: var(--like);
+    border: 1px solid var(--line);
+  }
+
+  .action.secondary:hover:not(:disabled) {
+    background: color-mix(in srgb, var(--like) 8%, transparent);
   }
 
   progress {
@@ -450,31 +411,20 @@
   progress::-webkit-progress-value { background: var(--accent); }
   progress::-moz-progress-bar { background: var(--accent); }
 
-  .also {
-    font-size: .8125rem;
-    line-height: 1.3;
-    color: var(--mute);
-    font-weight: 700;
-    margin-top: 4px;
-  }
-
-  .status ul, .awards {
-    margin: 0;
-    padding: 0;
-    list-style: none;
-  }
-
-  .status li, .awards li {
-    font-size: .9375rem;
-    line-height: 1.4;
-  }
-
   .about {
     display: flex;
     flex-direction: column;
     align-items: flex-start;
-    gap: 12px;
-    padding: 0 16px 16px;
+    gap: 24px;
+    margin-top: 28px;
+    padding: 0 16px 32px;
+  }
+
+  .blurb {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 4px;
   }
 
   .description {
@@ -491,33 +441,34 @@
     overflow: hidden;
   }
 
-  .facts {
+  .rows {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    width: 100%;
+  }
+
+  .row {
+    display: grid;
+    grid-template-columns: 4.75rem 1fr;
+    column-gap: 16px;
     line-height: 1.4;
   }
 
-  .chips {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 8px;
-    margin: 0;
-    padding: 0;
-    list-style: none;
+  .row span:first-child {
+    color: var(--mute);
   }
 
-  .chips li {
-    border: .6px solid var(--line);
-    border-radius: 999px;
-    padding: 4px 10px;
-    font-size: .8125rem;
-    line-height: 1.3;
-  }
-
-  .about a {
+  .library {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    min-height: 40px;
     color: var(--accent);
-    font-weight: 700;
   }
 
   .retry-line {
+    margin-top: 28px;
     padding: 0 16px 16px;
   }
 

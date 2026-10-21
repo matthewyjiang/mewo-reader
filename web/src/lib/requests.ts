@@ -185,6 +185,32 @@ export function heldCopy(error: string | null | undefined): string {
   return rest ? `Waiting on ${service}: ${rest}` : `Waiting on ${service}`;
 }
 
+/** One muted line. The first three names, then +N for the rest. */
+export function alsoRequested(names: string[]): string {
+  const shown = names.slice(0, 3).map((name) => `@${name}`);
+  const extra = names.length - shown.length;
+  const list = shown.join(', ');
+  return extra > 0 ? `Also requested by ${list} +${extra}` : `Also requested by ${list}`;
+}
+
+/** Year, length, and average. Edition count and rating count stay off this line. */
+export function workStats(info: {
+  year: number | null;
+  pagesMedian: number | null;
+  rating: { average: number } | null;
+}): string {
+  const parts: string[] = [];
+  if (info.year != null) parts.push(`First published ${info.year}`);
+  if (info.pagesMedian != null) parts.push(`~${info.pagesMedian.toLocaleString()} pages`);
+  if (info.rating) parts.push(`★ ${info.rating.average.toFixed(1)}`);
+  return parts.join(' · ');
+}
+
+/** Plain text. Subjects are not links, so they are not chips. */
+export function subjectLine(subjects: string[]): string {
+  return subjects.slice(0, 5).join(' · ');
+}
+
 /** Open Library cover CDN, medium JPEG. `default=false` makes a missing cover
  * 404 instead of a 1×1 GIF. Not proxied. */
 export function coverUrl(coverId: number | null): string | null {
