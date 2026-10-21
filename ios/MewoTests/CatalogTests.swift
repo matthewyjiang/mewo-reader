@@ -221,8 +221,8 @@ final class CatalogCopyTests: XCTestCase {
         XCTAssertNil(coverUrl(nil))
         XCTAssertNil(coverUrl(-1))
         XCTAssertEqual(coverUrl(0), "https://covers.openlibrary.org/b/id/0-M.jpg?default=false")
-        XCTAssertEqual(capNote(WorkStatus(request: nil, onServer: nil, active: 5, cap: 5)), cap)
-        XCTAssertNil(capNote(WorkStatus(request: nil, onServer: nil, active: 4, cap: 5)))
+        XCTAssertEqual(capNote(WorkStatus(request: nil, onServer: nil, active: 5, cap: 5, otherRequests: [])), cap)
+        XCTAssertNil(capNote(WorkStatus(request: nil, onServer: nil, active: 4, cap: 5, otherRequests: [])))
     }
 
     func testQueryGateStaysOnTrendingBelowThreeScalars() {
