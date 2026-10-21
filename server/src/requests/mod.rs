@@ -281,7 +281,9 @@ impl RequestRow {
 
 /// Sheet label for a request. `state` and `error` are the leader's when this
 /// row is following one. Held wins over importing: an upstream pause at 100%
-/// is not the import window.
+/// is not the import window. A requested row that still has a retry error
+/// (attempts left; the worker stores `failed` once they are gone) is
+/// `retrying`, so that error stays on the sheet.
 pub(crate) fn phase(state: &str, error: Option<&str>, progress: i64) -> &'static str {
     let error = error.unwrap_or("");
     match state {
@@ -294,6 +296,7 @@ pub(crate) fn phase(state: &str, error: Option<&str>, progress: i64) -> &'static
         "requested" if error == worker::NO_RELEASE_YET => "waiting",
         "requested" if error.starts_with(worker::NO_MATCHING_RELEASE) => "no_match",
         "requested" if worker::upstream_hold(error) => "held",
+        "requested" if !error.is_empty() => "retrying",
         _ => "searching",
     }
 }
@@ -1536,6 +1539,15 @@ mod tests {
         );
         assert_eq!(phase("requested", Some("SABnzbd: down"), 0), "held");
         assert_eq!(phase("requested", Some("Prowlarr: down"), 0), "held");
+        assert_eq!(
+            phase("requested", Some("No EPUB in the download."), 0),
+            "retrying"
+        );
+        assert_eq!(
+            phase("requested", Some("Download failed: CRC error"), 0),
+            "retrying"
+        );
+        assert_eq!(phase("requested", Some(""), 0), "searching");
         assert_eq!(
             phase("downloading", Some("Open Library: HTTP 500"), 40),
             "held"

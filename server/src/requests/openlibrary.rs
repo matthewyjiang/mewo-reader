@@ -21,6 +21,8 @@ const NEGATIVE_FOR: Duration = Duration::from_secs(60);
 const MISSING_FOR: Duration = Duration::from_secs(60 * 60);
 const FRESH_FOR: Duration = Duration::from_secs(6 * 60 * 60);
 const STALE_FOR: Duration = Duration::from_secs(48 * 60 * 60);
+/// How long a trending failure suppresses another upstream call.
+const FAILURE_FOR: Duration = Duration::from_secs(60);
 const DESCRIPTION_CAP: usize = 2000;
 pub(crate) const MISSING_WORK: &str = "Open Library has no record of this work.";
 pub(crate) const LIBRARY_DOWN: &str = "Open Library is not answering.";
@@ -124,10 +126,14 @@ pub(crate) async fn search(
 
 /// Weekly trending. Fresh for 6h. Older than that, but under 48h, is served
 /// immediately while one refresh runs. Empty or older than 48h is fetched
-/// inline, and a failure there is the caller's 502.
+/// inline, and a failure there is the caller's 502. That failure is remembered
+/// for a minute: a cold or expired cache returns it with no new fetch, and a
+/// stale cache skips the refresh.
 pub(crate) struct TrendingCache {
     slot: Mutex<Option<Trending>>,
     refreshing: AtomicBool,
+    /// Last upstream failure. Lock `slot` before `failed` when both are held.
+    failed: Mutex<Option<(Instant, UpstreamError)>>,
 }
 
 struct Trending {
@@ -146,6 +152,17 @@ impl TrendingCache {
         Self {
             slot: Mutex::new(None),
             refreshing: AtomicBool::new(false),
+            failed: Mutex::new(None),
+        }
+    }
+
+    async fn recent_failure(&self) -> Option<UpstreamError> {
+        let guard = self.failed.lock().await;
+        let (at, err) = guard.as_ref()?;
+        if Instant::now().saturating_duration_since(*at) < FAILURE_FOR {
+            Some(err.clone())
+        } else {
+            None
         }
     }
 
@@ -161,7 +178,9 @@ impl TrendingCache {
                     Age::Stale => {
                         let works = Arc::clone(&hit.works);
                         drop(guard);
-                        Arc::clone(&self).spawn_refresh(state);
+                        if self.recent_failure().await.is_none() {
+                            Arc::clone(&self).spawn_refresh(state);
+                        }
                         return Ok(works);
                     }
                     Age::Expired => {}
@@ -176,11 +195,16 @@ impl TrendingCache {
                 Age::Stale => {
                     let works = Arc::clone(&hit.works);
                     drop(guard);
-                    self.spawn_refresh(state);
+                    if self.recent_failure().await.is_none() {
+                        self.spawn_refresh(state);
+                    }
                     return Ok(works);
                 }
                 Age::Expired => {}
             }
+        }
+        if let Some(err) = self.recent_failure().await {
+            return Err(err);
         }
         match fetch_trending(state).await {
             Ok(works) => {
@@ -189,9 +213,13 @@ impl TrendingCache {
                     at: Instant::now(),
                     works: Arc::clone(&works),
                 });
+                *self.failed.lock().await = None;
                 Ok(works)
             }
-            Err(err) => Err(err),
+            Err(err) => {
+                *self.failed.lock().await = Some((Instant::now(), err.clone()));
+                Err(err)
+            }
         }
     }
 
@@ -208,9 +236,11 @@ impl TrendingCache {
                         at: Instant::now(),
                         works: Arc::new(works),
                     });
+                    *self.failed.lock().await = None;
                 }
                 Err(err) => {
                     tracing::warn!(error = %err, "open library trending refresh failed");
+                    *self.failed.lock().await = Some((Instant::now(), err));
                 }
             }
             self.refreshing.store(false, Ordering::Release);
@@ -333,7 +363,7 @@ fn age(at: Instant, now: Instant) -> Age {
 
 #[derive(Clone)]
 enum InfoEntry {
-    Ready(super::WorkInfo),
+    Ready(Box<super::WorkInfo>),
     Failed(String),
 }
 
@@ -359,7 +389,7 @@ pub(crate) async fn work_info(state: &AppState, work_key: &str) -> Result<super:
         .get_or_load(work_key, || assemble_info(state, work_key))
         .await;
     match entry {
-        InfoEntry::Ready(info) => Ok(info),
+        InfoEntry::Ready(info) => Ok(*info),
         InfoEntry::Failed(message) => Err(message),
     }
 }
@@ -376,7 +406,7 @@ pub(crate) fn mark_accepted(info: &mut super::WorkInfo, accepted: &[String]) {
 
 async fn assemble_info(state: &AppState, work_key: &str) -> (InfoEntry, Duration) {
     match load_info(state, work_key).await {
-        Ok(info) => (InfoEntry::Ready(info), CACHE_FOR),
+        Ok(info) => (InfoEntry::Ready(Box::new(info)), CACHE_FOR),
         Err(InfoFail::Missing) => (InfoEntry::Failed(MISSING_WORK.into()), MISSING_FOR),
         Err(InfoFail::Down) => (InfoEntry::Failed(LIBRARY_DOWN.into()), NEGATIVE_FOR),
     }
@@ -824,15 +854,39 @@ struct Store<V> {
 }
 
 struct Flight<V> {
+    id: u64,
     tx: tokio::sync::watch::Sender<Option<V>>,
+}
+
+/// Clears the in-flight entry when the leader is dropped mid-load. Waiters then
+/// see a closed watch channel and load the key themselves.
+struct FlightGuard<'a, V> {
+    flights: &'a std::sync::Mutex<HashMap<String, Flight<V>>>,
+    key: &'a str,
+    id: u64,
+}
+
+impl<V> Drop for FlightGuard<'_, V> {
+    fn drop(&mut self) {
+        let mut flights = self.flights.lock().unwrap_or_else(|err| err.into_inner());
+        let ours = flights
+            .get(self.key)
+            .is_some_and(|flight| flight.id == self.id);
+        if ours {
+            flights.remove(self.key);
+        }
+    }
 }
 
 /// In-memory TTL map. Insert drops expired rows, then the oldest ones past `cap`.
 /// [`TtlCache::get_or_load`] runs one load per key; the other callers wait for it.
+/// Dropping the leader removes that flight, so a cancelled caller does not leave
+/// the key stuck.
 pub(crate) struct TtlCache<V> {
     cap: usize,
     store: std::sync::Mutex<Store<V>>,
-    flights: Mutex<HashMap<String, Flight<V>>>,
+    flights: std::sync::Mutex<HashMap<String, Flight<V>>>,
+    next_flight: std::sync::atomic::AtomicU64,
 }
 
 impl<V> TtlCache<V>
@@ -846,7 +900,8 @@ where
                 next_seq: 0,
                 entries: HashMap::new(),
             }),
-            flights: Mutex::new(HashMap::new()),
+            flights: std::sync::Mutex::new(HashMap::new()),
+            next_flight: std::sync::atomic::AtomicU64::new(1),
         }
     }
 
@@ -904,8 +959,9 @@ where
             if let Some(hit) = self.get(key) {
                 return hit;
             }
+            let mut lead = None;
             let mut rx = {
-                let mut flights = self.flights.lock().await;
+                let mut flights = self.flights.lock().unwrap_or_else(|err| err.into_inner());
                 if let Some(hit) = self.get(key) {
                     return hit;
                 }
@@ -913,10 +969,12 @@ where
                     Some(flight.tx.subscribe())
                 } else {
                     let (tx, rx) = tokio::sync::watch::channel(None);
-                    flights.insert(key.to_string(), Flight { tx });
+                    let id = self.next_flight.fetch_add(1, Ordering::Relaxed);
+                    flights.insert(key.to_string(), Flight { id, tx });
                     // Waiters subscribe on the sender. This receiver would only
                     // observe the value the leader is about to write.
                     drop(rx);
+                    lead = Some(id);
                     None
                 }
             };
@@ -925,17 +983,31 @@ where
                     if let Some(value) = rx.borrow().clone() {
                         return value;
                     }
+                    // The leader was dropped, or it finished and closed the
+                    // channel after publishing. Either way, try the cache again.
                     if rx.changed().await.is_err() {
                         break;
                     }
                 }
                 continue;
             }
+            let guard = FlightGuard {
+                flights: &self.flights,
+                key,
+                id: lead.expect("the leader records its flight id"),
+            };
             let (value, ttl) = (load.take().expect("one load"))().await;
             self.insert(key, value.clone(), ttl);
-            if let Some(flight) = self.flights.lock().await.remove(key) {
-                let _ = flight.tx.send(Some(value.clone()));
+            {
+                let mut flights = self.flights.lock().unwrap_or_else(|err| err.into_inner());
+                let ours = flights.get(key).is_some_and(|flight| flight.id == guard.id);
+                if ours {
+                    if let Some(flight) = flights.remove(key) {
+                        let _ = flight.tx.send(Some(value.clone()));
+                    }
+                }
             }
+            drop(guard);
             return value;
         }
     }
@@ -1543,6 +1615,30 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_cancelled_load_does_not_stick_the_flight() {
+        let cache = Arc::new(TtlCache::new(4));
+        let slow = Arc::clone(&cache);
+        let first = tokio::spawn(async move {
+            tokio::time::timeout(
+                Duration::from_millis(50),
+                slow.get_or_load("k", || async {
+                    tokio::time::sleep(Duration::from_secs(30)).await;
+                    (1, Duration::from_secs(60))
+                }),
+            )
+            .await
+        });
+        assert!(first.await.unwrap().is_err());
+        let second = tokio::time::timeout(Duration::from_millis(200), async {
+            cache
+                .get_or_load("k", || async { (2, Duration::from_secs(60)) })
+                .await
+        })
+        .await;
+        assert_eq!(second.expect("second load hung on the abandoned flight"), 2);
+    }
+
+    #[tokio::test]
     async fn stale_trending_serves_the_old_list_when_refresh_fails() {
         let hits = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let seen = Arc::clone(&hits);
@@ -1608,9 +1704,26 @@ mod tests {
             assert_eq!(slot.as_ref().unwrap().works[0].work.title, "Old");
         }
 
+        let again = trending(&state).await.unwrap();
+        assert_eq!(again[0].work.title, "Old");
+        tokio::time::sleep(Duration::from_millis(80)).await;
+        assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 1);
+
         {
             let mut slot = state.trending.slot.lock().await;
             slot.as_mut().unwrap().at = Instant::now() - STALE_FOR - Duration::from_secs(1);
+        }
+        assert!(trending(&state).await.is_err());
+        {
+            let slot = state.trending.slot.lock().await;
+            assert_eq!(slot.as_ref().unwrap().works[0].work.title, "Old");
+        }
+        assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 1);
+
+        {
+            let mut failed = state.trending.failed.lock().await;
+            let (at, _) = failed.as_mut().expect("the refresh failure was recorded");
+            *at = Instant::now() - FAILURE_FOR - Duration::from_secs(1);
         }
         assert!(trending(&state).await.is_err());
         let slot = state.trending.slot.lock().await;

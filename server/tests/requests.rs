@@ -3822,6 +3822,21 @@ async fn catalog_browse_pages_languages_and_shares_one_fetch() {
     let _ = state;
 }
 
+#[tokio::test]
+async fn catalog_browse_does_not_refetch_a_fresh_outage() {
+    let catalog = Arc::new(Mutex::new(Catalog {
+        trending_status: 500,
+        ..Catalog::default()
+    }));
+    let (_state, app, _data, token) = catalog_app(Arc::clone(&catalog)).await;
+    for _ in 0..3 {
+        let (status, body) = empty_req(&app, "GET", "/v1/catalog/search", Some(&token)).await;
+        assert_eq!(status, StatusCode::BAD_GATEWAY, "{body}");
+        assert_eq!(body["error"], "Open Library is not answering. Try again.");
+    }
+    assert_eq!(catalog.lock().await.hits, vec!["trending".to_string()]);
+}
+
 async fn shelf_book(pool: &SqlitePool, id: &str, user_id: &str, shared: i64) {
     sqlx::query(
         "INSERT INTO books (id, user_id, title, author, handle, imported_at, shared)

@@ -14,7 +14,7 @@ pub(crate) struct Upstream {
 
 /// Display never includes a URL, query string, or body. reqwest errors go
 /// through `without_url()` because the SAB key travels in `?apikey=`.
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, Clone, thiserror::Error)]
 pub(crate) enum UpstreamError {
     #[error("not configured")]
     NotConfigured,
