@@ -361,13 +361,48 @@ struct Catalog {
     /// Search for this work key returns no docs. `GET /works/{id}.json` redirects
     /// at the second key.
     merged: Option<(String, String)>,
+    /// 200 `{"type":{"key":"/type/redirect"},"location":...}` instead of HTTP 302.
+    json_redirect: bool,
+    trending: Vec<Value>,
+    trending_status: u16,
+    /// Holds the trending response so two catalog callers overlap one fetch.
+    trending_delay_ms: u64,
+    work_docs: HashMap<String, Value>,
+    detail_docs: HashMap<String, Value>,
 }
 
 fn library_router(state: Arc<Mutex<Catalog>>) -> Router {
     Router::new()
         .route("/search.json", get(library_search))
+        .route("/trending/weekly.json", get(library_trending))
         .route("/works/{id}", get(library_work))
         .with_state(state)
+}
+
+async fn library_trending(
+    State(state): State<Arc<Mutex<Catalog>>>,
+) -> Result<Json<Value>, StatusCode> {
+    let (status, delay_ms, body) = {
+        let mut guard = state.lock().await;
+        guard.hits.push("trending".into());
+        let status = if guard.trending_status != 0 {
+            guard.trending_status
+        } else {
+            guard.status
+        };
+        (
+            status,
+            guard.trending_delay_ms,
+            json!({ "works": guard.trending }),
+        )
+    };
+    if delay_ms > 0 {
+        tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+    }
+    if status != 0 {
+        return Err(StatusCode::from_u16(status).unwrap());
+    }
+    Ok(Json(body))
 }
 
 async fn library_search(
@@ -389,6 +424,14 @@ async fn library_search(
     if let Some((from, _)) = &guard.merged {
         if query.get("q").is_some_and(|q| q == &format!("key:{from}")) {
             return Ok(Json(json!({ "numFound": 0, "docs": [] })));
+        }
+    }
+    if let Some(q) = query.get("q") {
+        if let Some(key) = q.strip_prefix("key:") {
+            if let Some(doc) = guard.detail_docs.get(key) {
+                let doc = doc.clone();
+                return Ok(Json(json!({ "numFound": 1, "docs": [doc] })));
+            }
         }
     }
     if query.contains_key("author_key") {
@@ -444,9 +487,28 @@ async fn library_work(
             .body(Body::empty())
             .unwrap();
     }
+    if let Some(doc) = guard.work_docs.get(&key) {
+        let doc = doc.to_string();
+        return axum::response::Response::builder()
+            .status(StatusCode::OK)
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(doc))
+            .unwrap();
+    }
     if let Some((from, to)) = &guard.merged {
         if key == *from {
             let to = to.clone();
+            if guard.json_redirect {
+                let body = json!({
+                    "type": { "key": "/type/redirect" },
+                    "location": to
+                });
+                return axum::response::Response::builder()
+                    .status(StatusCode::OK)
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap();
+            }
             return axum::response::Response::builder()
                 .status(StatusCode::FOUND)
                 .header(header::LOCATION, format!("{to}.json"))
@@ -1127,8 +1189,11 @@ async fn catalog_upstream_failure_is_502() {
     assert_eq!(status, StatusCode::BAD_GATEWAY, "{body}");
     assert_eq!(body["error"], "HTTP 500");
     let (status, body) = empty_req(&app, "GET", "/v1/catalog/search?q=", Some(&token)).await;
-    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
-    assert_eq!(body["error"], "Enter a search.");
+    assert_eq!(status, StatusCode::BAD_GATEWAY, "{body}");
+    assert_eq!(body["error"], "Open Library is not answering. Try again.");
+    let (status, body) = empty_req(&app, "GET", "/v1/catalog/search", Some(&token)).await;
+    assert_eq!(status, StatusCode::BAD_GATEWAY, "{body}");
+    assert_eq!(body["error"], "Open Library is not answering. Try again.");
 }
 
 #[tokio::test]
@@ -1363,6 +1428,12 @@ async fn permissions() {
     let app = router(state.clone());
     let token = register(&app, "matt", "password1").await;
     let (status, body) = empty_req(&app, "GET", "/v1/catalog/search?q=dune", Some(&token)).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+    assert_eq!(body["error"], "Requests are off.");
+    let (status, body) = empty_req(&app, "GET", "/v1/catalog/search", Some(&token)).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+    assert_eq!(body["error"], "Requests are off.");
+    let (status, body) = empty_req(&app, "GET", "/v1/catalog/works/OL1W", Some(&token)).await;
     assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
     assert_eq!(body["error"], "Requests are off.");
     let (status, body) = empty_req(&app, "GET", "/v1/requests", Some(&token)).await;
@@ -3636,4 +3707,434 @@ async fn retry_reuse_does_not_import_a_second_row() {
     .await
     .unwrap();
     assert_eq!(imported_rows, 1);
+}
+
+async fn catalog_app(catalog: Arc<Mutex<Catalog>>) -> (AppState, axum::Router, TempDir, String) {
+    let data = TempDir::new().unwrap();
+    let origin = serve(library_router(catalog)).await;
+    let state = prepare(Config {
+        listen: "127.0.0.1:0".into(),
+        data_dir: data.path().to_path_buf(),
+        web_dir: None,
+        allow_signup: true,
+        max_epub_bytes: 64 * 1024 * 1024,
+        downloads_dir: None,
+        openlibrary_url: origin,
+        auth: AuthConfig::default(),
+    })
+    .await
+    .unwrap();
+    let app = router(state.clone());
+    let token = register(&app, "matt", "password1").await;
+    grant(&state.pool, "matt").await;
+    let (status, body) = json_req(
+        &app,
+        "PATCH",
+        "/v1/admin/settings",
+        Some(&token),
+        json!({ "requestsEnabled": true }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    (state, app, data, token)
+}
+
+fn trend(key: &str, title: &str, language: Value) -> Value {
+    json!({
+        "key": key,
+        "title": title,
+        "author_name": ["Ada"],
+        "first_publish_year": 1990,
+        "cover_i": 3,
+        "language": language
+    })
+}
+
+fn titles_of(page: &Value) -> Vec<String> {
+    page["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|row| row["title"].as_str().unwrap().to_string())
+        .collect()
+}
+
+#[tokio::test]
+async fn catalog_browse_pages_languages_and_shares_one_fetch() {
+    let mut trending = vec![
+        trend("/works/OL1W", "German only", json!(["ger"])),
+        trend("/works/OL2W", "No language", json!([])),
+    ];
+    for n in 0..21 {
+        trending.push(trend(
+            &format!("/works/OL{}W", 100 + n),
+            &format!("En {n}"),
+            json!(["eng"]),
+        ));
+    }
+    let catalog = Arc::new(Mutex::new(Catalog {
+        trending,
+        trending_delay_ms: 400,
+        ..Catalog::default()
+    }));
+    let (state, app, _data, token) = catalog_app(Arc::clone(&catalog)).await;
+    let app2 = app.clone();
+    let token2 = token.clone();
+    let (first, second) = tokio::join!(
+        empty_req(&app, "GET", "/v1/catalog/search?page=1", Some(&token)),
+        empty_req(&app2, "GET", "/v1/catalog/search", Some(&token2)),
+    );
+    assert_eq!(first.0, StatusCode::OK, "{}", first.1);
+    assert_eq!(second.0, StatusCode::OK, "{}", second.1);
+    assert_eq!(titles_of(&first.1), titles_of(&second.1));
+    assert_eq!(first.1["items"].as_array().unwrap().len(), 20);
+    assert_eq!(first.1["nextPage"], 2);
+    assert_eq!(first.1["items"][0]["title"], "No language");
+    assert_eq!(first.1["items"][0]["onServer"], Value::Null);
+    assert!(!titles_of(&first.1)
+        .iter()
+        .any(|title| title == "German only"));
+    assert_eq!(catalog.lock().await.hits, vec!["trending".to_string()]);
+
+    let (status, rest) = empty_req(&app, "GET", "/v1/catalog/search?page=2", Some(&token)).await;
+    assert_eq!(status, StatusCode::OK, "{rest}");
+    assert_eq!(rest["items"].as_array().unwrap().len(), 2);
+    assert!(rest["nextPage"].is_null(), "{rest}");
+    assert_eq!(catalog.lock().await.hits.len(), 1);
+
+    let (status, body) = json_req(
+        &app,
+        "PATCH",
+        "/v1/admin/settings",
+        Some(&token),
+        json!({ "languages": ["en", "de"] }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (status, page) = empty_req(&app, "GET", "/v1/catalog/search?page=1", Some(&token)).await;
+    assert_eq!(status, StatusCode::OK, "{page}");
+    assert_eq!(page["items"][0]["title"], "German only");
+    let (status, rest) = empty_req(&app, "GET", "/v1/catalog/search?page=2", Some(&token)).await;
+    assert_eq!(status, StatusCode::OK, "{rest}");
+    assert_eq!(rest["items"].as_array().unwrap().len(), 3);
+    assert!(rest["nextPage"].is_null(), "{rest}");
+    assert_eq!(catalog.lock().await.hits.len(), 1);
+    let _ = state;
+}
+
+async fn shelf_book(pool: &SqlitePool, id: &str, user_id: &str, shared: i64) {
+    sqlx::query(
+        "INSERT INTO books (id, user_id, title, author, handle, imported_at, shared)
+         VALUES (?, ?, 'Dune', 'Frank Herbert', 'frank', 1, ?)",
+    )
+    .bind(id)
+    .bind(user_id)
+    .bind(shared)
+    .execute(pool)
+    .await
+    .unwrap();
+}
+
+async fn shelf_request(
+    pool: &SqlitePool,
+    id: &str,
+    user_id: &str,
+    work_key: &str,
+    book_id: &str,
+    at: i64,
+) {
+    sqlx::query(
+        "INSERT INTO book_requests (
+            id, user_id, work_key, title, author, state, progress, tried_guids,
+            book_id, next_check_at, created_at, updated_at
+         ) VALUES (?, ?, ?, 'Dune', 'Frank Herbert', 'imported', 100, '[]', ?, 0, ?, ?)",
+    )
+    .bind(id)
+    .bind(user_id)
+    .bind(work_key)
+    .bind(book_id)
+    .bind(at)
+    .bind(at)
+    .execute(pool)
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn catalog_on_server_follows_what_the_caller_can_open() {
+    let catalog = Arc::new(Mutex::new(Catalog::default()));
+    let (state, app, _data, _admin) = catalog_app(catalog).await;
+    let alice_token = register(&app, "alice", "password1").await;
+    let alice: String = sqlx::query_scalar("SELECT id FROM users WHERE username = 'alice'")
+        .fetch_one(&state.pool)
+        .await
+        .unwrap();
+    register(&app, "bob", "password1").await;
+    let bob: String = sqlx::query_scalar("SELECT id FROM users WHERE username = 'bob'")
+        .fetch_one(&state.pool)
+        .await
+        .unwrap();
+    let work = "/works/OL893414W";
+
+    shelf_book(&state.pool, "bob-book", &bob, 0).await;
+    shelf_request(&state.pool, "bob-req", &bob, work, "bob-book", 10).await;
+    let (status, page) =
+        empty_req(&app, "GET", "/v1/catalog/search?q=dune", Some(&alice_token)).await;
+    assert_eq!(status, StatusCode::OK, "{page}");
+    assert!(page["items"][0]["onServer"].is_null(), "{page}");
+
+    sqlx::query("UPDATE books SET shared = 1 WHERE id = 'bob-book'")
+        .execute(&state.pool)
+        .await
+        .unwrap();
+    let (status, page) =
+        empty_req(&app, "GET", "/v1/catalog/search?q=dune", Some(&alice_token)).await;
+    assert_eq!(status, StatusCode::OK, "{page}");
+    assert_eq!(page["items"][0]["onServer"]["bookId"], "bob-book");
+    assert_eq!(page["items"][0]["onServer"]["ownerUsername"], "bob");
+    assert_eq!(page["items"][0]["onServer"]["mine"], false);
+    assert_eq!(page["items"][0]["onServer"]["shared"], true);
+    assert_eq!(page["items"][0]["onServer"]["held"], false);
+
+    shelf_book(&state.pool, "alice-book", &alice, 1).await;
+    shelf_request(&state.pool, "alice-req", &alice, work, "alice-book", 5).await;
+    let (status, page) =
+        empty_req(&app, "GET", "/v1/catalog/search?q=dune", Some(&alice_token)).await;
+    assert_eq!(status, StatusCode::OK, "{page}");
+    assert_eq!(page["items"][0]["onServer"]["bookId"], "alice-book");
+    assert_eq!(page["items"][0]["onServer"]["mine"], true);
+    assert_eq!(page["items"][0]["onServer"]["ownerUsername"], "alice");
+
+    sqlx::query("UPDATE book_requests SET state = 'canceled' WHERE id = 'alice-req'")
+        .execute(&state.pool)
+        .await
+        .unwrap();
+    let (status, page) =
+        empty_req(&app, "GET", "/v1/catalog/search?q=dune", Some(&alice_token)).await;
+    assert_eq!(status, StatusCode::OK, "{page}");
+    assert_eq!(page["items"][0]["onServer"]["bookId"], "bob-book");
+
+    sqlx::query("DELETE FROM books WHERE id = 'bob-book'")
+        .execute(&state.pool)
+        .await
+        .unwrap();
+    let (status, page) =
+        empty_req(&app, "GET", "/v1/catalog/search?q=dune", Some(&alice_token)).await;
+    assert_eq!(status, StatusCode::OK, "{page}");
+    assert!(page["items"][0]["onServer"].is_null(), "{page}");
+
+    shelf_book(&state.pool, "bob-private", &bob, 0).await;
+    shelf_request(&state.pool, "bob-again", &bob, work, "bob-private", 20).await;
+    shelf_request(&state.pool, "alice-hold", &alice, work, "bob-private", 21).await;
+    let (status, page) =
+        empty_req(&app, "GET", "/v1/catalog/search?q=dune", Some(&alice_token)).await;
+    assert_eq!(status, StatusCode::OK, "{page}");
+    assert_eq!(page["items"][0]["onServer"]["bookId"], "bob-private");
+    assert_eq!(page["items"][0]["onServer"]["ownerUsername"], "");
+    assert_eq!(page["items"][0]["onServer"]["mine"], false);
+    assert_eq!(page["items"][0]["onServer"]["shared"], false);
+    assert_eq!(page["items"][0]["onServer"]["held"], true);
+    let _ = bob;
+}
+
+#[tokio::test]
+async fn work_detail_follows_redirects_leaders_and_negative_cache() {
+    let target = "/works/OL893414W";
+    let asked = "/works/OL893415W";
+    let catalog = Arc::new(Mutex::new(Catalog {
+        json_redirect: true,
+        merged: Some((asked.into(), target.into())),
+        work_docs: HashMap::from([(
+            target.into(),
+            json!({
+                "title": "Dune",
+                "description": { "value": "A [desert](https://example.com) planet." },
+                "subjects": ["Fiction, general", "Dune", "award:hugo_award=1966", "nyt:hardcover", "dune", "Arrakis"],
+                "covers": [11481354],
+                "series": ["Dune Saga"]
+            }),
+        )]),
+        detail_docs: HashMap::from([(
+            target.into(),
+            json!({
+                "key": target,
+                "title": "Ignored",
+                "subtitle": "The first book",
+                "author_name": ["Frank Herbert"],
+                "first_publish_year": 1965,
+                "cover_i": 1,
+                "edition_count": 155,
+                "number_of_pages_median": 608.4,
+                "language": ["eng"],
+                "ratings_average": 4.25,
+                "ratings_count": 448
+            }),
+        )]),
+        ..Catalog::default()
+    }));
+    let (state, app, _data, admin) = catalog_app(Arc::clone(&catalog)).await;
+    let ada_token = register(&app, "ada", "password1").await;
+    let bob_token = register(&app, "bob", "password1").await;
+    let _ = ada_token;
+    let ada: String = sqlx::query_scalar("SELECT id FROM users WHERE username = 'ada'")
+        .fetch_one(&state.pool)
+        .await
+        .unwrap();
+    let bob: String = sqlx::query_scalar("SELECT id FROM users WHERE username = 'bob'")
+        .fetch_one(&state.pool)
+        .await
+        .unwrap();
+    sqlx::query(
+        "INSERT INTO book_requests (
+            id, user_id, work_key, title, author, state, progress, tried_guids, attempts,
+            release_title, release_size, next_check_at, created_at, updated_at
+         ) VALUES (
+            'lead', ?, ?, 'Dune', 'Frank Herbert', 'downloading', 40, '[]', 2,
+            'Dune Retail', 99, 50, 10, 10
+         )",
+    )
+    .bind(&ada)
+    .bind(asked)
+    .execute(&state.pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO book_requests (
+            id, user_id, work_key, title, author, state, progress, tried_guids, attempts,
+            follows, next_check_at, created_at, updated_at
+         ) VALUES (
+            'follow', ?, ?, 'Dune', 'Frank Herbert', 'requested', 0, '[]', 0,
+            'lead', 1, 11, 11
+         )",
+    )
+    .bind(&bob)
+    .bind(asked)
+    .execute(&state.pool)
+    .await
+    .unwrap();
+
+    let (status, body) = empty_req(&app, "GET", "/v1/catalog/works/nope", Some(&bob_token)).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert_eq!(body["error"], "Work id must look like OL123W.");
+    let (status, _) = empty_req(&app, "GET", "/v1/catalog/works/OLW", Some(&bob_token)).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    let (status, body) =
+        empty_req(&app, "GET", "/v1/catalog/works/OL893415W", Some(&bob_token)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["workKey"], asked);
+    assert!(body["infoError"].is_null(), "{body}");
+    let info = &body["info"];
+    assert_eq!(info["canonicalKey"], target);
+    assert_eq!(info["title"], "Dune");
+    assert_eq!(info["subtitle"], "The first book");
+    assert_eq!(info["description"], "A desert planet.");
+    assert_eq!(info["subjects"], json!(["Dune", "Arrakis"]));
+    assert_eq!(info["awards"], json!(["Hugo Award 1966"]));
+    assert_eq!(info["series"], json!(["Dune Saga"]));
+    assert_eq!(info["coverId"], 11481354);
+    assert_eq!(info["editionCount"], 155);
+    assert_eq!(info["pagesMedian"], 608);
+    assert_eq!(info["languages"], json!(["English"]));
+    assert_eq!(info["hasAcceptedEdition"], true);
+    assert_eq!(info["rating"]["average"], 4.3);
+    assert_eq!(info["rating"]["count"], 448);
+    let request = &body["status"]["request"];
+    assert_eq!(request["phase"], "downloading");
+    assert_eq!(request["state"], "downloading");
+    assert_eq!(request["progress"], 40);
+    assert_eq!(request["attempts"], 2);
+    assert_eq!(request["maxAttempts"], 3);
+    assert!(request["nextCheckAt"].is_null(), "{request}");
+    assert_eq!(request["releaseTitle"], "Dune Retail");
+    assert_eq!(request["releaseSize"], 99);
+    assert_eq!(request["requester"], "bob");
+    assert_eq!(request["workKey"], asked);
+    assert_eq!(body["status"]["active"], 0);
+    assert_eq!(body["status"]["cap"], 5);
+    assert_eq!(body["status"]["otherRequests"], json!([]));
+
+    let (status, body) = empty_req(&app, "GET", "/v1/catalog/works/OL893415W", Some(&admin)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(body["status"]["request"].is_null(), "{body}");
+    let others = body["status"]["otherRequests"].as_array().unwrap();
+    assert_eq!(others.len(), 2, "{others:?}");
+    assert_eq!(others[0]["requester"], "bob");
+    assert_eq!(others[0]["follows"], "ada");
+    assert_eq!(others[1]["requester"], "ada");
+    assert!(others[1].get("follows").is_none(), "{others:?}");
+    let hits = catalog.lock().await.hits.len();
+
+    sqlx::query("UPDATE book_requests SET progress = 100 WHERE id = 'lead'")
+        .execute(&state.pool)
+        .await
+        .unwrap();
+    let (status, body) =
+        empty_req(&app, "GET", "/v1/catalog/works/OL893415W", Some(&bob_token)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["status"]["request"]["phase"], "importing");
+    assert_eq!(body["status"]["request"]["progress"], 100);
+    assert_eq!(catalog.lock().await.hits.len(), hits);
+
+    sqlx::query(
+        "UPDATE book_requests
+         SET state = 'requested', progress = 0, error = 'No release yet.', next_check_at = 999
+         WHERE id = 'lead'",
+    )
+    .execute(&state.pool)
+    .await
+    .unwrap();
+    let (status, body) =
+        empty_req(&app, "GET", "/v1/catalog/works/OL893415W", Some(&bob_token)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["status"]["request"]["phase"], "waiting");
+    assert_eq!(body["status"]["request"]["nextCheckAt"], 999);
+    assert_eq!(body["status"]["request"]["attempts"], 2);
+
+    sqlx::query(
+        "UPDATE book_requests
+         SET state = 'downloading', progress = 100, error = 'SABnzbd: paused'
+         WHERE id = 'lead'",
+    )
+    .execute(&state.pool)
+    .await
+    .unwrap();
+    let (status, body) =
+        empty_req(&app, "GET", "/v1/catalog/works/OL893415W", Some(&bob_token)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["status"]["request"]["phase"], "held");
+
+    let (status, body) =
+        empty_req(&app, "GET", "/v1/catalog/works/OL893414W", Some(&bob_token)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["info"]["canonicalKey"], target);
+    // The row lives on the merged-away key. This call asked for the canonical
+    // id, so it has no alias to search. The redirect response above finds it.
+    assert!(body["status"]["request"].is_null(), "{body}");
+
+    catalog.lock().await.status = 500;
+    let before = catalog.lock().await.hits.len();
+    let (status, body) = empty_req(&app, "GET", "/v1/catalog/works/OL9W", Some(&bob_token)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(body["info"].is_null(), "{body}");
+    assert_eq!(body["infoError"], "Open Library is not answering.");
+    assert_eq!(body["status"]["cap"], 5);
+    assert!(body["status"]["request"].is_null(), "{body}");
+    let (status, again) = empty_req(&app, "GET", "/v1/catalog/works/OL9W", Some(&bob_token)).await;
+    assert_eq!(status, StatusCode::OK, "{again}");
+    assert_eq!(again["infoError"], "Open Library is not answering.");
+    assert_eq!(catalog.lock().await.hits.len(), before + 1);
+
+    catalog.lock().await.status = 404;
+    let before = catalog.lock().await.hits.len();
+    let (status, body) = empty_req(&app, "GET", "/v1/catalog/works/OL8W", Some(&bob_token)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(body["info"].is_null(), "{body}");
+    assert_eq!(
+        body["infoError"],
+        "Open Library has no record of this work."
+    );
+    let (status, _) = empty_req(&app, "GET", "/v1/catalog/works/OL8W", Some(&bob_token)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(catalog.lock().await.hits.len(), before + 1);
 }

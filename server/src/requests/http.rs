@@ -86,6 +86,40 @@ impl Upstream {
         base: &Url,
         work_key: &str,
     ) -> Result<Option<String>, UpstreamError> {
+        // The matcher only needs the location. A full work document is larger.
+        match self.load_work(base, work_key, 64 * 1024).await? {
+            RawWork::Redirect(key) => Ok(key),
+            RawWork::Body(value) => {
+                let location = value
+                    .get("location")
+                    .and_then(|item| item.as_str())
+                    .unwrap_or("");
+                if location.is_empty() {
+                    Ok(None)
+                } else {
+                    Ok(work_key_from_location(location))
+                }
+            }
+        }
+    }
+
+    /// `GET /works/{id}.json` including the document. Catalog detail reads this.
+    /// Same path rules as [`Self::work_location`], with room for subjects and
+    /// a description. One hop: an HTTP redirect is [`RawWork::Redirect`].
+    pub(crate) async fn work_document(
+        &self,
+        base: &Url,
+        work_key: &str,
+    ) -> Result<RawWork, UpstreamError> {
+        self.load_work(base, work_key, 2 * 1024 * 1024).await
+    }
+
+    async fn load_work(
+        &self,
+        base: &Url,
+        work_key: &str,
+        cap: usize,
+    ) -> Result<RawWork, UpstreamError> {
         let relative = work_json_path(work_key)?;
         let url = base.join(&relative).map_err(|_| UpstreamError::Shape)?;
         let response = self.client.get(url).send().await.map_err(map_err)?;
@@ -96,22 +130,15 @@ impl Upstream {
                 .get(reqwest::header::LOCATION)
                 .and_then(|value| value.to_str().ok())
                 .unwrap_or("");
-            return Ok(work_key_from_location(location));
+            return Ok(RawWork::Redirect(work_key_from_location(location)));
         }
         if !status.is_success() {
             return Err(UpstreamError::Status(status.as_u16()));
         }
-        let bytes = read_capped(response, 64 * 1024).await?;
+        let bytes = read_capped(response, cap).await?;
         let value: serde_json::Value =
             serde_json::from_slice(&bytes).map_err(|_| UpstreamError::Shape)?;
-        let location = value
-            .get("location")
-            .and_then(|item| item.as_str())
-            .unwrap_or("");
-        if location.is_empty() {
-            return Ok(None);
-        }
-        Ok(work_key_from_location(location))
+        Ok(RawWork::Body(value))
     }
 
     async fn request_json<T: DeserializeOwned>(
@@ -227,7 +254,8 @@ fn work_id(id: &str) -> bool {
     !digits.is_empty() && digits.bytes().all(|byte| byte.is_ascii_digit())
 }
 
-fn work_key_from_location(location: &str) -> Option<String> {
+/// An HTTP `Location` or a JSON `location` that names `/works/OL…W`.
+pub(crate) fn work_key_from_location(location: &str) -> Option<String> {
     let path = location.split(['?', '#']).next().unwrap_or(location).trim();
     let start = path.find("/works/")?;
     let rest = &path[start + "/works/".len()..];
@@ -259,6 +287,12 @@ async fn read_capped(
             Err(err) => return Err(map_err(err)),
         }
     }
+}
+
+/// One `/works/{id}.json`. `Redirect` is an HTTP redirect, already parsed.
+pub(crate) enum RawWork {
+    Redirect(Option<String>),
+    Body(serde_json::Value),
 }
 
 fn map_err(err: reqwest::Error) -> UpstreamError {

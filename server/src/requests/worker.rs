@@ -40,11 +40,13 @@ const GIVE_UP_MS: i64 = 14 * 24 * 60 * 60 * 1000;
 const POLL_MS: i64 = 30 * 1000;
 const BACKOFF_MS: i64 = 5 * 60 * 1000;
 const DOWNLOAD_TIMEOUT_MS: i64 = 24 * 60 * 60 * 1000;
-const MAX_ATTEMPTS: i64 = 3;
+pub(crate) const MAX_ATTEMPTS: i64 = 3;
 const DUE_LIMIT: i64 = 20;
 
-const NO_RELEASE_YET: &str = "No release yet.";
+pub(crate) const NO_RELEASE_YET: &str = "No release yet.";
 const NO_RELEASE_FOUND: &str = "No release found.";
+/// `note` stores this, then the closest title. `phase` matches the prefix.
+pub(crate) const NO_MATCHING_RELEASE: &str = "No matching release";
 const NO_EPUB: &str = "No EPUB in the download.";
 const UNEXPECTED_FOLDER: &str = "Unexpected download folder.";
 const DOWNLOAD_TIMEOUT: &str = "Download timed out.";
@@ -353,7 +355,7 @@ async fn requested(
     let Some(release) = choice.release else {
         let gave_up = row.created_at < now_ms.saturating_sub(GIVE_UP_MS);
         let message = match choice.closest {
-            Some(by) => format!("No matching release (closest: {by}, a different book)"),
+            Some(by) => format!("{NO_MATCHING_RELEASE} (closest: {by}, a different book)"),
             None if gave_up => NO_RELEASE_FOUND.to_string(),
             None => NO_RELEASE_YET.to_string(),
         };
@@ -716,6 +718,14 @@ async fn open_library_or_give_up(
         return fail_from(state, &row.id, from, &message, now_ms).await;
     }
     hold(&state.pool, &row.id, from, "Open Library", err, now_ms).await
+}
+
+/// `hold` writes `{service}: {error}` for SABnzbd, Prowlarr, and Open Library.
+/// Those rows are waiting on an upstream, not on the search schedule.
+pub(crate) fn upstream_hold(error: &str) -> bool {
+    error.starts_with("SABnzbd:")
+        || error.starts_with("Prowlarr:")
+        || error.starts_with("Open Library:")
 }
 
 async fn hold(

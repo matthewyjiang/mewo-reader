@@ -9,7 +9,7 @@ use crate::config::MAX_COVER_BYTES;
 use crate::error::ApiError;
 use crate::feed::{Post, PostKind, Posts};
 use crate::models::{AccountRecord, BookRow, PostHitRecord, SearchHits, SearchKind, SearchPage};
-use crate::visibility::BOOK_VISIBLE_TO;
+use crate::visibility::{social_visible, BOOK_VISIBLE_TO};
 use crate::AppState;
 use base64::engine::general_purpose::STANDARD;
 use base64::Engine;
@@ -22,6 +22,11 @@ use uuid::Uuid;
 const SEARCH_LIMIT: i64 = 20;
 pub(crate) const PROFILE_POSTS_LIMIT: i64 = 30;
 const MAX_QUERY_CHARS: usize = 100;
+const BROWSE_ACCOUNTS: i64 = 20;
+const BROWSE_BOOKS: i64 = 30;
+const BROWSE_POSTS: i64 = 20;
+/// Comments and reposts older than this do not move a browse ranking.
+const WINDOW_MS: i64 = 30 * 24 * 60 * 60 * 1000;
 
 pub(crate) async fn run(
     pool: &SqlitePool,
@@ -32,7 +37,9 @@ pub(crate) async fn run(
 ) -> Result<SearchPage, ApiError> {
     let q = q.trim();
     if q.is_empty() {
-        return Err(ApiError::BadRequest("Enter a search.".into()));
+        // A cursor belongs to a typed query. Browse is one page, so it is ignored.
+        let _ = cursor;
+        return browse(pool, viewer, kind).await;
     }
     let asked = q.chars().count();
     if asked > MAX_QUERY_CHARS {
@@ -45,6 +52,227 @@ pub(crate) async fn run(
         SearchKind::Books => books(pool, viewer, q, cursor).await,
         SearchKind::Posts => posts(pool, viewer, q, cursor).await,
     }
+}
+
+/// One curated page. `nextCursor` stays empty so the client does not ask for more.
+async fn browse(
+    pool: &SqlitePool,
+    viewer: &Authed,
+    kind: SearchKind,
+) -> Result<SearchPage, ApiError> {
+    let now = crate::db::now_ms();
+    match kind {
+        SearchKind::Accounts => suggested_accounts(pool, viewer, now).await,
+        SearchKind::Books => popular_books(pool, viewer, now).await,
+        SearchKind::Posts => top_posts(pool, viewer, now).await,
+    }
+}
+
+/// Other accounts, busiest first on books this viewer can see.
+/// Private-copy replies and reposts do not count, so a number cannot leak them.
+async fn suggested_accounts(
+    pool: &SqlitePool,
+    viewer: &Authed,
+    now: i64,
+) -> Result<SearchPage, ApiError> {
+    let since = now.saturating_sub(WINDOW_MS);
+    let sql = format!(
+        "WITH vis AS (SELECT b.id FROM books b WHERE {BOOK_VISIBLE_TO}),
+         act AS (
+             SELECT c.user_id AS uid, COUNT(*) AS n
+             FROM comments c
+             JOIN vis ON vis.id = c.book_id
+             JOIN books b ON b.id = c.book_id
+             WHERE c.created_at >= ? AND {social_c}
+             GROUP BY c.user_id
+             UNION ALL
+             SELECT r.user_id, COUNT(*)
+             FROM reposts r
+             JOIN vis ON vis.id = r.book_id
+             JOIN books b ON b.id = r.book_id
+             WHERE r.created_at >= ? AND {social_r}
+             GROUP BY r.user_id
+         )
+         SELECT u.username
+         FROM users u
+         LEFT JOIN act ON act.uid = u.id
+         WHERE u.id <> ?
+         GROUP BY u.id
+         ORDER BY COALESCE(SUM(act.n), 0) DESC, u.created_at DESC, u.username_norm ASC
+         LIMIT {BROWSE_ACCOUNTS}",
+        social_c = social_visible("c"),
+        social_r = social_visible("r"),
+    );
+    let rows = sqlx::query_as::<_, SuggestedAccount>(&sql)
+        .bind(&viewer.user_id)
+        .bind(since)
+        .bind(&viewer.user_id)
+        .bind(since)
+        .bind(&viewer.user_id)
+        .bind(&viewer.user_id)
+        .fetch_all(pool)
+        .await?;
+    Ok(SearchPage {
+        hits: SearchHits::Accounts {
+            items: rows
+                .into_iter()
+                .map(|row| AccountRecord {
+                    mine: false,
+                    username: row.username,
+                })
+                .collect(),
+        },
+        next_cursor: None,
+    })
+}
+
+/// 3× readers + 2× comments in the window + reposts in the window.
+/// Readers are this account, or anyone on a shared or sample book: another
+/// person's private reading does not move the rank. The sample sorts last.
+async fn popular_books(
+    pool: &SqlitePool,
+    viewer: &Authed,
+    now: i64,
+) -> Result<SearchPage, ApiError> {
+    let since = now.saturating_sub(WINDOW_MS);
+    let sql = format!(
+        "WITH vis AS (SELECT b.id FROM books b WHERE {BOOK_VISIBLE_TO}),
+         readers AS (
+             SELECT bp.book_id AS book_id, COUNT(*) AS n
+             FROM book_progress bp
+             JOIN vis ON vis.id = bp.book_id
+             JOIN books b ON b.id = bp.book_id
+             WHERE bp.progress_index > 0
+               AND (bp.user_id = ? OR b.shared = 1 OR b.is_sample = 1)
+             GROUP BY bp.book_id
+         ),
+         talk AS (
+             SELECT c.book_id AS book_id, COUNT(*) AS n
+             FROM comments c
+             JOIN vis ON vis.id = c.book_id
+             JOIN books b ON b.id = c.book_id
+             WHERE c.created_at >= ? AND {social_c}
+             GROUP BY c.book_id
+         ),
+         shares AS (
+             SELECT r.book_id AS book_id, COUNT(*) AS n
+             FROM reposts r
+             JOIN vis ON vis.id = r.book_id
+             JOIN books b ON b.id = r.book_id
+             WHERE r.created_at >= ? AND {social_r}
+             GROUP BY r.book_id
+         )
+         SELECT b.id, b.title, b.author, b.handle, b.imported_at, b.post_count,
+                COALESCE(p.progress_index, 0) AS progress_index,
+                b.is_sample, b.shared, b.user_id AS owner_id,
+                owner.username AS owner_username,
+                EXISTS (
+                    SELECT 1 FROM book_requests holder
+                    WHERE holder.book_id = b.id AND holder.user_id = ?
+                      AND holder.state = 'imported'
+                ) AS holds
+         FROM books b
+         JOIN vis ON vis.id = b.id
+         JOIN users owner ON owner.id = b.user_id
+         LEFT JOIN book_progress p ON p.book_id = b.id AND p.user_id = ?
+         LEFT JOIN readers ON readers.book_id = b.id
+         LEFT JOIN talk ON talk.book_id = b.id
+         LEFT JOIN shares ON shares.book_id = b.id
+         ORDER BY b.is_sample ASC,
+                  3 * COALESCE(readers.n, 0) + 2 * COALESCE(talk.n, 0) + COALESCE(shares.n, 0) DESC,
+                  b.imported_at DESC, b.id ASC
+         LIMIT {BROWSE_BOOKS}",
+        social_c = social_visible("c"),
+        social_r = social_visible("r"),
+    );
+    let rows = sqlx::query_as::<_, BookRow>(&sql)
+        .bind(&viewer.user_id)
+        .bind(&viewer.user_id)
+        .bind(since)
+        .bind(&viewer.user_id)
+        .bind(since)
+        .bind(&viewer.user_id)
+        .bind(&viewer.user_id)
+        .bind(&viewer.user_id)
+        .fetch_all(pool)
+        .await?;
+    Ok(SearchPage {
+        hits: SearchHits::Books {
+            items: rows
+                .into_iter()
+                .map(|row| row.into_record(&viewer.user_id))
+                .collect(),
+        },
+        next_cursor: None,
+    })
+}
+
+/// Paragraphs on visible books. The window score wins. When it is quiet, the
+/// newest engaged post still shows, instead of an empty list.
+async fn top_posts(pool: &SqlitePool, viewer: &Authed, now: i64) -> Result<SearchPage, ApiError> {
+    let since = now.saturating_sub(WINDOW_MS);
+    let posts = posts_for("ranked");
+    let sql = format!(
+        "WITH vis AS (SELECT b.id FROM books b WHERE {BOOK_VISIBLE_TO}),
+         ev AS (
+             SELECT c.book_id AS book_id, c.post_id AS post_id, c.created_at AS at, 2 AS w
+             FROM comments c
+             JOIN vis ON vis.id = c.book_id
+             JOIN books b ON b.id = c.book_id
+             WHERE {social_c}
+             UNION ALL
+             SELECT r.book_id, r.post_id, r.created_at, 1
+             FROM reposts r
+             JOIN vis ON vis.id = r.book_id
+             JOIN books b ON b.id = r.book_id
+             WHERE {social_r}
+         ),
+         ranked AS (
+             SELECT book_id, post_id,
+                    SUM(CASE WHEN at >= ? THEN w ELSE 0 END) AS score,
+                    MAX(at) AS last_at
+             FROM ev
+             GROUP BY book_id, post_id
+             ORDER BY score DESC, last_at DESC, book_id ASC, post_id ASC
+             LIMIT {BROWSE_POSTS}
+         )
+         SELECT b.id, b.title, b.author, b.handle, b.imported_at, b.post_count,
+                COALESCE(p.progress_index, 0) AS progress_index,
+                b.is_sample, b.shared, b.user_id AS owner_id,
+                owner.username AS owner_username,
+                posts.idx AS post_idx, posts.kind AS post_kind,
+                posts.chapter AS post_chapter, posts.text AS post_text,
+                CAST(ranked.score AS REAL) AS score
+         FROM ranked
+         JOIN books b ON b.id = ranked.book_id
+         JOIN users owner ON owner.id = b.user_id
+         LEFT JOIN book_progress p ON p.book_id = b.id AND p.user_id = ?
+         {posts}
+         ORDER BY ranked.score DESC, ranked.last_at DESC, ranked.book_id ASC, ranked.post_id ASC",
+        social_c = social_visible("c"),
+        social_r = social_visible("r"),
+    );
+    let rows = sqlx::query_as::<_, PostHitRow>(&sql)
+        .bind(&viewer.user_id)
+        .bind(&viewer.user_id)
+        .bind(&viewer.user_id)
+        .bind(since)
+        .bind(&viewer.user_id)
+        .fetch_all(pool)
+        .await?;
+    let mut items = Vec::with_capacity(rows.len());
+    for row in rows {
+        items.push(row.into_hit(&viewer.user_id)?);
+    }
+    Ok(SearchPage {
+        hits: SearchHits::Posts { items },
+        next_cursor: None,
+    })
+}
+
+#[derive(Debug, FromRow)]
+struct SuggestedAccount {
+    username: String,
 }
 
 /// Words become a quoted FTS5 query. The last word is a prefix. Operators and
@@ -80,6 +308,17 @@ pub(crate) fn fts_match(q: &str) -> Option<String> {
         }
     }
     Some(out)
+}
+
+/// Join `posts` for a comment, repost, or ranked row (`c`, `r`, `ranked`).
+/// The idx comparison uses UNIQUE (book_id, idx). The text comparison rejects
+/// a non-canonical id that CASTs to that idx.
+pub(crate) fn posts_for(alias: &str) -> String {
+    format!(
+        "JOIN posts ON posts.book_id = {alias}.book_id \
+         AND posts.idx = CAST({alias}.post_id AS INTEGER) \
+         AND {alias}.post_id = CAST(posts.idx AS TEXT)"
+    )
 }
 
 /// Escape `\`, `%`, and `_` so the query is a literal LIKE pattern.

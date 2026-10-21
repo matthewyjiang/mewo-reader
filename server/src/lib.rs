@@ -50,6 +50,10 @@ pub struct AppState {
     pub throttle: auth::Throttle,
     /// Open Library work context, 24h, keyed by work key. Not durable.
     pub(crate) work_cache: Arc<requests::WorkCache>,
+    /// Weekly trending. Fresh 6h, stale up to 48h. Not durable.
+    pub(crate) trending: Arc<requests::TrendingCache>,
+    /// Work sheet info, 24h, plus a short negative cache. Not durable.
+    pub(crate) info_cache: Arc<requests::InfoCache>,
 }
 
 pub fn router(state: AppState) -> Router {
@@ -154,6 +158,8 @@ pub async fn prepare(config: Config) -> Result<AppState, sqlx::Error> {
         passwords,
         throttle,
         work_cache: Arc::new(requests::WorkCache::new()),
+        trending: Arc::new(requests::TrendingCache::new()),
+        info_cache: Arc::new(requests::InfoCache::new()),
     })
 }
 
