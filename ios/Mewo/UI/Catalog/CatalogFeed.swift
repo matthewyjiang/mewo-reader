@@ -129,8 +129,16 @@ final class CatalogFeed {
                 return .openBook(id)
             }
             return .done
-        case .request, .again:
+        case .request:
             await send(work.workKey) { try await self.service.request(NewBookRequest(work)) }
+            return .done
+        case .again:
+            // /retry accepts failed or canceled. An import with no book starts over.
+            if let current, current.state == "canceled" {
+                await send(work.workKey) { try await self.service.retry(id: current.id) }
+            } else {
+                await send(work.workKey) { try await self.service.request(NewBookRequest(work)) }
+            }
             return .done
         case .retry:
             guard let current else { return .done }

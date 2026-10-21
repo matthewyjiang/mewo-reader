@@ -47,7 +47,7 @@ struct CatalogRow: View {
             if let symbol {
                 Button(action: onAct) {
                     Image(systemName: symbol)
-                        .font(.system(size: 16, weight: .semibold))
+                        .font(.system(size: 13, weight: .medium))
                         .foregroundStyle(mewo.accent)
                         .frame(width: 32, height: 32)
                         .overlay(Circle().strokeBorder(mewo.accent, lineWidth: 1.5))
@@ -60,7 +60,7 @@ struct CatalogRow: View {
         }
         .padding(.leading, 16)
         .padding(.trailing, symbol == nil ? 16 : 4)
-        .padding(.vertical, 8)
+        .padding(.vertical, 12)
     }
 
     private var meta: String {

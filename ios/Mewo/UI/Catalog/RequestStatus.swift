@@ -40,9 +40,10 @@ func catalogQuery(_ raw: String) -> CatalogQuery {
     return .search(trimmed)
 }
 
-/// Only a blank field gets the trending header. A short query is still browse.
+/// Browse, including a 1–2 character field, is still the trending list.
 func catalogHeading(_ query: String) -> String? {
-    query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "Trending on Open Library" : nil
+    if case .browse = catalogQuery(query) { return "Trending on Open Library" }
+    return nil
 }
 
 func catalogEmptyCopy(_ query: String) -> String {
@@ -122,15 +123,15 @@ enum RowAction: String, Equatable, Sendable {
     case request, pending, open, retry, again
 }
 
-/// Retry is only legal for a failed or canceled row. Anything else is a 409.
-/// An imported row with no book, and no copy already on the server, starts over
-/// with POST /v1/requests.
+/// Retry is only legal for a failed row. A canceled row uses the same plus as
+/// "Request again" and still calls POST /retry. An imported row with no book,
+/// and no copy already on the server, starts over with POST /v1/requests.
 func rowAction(_ request: BookRequest?, _ onServer: ServerCopy? = nil) -> RowAction {
     if let request, request.state == "requested" || request.state == "downloading" { return .pending }
     if request?.state == "failed" { return .retry }
     if request?.state == "imported", request?.bookId != nil { return .open }
     if onServer?.bookId != nil { return .open }
-    if request?.state == "canceled" { return .retry }
+    if request?.state == "canceled" { return .again }
     if request?.state == "imported" { return .again }
     return .request
 }
@@ -279,6 +280,7 @@ enum SheetStatus: Equatable, Sendable {
     case failed(line: String, capNote: String?)
     case available(line: String, bookId: String?)
     case canceled(capNote: String?)
+    case requestAgain(capNote: String?)
     case requestable(capNote: String?, editionNote: String?)
 }
 
@@ -317,6 +319,11 @@ func sheetStatus(
     if phase == .failed, let request {
         return .failed(line: request.error ?? "The download failed.", capNote: capNote)
     }
+    // An import that never received a book, and nothing already on the server,
+    // is not on the shelf. "Open book" would sit there disabled.
+    if phase == .imported, bookId == nil, copy == nil {
+        return .requestAgain(capNote: capNote)
+    }
     if copy != nil || phase == .imported {
         let line = copy.map { copyLabel($0, .sheet) } ?? "On your shelf"
         return .available(line: line, bookId: bookId)
@@ -330,13 +337,23 @@ func sheetStatus(
 
 func catalogErrorText(code: Int?, serverMessage: String?, network: Bool) -> String {
     if network {
-        return "Could not reach the server. Check your connection and try again."
+        return "Couldn't reach the server. Check your connection."
+    }
+    switch code {
+    case 401:
+        return "Sign in again."
+    case 403:
+        return "Requests are off."
+    case 404:
+        return "That book is no longer in the catalog."
+    default:
+        break
     }
     if let serverMessage {
         let trimmed = serverMessage.trimmingCharacters(in: .whitespacesAndNewlines)
         if !trimmed.isEmpty, !isRawStatus(trimmed) { return trimmed }
     }
-    return "Something went wrong. Try again."
+    return "Couldn't load the catalog."
 }
 
 func catalogError(from error: Error) -> CatalogError {

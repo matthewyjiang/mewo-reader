@@ -62,7 +62,12 @@ final class CatalogCopyTests: XCTestCase {
         XCTAssertEqual(rowAction(bookRequest(state: "imported", bookId: "req-1")), .open)
         XCTAssertEqual(rowAction(bookRequest(state: "imported")), .again)
         XCTAssertEqual(rowAction(bookRequest(state: "failed", error: "x")), .retry)
-        XCTAssertEqual(rowAction(bookRequest(state: "canceled")), .retry)
+        XCTAssertEqual(rowAction(bookRequest(state: "canceled")), .again)
+        XCTAssertEqual(
+            rowActionLabel(.again, work(), bookRequest(state: "canceled")),
+            "Request again"
+        )
+        XCTAssertEqual(rowSymbol(rowAction(bookRequest(state: "canceled"))), "plus")
         XCTAssertEqual(rowAction(nil, sharedCopy()), .open)
         XCTAssertEqual(rowAction(bookRequest(), sharedCopy()), .pending)
         XCTAssertEqual(rowAction(bookRequest(state: "failed", error: "x"), sharedCopy()), .retry)
@@ -214,6 +219,18 @@ final class CatalogCopyTests: XCTestCase {
         if case .available(let line, _) = available {
             XCTAssertFalse(line.contains("secret"))
         }
+        XCTAssertEqual(
+            sheetStatus(
+                phase: .imported,
+                request: bookRequest(state: "imported"),
+                detailRequest: nil,
+                copy: nil,
+                bookId: nil,
+                capNote: cap,
+                hasAcceptedEdition: true
+            ),
+            .requestAgain(capNote: cap)
+        )
 
         XCTAssertEqual(
             workStats(workInfo()),
@@ -244,9 +261,10 @@ final class CatalogCopyTests: XCTestCase {
         XCTAssertEqual(catalogQuery("  dune  "), .search("dune"))
         XCTAssertEqual(catalogHeading(""), "Trending on Open Library")
         XCTAssertEqual(catalogHeading("   "), "Trending on Open Library")
-        XCTAssertNil(catalogHeading("a"))
-        XCTAssertNil(catalogHeading("ab"))
-        XCTAssertNil(catalogHeading("📚📚"))
+        XCTAssertEqual(catalogHeading("a"), "Trending on Open Library")
+        XCTAssertEqual(catalogHeading("ab"), "Trending on Open Library")
+        XCTAssertEqual(catalogHeading("du"), "Trending on Open Library")
+        XCTAssertEqual(catalogHeading("📚📚"), "Trending on Open Library")
         XCTAssertNil(catalogHeading("dune"))
         XCTAssertTrue(catalogEmptyCopy("dune").contains("“dune”"))
         XCTAssertEqual(catalogDebounceNanos, 300_000_000)
@@ -256,26 +274,42 @@ final class CatalogCopyTests: XCTestCase {
 
     func testErrorTextNeverShowsARawStatus() {
         let network = catalogErrorText(code: nil, serverMessage: "Server returned 0", network: true)
-        XCTAssertEqual(network, "Could not reach the server. Check your connection and try again.")
+        XCTAssertEqual(network, "Couldn't reach the server. Check your connection.")
         XCTAssertFalse(network.contains("Server returned"))
+        XCTAssertFalse(network.hasSuffix("Try again."))
+        XCTAssertEqual(
+            catalogErrorText(code: 401, serverMessage: "Server returned 401", network: false),
+            "Sign in again."
+        )
         XCTAssertEqual(
             catalogErrorText(code: 403, serverMessage: "Requests are off.", network: false),
             "Requests are off."
         )
         XCTAssertEqual(
+            catalogErrorText(code: 403, serverMessage: nil, network: false),
+            "Requests are off."
+        )
+        XCTAssertEqual(
+            catalogErrorText(code: 404, serverMessage: "HTTP 404", network: false),
+            "That book is no longer in the catalog."
+        )
+        XCTAssertEqual(
             catalogErrorText(code: 502, serverMessage: "Server returned 502", network: false),
-            "Something went wrong. Try again."
+            "Couldn't load the catalog."
         )
         XCTAssertEqual(
             catalogErrorText(code: 500, serverMessage: "HTTP 500", network: false),
-            "Something went wrong. Try again."
+            "Couldn't load the catalog."
+        )
+        XCTAssertFalse(
+            catalogErrorText(code: 500, serverMessage: "HTTP 500", network: false).hasSuffix("Try again.")
         )
         let human = "Search is longer than 200 characters (asked 201)."
         XCTAssertEqual(catalogErrorText(code: 400, serverMessage: human, network: false), human)
 
         let wrapped = catalogError(from: HostedException(message: "Server returned 502", code: 502))
         XCTAssertEqual(wrapped.reason, .http(502))
-        XCTAssertEqual(wrapped.message, "Something went wrong. Try again.")
+        XCTAssertEqual(wrapped.message, "Couldn't load the catalog.")
         XCTAssertNil(wrapped.message.range(of: #"Server returned|HTTP \d+"#, options: .regularExpression))
         let offline = catalogError(from: URLError(.notConnectedToInternet))
         XCTAssertEqual(offline.reason, .network)
@@ -466,7 +500,7 @@ final class CatalogModelTests: XCTestCase {
         feed.setQuery("foundation")
         await waitPages(2)
         await feed.loadTask?.value
-        XCTAssertEqual(feed.failure, "Something went wrong. Try again.")
+        XCTAssertEqual(feed.failure, "Couldn't load the catalog.")
         XCTAssertTrue(feed.items.isEmpty)
         XCTAssertNil(feed.failure?.range(of: #"Server returned|HTTP \d+"#, options: .regularExpression))
     }
@@ -492,6 +526,16 @@ final class CatalogModelTests: XCTestCase {
         XCTAssertTrue(feed.items.isEmpty)
     }
 
+    func testBlurbOverflowComparesMeasuredHeights() {
+        XCTAssertFalse(CatalogSheetModel.blurbOverflow(text: "Sand.", width: 320))
+        let long = String(repeating: "Arrakis ", count: 80)
+        XCTAssertTrue(CatalogSheetModel.blurbOverflow(text: long, width: 280))
+        XCTAssertFalse(CatalogSheetModel.blurbOverflow(text: long, width: 20_000))
+        let lines = (0..<8).map { _ in "line" }.joined(separator: "\n")
+        XCTAssertTrue(CatalogSheetModel.blurbOverflow(text: lines, width: 320))
+        XCTAssertFalse(CatalogSheetModel.blurbOverflow(text: long, width: 0))
+    }
+
     func testRowRequestWritesTheOverlayAndImportsOnce() async {
         fake = FakeCatalog()
         var imports = 0
@@ -506,6 +550,18 @@ final class CatalogModelTests: XCTestCase {
         XCTAssertEqual(again, .openBook("book-1"))
         XCTAssertEqual(imports, 1)
         XCTAssertEqual(fake.requestLog.count, 1)
+    }
+
+    func testCanceledAgainCallsRetry() async {
+        fake = FakeCatalog()
+        let feed = CatalogFeed(service: fake, debounceNanos: 0)
+        let canceled = work(request: bookRequest(state: "canceled"))
+        fake.retryResult = .success(bookRequest(state: "requested"))
+        let outcome = await feed.act(canceled)
+        XCTAssertEqual(outcome, .done)
+        XCTAssertEqual(fake.retryLog, ["req-1"])
+        XCTAssertTrue(fake.requestLog.isEmpty)
+        XCTAssertEqual(feed.shown(canceled)?.state, "requested")
     }
 
     func testImportedWithoutABookPostsInsteadOfRetrying() async {
@@ -961,7 +1017,7 @@ final class CatalogHTTPTests: XCTestCase {
             _ = try await service.page(query: "dune", page: 1)
             XCTFail("expected a human error")
         } catch let error as CatalogError {
-            XCTAssertEqual(error.message, "Something went wrong. Try again.")
+            XCTAssertEqual(error.message, "Couldn't load the catalog.")
             XCTAssertNil(error.message.range(of: #"Server returned|HTTP \d+"#, options: .regularExpression))
         } catch {
             throw error

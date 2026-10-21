@@ -36,6 +36,7 @@ struct AddBookButton<Label: View>: View {
                 } label: {
                     label()
                 }
+                .menuOrder(.fixed)
                 .buttonStyle(.plain)
             } else {
                 Button(action: onUpload, label: label)
