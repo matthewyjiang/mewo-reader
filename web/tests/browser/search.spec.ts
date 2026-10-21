@@ -3,7 +3,13 @@ import { readFileSync } from 'node:fs';
 import { mkdir } from 'node:fs/promises';
 
 const COVER = readFileSync(new URL('../fixtures/cover.jpg', import.meta.url));
-const SHOTS = '/opt/cursor/artifacts';
+
+async function shot(page: Page, name: string): Promise<void> {
+  if (!process.env.MEWO_SHOTS) return;
+  const dir = process.env.MEWO_SHOTS_DIR ?? 'test-results/search-shots';
+  await mkdir(dir, { recursive: true });
+  await page.screenshot({ path: `${dir}/${name}.png` });
+}
 
 function book(id: string, title: string, author: string, over: Record<string, unknown> = {}) {
   return {
@@ -151,6 +157,16 @@ function detailFor(stage: string, info: boolean) {
       bookId: 'book-dune',
       attempts: 1,
     };
+    onServer = {
+      bookId: 'book-dune',
+      ownerUsername: 'ada',
+      mine: true,
+      shared: false,
+      held: false,
+    };
+  }
+  if (stage === 'canceled-copy') {
+    request = { ...base, state: 'canceled', phase: 'canceled', error: null };
     onServer = {
       bookId: 'book-dune',
       ownerUsername: 'ada',
@@ -322,14 +338,13 @@ async function answer(route: Route, state: Awaited<ReturnType<typeof install>>) 
 
 test('empty search shows a browse page, keeps each tab, and restores scroll', async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 });
-  await mkdir(SHOTS, { recursive: true });
   const state = await install(page, { kind: 'books', holdBooks: true });
   await page.goto('/search');
   await expect(page.locator('[aria-busy="true"]')).toBeVisible();
   state.releaseBooks();
   await expect(page.getByRole('heading', { name: 'Popular on this server' })).toBeVisible();
   await expect(page.getByText('Emma').first()).toBeVisible();
-  await page.screenshot({ path: `${SHOTS}/search-books.png` });
+  await shot(page, 'search-books');
 
   const main = page.locator('main');
   await main.evaluate((el) => { el.scrollTop = 160; });
@@ -340,7 +355,7 @@ test('empty search shows a browse page, keeps each tab, and restores scroll', as
   await page.getByRole('tab', { name: 'Accounts' }).click();
   await expect(page.getByRole('heading', { name: 'Suggested accounts' })).toBeVisible();
   await expect(page.getByText('@grace')).toBeVisible();
-  await page.screenshot({ path: `${SHOTS}/search-accounts.png` });
+  await shot(page, 'search-accounts');
 
   await page.getByRole('tab', { name: 'Books' }).click();
   await expect(page.getByText('Emma').first()).toBeVisible();
@@ -351,7 +366,7 @@ test('empty search shows a browse page, keeps each tab, and restores scroll', as
   await expect(page.getByRole('heading', { name: 'Top posts' })).toBeVisible();
   await expect(page.getByText('Most replied and reposted in the last 30 days')).toBeVisible();
   await expect(page.getByText('Emma Woodhouse, handsome, clever, and rich.')).toBeVisible();
-  await page.screenshot({ path: `${SHOTS}/search-posts.png` });
+  await shot(page, 'search-posts');
 
   await page.getByRole('tab', { name: 'Catalog' }).click();
   await expect(page.getByRole('heading', { name: 'Trending on Open Library' })).toBeVisible();
@@ -362,7 +377,7 @@ test('empty search shows a browse page, keeps each tab, and restores scroll', as
   await expect(page.getByRole('button', {
     name: 'Neuromancer, William Gibson, 1984, On server · @grace',
   })).toBeVisible();
-  await page.screenshot({ path: `${SHOTS}/search-catalog.png` });
+  await shot(page, 'search-catalog');
 
   await main.evaluate((el) => { el.scrollTop = 140; });
   const catalogScroll = await main.evaluate((el) => el.scrollTop);
@@ -392,7 +407,6 @@ test('Search the Catalog keeps the query that missed', async ({ page }) => {
 test('a catalog row opens a sheet and follows the request through to the book', async ({ page }) => {
   test.setTimeout(60_000);
   await page.setViewportSize({ width: 390, height: 844 });
-  await mkdir(SHOTS, { recursive: true });
   const state = await install(page, { kind: 'catalog' });
   await page.goto('/search');
   await expect(page.getByRole('heading', { name: 'Trending on Open Library' })).toBeVisible();
@@ -407,6 +421,9 @@ test('a catalog row opens a sheet and follows the request through to the book', 
   await expect(sheet.getByText('Arrakis', { exact: true })).toBeVisible();
   await expect(sheet.getByText('First published 1965 · 155 editions · ~608 pages · ★ 4.3 (448)')).toBeVisible();
   await expect(sheet.getByText('Editions in English, German, French')).toBeVisible();
+  await expect(sheet.getByText('Series: Dune')).toBeVisible();
+  await expect(sheet.getByRole('heading', { name: 'Awards' })).toBeVisible();
+  await expect(sheet.getByText('Hugo Award 1966')).toBeVisible();
   await expect(sheet.getByRole('link', { name: 'View on Open Library' })).toHaveAttribute(
     'href',
     'https://openlibrary.org/works/OL893415W',
@@ -421,7 +438,7 @@ test('a catalog row opens a sheet and follows the request through to the book', 
   await open.getByRole('button', { name: 'Request', exact: true }).click();
   await expect(open.getByText('Looking for a release…')).toBeVisible();
   await expect(open.getByText('Searching')).toBeVisible();
-  await page.screenshot({ path: `${SHOTS}/catalog-sheet-requested.png` });
+  await shot(page, 'catalog-sheet-requested');
 
   state.stage = 'downloading';
   await page.clock.runFor(10_000);
@@ -429,7 +446,7 @@ test('a catalog row opens a sheet and follows the request through to the book', 
   await expect(open.getByText('Dune - Frank Herbert.epub')).toBeVisible();
   await expect(open.getByText('Also requested by')).toBeVisible();
   await expect(open.getByText(/@lin/)).toBeVisible();
-  await page.screenshot({ path: `${SHOTS}/catalog-sheet-downloading.png` });
+  await shot(page, 'catalog-sheet-downloading');
 
   state.stage = 'failed';
   await page.clock.runFor(10_000);
@@ -442,13 +459,25 @@ test('a catalog row opens a sheet and follows the request through to the book', 
   await library;
   await expect(open.getByRole('button', { name: 'Open book' })).toBeVisible();
   await expect(open.getByText('On your shelf').first()).toBeVisible();
-  await page.screenshot({ path: `${SHOTS}/catalog-sheet-imported.png` });
+  await shot(page, 'catalog-sheet-imported');
   await open.getByRole('button', { name: 'Open book' }).click();
   await expect(page).toHaveURL(/\/books\/book-dune/);
   await expect(page.getByText('A beginning is the time for taking the most delicate care.')).toBeVisible();
   await page.goBack();
   await expect(page.getByRole('heading', { name: 'Trending on Open Library' })).toBeVisible();
   expect(await main.evaluate((el) => el.scrollTop)).toBe(scroll);
+});
+
+test('a canceled request with a server copy opens the book', async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  const state = await install(page, { kind: 'catalog' });
+  state.stage = 'canceled-copy';
+  await page.goto('/search');
+  await page.getByRole('button', { name: 'Dune, Frank Herbert, 1965' }).click();
+  const sheet = page.getByRole('dialog', { name: 'Dune' });
+  await expect(sheet.getByRole('button', { name: 'Open book' })).toBeVisible();
+  await expect(sheet.getByText('On your shelf').first()).toBeVisible();
+  await expect(sheet.getByRole('button', { name: 'Request again' })).toHaveCount(0);
 });
 
 test('an Open Library miss keeps the row and still requests', async ({ page }) => {

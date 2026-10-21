@@ -63,11 +63,18 @@
 
   function apply(next: WorkDetail): void {
     const previous = detail?.status.request ?? null;
+    const opening = detail == null;
     detail = next;
     detailError = '';
     loading = false;
     if (!sameRequest(previous, next.status.request)) onchange(next.status.request);
-    if (next.status.request?.phase === 'imported' && !importedShelf) {
+    if (next.status.request?.phase !== 'imported') return;
+    // The shelf already has a book that was imported before the sheet opened.
+    if (opening) {
+      importedShelf = true;
+      return;
+    }
+    if (!importedShelf) {
       importedShelf = true;
       void store.load();
     }
@@ -92,8 +99,11 @@
       } catch (error) {
         if (!alive || ctrl.signal.aborted) return;
         if (error instanceof DOMException && error.name === 'AbortError') return;
-        detailError = message(error);
-        loading = false;
+        if (detail == null) {
+          detailError = message(error);
+          loading = false;
+        }
+        timer = setTimeout(() => { void pull(); }, 10_000);
       }
     }
 
@@ -159,7 +169,17 @@
     acting = true;
     try {
       await store.api.cancelRequest(current.id);
-      onchange({ ...current, state: 'canceled', error: null });
+      const next = { ...current, state: 'canceled' as const, error: null, phase: 'canceled' as const };
+      if (detail?.status.request?.id === current.id) {
+        detail = {
+          ...detail,
+          status: {
+            ...detail.status,
+            request: { ...detail.status.request, state: 'canceled', error: null, phase: 'canceled' },
+          },
+        };
+      }
+      onchange(next);
       attempt += 1;
     } catch (error) {
       store.notice = message(error);
@@ -170,7 +190,7 @@
 
   async function retry(): Promise<void> {
     const current = liveRequest;
-    if (acting || !current) return;
+    if (acting || atCap || !current) return;
     acting = true;
     try {
       const next = await store.api.retryRequest(current.id);
@@ -258,15 +278,16 @@
           {#if detailRequest}
             <p class="meta">Tried {detailRequest.attempts} of {detailRequest.maxAttempts} releases</p>
           {/if}
-          <button class="pill" type="button" disabled={acting} onclick={() => { void retry(); }}>Retry</button>
+          <button class="pill" type="button" disabled={acting || atCap} onclick={() => { void retry(); }}>Retry</button>
+          {#if atCap}<p class="meta">You have {detail?.status.cap} requests in progress</p>{/if}
+        {:else if copy || phase === 'imported'}
+          <p>{copy ? copyLabel(copy, 'sheet') : 'On your shelf'}</p>
+          <button class="pill" type="button" disabled={!bookId} onclick={openBook}>Open book</button>
         {:else if phase === 'canceled'}
           <button class="pill" type="button" disabled={acting || atCap} onclick={() => { void retry(); }}>
             Request again
           </button>
           {#if atCap}<p class="meta">You have {detail?.status.cap} requests in progress</p>{/if}
-        {:else if copy || phase === 'imported'}
-          <p>{copy ? copyLabel(copy, 'sheet') : 'On your shelf'}</p>
-          <button class="pill" type="button" disabled={!bookId} onclick={openBook}>Open book</button>
         {:else}
           <button class="pill" type="button" disabled={acting || atCap} onclick={() => { void requestBook(); }}>
             Request
@@ -314,9 +335,10 @@
             {/if}
           {/if}
           {#if info.series.length}
-            <p>{info.series.join(', ')}</p>
+            <p>Series: {info.series.join(', ')}</p>
           {/if}
           {#if info.awards.length}
+            <h3 class="also">Awards</h3>
             <ul class="awards">
               {#each info.awards as award (award)}<li>{award}</li>{/each}
             </ul>
