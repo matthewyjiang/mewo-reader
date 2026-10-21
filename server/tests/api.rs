@@ -1789,11 +1789,27 @@ async fn search_rejects_bad_queries_and_sanitizes_fts() {
     let (status, book) = upload(&app, &token, "Book", "Writer", &common::epub(), None, false).await;
     assert_eq!(status, StatusCode::OK, "{book}");
 
-    for q in ["", "   ", "\t"] {
-        let (status, body) = search(&app, Some(&token), q, "posts", None).await;
-        assert_eq!(status, StatusCode::BAD_REQUEST, "{q:?} {body}");
-        assert!(body["error"].as_str().unwrap().contains("Enter a search."));
+    for kind in ["accounts", "books", "posts"] {
+        for q in ["", "   ", "\t"] {
+            let (status, body) = search(&app, Some(&token), q, kind, None).await;
+            assert_eq!(status, StatusCode::OK, "{kind} {q:?} {body}");
+            assert!(body["nextCursor"].is_null(), "{body}");
+            assert_eq!(body["type"], kind);
+        }
+        let (status, body) = empty_req(
+            &app,
+            "GET",
+            &format!("/v1/search?type={kind}"),
+            Some(&token),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{kind} {body}");
+        assert!(body["nextCursor"].is_null(), "{body}");
     }
+    // A cursor belongs to a typed query. Browse ignores it, including a junk one.
+    let (status, body) = search(&app, Some(&token), "", "books", Some("%%%")).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(body["nextCursor"].is_null(), "{body}");
     let long = "a".repeat(101);
     let (status, body) = search(&app, Some(&token), &long, "accounts", None).await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
@@ -1836,6 +1852,399 @@ async fn search_rejects_bad_queries_and_sanitizes_fts() {
     let (status, body) = search(&app, Some(&token), "para", "posts", Some("%%%")).await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
     assert!(body["error"].as_str().unwrap().contains("page token"));
+}
+
+async fn user_id(pool: &SqlitePool, username: &str) -> String {
+    sqlx::query_scalar("SELECT id FROM users WHERE username = ?")
+        .bind(username)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+}
+
+async fn insert_user(pool: &SqlitePool, id: &str, username: &str, created_at: i64) {
+    sqlx::query(
+        "INSERT INTO users (id, username, username_norm, password_hash, created_at)
+         VALUES (?, ?, ?, 'x', ?)",
+    )
+    .bind(id)
+    .bind(username)
+    .bind(username.to_ascii_lowercase())
+    .bind(created_at)
+    .execute(pool)
+    .await
+    .unwrap();
+}
+
+async fn insert_book(
+    pool: &SqlitePool,
+    id: &str,
+    user_id: &str,
+    title: &str,
+    imported_at: i64,
+    shared: i64,
+    sample: i64,
+) {
+    sqlx::query(
+        "INSERT INTO books (id, user_id, title, author, handle, imported_at, post_count, is_sample, shared)
+         VALUES (?, ?, ?, 'Author', 'author', ?, 1, ?, ?)",
+    )
+    .bind(id)
+    .bind(user_id)
+    .bind(title)
+    .bind(imported_at)
+    .bind(sample)
+    .bind(shared)
+    .execute(pool)
+    .await
+    .unwrap();
+}
+
+async fn insert_post(pool: &SqlitePool, book_id: &str, idx: i64) {
+    sqlx::query(
+        "INSERT INTO posts (book_id, idx, kind, chapter, text) VALUES (?, ?, 'Body', '', ?)",
+    )
+    .bind(book_id)
+    .bind(idx)
+    .bind(format!("post {idx}"))
+    .execute(pool)
+    .await
+    .unwrap();
+}
+
+async fn insert_comment(
+    pool: &SqlitePool,
+    id: &str,
+    user_id: &str,
+    book_id: &str,
+    post_id: &str,
+    at: i64,
+) {
+    sqlx::query(
+        "INSERT INTO comments (id, user_id, book_id, post_id, text, created_at)
+         VALUES (?, ?, ?, ?, 'hi', ?)",
+    )
+    .bind(id)
+    .bind(user_id)
+    .bind(book_id)
+    .bind(post_id)
+    .bind(at)
+    .execute(pool)
+    .await
+    .unwrap();
+}
+
+async fn insert_repost(pool: &SqlitePool, user_id: &str, book_id: &str, post_id: &str, at: i64) {
+    sqlx::query("INSERT INTO reposts (user_id, book_id, post_id, created_at) VALUES (?, ?, ?, ?)")
+        .bind(user_id)
+        .bind(book_id)
+        .bind(post_id)
+        .bind(at)
+        .execute(pool)
+        .await
+        .unwrap();
+}
+
+async fn insert_progress(pool: &SqlitePool, user_id: &str, book_id: &str, index: i64) {
+    sqlx::query("INSERT INTO book_progress (user_id, book_id, progress_index) VALUES (?, ?, ?)")
+        .bind(user_id)
+        .bind(book_id)
+        .bind(index)
+        .execute(pool)
+        .await
+        .unwrap();
+}
+
+async fn insert_imported(
+    pool: &SqlitePool,
+    id: &str,
+    user_id: &str,
+    work_key: &str,
+    book_id: &str,
+    at: i64,
+) {
+    sqlx::query(
+        "INSERT INTO book_requests (
+            id, user_id, work_key, title, author, state, progress, tried_guids, attempts,
+            book_id, next_check_at, created_at, updated_at
+         ) VALUES (?, ?, ?, 'T', 'A', 'imported', 100, '[]', 0, ?, 0, ?, ?)",
+    )
+    .bind(id)
+    .bind(user_id)
+    .bind(work_key)
+    .bind(book_id)
+    .bind(at)
+    .bind(at)
+    .execute(pool)
+    .await
+    .unwrap();
+}
+
+fn book_titles(body: &Value) -> Vec<String> {
+    body["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|row| row["title"].as_str().unwrap().to_string())
+        .collect()
+}
+
+#[tokio::test]
+async fn browse_books_rank_readers_then_talk_then_reposts() {
+    let (app, tmp) = app().await;
+    let alice_token = register(&app, "alice", "password1").await;
+    let bob_token = register(&app, "bob", "password1").await;
+    let pool = open_db(tmp.path()).await;
+    let alice = user_id(&pool, "alice").await;
+    let bob = user_id(&pool, "bob").await;
+    insert_user(&pool, "cara", "cara", 20).await;
+    insert_user(&pool, "ada", "ada", 10).await;
+
+    insert_book(&pool, "read", &alice, "Read", 10, 1, 0).await;
+    insert_book(&pool, "talk", &alice, "Talk", 10, 1, 0).await;
+    insert_book(&pool, "share", &alice, "Share", 10, 1, 0).await;
+    insert_book(&pool, "held", &alice, "Held", 10, 0, 0).await;
+    insert_book(&pool, "quiet", &alice, "Quiet", 50, 0, 0).await;
+    insert_book(&pool, "older", &alice, "Older", 40, 0, 0).await;
+    insert_book(&pool, "sample", &alice, "Sample", 9_000, 0, 1).await;
+    insert_book(&pool, "secret", &bob, "Secret", 9_000, 0, 0).await;
+
+    let now = mewo_server::db::now_ms();
+    insert_progress(&pool, &alice, "read", 3).await;
+    insert_progress(&pool, &bob, "read", 3).await;
+    insert_comment(&pool, "t1", &alice, "talk", "0", now).await;
+    insert_comment(&pool, "t2", &bob, "talk", "0", now).await;
+    for user in [alice.as_str(), bob.as_str(), "cara"] {
+        insert_repost(&pool, user, "share", "0", now).await;
+    }
+    insert_comment(&pool, "h-alice", &alice, "held", "0", now).await;
+    for n in 0..4 {
+        insert_comment(&pool, &format!("h-bob-{n}"), &bob, "held", "0", now).await;
+    }
+    for user in [alice.as_str(), bob.as_str(), "cara", "ada"] {
+        insert_progress(&pool, user, "sample", 5).await;
+    }
+    for n in 0..8 {
+        insert_comment(&pool, &format!("sec-{n}"), &bob, "secret", "0", now).await;
+    }
+    insert_imported(&pool, "hold-bob", &bob, "/works/OL1W", "held", now).await;
+
+    let (status, body) = search(&app, Some(&alice_token), "", "books", None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(body["nextCursor"].is_null(), "{body}");
+    assert_eq!(
+        book_titles(&body),
+        vec!["Read", "Talk", "Share", "Held", "Quiet", "Older", "Sample"]
+    );
+    let held = &body["items"][3];
+    assert_eq!(held["mine"], true);
+    assert_eq!(held["held"], false);
+    assert_eq!(held["ownerUsername"], "alice");
+    assert_eq!(body["items"][6]["isSample"], true);
+
+    let (status, body) = search(&app, Some(&bob_token), "   ", "books", None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let titles = book_titles(&body);
+    let held_at = titles.iter().position(|title| title == "Held").unwrap();
+    let read_at = titles.iter().position(|title| title == "Read").unwrap();
+    assert!(held_at < read_at, "{titles:?}");
+    assert!(titles.contains(&"Secret".to_string()), "{titles:?}");
+    assert!(!titles.contains(&"Quiet".to_string()), "{titles:?}");
+    let held = body["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["title"] == "Held")
+        .unwrap();
+    assert_eq!(held["mine"], false);
+    assert_eq!(held["held"], true);
+    assert_eq!(held["ownerUsername"], "");
+    assert_eq!(held["shared"], false);
+}
+
+#[tokio::test]
+async fn browse_accounts_ignore_private_activity_and_skip_self() {
+    let (app, tmp) = app().await;
+    let alice_token = register(&app, "alice", "password1").await;
+    let pool = open_db(tmp.path()).await;
+    let alice = user_id(&pool, "alice").await;
+    let (status, body) = search(&app, Some(&alice_token), "", "accounts", None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(body["nextCursor"].is_null(), "{body}");
+    assert_eq!(body["items"].as_array().unwrap().len(), 0);
+
+    insert_user(&pool, "bob", "bob", 400).await;
+    insert_user(&pool, "cara", "cara", 200).await;
+    insert_user(&pool, "ada", "ada", 300).await;
+    insert_book(&pool, "plaza", &alice, "Plaza", 1, 1, 0).await;
+    insert_book(&pool, "diary", &alice, "Diary", 1, 0, 0).await;
+    let now = mewo_server::db::now_ms();
+    insert_comment(&pool, "c-cara", "cara", "plaza", "0", now).await;
+    insert_comment(&pool, "c-ada", "ada", "plaza", "0", now).await;
+    for n in 0..5 {
+        insert_comment(&pool, &format!("c-bob-{n}"), "bob", "diary", "0", now).await;
+    }
+
+    let (status, body) = search(&app, Some(&alice_token), "", "accounts", None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(body["nextCursor"].is_null(), "{body}");
+    let names: Vec<&str> = body["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|row| row["username"].as_str().unwrap())
+        .collect();
+    assert_eq!(names, vec!["ada", "cara", "bob"]);
+    assert!(body["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|row| row["mine"] == false));
+}
+
+#[tokio::test]
+async fn browse_posts_use_the_window_then_the_newest() {
+    let (app, tmp) = app().await;
+    let alice_token = register(&app, "alice", "password1").await;
+    let bob_token = register(&app, "bob", "password1").await;
+    let pool = open_db(tmp.path()).await;
+    let alice = user_id(&pool, "alice").await;
+    let bob = user_id(&pool, "bob").await;
+    insert_user(&pool, "cara", "cara", 1).await;
+    let now = mewo_server::db::now_ms();
+    let day = 24 * 60 * 60 * 1000;
+
+    insert_book(&pool, "hot", &alice, "Hot", 1, 1, 0).await;
+    insert_book(&pool, "busy", &alice, "Busy", 1, 1, 0).await;
+    insert_book(&pool, "newer", &alice, "Newer", 1, 1, 0).await;
+    insert_book(&pool, "older", &alice, "Older", 1, 1, 0).await;
+    insert_book(&pool, "secret", &bob, "Secret", 1, 0, 0).await;
+    insert_book(&pool, "diary", &alice, "Diary", 1, 0, 0).await;
+    for id in ["hot", "busy", "newer", "older", "secret"] {
+        insert_post(&pool, id, 0).await;
+    }
+    insert_post(&pool, "diary", 0).await;
+    insert_post(&pool, "diary", 1).await;
+
+    insert_comment(&pool, "hot-c", &alice, "hot", "0", now - day).await;
+    for n in 0..3 {
+        insert_comment(
+            &pool,
+            &format!("busy-{n}"),
+            &alice,
+            "busy",
+            "0",
+            now - 40 * day,
+        )
+        .await;
+    }
+    insert_comment(&pool, "newer-c", &alice, "newer", "0", now - 31 * day).await;
+    for n in 0..4 {
+        insert_comment(
+            &pool,
+            &format!("older-{n}"),
+            &alice,
+            "older",
+            "0",
+            now - 60 * day,
+        )
+        .await;
+    }
+    insert_comment(&pool, "sec-c", &bob, "secret", "0", now).await;
+    insert_comment(&pool, "diary-a", &alice, "diary", "0", now).await;
+    insert_comment(&pool, "diary-b", &bob, "diary", "1", now).await;
+    insert_imported(&pool, "hold", &bob, "/works/OL1W", "diary", now).await;
+
+    let posts = |body: &Value| -> Vec<(String, String)> {
+        body["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|row| {
+                (
+                    row["book"]["title"].as_str().unwrap().to_string(),
+                    row["post"]["id"].as_str().unwrap().to_string(),
+                )
+            })
+            .collect()
+    };
+
+    let (status, body) = search(&app, Some(&alice_token), "", "posts", None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(body["nextCursor"].is_null(), "{body}");
+    let alice_posts = posts(&body);
+    let hot = alice_posts.iter().position(|row| row.0 == "Hot").unwrap();
+    let busy = alice_posts.iter().position(|row| row.0 == "Busy").unwrap();
+    assert!(hot < busy, "{alice_posts:?}");
+    assert!(alice_posts.contains(&("Diary".into(), "0".into())));
+    assert!(!alice_posts.iter().any(|row| row.0 == "Secret"));
+    assert!(!alice_posts.iter().any(|row| row.1 == "1"));
+
+    let (status, body) = search(&app, Some(&bob_token), "", "posts", None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let bob_posts = posts(&body);
+    assert!(bob_posts.contains(&("Diary".into(), "1".into())));
+    assert!(!bob_posts.contains(&("Diary".into(), "0".into())));
+    assert!(bob_posts.iter().any(|row| row.0 == "Secret"));
+
+    sqlx::query("DELETE FROM comments WHERE created_at >= ?")
+        .bind(now - 30 * day)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let (status, body) = search(&app, Some(&alice_token), "", "posts", None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let quiet = posts(&body);
+    assert_eq!(quiet.first().map(|row| row.0.as_str()), Some("Newer"));
+    let newer = quiet.iter().position(|row| row.0 == "Newer").unwrap();
+    let older = quiet.iter().position(|row| row.0 == "Older").unwrap();
+    assert!(newer < older, "{quiet:?}");
+    assert!(!quiet.iter().any(|row| row.0 == "Hot"));
+}
+
+#[tokio::test]
+async fn browse_pages_are_a_single_head() {
+    let (app, tmp) = app().await;
+    let token = register(&app, "alice", "password1").await;
+    let pool = open_db(tmp.path()).await;
+    let alice = user_id(&pool, "alice").await;
+    for n in 1..=21 {
+        insert_user(&pool, &format!("u{n:02}"), &format!("u{n:02}"), n).await;
+    }
+    for n in 1..=31 {
+        insert_book(
+            &pool,
+            &format!("b{n:02}"),
+            &alice,
+            &format!("B{n:02}"),
+            n,
+            0,
+            0,
+        )
+        .await;
+    }
+    let (status, body) = search(&app, Some(&token), "", "accounts", None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(body["nextCursor"].is_null(), "{body}");
+    let names: Vec<&str> = body["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|row| row["username"].as_str().unwrap())
+        .collect();
+    assert_eq!(names.len(), 20);
+    assert_eq!(names[0], "u21");
+    assert_eq!(names[19], "u02");
+    assert!(!names.contains(&"u01"));
+
+    let (status, body) = search(&app, Some(&token), "", "books", None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(body["nextCursor"].is_null(), "{body}");
+    let titles = book_titles(&body);
+    assert_eq!(titles.len(), 30);
+    assert_eq!(titles[0], "B31");
+    assert_eq!(titles[29], "B02");
+    assert!(!titles.iter().any(|title| title == "B01"));
 }
 
 #[tokio::test]

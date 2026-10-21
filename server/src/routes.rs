@@ -585,6 +585,7 @@ pub async fn add_comment(
 
 #[derive(Deserialize)]
 pub struct SearchQuery {
+    #[serde(default)]
     q: String,
     #[serde(rename = "type")]
     kind: SearchKind,
@@ -652,7 +653,7 @@ pub async fn profile_posts(
         Some((created_at, id)) => (1i64, created_at, id),
         None => (0, 0, String::new()),
     };
-    let comment_posts = posts_for("c");
+    let comment_posts = search::posts_for("c");
     let sql = format!(
         "SELECT b.id, b.title, b.author, b.handle, b.imported_at, b.post_count,
                 COALESCE(p.progress_index, 0) AS progress_index,
@@ -716,7 +717,7 @@ pub async fn profile_reposts(
 ) -> Result<Json<ProfileRepostsPage>, ApiError> {
     let (user_id, _, _) = require_user(&state.pool, &username).await?;
     let (has_cursor, created_at, cursor_book, cursor_post) = keyset3(&query, false)?;
-    let repost_posts = posts_for("r");
+    let repost_posts = search::posts_for("r");
     let sql = format!(
         "SELECT b.id, b.title, b.author, b.handle, b.imported_at, b.post_count,
                 COALESCE(p.progress_index, 0) AS progress_index,
@@ -802,8 +803,8 @@ pub async fn feed(
     Query(query): Query<PageQuery>,
 ) -> Result<Json<FeedPage>, ApiError> {
     let (has_cursor, at, kind, id) = keyset3(&query, true)?;
-    let comment_posts = posts_for("c");
-    let repost_posts = posts_for("r");
+    let comment_posts = search::posts_for("c");
+    let repost_posts = search::posts_for("r");
     // Each branch keeps its own cursor and limit so the feed does not sort the
     // whole history before discarding it. The outer query merges those pages.
     let sql = format!(
@@ -1165,7 +1166,7 @@ async fn visible_reply_count(
     viewer: &str,
     user_id: &str,
 ) -> Result<i64, ApiError> {
-    let comment_posts = posts_for("c");
+    let comment_posts = search::posts_for("c");
     let count = sqlx::query_scalar::<_, i64>(&format!(
         "SELECT COUNT(*)
          FROM comments c
@@ -1187,7 +1188,7 @@ async fn visible_repost_count(
     viewer: &str,
     user_id: &str,
 ) -> Result<i64, ApiError> {
-    let repost_posts = posts_for("r");
+    let repost_posts = search::posts_for("r");
     let count = sqlx::query_scalar::<_, i64>(&format!(
         "SELECT COUNT(*)
          FROM reposts r
@@ -1353,16 +1354,6 @@ async fn require_post(state: &AppState, book_id: &str, post_id: &str) -> Result<
         .fetch_optional(&state.pool)
         .await?;
     found.map(|_| ()).ok_or(ApiError::NotFound)
-}
-
-/// `alias` is `c` or `r`. The idx comparison uses UNIQUE (book_id, idx).
-/// The text comparison rejects a non-canonical id that CASTs to that idx.
-fn posts_for(alias: &str) -> String {
-    format!(
-        "JOIN posts ON posts.book_id = {alias}.book_id \
-         AND posts.idx = CAST({alias}.post_id AS INTEGER) \
-         AND {alias}.post_id = CAST(posts.idx AS TEXT)"
-    )
 }
 
 fn parse_comment_text(raw: &str) -> Result<String, ApiError> {

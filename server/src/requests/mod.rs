@@ -11,7 +11,9 @@ mod sabnzbd;
 pub mod worker;
 
 pub(crate) mod http;
-pub(crate) use openlibrary::{Limiter, WorkCache};
+pub(crate) use openlibrary::{InfoCache, Limiter, TrendingCache, WorkCache};
+
+use crate::visibility::BOOK_VISIBLE_TO;
 
 use crate::auth::Authed;
 use crate::db::now_ms;
@@ -36,6 +38,7 @@ const MAX_WORK_KEY: usize = 200;
 pub(crate) fn router() -> Router<AppState> {
     Router::new()
         .route("/v1/catalog/search", get(catalog_search))
+        .route("/v1/catalog/works/{olid}", get(catalog_work))
         .route("/v1/requests", get(list_requests).post(create_request))
         .route("/v1/requests/{id}", delete(cancel_request))
         .route("/v1/requests/{id}/retry", post(retry_request))
@@ -68,6 +71,17 @@ pub struct BookRequest {
     pub follows: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ServerCopy {
+    pub book_id: String,
+    /// Empty for a private copy the viewer holds, matching [`crate::models::BookRecord`].
+    pub owner_username: String,
+    pub mine: bool,
+    pub shared: bool,
+    pub held: bool,
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CatalogWork {
@@ -77,6 +91,68 @@ pub struct CatalogWork {
     pub year: Option<i64>,
     pub cover_id: Option<i64>,
     pub request: Option<BookRequest>,
+    /// A copy this account can open. Null when the work is not on the server for them.
+    pub on_server: Option<ServerCopy>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Rating {
+    pub average: f64,
+    pub count: i64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkInfo {
+    pub canonical_key: String,
+    pub title: String,
+    pub subtitle: Option<String>,
+    pub authors: Vec<String>,
+    pub year: Option<i64>,
+    pub cover_id: Option<i64>,
+    pub description: Option<String>,
+    pub subjects: Vec<String>,
+    pub awards: Vec<String>,
+    pub series: Vec<String>,
+    pub edition_count: Option<i64>,
+    pub pages_median: Option<i64>,
+    pub languages: Vec<String>,
+    pub has_accepted_edition: bool,
+    pub rating: Option<Rating>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkDetail {
+    pub work_key: String,
+    pub info: Option<WorkInfo>,
+    pub info_error: Option<String>,
+    pub status: WorkStatus,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkStatus {
+    pub request: Option<RequestDetail>,
+    pub on_server: Option<ServerCopy>,
+    pub active: i64,
+    pub cap: i64,
+    pub other_requests: Vec<BookRequest>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RequestDetail {
+    #[serde(flatten)]
+    pub request: BookRequest,
+    pub attempts: i64,
+    pub max_attempts: i64,
+    /// Set while the effective state is still `requested`.
+    pub next_check_at: Option<i64>,
+    pub release_title: Option<String>,
+    pub release_size: Option<i64>,
+    pub phase: &'static str,
 }
 
 #[derive(Serialize)]
@@ -107,10 +183,18 @@ struct RequestRow {
     requester: String,
     created_at: i64,
     updated_at: i64,
+    attempts: i64,
+    next_check_at: i64,
+    release_title: Option<String>,
+    release_size: Option<i64>,
     lead_state: Option<String>,
     lead_progress: Option<i64>,
     lead_error: Option<String>,
     lead_requester: Option<String>,
+    lead_attempts: Option<i64>,
+    lead_next_check_at: Option<i64>,
+    lead_release_title: Option<String>,
+    lead_release_size: Option<i64>,
 }
 
 impl RequestRow {
@@ -152,14 +236,80 @@ impl RequestRow {
             },
         }
     }
+
+    /// Same leader projection as [`Self::into_wire`], plus the fields the sheet needs.
+    fn into_detail(self) -> RequestDetail {
+        let following = self.state == "requested" && self.lead_state.is_some();
+        let attempts = if following {
+            self.lead_attempts.unwrap_or(self.attempts)
+        } else {
+            self.attempts
+        };
+        let next_check_at = if following {
+            self.lead_next_check_at
+        } else {
+            Some(self.next_check_at)
+        };
+        let release_title = if following {
+            self.lead_release_title.clone()
+        } else {
+            self.release_title.clone()
+        };
+        let release_size = if following {
+            self.lead_release_size
+        } else {
+            self.release_size
+        };
+        let request = self.into_wire(false);
+        let phase = phase(&request.state, request.error.as_deref(), request.progress);
+        let next_check_at = if request.state == "requested" {
+            next_check_at
+        } else {
+            None
+        };
+        RequestDetail {
+            request,
+            attempts,
+            max_attempts: worker::MAX_ATTEMPTS,
+            next_check_at,
+            release_title,
+            release_size,
+            phase,
+        }
+    }
+}
+
+/// Sheet label for a request. `state` and `error` are the leader's when this
+/// row is following one. Held wins over importing: an upstream pause at 100%
+/// is not the import window. A requested row that still has a retry error
+/// (attempts left; the worker stores `failed` once they are gone) is
+/// `retrying`, so that error stays on the sheet.
+pub(crate) fn phase(state: &str, error: Option<&str>, progress: i64) -> &'static str {
+    let error = error.unwrap_or("");
+    match state {
+        "imported" => "imported",
+        "failed" => "failed",
+        "canceled" => "canceled",
+        "downloading" if worker::upstream_hold(error) => "held",
+        "downloading" if progress >= 100 => "importing",
+        "downloading" => "downloading",
+        "requested" if error == worker::NO_RELEASE_YET => "waiting",
+        "requested" if error.starts_with(worker::NO_MATCHING_RELEASE) => "no_match",
+        "requested" if worker::upstream_hold(error) => "held",
+        "requested" if !error.is_empty() => "retrying",
+        _ => "searching",
+    }
 }
 
 const REQUEST_COLUMNS: &str =
     "SELECT r.id, r.user_id, r.work_key, r.title, r.author, r.year, r.cover_id,
         r.state, r.progress, r.error, r.book_id, u.username AS requester,
         r.created_at, r.updated_at,
+        r.attempts, r.next_check_at, r.release_title, r.release_size,
         lead.state AS lead_state, lead.progress AS lead_progress, lead.error AS lead_error,
-        lead_user.username AS lead_requester
+        lead_user.username AS lead_requester,
+        lead.attempts AS lead_attempts, lead.next_check_at AS lead_next_check_at,
+        lead.release_title AS lead_release_title, lead.release_size AS lead_release_size
      FROM book_requests r
      JOIN users u ON u.id = r.user_id
      LEFT JOIN book_requests lead ON lead.id = r.follows
@@ -167,6 +317,7 @@ const REQUEST_COLUMNS: &str =
 
 #[derive(Deserialize)]
 struct CatalogQuery {
+    #[serde(default)]
     q: String,
     #[serde(default = "first_page")]
     page: i64,
@@ -184,7 +335,7 @@ async fn catalog_search(
     ensure_on(&state).await?;
     let q = query.q.trim();
     if q.is_empty() {
-        return Err(ApiError::BadRequest("Enter a search.".into()));
+        return catalog_trending(state, authed, query.page).await;
     }
     let asked = q.chars().count();
     if asked > MAX_QUERY_CHARS {
@@ -196,19 +347,96 @@ async fn catalog_search(
     let (works, next_page) = openlibrary::search(&state, q, page)
         .await
         .map_err(|err| ApiError::BadGateway(err.to_string()))?;
-    let mine = mine_by_work(&state.pool, &authed.user_id).await?;
+    catalog_items(&state, &authed.user_id, works, next_page).await
+}
+
+async fn catalog_trending(
+    state: AppState,
+    authed: Authed,
+    page: i64,
+) -> Result<Json<CatalogPage>, ApiError> {
+    let settings = settings::load(&state.pool).await?;
+    let works = openlibrary::trending(&state).await.map_err(|err| {
+        tracing::warn!(error = %err, "open library trending failed");
+        ApiError::BadGateway(openlibrary::LIBRARY_AGAIN.into())
+    })?;
+    let (works, next_page) = openlibrary::browse_page(&works, page.max(1), &settings.languages);
+    catalog_items(&state, &authed.user_id, works, next_page).await
+}
+
+async fn catalog_items(
+    state: &AppState,
+    user_id: &str,
+    works: Vec<openlibrary::Work>,
+    next_page: Option<i64>,
+) -> Result<Json<CatalogPage>, ApiError> {
+    let mine = mine_by_work(&state.pool, user_id).await?;
+    let keys: Vec<String> = works.iter().map(|work| work.work_key.clone()).collect();
+    let copies = copies_by_work(&state.pool, user_id, &keys).await?;
     let items = works
         .into_iter()
-        .map(|work| CatalogWork {
-            request: mine.get(&work.work_key).cloned(),
-            work_key: work.work_key,
-            title: work.title,
-            author: work.author,
-            year: work.year,
-            cover_id: work.cover_id,
+        .map(|work| {
+            let request = mine.get(&work.work_key).cloned();
+            let on_server = copies.get(&work.work_key).cloned();
+            CatalogWork {
+                work_key: work.work_key,
+                title: work.title,
+                author: work.author,
+                year: work.year,
+                cover_id: work.cover_id,
+                request,
+                on_server,
+            }
         })
         .collect();
     Ok(Json(CatalogPage { items, next_page }))
+}
+
+async fn catalog_work(
+    State(state): State<AppState>,
+    authed: Authed,
+    Path(olid): Path<String>,
+) -> Result<Json<WorkDetail>, ApiError> {
+    ensure_on(&state).await?;
+    clean_olid(&olid)?;
+    let work_key = format!("/works/{olid}");
+    let settings = settings::load(&state.pool).await?;
+    let (info, info_error) = match openlibrary::work_info(&state, &work_key).await {
+        Ok(mut info) => {
+            openlibrary::mark_accepted(&mut info, &settings.languages);
+            (Some(info), None)
+        }
+        Err(message) => (None, Some(message)),
+    };
+    let mut keys = vec![work_key.clone()];
+    if let Some(info) = info.as_ref() {
+        if info.canonical_key != work_key {
+            keys.push(info.canonical_key.clone());
+        }
+    }
+    let status = work_status(&state, &authed, &keys).await?;
+    Ok(Json(WorkDetail {
+        work_key,
+        info,
+        info_error,
+        status,
+    }))
+}
+
+fn clean_olid(raw: &str) -> Result<(), ApiError> {
+    let digits = raw
+        .strip_prefix("OL")
+        .and_then(|rest| rest.strip_suffix('W'));
+    let ok = digits.is_some_and(|digits| {
+        (1..=12).contains(&digits.len()) && digits.bytes().all(|byte| byte.is_ascii_digit())
+    });
+    if ok {
+        Ok(())
+    } else {
+        Err(ApiError::BadRequest(
+            "Work id must look like OL123W.".into(),
+        ))
+    }
 }
 
 #[derive(Deserialize)]
@@ -990,6 +1218,174 @@ async fn mine_by_work(
     Ok(by_work)
 }
 
+#[derive(Debug, sqlx::FromRow)]
+struct CopyRow {
+    work_key: String,
+    book_id: String,
+    owner_username: String,
+    mine: i64,
+    shared: i64,
+    is_sample: i64,
+    holds: i64,
+}
+
+impl CopyRow {
+    /// Same owner hiding as [`crate::models::BookRow::into_record`].
+    fn into_copy(self) -> ServerCopy {
+        let mine = self.mine != 0;
+        let shared = self.shared != 0;
+        let is_sample = self.is_sample != 0;
+        let private_hold = !mine && !shared && !is_sample;
+        ServerCopy {
+            book_id: self.book_id,
+            owner_username: if private_hold {
+                String::new()
+            } else {
+                self.owner_username
+            },
+            mine,
+            shared,
+            held: !mine && (self.holds != 0 || private_hold),
+        }
+    }
+}
+
+/// Imported copies the viewer can open, one per work key. Own copy wins, then
+/// the newest request. `holds` is selected so a shared book the viewer holds
+/// still reports `held`.
+async fn copies_by_work(
+    pool: &SqlitePool,
+    viewer: &str,
+    keys: &[String],
+) -> Result<HashMap<String, ServerCopy>, ApiError> {
+    if keys.is_empty() {
+        return Ok(HashMap::new());
+    }
+    let keys_json = serde_json::to_string(keys).unwrap_or_else(|_| "[]".into());
+    let sql = format!(
+        "SELECT r.work_key AS work_key, b.id AS book_id, owner.username AS owner_username,
+                (b.user_id = ?) AS mine, b.shared AS shared, b.is_sample AS is_sample,
+                EXISTS (
+                    SELECT 1 FROM book_requests holder
+                    WHERE holder.book_id = b.id AND holder.user_id = ?
+                      AND holder.state = 'imported'
+                ) AS holds
+         FROM book_requests r
+         JOIN books b ON b.id = r.book_id
+         JOIN users owner ON owner.id = b.user_id
+         WHERE r.state = 'imported'
+           AND r.work_key IN (SELECT value FROM json_each(?))
+           AND {BOOK_VISIBLE_TO}
+         ORDER BY (b.user_id = ?) DESC, r.updated_at DESC"
+    );
+    let rows = sqlx::query_as::<_, CopyRow>(&sql)
+        .bind(viewer)
+        .bind(viewer)
+        .bind(&keys_json)
+        .bind(viewer)
+        .bind(viewer)
+        .fetch_all(pool)
+        .await?;
+    let mut out = HashMap::new();
+    for row in rows {
+        out.entry(row.work_key.clone())
+            .or_insert_with(|| row.into_copy());
+    }
+    Ok(out)
+}
+
+/// Asked key wins unless the canonical key is the viewer's own copy and the
+/// asked key is someone else's.
+fn prefer_copy(asked: Option<ServerCopy>, canonical: Option<ServerCopy>) -> Option<ServerCopy> {
+    match (asked, canonical) {
+        (Some(asked), Some(canonical)) if canonical.mine && !asked.mine => Some(canonical),
+        (Some(asked), _) => Some(asked),
+        (None, canonical) => canonical,
+    }
+}
+
+async fn latest_detail(
+    pool: &SqlitePool,
+    user_id: &str,
+    keys: &[String],
+) -> Result<Option<RequestDetail>, ApiError> {
+    if keys.is_empty() {
+        return Ok(None);
+    }
+    let keys_json = serde_json::to_string(keys).unwrap_or_else(|_| "[]".into());
+    let sql = format!(
+        "{REQUEST_COLUMNS}
+         WHERE r.user_id = ? AND r.work_key IN (SELECT value FROM json_each(?))
+         ORDER BY r.created_at DESC, r.id DESC
+         LIMIT 1"
+    );
+    let row = sqlx::query_as::<_, RequestRow>(&sql)
+        .bind(user_id)
+        .bind(&keys_json)
+        .fetch_optional(pool)
+        .await?;
+    Ok(row.map(|row| row.into_detail()))
+}
+
+async fn active_leaders(pool: &SqlitePool, user_id: &str) -> Result<i64, ApiError> {
+    let active: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM book_requests
+         WHERE user_id = ? AND state IN ('requested', 'downloading') AND follows IS NULL",
+    )
+    .bind(user_id)
+    .fetch_one(pool)
+    .await?;
+    Ok(active)
+}
+
+async fn others_for_work(
+    pool: &SqlitePool,
+    user_id: &str,
+    keys: &[String],
+) -> Result<Vec<BookRequest>, ApiError> {
+    if keys.is_empty() {
+        return Ok(Vec::new());
+    }
+    let keys_json = serde_json::to_string(keys).unwrap_or_else(|_| "[]".into());
+    let sql = format!(
+        "{REQUEST_COLUMNS}
+         WHERE r.user_id <> ? AND r.work_key IN (SELECT value FROM json_each(?))
+         ORDER BY r.created_at DESC, r.id DESC"
+    );
+    let rows = sqlx::query_as::<_, RequestRow>(&sql)
+        .bind(user_id)
+        .bind(&keys_json)
+        .fetch_all(pool)
+        .await?;
+    Ok(rows.into_iter().map(|row| row.into_wire(true)).collect())
+}
+
+async fn work_status(
+    state: &AppState,
+    authed: &Authed,
+    keys: &[String],
+) -> Result<WorkStatus, ApiError> {
+    let request = latest_detail(&state.pool, &authed.user_id, keys).await?;
+    let copies = copies_by_work(&state.pool, &authed.user_id, keys).await?;
+    let on_server = prefer_copy(
+        keys.first().and_then(|key| copies.get(key).cloned()),
+        keys.get(1).and_then(|key| copies.get(key).cloned()),
+    );
+    let active = active_leaders(&state.pool, &authed.user_id).await?;
+    let other_requests = if authed.is_admin {
+        others_for_work(&state.pool, &authed.user_id, keys).await?
+    } else {
+        Vec::new()
+    };
+    Ok(WorkStatus {
+        request,
+        on_server,
+        active,
+        cap: ACTIVE_CAP,
+        other_requests,
+    })
+}
+
 async fn delete_job(state: &AppState, nzo: &str) {
     let Ok(settings) = settings::load(&state.pool).await else {
         return;
@@ -1122,5 +1518,45 @@ mod tests {
             choose_key("/works/OL893415W", Some("not a key"), false),
             "/works/OL893415W"
         );
+    }
+
+    #[test]
+    fn phase_covers_each_worker_message() {
+        use super::phase;
+        use super::worker::{NO_MATCHING_RELEASE, NO_RELEASE_YET};
+
+        assert_eq!(phase("requested", None, 0), "searching");
+        assert_eq!(phase("requested", Some(NO_RELEASE_YET), 0), "waiting");
+        assert_eq!(
+            phase(
+                "requested",
+                Some(&format!(
+                    "{NO_MATCHING_RELEASE} (closest: Dune Messiah, a different book)"
+                )),
+                0
+            ),
+            "no_match"
+        );
+        assert_eq!(phase("requested", Some("SABnzbd: down"), 0), "held");
+        assert_eq!(phase("requested", Some("Prowlarr: down"), 0), "held");
+        assert_eq!(
+            phase("requested", Some("No EPUB in the download."), 0),
+            "retrying"
+        );
+        assert_eq!(
+            phase("requested", Some("Download failed: CRC error"), 0),
+            "retrying"
+        );
+        assert_eq!(phase("requested", Some(""), 0), "searching");
+        assert_eq!(
+            phase("downloading", Some("Open Library: HTTP 500"), 40),
+            "held"
+        );
+        assert_eq!(phase("downloading", None, 40), "downloading");
+        assert_eq!(phase("downloading", None, 100), "importing");
+        assert_eq!(phase("downloading", Some("SABnzbd: paused"), 100), "held");
+        assert_eq!(phase("failed", Some("No release found."), 0), "failed");
+        assert_eq!(phase("canceled", None, 0), "canceled");
+        assert_eq!(phase("imported", None, 100), "imported");
     }
 }
