@@ -69,7 +69,7 @@ final class CatalogSheetModel: Identifiable {
         if phase?.isLive == true {
             note = nil
         } else {
-            note = detail?.status.flatMap(capNote)
+            note = detail.flatMap { capNote($0.status) }
         }
         return sheetStatus(
             phase: phase,

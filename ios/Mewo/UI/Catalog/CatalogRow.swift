@@ -8,7 +8,7 @@ struct CatalogRow: View {
     var onAct: () -> Void
 
     private var action: RowAction { rowAction(request, work.onServer) }
-    private var label: String? { badge(work, request) }
+    private var label: String? { Mewo.badge(work, request) }
 
     private var actionName: String {
         switch action {

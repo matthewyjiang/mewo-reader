@@ -567,7 +567,8 @@ final class HostedLibraryStore: LibraryStore {
     }
 
     private func expireOn401<T>(_ session: HostedSession, _ block: () async throws -> T) async throws -> T {
-        try await expireOn401(sessions: sessions, session: session, operation: block)
+        // The instance method shares this name, so the call has to name the module.
+        try await Mewo.expireOn401(sessions: sessions, session: session, operation: block)
     }
 
     private func bookDir(_ id: String) -> URL {
