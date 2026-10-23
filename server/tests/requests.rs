@@ -2579,6 +2579,121 @@ async fn retry_reuses_a_live_copy_when_the_import_is_stale() {
 }
 
 #[tokio::test]
+async fn a_repointed_holder_does_not_inherit_ahead_of_an_earlier_one() {
+    let world = world().await;
+    let work = "/works/OL893414W";
+    let book_id = bring_in(&world, work).await;
+    let bob = account(&world, "bob").await;
+    let ada = account(&world, "ada").await;
+
+    let (status, body) = post_work(&world, &bob.token, work).await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    let bob_request = body["id"].as_str().unwrap().to_string();
+    // Older than a repoint, newer than Ada's dead import. Ownership follows
+    // created_at, so this has to stay ahead of a row that is only reused now.
+    sqlx::query("UPDATE book_requests SET created_at = 1000 WHERE id = ?")
+        .bind(&bob_request)
+        .execute(&world.state.pool)
+        .await
+        .unwrap();
+
+    shelf_book(&world.state.pool, "ada-gone", &ada.id, 0).await;
+    shelf_request(&world.state.pool, "ada-stale", &ada.id, work, "ada-gone", 1).await;
+    delete_leaving_import(&world.state.pool, "ada-gone", "ada-stale").await;
+
+    let (status, body) = post_work(&world, &ada.token, work).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["id"], "ada-stale");
+    assert_eq!(body["bookId"], book_id);
+    assert!(stored(&world.state.pool, "ada-stale").await.created_at > 1000);
+
+    let (status, _) = empty_req(
+        &world.app,
+        "DELETE",
+        &format!("/v1/books/{book_id}"),
+        Some(&world.token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+
+    let owner: (String, String) =
+        sqlx::query_as("SELECT user_id, files_user_id FROM books WHERE id = ?")
+            .bind(&book_id)
+            .fetch_one(&world.state.pool)
+            .await
+            .unwrap();
+    assert_eq!(owner.0, bob.id);
+    assert_eq!(owner.1, world.user_id);
+    assert_eq!(
+        stored(&world.state.pool, "ada-stale")
+            .await
+            .book_id
+            .as_deref(),
+        Some(book_id.as_str())
+    );
+    assert!(epub_file(&world, &world.user_id, &book_id).is_file());
+    assert!(!epub_file(&world, &ada.id, &book_id).exists());
+    assert!(!epub_file(&world, &bob.id, &book_id).exists());
+}
+
+#[tokio::test]
+async fn request_again_reuses_onto_the_newer_closed_row() {
+    let world = world().await;
+    let work = "/works/OL893414W";
+    let book_id = bring_in(&world, work).await;
+    let ada = account(&world, "ada").await;
+
+    shelf_book(&world.state.pool, "ada-gone", &ada.id, 0).await;
+    shelf_request(&world.state.pool, "ada-stale", &ada.id, work, "ada-gone", 1).await;
+    delete_leaving_import(&world.state.pool, "ada-gone", "ada-stale").await;
+    failed_request(&world.state.pool, "ada-failed", &ada.id, work, 50).await;
+
+    let queries = world.prowlarr.lock().await.queries.len();
+    let adds = world.sab.lock().await.adds.len();
+    let books = book_count(&world.state.pool).await;
+
+    let (status, body) = post_work(&world, &ada.token, work).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["id"], "ada-failed");
+    assert_eq!(body["state"], "imported");
+    assert_eq!(body["bookId"], book_id);
+    assert_eq!(body["requester"], "ada");
+    assert!(body.get("follows").is_none(), "{body}");
+
+    assert_eq!(
+        stored(&world.state.pool, "ada-stale").await.state,
+        "canceled"
+    );
+    assert!(stored(&world.state.pool, "ada-stale")
+        .await
+        .book_id
+        .is_none());
+    assert_eq!(
+        stored(&world.state.pool, "ada-failed")
+            .await
+            .book_id
+            .as_deref(),
+        Some(book_id.as_str())
+    );
+    assert_eq!(imported_for(&world.state.pool, &ada.id, work).await, 1);
+    assert_eq!(book_count(&world.state.pool).await, books);
+    assert_eq!(world.prowlarr.lock().await.queries.len(), queries);
+    assert_eq!(world.sab.lock().await.adds.len(), adds);
+
+    let (status, page) = empty_req(
+        &world.app,
+        "GET",
+        "/v1/catalog/search?q=dune&page=1",
+        Some(&ada.token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{page}");
+    assert_eq!(page["items"][0]["request"]["id"], "ada-failed");
+    assert_eq!(page["items"][0]["request"]["state"], "imported");
+    assert_eq!(page["items"][0]["request"]["bookId"], book_id);
+}
+
+#[tokio::test]
 async fn a_follower_completes_with_the_leader() {
     let world = world().await;
     world.prowlarr.lock().await.key_ok = true;

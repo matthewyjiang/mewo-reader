@@ -730,8 +730,8 @@ enum Admitted {
 }
 
 /// Reuse an imported copy, follow the in-flight leader, or become the leader.
-/// The caller's own active row is returned as it stands. An import whose book
-/// is gone is pointed at the live copy, so it is not handed back as a hold.
+/// The caller's own active row is returned as it stands. A dead import is not
+/// a hold: the row the catalog shows becomes the live copy.
 async fn admit(
     tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
     asked: &str,
@@ -751,14 +751,28 @@ async fn admit(
         if let Some(existing) = own_imported(&mut **tx, seed.user_id, &work_key, &book_id).await? {
             return Ok(Admitted::Existing(Box::new(existing)));
         }
-        // The catalog shows this dead row. Point it at the live copy instead
-        // of inserting a second import for the same user and work.
+        // Same rule as retry: the catalog's row for this work becomes the
+        // import. A newer failure or cancel wins over an older dead import.
         if let Some(dead) = dead_import(&mut **tx, seed.user_id, &work_key).await? {
-            if let Some(existing) = repoint_import(tx, &dead.id, seed.user_id, &book_id).await? {
+            let take_closed = match newest_closed(&mut **tx, seed.user_id, &work_key).await? {
+                Some((id, at)) if shows_before(at, &id, dead.created_at, &dead.id) => Some(id),
+                _ => None,
+            };
+            if let Some(id) = take_closed {
+                cancel_dead_imports(tx, seed.user_id, &work_key).await?;
+                if let Some(existing) =
+                    attach_closed(tx, &id, seed.user_id, &work_key, &book_id).await?
+                {
+                    return Ok(Admitted::Existing(Box::new(existing)));
+                }
+            } else if let Some(existing) =
+                repoint_import(tx, &dead.id, seed.user_id, &book_id).await?
+            {
                 cancel_dead_imports(tx, seed.user_id, &work_key).await?;
                 return Ok(Admitted::Existing(Box::new(existing)));
+            } else {
+                cancel_dead_imports(tx, seed.user_id, &work_key).await?;
             }
-            cancel_dead_imports(tx, seed.user_id, &work_key).await?;
         }
         let id = insert_imported(tx, &seed, &work_key, &book_id).await?;
         return Ok(Admitted::Fresh { id, wake: false });
@@ -898,6 +912,32 @@ fn shows_before(at: i64, id: &str, other_at: i64, other_id: &str) -> bool {
     at > other_at || (at == other_at && id > other_id)
 }
 
+/// Newest failed or canceled row. It is what the catalog shows when it is
+/// newer than the dead import.
+async fn newest_closed<'a, E>(
+    executor: E,
+    user_id: &str,
+    work_key: &str,
+) -> Result<Option<(String, i64)>, ApiError>
+where
+    E: sqlx::Executor<'a, Database = sqlx::Sqlite>,
+{
+    let row = sqlx::query_as(
+        "SELECT id, created_at FROM book_requests
+         WHERE user_id = ? AND work_key = ? AND state IN ('failed', 'canceled')
+         ORDER BY created_at DESC, id DESC
+         LIMIT 1",
+    )
+    .bind(user_id)
+    .bind(work_key)
+    .fetch_optional(executor)
+    .await?;
+    Ok(row)
+}
+
+/// Point a dead import at `book_id`. `created_at` becomes now so this holder
+/// does not precede people who have held the copy longer. That also leaves
+/// the row newest, which is what the catalog shows.
 async fn repoint_import(
     tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
     id: &str,
@@ -908,10 +948,11 @@ async fn repoint_import(
     let changed = sqlx::query(
         "UPDATE book_requests
          SET book_id = ?, progress = 100, error = NULL, follows = NULL,
-             download_id = NULL, updated_at = ?, next_check_at = ?
+             download_id = NULL, created_at = ?, updated_at = ?, next_check_at = ?
          WHERE id = ? AND user_id = ? AND state = 'imported'",
     )
     .bind(book_id)
+    .bind(now)
     .bind(now)
     .bind(now)
     .bind(id)
@@ -922,10 +963,48 @@ async fn repoint_import(
     if changed == 0 {
         return Ok(None);
     }
+    wire_row(&mut **tx, id).await
+}
+
+/// The failed or canceled row the catalog shows becomes the live import.
+/// `created_at` stays: this row is already the newest.
+async fn attach_closed(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    id: &str,
+    user_id: &str,
+    work_key: &str,
+    book_id: &str,
+) -> Result<Option<BookRequest>, ApiError> {
+    let now = now_ms();
+    let changed = sqlx::query(
+        "UPDATE book_requests
+         SET state = 'imported', book_id = ?, progress = 100, error = NULL, follows = NULL,
+             download_id = NULL, work_key = ?, next_check_at = ?, updated_at = ?
+         WHERE id = ? AND user_id = ? AND state IN ('failed', 'canceled')",
+    )
+    .bind(book_id)
+    .bind(work_key)
+    .bind(now)
+    .bind(now)
+    .bind(id)
+    .bind(user_id)
+    .execute(&mut **tx)
+    .await?
+    .rows_affected();
+    if changed == 0 {
+        return Ok(None);
+    }
+    wire_row(&mut **tx, id).await
+}
+
+async fn wire_row<'a, E>(executor: E, id: &str) -> Result<Option<BookRequest>, ApiError>
+where
+    E: sqlx::Executor<'a, Database = sqlx::Sqlite>,
+{
     let sql = format!("{REQUEST_COLUMNS} WHERE r.id = ?");
     let row = sqlx::query_as::<_, RequestRow>(&sql)
         .bind(id)
-        .fetch_optional(&mut **tx)
+        .fetch_optional(executor)
         .await?;
     Ok(row.map(|row| row.into_wire(false)))
 }
@@ -1107,27 +1186,13 @@ async fn requeue(
             }
             cancel_dead_imports(tx, &row.user_id, work_key).await?;
         }
-        let changed = sqlx::query(
-            "UPDATE book_requests
-             SET state = 'imported', book_id = ?, progress = 100, error = NULL, follows = NULL,
-                 download_id = NULL, work_key = ?, next_check_at = ?, updated_at = ?
-             WHERE id = ? AND user_id = ? AND state IN ('failed', 'canceled')",
-        )
-        .bind(&book_id)
-        .bind(work_key)
-        .bind(now)
-        .bind(now)
-        .bind(&row.id)
-        .bind(&row.user_id)
-        .execute(&mut **tx)
-        .await?
-        .rows_affected();
-        if changed == 0 {
+        let Some(existing) = attach_closed(tx, &row.id, &row.user_id, work_key, &book_id).await?
+        else {
             return Err(ApiError::Conflict(
                 "Only a failed or canceled request can be retried.".into(),
             ));
-        }
-        return Ok(Requeued::Ready { wake: false });
+        };
+        return Ok(Requeued::Existing(Box::new(existing)));
     }
     if let Some(leader) = leader_id(&mut **tx, work_key).await? {
         if leader != row.id {
