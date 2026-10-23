@@ -760,13 +760,27 @@ async fn admit(
             };
             if let Some(id) = take_closed {
                 cancel_dead_imports(tx, seed.user_id, &work_key).await?;
-                if let Some(existing) =
-                    attach_closed(tx, &id, seed.user_id, &work_key, &book_id).await?
+                if let Some(existing) = attach_hold(
+                    tx,
+                    &id,
+                    seed.user_id,
+                    &work_key,
+                    &book_id,
+                    "'failed', 'canceled'",
+                )
+                .await?
                 {
                     return Ok(Admitted::Existing(Box::new(existing)));
                 }
-            } else if let Some(existing) =
-                repoint_import(tx, &dead.id, seed.user_id, &book_id).await?
+            } else if let Some(existing) = attach_hold(
+                tx,
+                &dead.id,
+                seed.user_id,
+                &work_key,
+                &book_id,
+                "'imported'",
+            )
+            .await?
             {
                 cancel_dead_imports(tx, seed.user_id, &work_key).await?;
                 return Ok(Admitted::Existing(Box::new(existing)));
@@ -935,55 +949,28 @@ where
     Ok(row)
 }
 
-/// Point a dead import at `book_id`. `created_at` becomes now so this holder
-/// does not precede people who have held the copy longer. That also leaves
-/// the row newest, which is what the catalog shows.
-async fn repoint_import(
-    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
-    id: &str,
-    user_id: &str,
-    book_id: &str,
-) -> Result<Option<BookRequest>, ApiError> {
-    let now = now_ms();
-    let changed = sqlx::query(
-        "UPDATE book_requests
-         SET book_id = ?, progress = 100, error = NULL, follows = NULL,
-             download_id = NULL, created_at = ?, updated_at = ?, next_check_at = ?
-         WHERE id = ? AND user_id = ? AND state = 'imported'",
-    )
-    .bind(book_id)
-    .bind(now)
-    .bind(now)
-    .bind(now)
-    .bind(id)
-    .bind(user_id)
-    .execute(&mut **tx)
-    .await?
-    .rows_affected();
-    if changed == 0 {
-        return Ok(None);
-    }
-    wire_row(&mut **tx, id).await
-}
-
-/// The failed or canceled row the catalog shows becomes the live import.
-/// `created_at` stays: this row is already the newest.
-async fn attach_closed(
+/// Make `id` the live hold of `book_id`. `from` is the `state IN (...)` list
+/// the row must already match. `created_at` becomes now so this holder does
+/// not precede people who have held the copy longer, and the catalog still
+/// shows the row.
+async fn attach_hold(
     tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
     id: &str,
     user_id: &str,
     work_key: &str,
     book_id: &str,
+    from: &str,
 ) -> Result<Option<BookRequest>, ApiError> {
     let now = now_ms();
-    let changed = sqlx::query(
+    let changed = sqlx::query(&format!(
         "UPDATE book_requests
          SET state = 'imported', book_id = ?, progress = 100, error = NULL, follows = NULL,
-             download_id = NULL, work_key = ?, next_check_at = ?, updated_at = ?
-         WHERE id = ? AND user_id = ? AND state IN ('failed', 'canceled')",
-    )
+             download_id = NULL, work_key = ?, created_at = ?, updated_at = ?, next_check_at = ?
+         WHERE id = ? AND user_id = ? AND state IN ({from})"
+    ))
     .bind(book_id)
     .bind(work_key)
+    .bind(now)
     .bind(now)
     .bind(now)
     .bind(id)
@@ -1178,7 +1165,9 @@ async fn requeue(
             // The catalog shows one row per work, newest first. The book has
             // to land on that row, and the dead import must not stay beside it.
             if !shows_before(row.created_at, &row.id, dead.created_at, &dead.id) {
-                if let Some(existing) = repoint_import(tx, &dead.id, &row.user_id, &book_id).await?
+                if let Some(existing) =
+                    attach_hold(tx, &dead.id, &row.user_id, work_key, &book_id, "'imported'")
+                        .await?
                 {
                     cancel_dead_imports(tx, &row.user_id, work_key).await?;
                     return Ok(Requeued::Existing(Box::new(existing)));
@@ -1186,7 +1175,15 @@ async fn requeue(
             }
             cancel_dead_imports(tx, &row.user_id, work_key).await?;
         }
-        let Some(existing) = attach_closed(tx, &row.id, &row.user_id, work_key, &book_id).await?
+        let Some(existing) = attach_hold(
+            tx,
+            &row.id,
+            &row.user_id,
+            work_key,
+            &book_id,
+            "'failed', 'canceled'",
+        )
+        .await?
         else {
             return Err(ApiError::Conflict(
                 "Only a failed or canceled request can be retried.".into(),

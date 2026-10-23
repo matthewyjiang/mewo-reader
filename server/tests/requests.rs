@@ -2637,6 +2637,65 @@ async fn a_repointed_holder_does_not_inherit_ahead_of_an_earlier_one() {
 }
 
 #[tokio::test]
+async fn a_closed_row_holder_does_not_inherit_ahead_of_an_earlier_one() {
+    let world = world().await;
+    let work = "/works/OL893414W";
+    let book_id = bring_in(&world, work).await;
+    let bob = account(&world, "bob").await;
+    let ada = account(&world, "ada").await;
+
+    let (status, body) = post_work(&world, &bob.token, work).await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    let bob_request = body["id"].as_str().unwrap().to_string();
+    sqlx::query("UPDATE book_requests SET created_at = 1000 WHERE id = ?")
+        .bind(&bob_request)
+        .execute(&world.state.pool)
+        .await
+        .unwrap();
+
+    // The failure is what the catalog shows, and it is older than Bob's hold.
+    shelf_book(&world.state.pool, "ada-gone", &ada.id, 0).await;
+    shelf_request(&world.state.pool, "ada-stale", &ada.id, work, "ada-gone", 1).await;
+    delete_leaving_import(&world.state.pool, "ada-gone", "ada-stale").await;
+    failed_request(&world.state.pool, "ada-failed", &ada.id, work, 50).await;
+
+    let (status, body) = post_work(&world, &ada.token, work).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["id"], "ada-failed");
+    assert_eq!(body["bookId"], book_id);
+    assert!(stored(&world.state.pool, "ada-failed").await.created_at > 1000);
+    assert_eq!(
+        stored(&world.state.pool, "ada-stale").await.state,
+        "canceled"
+    );
+
+    let (status, _) = empty_req(
+        &world.app,
+        "DELETE",
+        &format!("/v1/books/{book_id}"),
+        Some(&world.token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+
+    let owner: String = sqlx::query_scalar("SELECT user_id FROM books WHERE id = ?")
+        .bind(&book_id)
+        .fetch_one(&world.state.pool)
+        .await
+        .unwrap();
+    assert_eq!(owner, bob.id);
+    assert_eq!(
+        stored(&world.state.pool, "ada-failed")
+            .await
+            .book_id
+            .as_deref(),
+        Some(book_id.as_str())
+    );
+    assert!(epub_file(&world, &world.user_id, &book_id).is_file());
+    assert!(!epub_file(&world, &ada.id, &book_id).exists());
+}
+
+#[tokio::test]
 async fn request_again_reuses_onto_the_newer_closed_row() {
     let world = world().await;
     let work = "/works/OL893414W";
