@@ -395,6 +395,39 @@ pub async fn toggle_like(
     Ok(Json(likes_for(&state, &authed.user_id, &id).await?))
 }
 
+pub async fn put_like(
+    State(state): State<AppState>,
+    authed: Authed,
+    Path((id, post_id)): Path<(String, String)>,
+) -> Result<Json<LikeSet>, ApiError> {
+    let _ = visible_book(&state, &authed.user_id, &id).await?;
+    sqlx::query(
+        "INSERT INTO likes (user_id, book_id, post_id) VALUES (?, ?, ?)
+         ON CONFLICT DO NOTHING",
+    )
+    .bind(&authed.user_id)
+    .bind(&id)
+    .bind(&post_id)
+    .execute(&state.pool)
+    .await?;
+    Ok(Json(likes_for(&state, &authed.user_id, &id).await?))
+}
+
+pub async fn delete_like(
+    State(state): State<AppState>,
+    authed: Authed,
+    Path((id, post_id)): Path<(String, String)>,
+) -> Result<Json<LikeSet>, ApiError> {
+    let _ = visible_book(&state, &authed.user_id, &id).await?;
+    sqlx::query("DELETE FROM likes WHERE user_id = ? AND book_id = ? AND post_id = ?")
+        .bind(&authed.user_id)
+        .bind(&id)
+        .bind(&post_id)
+        .execute(&state.pool)
+        .await?;
+    Ok(Json(likes_for(&state, &authed.user_id, &id).await?))
+}
+
 pub async fn comment_index(
     State(state): State<AppState>,
     authed: Authed,
@@ -565,19 +598,78 @@ pub async fn add_comment(
     let book = visible_book(&state, &authed.user_id, &id).await?;
     require_post(&state, &book.id, &post_id).await?;
     let text = parse_comment_text(&body.text)?;
-    let comment_id = Uuid::new_v4().to_string();
-    sqlx::query(
-        "INSERT INTO comments (id, user_id, book_id, post_id, text, created_at)
-         VALUES (?, ?, ?, ?, ?, ?)",
-    )
-    .bind(&comment_id)
-    .bind(&authed.user_id)
-    .bind(&book.id)
-    .bind(&post_id)
-    .bind(&text)
-    .bind(now_ms())
-    .execute(&state.pool)
-    .await?;
+    // Insert and the privacy raise commit together. The trigger's update is
+    // visible to other connections only after that, so a late sync is never
+    // briefly public.
+    let mut tx = state.pool.begin().await?;
+    let comment_id = match body.id {
+        Some(client_id) => {
+            let comment_id = client_id.to_string();
+            let inserted = sqlx::query(
+                "INSERT INTO comments (id, user_id, book_id, post_id, text, created_at)
+                 VALUES (?, ?, ?, ?, ?, ?)
+                 ON CONFLICT(id) DO NOTHING",
+            )
+            .bind(&comment_id)
+            .bind(&authed.user_id)
+            .bind(&book.id)
+            .bind(&post_id)
+            .bind(&text)
+            .bind(now_ms())
+            .execute(&mut *tx)
+            .await?;
+            if inserted.rows_affected() == 0 {
+                // Only the caller's row. A missing row means another account
+                // holds this id, which is still a conflict.
+                let existing = sqlx::query_as::<_, (String, String)>(
+                    "SELECT book_id, post_id FROM comments
+                     WHERE id = ? AND user_id = ? -- own rows only",
+                )
+                .bind(&comment_id)
+                .bind(&authed.user_id)
+                .fetch_optional(&mut *tx)
+                .await?;
+                match existing {
+                    Some((book_id, existing_post))
+                        if book_id == book.id && existing_post == post_id => {}
+                    _ => return Err(ApiError::Conflict("That reply id is taken.".into())),
+                }
+            }
+            comment_id
+        }
+        None => {
+            let comment_id = Uuid::new_v4().to_string();
+            sqlx::query(
+                "INSERT INTO comments (id, user_id, book_id, post_id, text, created_at)
+                 VALUES (?, ?, ?, ?, ?, ?)",
+            )
+            .bind(&comment_id)
+            .bind(&authed.user_id)
+            .bind(&book.id)
+            .bind(&post_id)
+            .bind(&text)
+            .bind(now_ms())
+            .execute(&mut *tx)
+            .await?;
+            comment_id
+        }
+    };
+    if body.private {
+        // OR the client's flag onto the trigger. The owner check is the
+        // trigger's own, so an owner's reply stays as it was written online.
+        sqlx::query(
+            "UPDATE comments SET private = 1
+             WHERE id = ? AND user_id = ?
+               AND (SELECT user_id FROM books WHERE id = ?) <> ?",
+        )
+        .bind(&comment_id)
+        .bind(&authed.user_id)
+        .bind(&book.id)
+        .bind(&authed.user_id)
+        .execute(&mut *tx)
+        .await?;
+    }
+    tx.commit().await?;
     Ok(Json(
         thread_for(&state, &authed.user_id, &id, &post_id).await?,
     ))

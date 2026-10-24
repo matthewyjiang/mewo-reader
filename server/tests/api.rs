@@ -626,6 +626,335 @@ async fn comments_are_public_on_the_shared_book() {
 }
 
 #[tokio::test]
+async fn client_comment_ids_replay_and_conflict() {
+    let (app, tmp) = app().await;
+    let matt = register(&app, "matt", "password1").await;
+    let ted = register(&app, "ted", "password1").await;
+    let carol = register(&app, "carol", "password1").await;
+    let (status, book) = upload(&app, &matt, "Pride", "Jane", &common::epub(), None, false).await;
+    assert_eq!(status, StatusCode::OK, "{book}");
+    let id = book["id"].as_str().unwrap();
+    share(&app, &matt, id).await;
+    let (status, other) = upload(&app, &matt, "Emma", "Jane", &common::epub(), None, false).await;
+    assert_eq!(status, StatusCode::OK, "{other}");
+    let other_id = other["id"].as_str().unwrap();
+    share(&app, &matt, other_id).await;
+
+    let reply_id = "6f0b9c3e-1a2b-4c5d-8e9f-0a1b2c3d4e5f";
+    let (status, first) = json_req(
+        &app,
+        "POST",
+        &format!("/v1/books/{id}/comments/0"),
+        Some(&ted),
+        json!({ "text": "queued", "id": reply_id }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{first}");
+    assert_eq!(first["comments"].as_array().unwrap().len(), 1);
+    assert_eq!(first["comments"][0]["id"], reply_id);
+    assert_eq!(first["comments"][0]["text"], "queued");
+
+    // A retry can carry different text. The stored row, and the thread, stay the first one.
+    let (status, again) = json_req(
+        &app,
+        "POST",
+        &format!("/v1/books/{id}/comments/0"),
+        Some(&ted),
+        json!({ "text": "queued again", "id": reply_id }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{again}");
+    assert_eq!(again, first);
+
+    let pool = open_db(tmp.path()).await;
+    let rows: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM comments WHERE id = ?")
+        .bind(reply_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(rows, 1);
+
+    let (status, body) = json_req(
+        &app,
+        "POST",
+        &format!("/v1/books/{id}/comments/1"),
+        Some(&ted),
+        json!({ "text": "other post", "id": reply_id }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_eq!(body["error"], "That reply id is taken.");
+
+    let (status, body) = json_req(
+        &app,
+        "POST",
+        &format!("/v1/books/{other_id}/comments/0"),
+        Some(&ted),
+        json!({ "text": "other book", "id": reply_id }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_eq!(body["error"], "That reply id is taken.");
+
+    let (status, body) = json_req(
+        &app,
+        "POST",
+        &format!("/v1/books/{id}/comments/0"),
+        Some(&carol),
+        json!({ "text": "stolen", "id": reply_id }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_eq!(body["error"], "That reply id is taken.");
+
+    let rows: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM comments WHERE id = ?")
+        .bind(reply_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(rows, 1);
+    let (status, thread) = empty_req(
+        &app,
+        "GET",
+        &format!("/v1/books/{id}/comments/0"),
+        Some(&ted),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{thread}");
+    assert_eq!(thread, first);
+
+    // Omitted id still mints a server id, so two posts are two rows.
+    let (status, minted) = json_req(
+        &app,
+        "POST",
+        &format!("/v1/books/{id}/comments/0"),
+        Some(&ted),
+        json!({ "text": "no id" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{minted}");
+    let comments = minted["comments"].as_array().unwrap();
+    assert_eq!(comments.len(), 2);
+    assert!(comments
+        .iter()
+        .any(|row| row["text"] == "no id" && row["id"] != reply_id));
+}
+
+#[tokio::test]
+async fn a_private_reply_stays_private_after_the_book_is_shared() {
+    let (app, tmp) = app().await;
+    let matt = register(&app, "matt", "password1").await;
+    let ted = register(&app, "ted", "password1").await;
+    let carol = register(&app, "carol", "password1").await;
+    let (status, book) = upload(&app, &matt, "Pride", "Jane", &common::epub(), None, false).await;
+    assert_eq!(status, StatusCode::OK, "{book}");
+    let id = book["id"].as_str().unwrap();
+    let pool = open_db(tmp.path()).await;
+    let ted_id = user_id(&pool, "ted").await;
+    insert_imported(&pool, "hold-ted", &ted_id, "/works/OL1W", id, 1).await;
+
+    let comment_private = async |comment_id| -> i64 {
+        sqlx::query_scalar("SELECT private FROM comments WHERE id = ?")
+            .bind(comment_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+    };
+    let texts = |thread: &Value| -> Vec<String> {
+        thread["comments"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|row| row["text"].as_str().unwrap().to_string())
+            .collect()
+    };
+
+    // Ted holds the private book. `private: false` must not clear the trigger.
+    let (status, thread) = json_req(
+        &app,
+        "POST",
+        &format!("/v1/books/{id}/comments/0"),
+        Some(&ted),
+        json!({ "text": "while private", "private": false }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{thread}");
+    let early_id = thread["comments"][0]["id"].as_str().unwrap();
+    assert_eq!(comment_private(early_id).await, 1);
+
+    let (status, thread) = json_req(
+        &app,
+        "POST",
+        &format!("/v1/books/{id}/comments/0"),
+        Some(&ted),
+        json!({ "text": "also private", "private": true }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{thread}");
+    let flagged_id = thread["comments"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["text"] == "also private")
+        .unwrap()["id"]
+        .as_str()
+        .unwrap();
+    assert_eq!(comment_private(flagged_id).await, 1);
+
+    share(&app, &matt, id).await;
+
+    // Composed while the book was private, delivered after the share. The
+    // trigger would publish this row. The flag keeps it private.
+    let late_id = "8a1c2d3e-4f50-4612-9abc-def012345678";
+    let (status, thread) = json_req(
+        &app,
+        "POST",
+        &format!("/v1/books/{id}/comments/0"),
+        Some(&ted),
+        json!({ "text": "synced late", "id": late_id, "private": true }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{thread}");
+    assert_eq!(comment_private(late_id).await, 1);
+
+    let (status, carol_thread) = empty_req(
+        &app,
+        "GET",
+        &format!("/v1/books/{id}/comments/0"),
+        Some(&carol),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{carol_thread}");
+    assert!(texts(&carol_thread).is_empty(), "{carol_thread}");
+
+    let (status, owner_thread) = empty_req(
+        &app,
+        "GET",
+        &format!("/v1/books/{id}/comments/0"),
+        Some(&matt),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{owner_thread}");
+    assert!(texts(&owner_thread).is_empty(), "{owner_thread}");
+
+    let mut ted_texts = texts(&thread);
+    ted_texts.sort();
+    assert_eq!(
+        ted_texts,
+        vec![
+            "also private".to_string(),
+            "synced late".to_string(),
+            "while private".to_string(),
+        ]
+    );
+
+    // An owner's reply stays public. The flag does not hide it.
+    let (status, thread) = json_req(
+        &app,
+        "POST",
+        &format!("/v1/books/{id}/comments/0"),
+        Some(&matt),
+        json!({ "text": "owner note", "private": true }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{thread}");
+    let owner_id = thread["comments"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["text"] == "owner note")
+        .unwrap()["id"]
+        .as_str()
+        .unwrap();
+    assert_eq!(comment_private(owner_id).await, 0);
+
+    let (status, carol_thread) = empty_req(
+        &app,
+        "GET",
+        &format!("/v1/books/{id}/comments/0"),
+        Some(&carol),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{carol_thread}");
+    assert_eq!(texts(&carol_thread), vec!["owner note".to_string()]);
+    let (status, owner_thread) = empty_req(
+        &app,
+        "GET",
+        &format!("/v1/books/{id}/comments/0"),
+        Some(&matt),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{owner_thread}");
+    assert_eq!(texts(&owner_thread), vec!["owner note".to_string()]);
+}
+
+#[tokio::test]
+async fn put_and_delete_likes_are_idempotent() {
+    let (app, _tmp) = app().await;
+    let token = register(&app, "matt", "password1").await;
+    let (status, book) = upload(&app, &token, "Pride", "Jane", &common::epub(), None, false).await;
+    assert_eq!(status, StatusCode::OK, "{book}");
+    let id = book["id"].as_str().unwrap();
+
+    let (status, likes) = empty_req(
+        &app,
+        "PUT",
+        &format!("/v1/books/{id}/likes/p1"),
+        Some(&token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{likes}");
+    assert_eq!(likes["ids"], json!(["p1"]));
+    let (status, again) = empty_req(
+        &app,
+        "PUT",
+        &format!("/v1/books/{id}/likes/p1"),
+        Some(&token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{again}");
+    assert_eq!(again["ids"], json!(["p1"]));
+
+    let (status, likes) = empty_req(
+        &app,
+        "DELETE",
+        &format!("/v1/books/{id}/likes/p1"),
+        Some(&token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{likes}");
+    assert_eq!(likes["ids"], json!([]));
+    let (status, again) = empty_req(
+        &app,
+        "DELETE",
+        &format!("/v1/books/{id}/likes/p1"),
+        Some(&token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{again}");
+    assert_eq!(again["ids"], json!([]));
+
+    let (status, likes) = empty_req(
+        &app,
+        "POST",
+        &format!("/v1/books/{id}/likes/p1"),
+        Some(&token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{likes}");
+    assert_eq!(likes["ids"], json!(["p1"]));
+    let (status, likes) = empty_req(
+        &app,
+        "POST",
+        &format!("/v1/books/{id}/likes/p1"),
+        Some(&token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{likes}");
+    assert_eq!(likes["ids"], json!([]));
+}
+
+#[tokio::test]
 async fn profile_lists_that_users_replies() {
     let (app, _tmp) = app().await;
     let matt = register(&app, "matt", "password1").await;
@@ -1018,6 +1347,8 @@ async fn private_book_is_invisible_on_every_route() {
     }
     for (method, path) in [
         ("POST", format!("/v1/books/{id}/likes/0")),
+        ("PUT", format!("/v1/books/{id}/likes/0")),
+        ("DELETE", format!("/v1/books/{id}/likes/0")),
         ("DELETE", format!("/v1/books/{id}")),
         ("DELETE", format!("/v1/books/{id}/comments/0/missing")),
     ] {
