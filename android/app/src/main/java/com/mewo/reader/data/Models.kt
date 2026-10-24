@@ -94,6 +94,37 @@ data class CommentThread(
     val comments: List<PostComment> = emptyList(),
 )
 
+/** Per-book offline availability. Downloaded and NotDownloaded come from files. */
+sealed interface OfflineState {
+    data object NotDownloaded : OfflineState
+
+    /** [fraction] is null until the server sends Content-Length. */
+    data class Downloading(val fraction: Float?) : OfflineState
+
+    data object Downloaded : OfflineState
+
+    data class Failed(val message: String) : OfflineState
+}
+
+/** Shelf-wide status for the Settings row. Derived, never stored. */
+data class OfflineSummary(
+    val downloaded: Int,
+    val total: Int,
+    val running: Boolean,
+)
+
+const val SOCIAL_CACHE_VERSION = 1
+
+/** Last social state the server returned for a book. Read only when the network fails. */
+@Serializable
+data class SocialCache(
+    val version: Int = SOCIAL_CACHE_VERSION,
+    val likes: Set<String> = emptySet(),
+    val index: CommentIndex = CommentIndex(),
+    /** Threads opened for this book, by post id. Not prefetched. */
+    val threads: Map<String, List<PostComment>> = emptyMap(),
+)
+
 @Serializable
 data class NewComment(
     val text: String,

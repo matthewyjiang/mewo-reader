@@ -50,6 +50,20 @@ class LibraryLoadTest {
     }
 
     @Test
+    fun savedTextStaysAvailableUntilTheShelfSettles() {
+        val id = "11111111-1111-1111-1111-111111111111"
+        val other = "22222222-2222-2222-2222-222222222222"
+        assertTrue(savedTextAllowed(LibraryLoading, id))
+        assertTrue(savedTextAllowed(LibraryLoaded(listOf(book(id)), refreshing = true), id))
+        assertTrue(savedTextAllowed(LibraryLoaded(listOf(book(other)), refreshing = true), id))
+        assertTrue(savedTextAllowed(LibraryFailed("offline", null), id))
+        assertFalse(savedTextAllowed(LibraryLoaded(listOf(book(other)), refreshing = false), id))
+        assertTrue(savedTextAllowed(LibraryLoaded(listOf(book(id)), refreshing = false), id))
+        assertFalse(savedTextAllowed(LibraryFailed("offline", listOf(book(other))), id))
+        assertTrue(savedTextAllowed(LibraryFailed("offline", listOf(book(id))), id))
+    }
+
+    @Test
     fun dismissingACachedFailureReturnsToTheShelf() {
         val failed = LibraryFailed("offline", listOf(book("a")))
         val dismissed = reduceLibraryLoad(failed, LibraryEvent.Dismissed)

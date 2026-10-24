@@ -30,6 +30,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.lifecycle.ViewModelProvider
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.navigation.NavType
 import androidx.navigation.compose.NavHost
@@ -66,6 +67,7 @@ import kotlinx.coroutines.launch
 @Composable
 fun MewoNav() {
     val store = LocalLibraryStore.current
+    val offlineSummary by store.offlineSummary.collectAsStateWithLifecycle()
     val catalog = LocalCatalogStore.current
     val context = LocalContext.current
     val searchKinds = remember { PrefSearchKind(context) }
@@ -351,6 +353,8 @@ fun MewoNav() {
                 ) {
                     SettingsLibraryPage(
                         onBack = { nav.popBackStack() },
+                        offlineSummary = offlineSummary,
+                        onDownloadAll = { scope.launch { store.downloadAll() } },
                     )
                 }
                 composable(

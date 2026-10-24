@@ -9,17 +9,23 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.runInterruptible
+import kotlinx.coroutines.supervisorScope
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
 import java.io.File
+import java.io.IOException
 import java.util.UUID
+import java.util.concurrent.ConcurrentHashMap
 
 /**
  * Hosted shelf. Talks HTTP. The server parses each book, so every client
@@ -51,6 +57,17 @@ class HostedLibraryStore(
     override val library: StateFlow<LibrarySnapshot> = _library.asStateFlow()
     private val _load = MutableStateFlow<LibraryLoad>(LibraryLoading)
     override val loadState: StateFlow<LibraryLoad> = _load.asStateFlow()
+    private val live = MutableStateFlow<Map<String, OfflineState>>(emptyMap())
+    private val onDisk = ConcurrentHashMap.newKeySet<String>()
+    private val bookJobs = ConcurrentHashMap<String, Job>()
+    private val socialLock = Any()
+
+    @Volatile
+    private var batch: Job? = null
+    private val _offline = MutableStateFlow<Map<String, OfflineState>>(emptyMap())
+    override val offline: StateFlow<Map<String, OfflineState>> = _offline.asStateFlow()
+    private val _summary = MutableStateFlow(OfflineSummary(0, 0, false))
+    override val offlineSummary: StateFlow<OfflineSummary> = _summary.asStateFlow()
     private val shares = HostedShareToggle(
         books = { _library.value.books },
         replace = { replaceBook(it) },
@@ -67,12 +84,16 @@ class HostedLibraryStore(
                 val signedOut = previous.signedIn && !session.signedIn
                 if (previous.signedIn && (signedOut || urlChanged || userChanged)) {
                     refreshJob?.cancel()
+                    cancelDownloads()
                     clearShelf(previous)
-                    if (signedOut || urlChanged) wipeCache()
+                    if (signedOut || urlChanged) wipeCache() else clearSocialFiles()
                     mutex.withLock {
                         _library.value = LibrarySnapshot()
                         _load.value = if (session.signedIn) LibraryLoading else LibraryLoaded(emptyList(), false)
                     }
+                    live.value = emptyMap()
+                    onDisk.clear()
+                    publishOffline()
                 }
                 previous = session
                 launch { runCatching { load() } }
@@ -235,10 +256,15 @@ class HostedLibraryStore(
     override suspend fun delete(id: String) {
         val session = requireSession()
         val safe = requireBookId(id)
+        val job = bookJobs[safe]
+        job?.cancel()
+        job?.join()
         withContext(Dispatchers.IO) {
             sessions.expireOn401(session) { client.delete(session, safe) }
             bookDir(safe).deleteRecursively()
         }
+        onDisk.remove(safe)
+        setLive(safe, null)
         mutex.withLock {
             epoch += 1
             val books = _library.value.books.filterNot { it.id == safe }
@@ -266,18 +292,81 @@ class HostedLibraryStore(
     override suspend fun feed(id: String): List<FeedPost> = withContext(Dispatchers.IO) {
         val session = requireSession()
         val safe = requireBookId(id)
+        if (!savedTextAllowed(_load.value, safe)) {
+            error("That book is not on your shelf.")
+        }
         cachedFeed(safe)?.let { return@withContext it }
         val posts = sessions.expireOn401(session) { client.posts(session, safe) }
-        val dir = bookDir(safe).apply { mkdirs() }
-        // Builds before server parsing kept the EPUB and a Readium feed here.
-        File(dir, "book.epub").delete()
-        File(dir, "feed.json").delete()
-        File(dir, POSTS_CACHE).writeText(
-            json.encodeToString(FeedCache(version = HOSTED_POSTS_CACHE_VERSION, posts = posts)),
-        )
-        // The server set postCount when it parsed; mirror it so Finished works before the next load.
-        book(safe)?.takeIf { it.postCount != posts.size }?.let { replaceBook(it.copy(postCount = posts.size)) }
+        writeCachedPosts(safe, posts)
         posts
+    }
+
+    override suspend fun setDownloaded(id: String, on: Boolean) {
+        val safe = requireBookId(id)
+        if (!on) {
+            val job = bookJobs[safe]
+            job?.cancel()
+            job?.join()
+            withContext(Dispatchers.IO) { removeDownloadFiles(safe) }
+            setLive(safe, null)
+            return
+        }
+        if (withContext(Dispatchers.IO) { hasCurrentPosts(safe) }) {
+            onDisk.add(safe)
+            publishOffline()
+            return
+        }
+        bookJobs[safe]?.let { existing ->
+            if (existing.isActive) {
+                existing.join()
+                return
+            }
+        }
+        supervisorScope {
+            val job = launch(Dispatchers.IO) { downloadBody(safe) }
+            bookJobs[safe] = job
+            try {
+                job.join()
+            } catch (err: CancellationException) {
+                if (!isActive) throw err
+            } finally {
+                bookJobs.remove(safe, job)
+            }
+        }
+    }
+
+    override suspend fun downloadAll() {
+        val current = batch
+        if (current?.isActive == true) {
+            current.cancel()
+            current.join()
+            return
+        }
+        coroutineScope {
+            batch = coroutineContext[Job]
+            try {
+                publishOffline()
+                val queue = ArrayDeque(
+                    withContext(Dispatchers.IO) {
+                        _library.value.books.map { it.id }.filter { !hasCurrentPosts(it) }
+                    },
+                )
+                val gate = Mutex()
+                coroutineScope {
+                    repeat(2) {
+                        launch {
+                            while (isActive) {
+                                val next = gate.withLock { queue.removeFirstOrNull() } ?: break
+                                setDownloaded(next, true)
+                            }
+                        }
+                    }
+                }
+            } finally {
+                if (batch === coroutineContext[Job]) batch = null
+                publishOffline()
+            }
+        }
     }
 
     override suspend fun saveProgress(id: String, index: Int) {
@@ -294,7 +383,13 @@ class HostedLibraryStore(
     override suspend fun likes(id: String): Set<String> = withContext(Dispatchers.IO) {
         val session = requireSession()
         val safe = requireBookId(id)
-        sessions.expireOn401(session) { client.likes(session, safe) }
+        val likes = try {
+            sessions.expireOn401(session) { client.likes(session, safe) }
+        } catch (err: IOException) {
+            return@withContext readSocial(safe)?.likes ?: throw err
+        }
+        writeSocial(safe) { it.copy(likes = likes) }
+        likes
     }
 
     override suspend fun toggleLike(id: String, postId: String): Set<String> =
@@ -307,14 +402,32 @@ class HostedLibraryStore(
     override suspend fun commentIndex(id: String): CommentIndex = withContext(Dispatchers.IO) {
         val session = requireSession()
         val safe = requireBookId(id)
-        sessions.expireOn401(session) { client.commentIndex(session, safe) }
+        val index = try {
+            sessions.expireOn401(session) { client.commentIndex(session, safe) }
+        } catch (err: IOException) {
+            return@withContext readSocial(safe)?.index ?: throw err
+        }
+        writeSocial(safe) { it.copy(index = index) }
+        index
     }
 
     override suspend fun comments(id: String, postId: String): List<PostComment> =
         withContext(Dispatchers.IO) {
             val session = requireSession()
             val safe = requireBookId(id)
-            sessions.expireOn401(session) { client.comments(session, safe, postId) }
+            val thread = try {
+                sessions.expireOn401(session) { client.comments(session, safe, postId) }
+            } catch (err: IOException) {
+                return@withContext readSocial(safe)?.threads?.get(postId)
+                    ?: throw IOException("You're offline.", err)
+            }
+            writeSocial(safe) {
+                it.copy(
+                    threads = it.threads + (postId to thread),
+                    index = it.index.afterThread(postId, thread),
+                )
+            }
+            thread
         }
 
     override suspend fun addComment(id: String, postId: String, text: String): List<PostComment> =
@@ -496,6 +609,8 @@ class HostedLibraryStore(
             _library.value = LibrarySnapshot(books)
             _load.value = reduceLibraryLoad(_load.value, event)
             if (event is LibraryEvent.RefreshSucceeded) forgetPosts(previous, books)
+            rescan(books)
+            publishOffline()
         }
         val url = owner.normalizedUrl()
         val user = owner.username
@@ -526,10 +641,141 @@ class HostedLibraryStore(
     private fun bookDir(id: String): File = File(root, id)
 
     private fun wipeCache() {
+        cancelDownloads()
+        live.value = emptyMap()
+        onDisk.clear()
         root.deleteRecursively()
         root.mkdirs()
     }
+
+    private suspend fun downloadBody(id: String) = withContext(Dispatchers.IO) {
+        setLive(id, OfflineState.Downloading(null))
+        try {
+            val session = requireSession()
+            val fetched = runInterruptible {
+                val posts = sessions.expireOn401(session) {
+                    client.posts(session, id) { fraction ->
+                        setLive(id, OfflineState.Downloading(fraction))
+                    }
+                }
+                ensureCover(session, id)
+                val likes = sessions.expireOn401(session) { client.likes(session, id) }
+                val index = sessions.expireOn401(session) { client.commentIndex(session, id) }
+                DownloadBundle(posts, likes, index)
+            }
+            ensureActive()
+            if (sessions.session.value.token != session.token || _library.value.books.none { it.id == id }) {
+                setLive(id, null)
+                return@withContext
+            }
+            writeCachedPosts(id, fetched.posts)
+            writeSocial(id) { it.copy(likes = fetched.likes, index = fetched.index) }
+            setLive(id, null)
+        } catch (err: CancellationException) {
+            setLive(id, null)
+            throw err
+        } catch (err: Exception) {
+            if (!isActive) {
+                setLive(id, null)
+                throw CancellationException("Download cancelled")
+            }
+            setLive(id, OfflineState.Failed(err.message ?: "Could not download."))
+        }
+    }
+
+    private suspend fun writeCachedPosts(id: String, posts: List<FeedPost>) {
+        val dir = bookDir(id).apply { mkdirs() }
+        // Builds before server parsing kept the EPUB and a Readium feed here.
+        File(dir, "book.epub").delete()
+        File(dir, "feed.json").delete()
+        File(dir, POSTS_CACHE).writeText(
+            json.encodeToString(FeedCache(version = HOSTED_POSTS_CACHE_VERSION, posts = posts)),
+        )
+        onDisk.add(id)
+        // The server set postCount when it parsed; mirror it so Finished works before the next load.
+        book(id)?.takeIf { it.postCount != posts.size }?.let { replaceBook(it.copy(postCount = posts.size)) }
+        publishOffline()
+    }
+
+    private fun removeDownloadFiles(id: String) {
+        File(bookDir(id), POSTS_CACHE).delete()
+        File(bookDir(id), SOCIAL_FILE).delete()
+        onDisk.remove(id)
+    }
+
+    private fun hasCurrentPosts(id: String): Boolean {
+        val safe = safeBookId(id) ?: return false
+        return readHostedPosts(File(bookDir(safe), POSTS_CACHE), json) != null
+    }
+
+    private fun readSocial(id: String): SocialCache? {
+        val file = File(bookDir(id), SOCIAL_FILE)
+        if (!file.isFile) return null
+        return runCatching {
+            val cache = json.decodeFromString<SocialCache>(file.readText())
+            if (cache.version == SOCIAL_CACHE_VERSION) cache else null
+        }.getOrNull()
+    }
+
+    private fun writeSocial(id: String, update: (SocialCache) -> SocialCache) {
+        synchronized(socialLock) {
+            val next = update(readSocial(id) ?: SocialCache())
+            val dir = bookDir(id).apply { mkdirs() }
+            File(dir, SOCIAL_FILE).writeText(json.encodeToString(next))
+        }
+    }
+
+    private fun setLive(id: String, state: OfflineState?) {
+        live.update { current ->
+            if (state == null) current - id else current + (id to state)
+        }
+        publishOffline()
+    }
+
+    private fun rescan(books: List<BookRecord>) {
+        val ids = books.map { it.id }.toSet()
+        onDisk.removeIf { it !in ids || !hasCurrentPosts(it) }
+        for (id in ids) {
+            if (hasCurrentPosts(id)) onDisk.add(id)
+        }
+        live.update { current -> current.filterKeys { it in ids } }
+    }
+
+    private fun publishOffline() {
+        val books = _library.value.books
+        val marks = live.value
+        val running = batch?.isActive == true
+        val map = LinkedHashMap<String, OfflineState>(books.size)
+        var downloaded = 0
+        for (book in books) {
+            val state = when (val mark = marks[book.id]) {
+                is OfflineState.Downloading, is OfflineState.Failed -> mark
+                else -> if (book.id in onDisk) OfflineState.Downloaded else OfflineState.NotDownloaded
+            }
+            if (state is OfflineState.Downloaded) downloaded += 1
+            map[book.id] = state
+        }
+        _offline.value = map
+        _summary.value = OfflineSummary(downloaded, books.size, running)
+    }
+
+    private fun cancelDownloads() {
+        batch?.cancel()
+        bookJobs.values.toList().forEach { it.cancel() }
+    }
+
+    private fun clearSocialFiles() {
+        root.listFiles()?.forEach { dir ->
+            if (dir.isDirectory) File(dir, SOCIAL_FILE).delete()
+        }
+    }
 }
+
+private data class DownloadBundle(
+    val posts: List<FeedPost>,
+    val likes: Set<String>,
+    val index: CommentIndex,
+)
 
 fun safeBookId(id: String): String? {
     return runCatching { UUID.fromString(id).toString() }.getOrNull()
@@ -543,6 +789,7 @@ const val HOSTED_NOT_SIGNED_IN = "Sign in to the hosted library first."
 
 /** Server posts cached per hosted book. Bump the version if the server's post shape changes. */
 private const val POSTS_CACHE = "posts.json"
+private const val SOCIAL_FILE = "social.json"
 private const val HOSTED_POSTS_CACHE_VERSION = 1
 
 /** A hit means [HostedLibraryStore.feed] can skip the network. A version mismatch is a miss. */
