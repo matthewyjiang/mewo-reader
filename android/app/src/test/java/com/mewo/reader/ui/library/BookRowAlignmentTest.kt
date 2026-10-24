@@ -15,6 +15,7 @@ import androidx.compose.ui.test.onAllNodesWithContentDescription
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.unit.dp
 import com.mewo.reader.data.BookRecord
+import com.mewo.reader.data.OfflineState
 import org.junit.Assert.assertEquals
 import org.junit.Rule
 import org.junit.Test
@@ -54,11 +55,14 @@ class BookRowAlignmentTest {
         val row = compose.onNodeWithTag(tag).fetchSemanticsNode().boundsInRoot
         val share = boundsInside(shareLabel, row)
         val remove = boundsInside("Remove Pride and Prejudice", row)
+        val download = boundsInside("Download", row)
         assertEquals(share.width, remove.width, 0.5f)
         assertEquals(share.height, remove.height, 0.5f)
+        assertEquals(share.width, download.width, 0.5f)
         assertEquals(share.center.y, remove.center.y, 0.5f)
         assertEquals(row.center.y, share.center.y, 0.5f)
         assertEquals(row.center.y, remove.center.y, 0.5f)
+        assertEquals(row.center.y, download.center.y, 0.5f)
     }
 
     private fun boundsInside(description: String, row: Rect): Rect {
@@ -107,6 +111,8 @@ private fun HostedRow(shared: Boolean, owner: String?, tag: String) {
         onOpen = {},
         onDelete = {},
         onShare = {},
+        offline = OfflineState.NotDownloaded,
+        onDownload = {},
         modifier = Modifier.testTag(tag),
     )
 }

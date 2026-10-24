@@ -9,6 +9,7 @@ import okhttp3.Request
 import okhttp3.RequestBody.Companion.asRequestBody
 import okhttp3.RequestBody.Companion.toRequestBody
 import okhttp3.Response
+import java.io.ByteArrayOutputStream
 import java.io.File
 import java.io.IOException
 import java.util.concurrent.TimeUnit
@@ -147,7 +148,7 @@ open class HostedClient(
         http.newCall(req).execute().use { it.expectOk() }
     }
 
-    fun patch(session: HostedSession, id: String, body: PatchBook): BookRecord {
+    open fun patch(session: HostedSession, id: String, body: PatchBook): BookRecord {
         val req = request(session.api("/v1/books/$id"), session.token)
             .patch(json.encodeToString(body).toRequestBody(JSON))
             .build()
@@ -159,10 +160,38 @@ open class HostedClient(
         return patch(session, id, PatchBook(shared = shared))
     }
 
-    /** Timeline posts the server parsed from this book. Ids match likes and comments. */
-    open fun posts(session: HostedSession, id: String): List<FeedPost> {
-        val body: PostsResponse = get(session, "/v1/books/$id/posts")
-        return body.posts
+    /**
+     * Timeline posts the server parsed from this book. Ids match likes and comments.
+     * [onProgress] is null until the response has a Content-Length, then the fraction read.
+     */
+    open fun posts(
+        session: HostedSession,
+        id: String,
+        onProgress: (Float?) -> Unit = {},
+    ): List<FeedPost> {
+        val req = request(session.api("/v1/books/$id/posts"), session.token).get().build()
+        return http.newCall(req).execute().use { response ->
+            response.expectOk()
+            val body = response.body ?: throw HostedException("Empty download.")
+            val length = body.contentLength().takeIf { it > 0L }
+            onProgress(if (length == null) null else 0f)
+            val bytes = ByteArrayOutputStream()
+            body.byteStream().use { input ->
+                val buf = ByteArray(8 * 1024)
+                var read = 0L
+                while (true) {
+                    val n = input.read(buf)
+                    if (n < 0) break
+                    bytes.write(buf, 0, n)
+                    read += n
+                    onProgress(length?.let { (read.toFloat() / it).coerceIn(0f, 1f) })
+                }
+            }
+            val text = bytes.toString(Charsets.UTF_8)
+            runCatching { json.decodeFromString<PostsResponse>(text) }.getOrElse {
+                throw HostedException("Could not read the server response.", response.code)
+            }.posts
+        }
     }
 
     open fun downloadCover(session: HostedSession, id: String, dest: File): Boolean {
@@ -175,7 +204,7 @@ open class HostedClient(
         }
     }
 
-    fun likes(session: HostedSession, id: String): Set<String> {
+    open fun likes(session: HostedSession, id: String): Set<String> {
         val set: LikeSet = get(session, "/v1/books/$id/likes")
         return set.ids
     }
@@ -188,11 +217,11 @@ open class HostedClient(
         return set.ids
     }
 
-    fun commentIndex(session: HostedSession, id: String): CommentIndex {
+    open fun commentIndex(session: HostedSession, id: String): CommentIndex {
         return get(session, "/v1/books/$id/comments")
     }
 
-    fun comments(session: HostedSession, id: String, postId: String): List<PostComment> {
+    open fun comments(session: HostedSession, id: String, postId: String): List<PostComment> {
         val thread: CommentThread = get(session, "/v1/books/$id/comments/$postId")
         return thread.comments
     }

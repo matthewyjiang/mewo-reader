@@ -43,6 +43,7 @@ import androidx.compose.ui.unit.dp
 import com.mewo.reader.BuildConfig
 import com.mewo.reader.data.BackendKind
 import com.mewo.reader.data.HostedClient
+import com.mewo.reader.data.OfflineSummary
 import com.mewo.reader.data.LocalIdentity
 import com.mewo.reader.ui.LocalBackend
 import com.mewo.reader.ui.LocalHostedAuth
@@ -288,12 +289,16 @@ fun SettingsLibraryPage(
     onBack: () -> Unit,
     startOnCreate: Boolean = false,
     signupsOpen: Boolean? = null,
+    offlineSummary: OfflineSummary = OfflineSummary(downloaded = 0, total = 1, running = false),
+    onDownloadAll: () -> Unit = {},
 ) {
     SettingsScaffold(title = "Library", onBack = onBack) {
         LibrarySettings(
             modifier = Modifier.padding(horizontal = 16.dp),
             startOnCreate = startOnCreate,
             signupsOpen = signupsOpen,
+            offlineSummary = offlineSummary,
+            onDownloadAll = onDownloadAll,
         )
     }
 }

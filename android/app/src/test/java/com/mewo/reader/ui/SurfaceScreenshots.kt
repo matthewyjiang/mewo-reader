@@ -48,6 +48,8 @@ import com.mewo.reader.data.hasReposted
 import com.mewo.reader.data.repostCount
 import com.mewo.reader.data.HostedSession
 import com.mewo.reader.data.LocalProfile
+import com.mewo.reader.data.OfflineState
+import com.mewo.reader.data.OfflineSummary
 import com.mewo.reader.data.PostKind
 import com.mewo.reader.data.ProfileRecord
 import com.mewo.reader.ui.catalog.CatalogEmpty
@@ -76,6 +78,7 @@ import com.mewo.reader.ui.reader.relativeTime
 import com.mewo.reader.ui.search.AccountHitRow
 import com.mewo.reader.ui.search.SearchField
 import com.mewo.reader.ui.library.AddBookAnchor
+import com.mewo.reader.ui.components.DownloadAllRow
 import com.mewo.reader.ui.library.BookPost
 import com.mewo.reader.ui.library.addBookOptions
 import com.mewo.reader.ui.library.EmptyTimeline
@@ -248,7 +251,7 @@ class SurfaceScreenshots {
     @Test
     fun searchBooks() = shoot("search-books") {
         SearchChrome("books") {
-            shelfBook(sharedBook)
+            shelfBook(sharedBook, offline = null)
         }
     }
 
@@ -276,7 +279,7 @@ class SurfaceScreenshots {
     @Test
     fun profileBooks() = shoot("profile-books") {
         ProfileChrome("books") {
-            shelfBook(sharedBook)
+            shelfBook(sharedBook, offline = null)
         }
     }
 
@@ -299,6 +302,34 @@ class SurfaceScreenshots {
 
     @Test
     fun homeBooks() = shoot("home-books") { HomeBooks() }
+
+    @Test
+    fun downloadRows() = shoot("download-rows") {
+        Column(
+            Modifier
+                .fillMaxSize()
+                .background(MaterialTheme.colorScheme.background),
+        ) {
+            shelfBook(privateBook, OfflineState.NotDownloaded)
+            shelfBook(sharedBook, OfflineState.Downloading(0.4f))
+            shelfBook(longTitleBook, OfflineState.Downloaded)
+            shelfBook(sharedWithMe, OfflineState.Failed("offline"))
+        }
+    }
+
+    @Test
+    fun downloadSettings() = shoot("download-settings") {
+        Column(
+            Modifier
+                .fillMaxSize()
+                .background(MaterialTheme.colorScheme.background)
+                .padding(horizontal = 16.dp),
+        ) {
+            DownloadAllRow(OfflineSummary(0, 12, running = false)) {}
+            DownloadAllRow(OfflineSummary(3, 12, running = true)) {}
+            DownloadAllRow(OfflineSummary(12, 12, running = false)) {}
+        }
+    }
 
     @Test
     fun repostActive() = shoot("repost-active") {
@@ -969,7 +1000,7 @@ private fun passage(reposted: Boolean, count: Int) {
 }
 
 @Composable
-private fun shelfBook(book: BookRecord) {
+private fun shelfBook(book: BookRecord, offline: OfflineState? = OfflineState.NotDownloaded) {
     val mine = book.mine
     BookPost(
         book = book,
@@ -978,6 +1009,8 @@ private fun shelfBook(book: BookRecord) {
         onOpen = {},
         onDelete = if (mine) ({ }) else null,
         onShare = if (mine) ({ _ -> }) else null,
+        offline = offline,
+        onDownload = if (offline == null) null else { _ -> },
     )
     HorizontalDivider(
         color = MaterialTheme.colorScheme.outline,

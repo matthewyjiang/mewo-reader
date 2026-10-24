@@ -185,7 +185,11 @@ class HostedLibraryRefreshTest {
             return runBlocking { gate.await() }
         }
 
-        override fun posts(session: HostedSession, id: String): List<FeedPost> {
+        override fun posts(
+            session: HostedSession,
+            id: String,
+            onProgress: (Float?) -> Unit,
+        ): List<FeedPost> {
             return listOf(FeedPost(id = "p", kind = PostKind.Body, text = "secret", chapter = "1"))
         }
 

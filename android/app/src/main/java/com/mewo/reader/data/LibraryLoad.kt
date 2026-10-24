@@ -46,6 +46,16 @@ sealed class LibraryEvent {
     data object Dismissed : LibraryEvent()
 }
 
+/**
+ * Saved text may open a book only while the shelf is still catching up, or when a
+ * finished shelf still lists it. A completed refresh is the list.
+ */
+fun savedTextAllowed(state: LibraryLoad, bookId: String): Boolean = when (state) {
+    is LibraryLoading -> true
+    is LibraryLoaded -> state.refreshing || state.books.any { it.id == bookId }
+    is LibraryFailed -> state.books?.any { it.id == bookId } ?: true
+}
+
 fun reduceLibraryLoad(state: LibraryLoad, event: LibraryEvent): LibraryLoad = when (event) {
     is LibraryEvent.Cached -> when (state) {
         is LibraryLoading -> LibraryLoaded(event.books, refreshing = true)

@@ -25,6 +25,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
@@ -33,6 +34,7 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import com.mewo.reader.data.BackendKind
 import com.mewo.reader.data.HostedClient
+import com.mewo.reader.data.OfflineSummary
 import com.mewo.reader.ui.LocalBackend
 import com.mewo.reader.ui.LocalHostedAuth
 import kotlinx.coroutines.CancellationException
@@ -56,9 +58,10 @@ fun LibrarySettings(
     modifier: Modifier = Modifier,
     startOnCreate: Boolean = false,
     signupsOpen: Boolean? = null,
+    offlineSummary: OfflineSummary = OfflineSummary(downloaded = 0, total = 1, running = false),
+    onDownloadAll: () -> Unit = {},
 ) {
     val backend = LocalBackend.current
-    val hosted = LocalHostedAuth.current
     Column(modifier = modifier.fillMaxWidth()) {
         Column(modifier = Modifier.selectableGroup()) {
             BackendRow(
@@ -73,7 +76,12 @@ fun LibrarySettings(
             )
         }
         if (backend.kind == BackendKind.Hosted) {
-            HostedAccountForm(startOnCreate = startOnCreate, signupsOpen = signupsOpen)
+            HostedAccountForm(
+                startOnCreate = startOnCreate,
+                signupsOpen = signupsOpen,
+                offlineSummary = offlineSummary,
+                onDownloadAll = onDownloadAll,
+            )
         }
     }
 }
@@ -82,6 +90,8 @@ fun LibrarySettings(
 private fun HostedAccountForm(
     startOnCreate: Boolean,
     signupsOpen: Boolean?,
+    offlineSummary: OfflineSummary,
+    onDownloadAll: () -> Unit,
 ) {
     val hosted = LocalHostedAuth.current
     val scope = rememberCoroutineScope()
@@ -144,6 +154,7 @@ private fun HostedAccountForm(
                     style = MaterialTheme.typography.titleMedium,
                 )
             }
+            DownloadAllRow(summary = offlineSummary, onClick = onDownloadAll)
             Box(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -264,6 +275,42 @@ private fun HostedAccountForm(
         }
     }
 }
+
+@Composable
+internal fun DownloadAllRow(
+    summary: OfflineSummary,
+    onClick: () -> Unit,
+) {
+    val enabled = downloadAllEnabled(summary)
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .heightIn(min = 52.dp)
+            .then(
+                if (enabled) {
+                    Modifier.clickable(role = Role.Button, onClick = onClick)
+                } else {
+                    Modifier
+                },
+            ),
+        contentAlignment = Alignment.CenterStart,
+    ) {
+        Text(
+            text = downloadAllLabel(summary),
+            color = if (enabled) MaterialTheme.colorScheme.primary else Color.Unspecified,
+            style = MaterialTheme.typography.titleMedium,
+        )
+    }
+}
+
+internal fun downloadAllLabel(summary: OfflineSummary): String = when {
+    summary.running -> "Downloading ${summary.downloaded} of ${summary.total}"
+    summary.downloaded < summary.total -> "Download all books"
+    else -> "All books downloaded"
+}
+
+internal fun downloadAllEnabled(summary: OfflineSummary): Boolean =
+    summary.running || summary.downloaded < summary.total
 
 @Composable
 private fun FormButton(

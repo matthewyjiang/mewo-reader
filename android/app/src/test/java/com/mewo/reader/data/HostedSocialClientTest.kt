@@ -89,6 +89,52 @@ class HostedSocialClientTest {
     }
 
     @Test
+    fun postsReportsByteProgressWhenTheLengthIsKnown() {
+        val body = """{"posts":[{"id":"p","kind":"Body","text":"Hello","chapter":"1"}]}"""
+        val server = MockWebServer()
+        server.enqueue(MockResponse().setBody(body))
+        server.start()
+        try {
+            val session = HostedSession(
+                baseUrl = server.url("/").toString().trimEnd('/'),
+                username = "ada",
+                token = "token",
+            )
+            val seen = mutableListOf<Float?>()
+            val posts = HostedClient().posts(session, "b1") { seen.add(it) }
+            assertEquals("Hello", posts.single().text)
+            assertEquals("/v1/books/b1/posts", server.takeRequest().path)
+            assertTrue(seen.isNotEmpty())
+            assertTrue(seen.all { it != null })
+            assertEquals(0f, seen.first())
+            assertEquals(1f, seen.last())
+        } finally {
+            server.shutdown()
+        }
+    }
+
+    @Test
+    fun postsStaysIndeterminateWithoutALength() {
+        val body = """{"posts":[{"id":"p","kind":"Body","text":"Hello","chapter":"1"}]}"""
+        val server = MockWebServer()
+        server.enqueue(MockResponse().setChunkedBody(body, 8))
+        server.start()
+        try {
+            val session = HostedSession(
+                baseUrl = server.url("/").toString().trimEnd('/'),
+                username = "ada",
+                token = "token",
+            )
+            val seen = mutableListOf<Float?>()
+            HostedClient().posts(session, "b1") { seen.add(it) }
+            assertTrue(seen.isNotEmpty())
+            assertTrue(seen.all { it == null })
+        } finally {
+            server.shutdown()
+        }
+    }
+
+    @Test
     fun setRepostUsesPutAndDelete() {
         val on = client(
             """{"reposts":1,"reposted":true}""",

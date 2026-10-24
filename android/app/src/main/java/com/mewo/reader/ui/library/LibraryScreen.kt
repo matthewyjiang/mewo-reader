@@ -35,9 +35,12 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.DownloadForOffline
 import androidx.compose.material.icons.filled.People
 import androidx.compose.material.icons.outlined.Add
 import androidx.compose.material.icons.outlined.Delete
+import androidx.compose.material.icons.outlined.DownloadForOffline
+import androidx.compose.material.icons.outlined.ErrorOutline
 import androidx.compose.material.icons.outlined.Lock
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
@@ -59,15 +62,19 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.clipToBounds
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.IntOffset
@@ -82,6 +89,7 @@ import com.mewo.reader.data.FileHomeFeedCache
 import com.mewo.reader.data.LibraryFailed
 import com.mewo.reader.data.LibraryLoading
 import com.mewo.reader.data.LibraryStore
+import com.mewo.reader.data.OfflineState
 import com.mewo.reader.data.cachedBooks
 import com.mewo.reader.data.isRefreshing
 import com.mewo.reader.data.showEmpty
@@ -103,6 +111,7 @@ import com.mewo.reader.ui.components.ProfileButton
 import com.mewo.reader.ui.components.ShowWhenIdle
 import java.io.File
 import kotlin.math.roundToInt
+import kotlinx.coroutines.launch
 import androidx.lifecycle.viewmodel.compose.viewModel as composeViewModel
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -120,6 +129,11 @@ fun LibraryScreen(
     val load = state.load
     val books = load.cachedBooks().orEmpty()
     val library = LocalLibraryStore.current
+    val offline by library.offline.collectAsStateWithLifecycle()
+    val scope = rememberCoroutineScope()
+    val onDownload: (String, Boolean) -> Unit = { id, download ->
+        scope.launch { library.setDownloaded(id, download) }
+    }
     val hosted = LocalBackend.current.kind == BackendKind.Hosted
     val context = LocalContext.current
     val auth = LocalHostedAuth.current
@@ -249,23 +263,23 @@ fun LibraryScreen(
                                 val groups = shelfGroups(books)
                                 if (groups.mine.isNotEmpty()) {
                                     item(key = "section-mine") { SectionLabel("My books") }
-                                    bookRows(groups.mine, library, hosted, onOpenBook, { pendingDelete = it }, viewModel::setShared)
+                                    bookRows(groups.mine, library, hosted, offline, onOpenBook, { pendingDelete = it }, viewModel::setShared, onDownload)
                                 }
                                 if (groups.sharedWithMe.isNotEmpty()) {
                                     item(key = "section-shared") { SectionLabel("Shared with me") }
-                                    bookRows(groups.sharedWithMe, library, hosted, onOpenBook, { pendingDelete = it }, viewModel::setShared)
+                                    bookRows(groups.sharedWithMe, library, hosted, offline, onOpenBook, { pendingDelete = it }, viewModel::setShared, onDownload)
                                 }
                                 if (groups.finished.isNotEmpty()) {
                                     item(key = "section-finished") { SectionLabel("Finished") }
-                                    bookRows(groups.finished, library, hosted, onOpenBook, { pendingDelete = it }, viewModel::setShared)
+                                    bookRows(groups.finished, library, hosted, offline, onOpenBook, { pendingDelete = it }, viewModel::setShared, onDownload)
                                 }
                             } else {
                                 val reading = books.filterNot { it.isFinished }
                                 val finished = books.filter { it.isFinished }
-                                bookRows(reading, library, hosted = false, onOpenBook, { pendingDelete = it }, viewModel::setShared)
+                                bookRows(reading, library, hosted = false, offline, onOpenBook, { pendingDelete = it }, viewModel::setShared, onDownload)
                                 if (finished.isNotEmpty()) {
                                     item(key = "section-finished") { SectionLabel("Finished") }
-                                    bookRows(finished, library, hosted = false, onOpenBook, { pendingDelete = it }, viewModel::setShared)
+                                    bookRows(finished, library, hosted = false, offline, onOpenBook, { pendingDelete = it }, viewModel::setShared, onDownload)
                                 }
                             }
                         }
@@ -582,9 +596,11 @@ private fun LazyListScope.bookRows(
     books: List<BookRecord>,
     library: LibraryStore,
     hosted: Boolean,
+    offline: Map<String, OfflineState>,
     onOpenBook: (String) -> Unit,
     onDelete: (BookRecord) -> Unit,
     onShare: (String, Boolean) -> Unit,
+    onDownload: (String, Boolean) -> Unit,
 ) {
     items(books, key = { it.id }) { book ->
         ShelfBook(
@@ -599,6 +615,12 @@ private fun LazyListScope.bookRows(
             },
             onShare = if (hosted && book.mine) {
                 { shared -> onShare(book.id, shared) }
+            } else {
+                null
+            },
+            offline = if (hosted) offline[book.id] ?: OfflineState.NotDownloaded else null,
+            onDownload = if (hosted) {
+                { download -> onDownload(book.id, download) }
             } else {
                 null
             },
@@ -624,6 +646,8 @@ private fun ShelfBook(
     onOpen: () -> Unit,
     onDelete: (() -> Unit)?,
     onShare: ((Boolean) -> Unit)?,
+    offline: OfflineState?,
+    onDownload: ((Boolean) -> Unit)?,
 ) {
     BookPost(
         book = book,
@@ -632,6 +656,8 @@ private fun ShelfBook(
         onOpen = onOpen,
         onDelete = onDelete,
         onShare = onShare,
+        offline = offline,
+        onDownload = onDownload,
     )
     HorizontalDivider(
         color = MaterialTheme.colorScheme.outline,
@@ -648,6 +674,8 @@ internal fun BookPost(
     onDelete: (() -> Unit)?,
     onShare: ((Boolean) -> Unit)?,
     modifier: Modifier = Modifier,
+    offline: OfflineState? = null,
+    onDownload: ((Boolean) -> Unit)? = null,
 ) {
     Row(
         modifier = modifier.fillMaxWidth(),
@@ -701,11 +729,14 @@ internal fun BookPost(
                 }
             }
         }
-        if (onShare != null || onDelete != null) {
+        if (offline != null && onDownload != null || onShare != null || onDelete != null) {
             Row(
                 modifier = Modifier.padding(end = 8.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
+                if (offline != null && onDownload != null) {
+                    DownloadAction(state = offline, onDownload = onDownload)
+                }
                 if (onShare != null) {
                     val shared = book.shared
                     RowActionButton(
@@ -729,10 +760,68 @@ internal fun BookPost(
 }
 
 @Composable
+private fun DownloadAction(
+    state: OfflineState,
+    onDownload: (Boolean) -> Unit,
+) {
+    when (state) {
+        OfflineState.NotDownloaded -> RowActionButton(
+            onClick = { onDownload(true) },
+            icon = Icons.Outlined.DownloadForOffline,
+            contentDescription = "Download",
+        )
+        is OfflineState.Downloading -> {
+            val fraction = state.fraction
+            IconButton(
+                onClick = { onDownload(false) },
+                modifier = Modifier
+                    .size(RowActionSize)
+                    .semantics { contentDescription = downloadingLabel(fraction) },
+            ) {
+                if (fraction == null) {
+                    CircularProgressIndicator(
+                        modifier = Modifier.size(DownloadRing),
+                        strokeWidth = 2.dp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                } else {
+                    CircularProgressIndicator(
+                        progress = { fraction },
+                        modifier = Modifier.size(DownloadRing),
+                        strokeWidth = 2.dp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        trackColor = MaterialTheme.colorScheme.outline,
+                    )
+                }
+            }
+        }
+        OfflineState.Downloaded -> RowActionButton(
+            onClick = { onDownload(false) },
+            icon = Icons.Filled.DownloadForOffline,
+            contentDescription = "Remove download",
+        )
+        is OfflineState.Failed -> RowActionButton(
+            onClick = { onDownload(true) },
+            icon = Icons.Outlined.ErrorOutline,
+            contentDescription = "Download failed, try again",
+            tint = MaterialTheme.colorScheme.error,
+        )
+    }
+}
+
+/** Spoken name for the shelf ring. A missing length has no percent. */
+internal fun downloadingLabel(fraction: Float?): String {
+    if (fraction == null) return "Downloading"
+    val pct = (fraction * 100).roundToInt().coerceIn(0, 100)
+    return "Downloading, $pct%"
+}
+
+@Composable
 private fun RowActionButton(
     onClick: () -> Unit,
     icon: ImageVector,
     contentDescription: String,
+    tint: Color = MaterialTheme.colorScheme.onSurfaceVariant,
 ) {
     IconButton(
         onClick = onClick,
@@ -742,13 +831,14 @@ private fun RowActionButton(
             imageVector = icon,
             contentDescription = contentDescription,
             modifier = Modifier.size(RowActionIconSize),
-            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+            tint = tint,
         )
     }
 }
 
 private val RowActionSize = 40.dp
 private val RowActionIconSize = 24.dp
+private val DownloadRing = 20.dp
 
 private fun statusLine(book: BookRecord): String {
     val count = if (book.postCount > 0) "${book.postCount} posts" else "Not opened yet"

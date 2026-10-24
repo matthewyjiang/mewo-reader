@@ -3,6 +3,7 @@ package com.mewo.reader.data
 import android.net.Uri
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.flatMapLatest
@@ -84,7 +85,27 @@ interface LibraryStore {
 
     /** Local path the avatar can decode. Hosted writes a cache file first. */
     fun coverFile(id: String): File?
+
+    /** Hosted only. Empty map on the local backend (local books are already on the phone). */
+    val offline: StateFlow<Map<String, OfflineState>>
+        get() = NO_OFFLINE
+
+    val offlineSummary: StateFlow<OfflineSummary>
+        get() = NO_SUMMARY
+
+    /** on = fetch posts, cover and social now; off = delete posts.json and social.json. Idempotent. */
+    suspend fun setDownloaded(id: String, on: Boolean) {}
+
+    /**
+     * Downloads every shelf book that is not downloaded yet, two at a time, in shelf order.
+     * Tap again while that run is going and it cancels. One shot, not a saved setting.
+     */
+    suspend fun downloadAll() {}
 }
+
+private val NO_OFFLINE: StateFlow<Map<String, OfflineState>> = MutableStateFlow(emptyMap())
+private val NO_SUMMARY: StateFlow<OfflineSummary> =
+    MutableStateFlow(OfflineSummary(downloaded = 0, total = 0, running = false))
 
 /** Forwards each call to the backend chosen in settings. */
 @OptIn(ExperimentalCoroutinesApi::class)
@@ -106,6 +127,14 @@ class SwitchingLibraryStore(
     override val loadState: StateFlow<LibraryLoad> = kind
         .flatMapLatest { which -> active(which).loadState }
         .stateIn(scope, SharingStarted.Eagerly, LibraryLoading)
+
+    override val offline: StateFlow<Map<String, OfflineState>> = kind
+        .flatMapLatest { which -> active(which).offline }
+        .stateIn(scope, SharingStarted.Eagerly, emptyMap())
+
+    override val offlineSummary: StateFlow<OfflineSummary> = kind
+        .flatMapLatest { which -> active(which).offlineSummary }
+        .stateIn(scope, SharingStarted.Eagerly, OfflineSummary(0, 0, false))
 
     init {
         scope.launch {
@@ -172,4 +201,8 @@ class SwitchingLibraryStore(
     override suspend fun profileReplies(handle: String) = active().profileReplies(handle)
 
     override fun coverFile(id: String) = active().coverFile(id)
+
+    override suspend fun setDownloaded(id: String, on: Boolean) = active().setDownloaded(id, on)
+
+    override suspend fun downloadAll() = active().downloadAll()
 }
