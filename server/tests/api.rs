@@ -955,6 +955,257 @@ async fn put_and_delete_likes_are_idempotent() {
 }
 
 #[tokio::test]
+async fn reply_ids_must_be_lowercase_uuids() {
+    let (app, tmp) = app().await;
+    let token = register(&app, "matt", "password1").await;
+    let (status, book) = upload(&app, &token, "Pride", "Jane", &common::epub(), None, false).await;
+    assert_eq!(status, StatusCode::OK, "{book}");
+    let id = book["id"].as_str().unwrap();
+    let reply_id = "6f0b9c3e-1a2b-4c5d-8e9f-0a1b2c3d4e5f";
+    let pool = open_db(tmp.path()).await;
+    let stored = async || -> i64 {
+        sqlx::query_scalar("SELECT COUNT(*) FROM comments WHERE book_id = ?")
+            .bind(id)
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+    };
+
+    for bad in [
+        reply_id.to_ascii_uppercase(),
+        reply_id.replace('-', ""),
+        "not-a-uuid".to_string(),
+        String::new(),
+    ] {
+        let (status, body) = json_req(
+            &app,
+            "POST",
+            &format!("/v1/books/{id}/comments/0"),
+            Some(&token),
+            json!({ "text": "nope", "id": bad }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{bad} {body}");
+        assert_eq!(body["error"], "Reply id must be a lowercase UUID.");
+        assert_eq!(stored().await, 0, "{bad}");
+    }
+
+    let (status, thread) = json_req(
+        &app,
+        "POST",
+        &format!("/v1/books/{id}/comments/0"),
+        Some(&token),
+        json!({ "text": "kept", "id": reply_id }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{thread}");
+    assert_eq!(thread["comments"][0]["id"], reply_id);
+    assert_eq!(stored().await, 1);
+
+    let (status, after) = empty_req(
+        &app,
+        "DELETE",
+        &format!("/v1/books/{id}/comments/0/{reply_id}"),
+        Some(&token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{after}");
+    assert!(after["comments"].as_array().unwrap().is_empty(), "{after}");
+}
+
+#[tokio::test]
+async fn likes_and_comments_accept_an_uppercase_book_id() {
+    let (app, _tmp) = app().await;
+    let token = register(&app, "matt", "password1").await;
+    let (status, book) = upload(&app, &token, "Pride", "Jane", &common::epub(), None, false).await;
+    assert_eq!(status, StatusCode::OK, "{book}");
+    let id = book["id"].as_str().unwrap().to_string();
+    let upper = id.to_ascii_uppercase();
+
+    let (status, upper_like) = empty_req(
+        &app,
+        "PUT",
+        &format!("/v1/books/{upper}/likes/p1"),
+        Some(&token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{upper_like}");
+    let (status, lower_like) = empty_req(
+        &app,
+        "PUT",
+        &format!("/v1/books/{id}/likes/p1"),
+        Some(&token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{lower_like}");
+    assert_eq!(upper_like, lower_like);
+    assert_eq!(lower_like["ids"], json!(["p1"]));
+
+    let (status, upper_gone) = empty_req(
+        &app,
+        "DELETE",
+        &format!("/v1/books/{upper}/likes/p1"),
+        Some(&token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{upper_gone}");
+    let (status, lower_gone) = empty_req(
+        &app,
+        "DELETE",
+        &format!("/v1/books/{id}/likes/p1"),
+        Some(&token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{lower_gone}");
+    assert_eq!(upper_gone, lower_gone);
+    assert_eq!(lower_gone["ids"], json!([]));
+
+    let (status, upper_toggle) = empty_req(
+        &app,
+        "POST",
+        &format!("/v1/books/{upper}/likes/p1"),
+        Some(&token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{upper_toggle}");
+    assert_eq!(upper_toggle["ids"], json!(["p1"]));
+    let (status, _) = empty_req(
+        &app,
+        "DELETE",
+        &format!("/v1/books/{id}/likes/p1"),
+        Some(&token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, lower_toggle) = empty_req(
+        &app,
+        "POST",
+        &format!("/v1/books/{id}/likes/p1"),
+        Some(&token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{lower_toggle}");
+    assert_eq!(lower_toggle, upper_toggle);
+
+    let (status, upper_thread) = json_req(
+        &app,
+        "POST",
+        &format!("/v1/books/{upper}/comments/0"),
+        Some(&token),
+        json!({ "text": "from the upper id" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{upper_thread}");
+    let (status, lower_thread) = empty_req(
+        &app,
+        "GET",
+        &format!("/v1/books/{id}/comments/0"),
+        Some(&token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{lower_thread}");
+    assert_eq!(upper_thread, lower_thread);
+    assert_eq!(lower_thread["comments"][0]["text"], "from the upper id");
+}
+
+#[tokio::test]
+async fn replaying_a_reply_does_not_change_privacy() {
+    let (app, tmp) = app().await;
+    let matt = register(&app, "matt", "password1").await;
+    let ted = register(&app, "ted", "password1").await;
+    let (status, book) = upload(&app, &matt, "Pride", "Jane", &common::epub(), None, false).await;
+    assert_eq!(status, StatusCode::OK, "{book}");
+    let id = book["id"].as_str().unwrap();
+    share(&app, &matt, id).await;
+    let reply_id = "6f0b9c3e-1a2b-4c5d-8e9f-0a1b2c3d4e5f";
+
+    let (status, thread) = json_req(
+        &app,
+        "POST",
+        &format!("/v1/books/{id}/comments/0"),
+        Some(&ted),
+        json!({ "text": "public", "id": reply_id, "private": false }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{thread}");
+    let pool = open_db(tmp.path()).await;
+    let private_flag = async || -> i64 {
+        sqlx::query_scalar("SELECT private FROM comments WHERE id = ?")
+            .bind(reply_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+    };
+    assert_eq!(private_flag().await, 0);
+
+    let (status, again) = json_req(
+        &app,
+        "POST",
+        &format!("/v1/books/{id}/comments/0"),
+        Some(&ted),
+        json!({ "text": "public", "id": reply_id, "private": true }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{again}");
+    assert_eq!(again, thread);
+    assert_eq!(private_flag().await, 0);
+    let rows: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM comments WHERE id = ?")
+        .bind(reply_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(rows, 1);
+}
+
+#[tokio::test]
+async fn a_deleted_reply_id_can_be_posted_again() {
+    let (app, tmp) = app().await;
+    let token = register(&app, "matt", "password1").await;
+    let (status, book) = upload(&app, &token, "Pride", "Jane", &common::epub(), None, false).await;
+    assert_eq!(status, StatusCode::OK, "{book}");
+    let id = book["id"].as_str().unwrap();
+    let reply_id = "6f0b9c3e-1a2b-4c5d-8e9f-0a1b2c3d4e5f";
+
+    let (status, thread) = json_req(
+        &app,
+        "POST",
+        &format!("/v1/books/{id}/comments/0"),
+        Some(&token),
+        json!({ "text": "first", "id": reply_id }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{thread}");
+    let (status, _) = empty_req(
+        &app,
+        "DELETE",
+        &format!("/v1/books/{id}/comments/0/{reply_id}"),
+        Some(&token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (status, again) = json_req(
+        &app,
+        "POST",
+        &format!("/v1/books/{id}/comments/0"),
+        Some(&token),
+        json!({ "text": "second", "id": reply_id }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{again}");
+    assert_eq!(again["comments"].as_array().unwrap().len(), 1);
+    assert_eq!(again["comments"][0]["id"], reply_id);
+    assert_eq!(again["comments"][0]["text"], "second");
+    let pool = open_db(tmp.path()).await;
+    let rows: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM comments WHERE id = ?")
+        .bind(reply_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(rows, 1);
+}
+
+#[tokio::test]
 async fn profile_lists_that_users_replies() {
     let (app, _tmp) = app().await;
     let matt = register(&app, "matt", "password1").await;
