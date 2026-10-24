@@ -9,6 +9,7 @@ import com.mewo.reader.data.FeedPost
 import com.mewo.reader.data.LibraryStore
 import com.mewo.reader.data.PostComment
 import com.mewo.reader.data.commitRepost
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -35,37 +36,53 @@ class ReaderViewModel(
 
     init {
         viewModelScope.launch {
-            runCatching {
+            val opened = try {
                 store.book(bookId)
                     ?: store.load().let { store.book(bookId) }
                     ?: error("That book is gone.")
                 val posts = store.feed(bookId)
                 val book = store.book(bookId) ?: error("That book is gone.")
-                val likes = store.likes(bookId)
-                val comments = store.commentIndex(bookId)
-                val focus = focusPostId?.let { id -> posts.indexOfFirst { it.id == id } }
-                    ?.takeIf { it >= 0 }
-                val start = focus ?: book.progressIndex.coerceIn(0, posts.lastIndex.coerceAtLeast(0))
-                _state.value = ReaderUiState(
-                    book = book,
-                    posts = posts,
-                    likes = likes,
-                    comments = comments,
-                    startIndex = start,
-                    loading = false,
-                )
-            }.onFailure { err ->
+                posts to book
+            } catch (e: CancellationException) {
+                throw e
+            } catch (err: Exception) {
                 _state.update {
                     it.copy(loading = false, error = err.message ?: "Could not open this book.")
                 }
+                return@launch
             }
+            val (posts, book) = opened
+            // Likes and replies are not what makes the book readable.
+            val likes = socialOrNull { store.likes(bookId) } ?: emptySet()
+            val comments = socialOrNull { store.commentIndex(bookId) } ?: CommentIndex()
+            val focus = focusPostId?.let { id -> posts.indexOfFirst { it.id == id } }
+                ?.takeIf { it >= 0 }
+            val start = focus ?: book.progressIndex.coerceIn(0, posts.lastIndex.coerceAtLeast(0))
+            _state.value = ReaderUiState(
+                book = book,
+                posts = posts,
+                likes = likes,
+                comments = comments,
+                startIndex = start,
+                loading = false,
+            )
         }
     }
 
     fun toggleLike(postId: String) {
+        val before = _state.value.likes
+        val optimistic = if (postId in before) before - postId else before + postId
+        _state.update { it.copy(likes = optimistic) }
         viewModelScope.launch {
-            val next = store.toggleLike(bookId, postId)
-            _state.update { it.copy(likes = next) }
+            try {
+                val next = store.toggleLike(bookId, postId)
+                _state.update { it.copy(likes = next) }
+            } catch (e: CancellationException) {
+                _state.update { if (it.likes == optimistic) it.copy(likes = before) else it }
+                throw e
+            } catch (e: Exception) {
+                _state.update { if (it.likes == optimistic) it.copy(likes = before) else it }
+            }
         }
     }
 
@@ -90,8 +107,22 @@ class ReaderViewModel(
 
     fun saveProgress(index: Int) {
         viewModelScope.launch {
-            store.saveProgress(bookId, index)
+            try {
+                store.saveProgress(bookId, index)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                // The reader stays on this post. The shelf percent is whatever the server kept.
+            }
         }
+    }
+
+    private suspend fun <T> socialOrNull(block: suspend () -> T): T? = try {
+        block()
+    } catch (e: CancellationException) {
+        throw e
+    } catch (e: Exception) {
+        null
     }
 
     companion object {
