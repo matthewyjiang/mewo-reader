@@ -365,8 +365,8 @@ pub async fn list_likes(
     authed: Authed,
     Path(id): Path<String>,
 ) -> Result<Json<LikeSet>, ApiError> {
-    let _ = visible_book(&state, &authed.user_id, &id).await?;
-    Ok(Json(likes_for(&state, &authed.user_id, &id).await?))
+    let book = visible_book(&state, &authed.user_id, &id).await?;
+    Ok(Json(likes_for(&state, &authed.user_id, &book.id).await?))
 }
 
 pub async fn toggle_like(
@@ -582,9 +582,9 @@ pub async fn list_comments(
     Path((id, post_id)): Path<(String, String)>,
 ) -> Result<Json<CommentThread>, ApiError> {
     let post_id = parse_post_id(&post_id)?;
-    let _ = visible_book(&state, &authed.user_id, &id).await?;
+    let book = visible_book(&state, &authed.user_id, &id).await?;
     Ok(Json(
-        thread_for(&state, &authed.user_id, &id, &post_id).await?,
+        thread_for(&state, &authed.user_id, &book.id, &post_id).await?,
     ))
 }
 
@@ -1360,12 +1360,12 @@ pub async fn delete_comment(
     Path((id, post_id, comment_id)): Path<(String, String, String)>,
 ) -> Result<Json<CommentThread>, ApiError> {
     let post_id = parse_post_id(&post_id)?;
-    let _ = visible_book(&state, &authed.user_id, &id).await?;
+    let book = visible_book(&state, &authed.user_id, &id).await?;
     let owner = sqlx::query_scalar::<_, String>(
         "SELECT user_id FROM comments WHERE id = ? AND book_id = ? AND post_id = ? -- own rows only",
     )
     .bind(&comment_id)
-    .bind(&id)
+    .bind(&book.id)
     .bind(&post_id)
     .fetch_optional(&state.pool)
     .await?;
@@ -1382,7 +1382,7 @@ pub async fn delete_comment(
         .execute(&state.pool)
         .await?;
     Ok(Json(
-        thread_for(&state, &authed.user_id, &id, &post_id).await?,
+        thread_for(&state, &authed.user_id, &book.id, &post_id).await?,
     ))
 }
 

@@ -1041,6 +1041,20 @@ async fn likes_and_comments_accept_an_uppercase_book_id() {
     assert_eq!(upper_like, lower_like);
     assert_eq!(lower_like["ids"], json!(["p1"]));
 
+    let (status, upper_listed) = empty_req(
+        &app,
+        "GET",
+        &format!("/v1/books/{upper}/likes"),
+        Some(&token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{upper_listed}");
+    let (status, lower_listed) =
+        empty_req(&app, "GET", &format!("/v1/books/{id}/likes"), Some(&token)).await;
+    assert_eq!(status, StatusCode::OK, "{lower_listed}");
+    assert_eq!(upper_listed, lower_listed);
+    assert_eq!(upper_listed, lower_like);
+
     let (status, upper_gone) = empty_req(
         &app,
         "DELETE",
@@ -1106,6 +1120,38 @@ async fn likes_and_comments_accept_an_uppercase_book_id() {
     assert_eq!(status, StatusCode::OK, "{lower_thread}");
     assert_eq!(upper_thread, lower_thread);
     assert_eq!(lower_thread["comments"][0]["text"], "from the upper id");
+    let (status, upper_get) = empty_req(
+        &app,
+        "GET",
+        &format!("/v1/books/{upper}/comments/0"),
+        Some(&token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{upper_get}");
+    assert_eq!(upper_get, lower_thread);
+
+    let comment_id = lower_thread["comments"][0]["id"].as_str().unwrap();
+    let (status, deleted) = empty_req(
+        &app,
+        "DELETE",
+        &format!("/v1/books/{upper}/comments/0/{comment_id}"),
+        Some(&token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{deleted}");
+    assert!(
+        deleted["comments"].as_array().unwrap().is_empty(),
+        "{deleted}"
+    );
+    let (status, gone) = empty_req(
+        &app,
+        "GET",
+        &format!("/v1/books/{id}/comments/0"),
+        Some(&token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{gone}");
+    assert_eq!(gone, deleted);
 }
 
 #[tokio::test]
