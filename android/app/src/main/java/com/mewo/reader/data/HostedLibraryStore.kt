@@ -16,6 +16,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.runInterruptible
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -68,7 +69,6 @@ class HostedLibraryStore(
 
     @Volatile
     private var batch: Job? = null
-    private val batchIds = ConcurrentHashMap.newKeySet<String>()
     private val _offline = MutableStateFlow<Map<String, OfflineState>>(emptyMap())
     override val offline: StateFlow<Map<String, OfflineState>> = _offline.asStateFlow()
     private val _summary = MutableStateFlow(OfflineSummary(0, 0, false))
@@ -336,8 +336,8 @@ class HostedLibraryStore(
 
     /**
      * The caller's scope dies on navigation and activity recreate. The download does not.
-     * [fromBatch] records only a job this pass started, so cancelling Download all leaves a
-     * row download the pass merely joined.
+     * A Download all worker owns the job it started, and cancels that job if the worker
+     * itself is cancelled. A row download the pass only joined keeps running.
      */
     private suspend fun changeDownload(id: String, on: Boolean, fromBatch: Boolean) {
         val safe = requireBookId(id)
@@ -363,14 +363,26 @@ class HostedLibraryStore(
             }
             return
         }
+        // A Download all worker can be cancelled in the gap before start(). Tests block here.
+        if (fromBatch) hostedBeforeClaim?.invoke()
         val claim = claimDownload(safe)
-        if (fromBatch && claim.started) batchIds.add(safe)
-        claim.job.start()
-        claim.job.join()
+        try {
+            claim.job.start()
+            claim.job.join()
+        } catch (err: CancellationException) {
+            if (fromBatch && claim.started) {
+                claim.job.cancel()
+                withContext(NonCancellable) { claim.job.join() }
+            }
+            throw err
+        }
     }
 
-    /** One download per book. A second caller joins the job already in the slot. */
-    private fun claimDownload(id: String): DownloadClaim {
+    /**
+     * One live download per book. A second caller joins that job. A job that is cancelled
+     * or already finished is joined, then the slot is claimed again.
+     */
+    private suspend fun claimDownload(id: String): DownloadClaim {
         while (true) {
             val job = scope.launch(Dispatchers.IO, start = CoroutineStart.LAZY) {
                 try {
@@ -382,7 +394,10 @@ class HostedLibraryStore(
             val existing = bookJobs.putIfAbsent(id, job)
             if (existing == null) return DownloadClaim(job, started = true)
             job.cancel()
-            if (!existing.isCompleted) return DownloadClaim(existing, started = false)
+            if (!existing.isCancelled && !existing.isCompleted) {
+                return DownloadClaim(existing, started = false)
+            }
+            existing.join()
             bookJobs.remove(id, existing)
         }
     }
@@ -413,10 +428,7 @@ class HostedLibraryStore(
                     }
                 }
             } finally {
-                if (batch === coroutineContext[Job]) {
-                    batch = null
-                    batchIds.clear()
-                }
+                if (batch === coroutineContext[Job]) batch = null
                 publishOffline()
             }
         }
@@ -912,13 +924,10 @@ class HostedLibraryStore(
         feeds.forEach { it.join() }
     }
 
-    /** Stops a Download all pass and waits for the book jobs that pass started. */
+    /** Stops a Download all pass. Each worker cancels and joins the book job it started. */
     private suspend fun cancelBatch(running: Job) {
-        val jobs = batchIds.toList().mapNotNull { bookJobs[it] }
         running.cancel()
-        jobs.forEach { it.cancel() }
         running.join()
-        jobs.forEach { it.join() }
     }
 
     private suspend fun clearSocialFiles() {
@@ -961,6 +970,9 @@ internal val hostedPostsDecodes = AtomicInteger(0)
 
 /** Threads that touched the hosted shelf files. Tests use this to catch main-thread IO. */
 internal val hostedDiskThreads = ConcurrentLinkedQueue<String>()
+
+/** When set, a Download all worker blocks here before it claims a book. Tests cancel in that gap. */
+internal var hostedBeforeClaim: (() -> Unit)? = null
 
 private fun noteDisk() {
     hostedDiskThreads.add(Thread.currentThread().name)

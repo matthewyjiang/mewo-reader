@@ -53,6 +53,7 @@ class HostedOfflineTest {
         Dispatchers.setMain(Dispatchers.Unconfined)
         hostedPostsDecodes.set(0)
         hostedDiskThreads.clear()
+        hostedBeforeClaim = null
         context.filesDir.listFiles()?.forEach { it.deleteRecursively() }
         context.getSharedPreferences("mewo_hosted", 0).edit().clear().commit()
     }
@@ -524,6 +525,106 @@ class HostedOfflineTest {
     }
 
     @Test
+    fun aCancelledDownloadAllDoesNotLeaveItsDownloadRunning() = runBlocking {
+        val client = OfflineClient()
+        client.blockPosts = true
+        val store = open(client, listOf(book(A, importedAt = 3)))
+        val enteredGate = CountDownLatch(1)
+        val release = CountDownLatch(1)
+        hostedBeforeClaim = {
+            enteredGate.countDown()
+            if (!release.await(5, TimeUnit.SECONDS)) error("before-claim timed out")
+        }
+        val batch = scope.launch { store.downloadAll() }
+        try {
+            assertTrue(enteredGate.await(5, TimeUnit.SECONDS))
+            val cancel = scope.launch { store.downloadAll() }
+            delay(100)
+            release.countDown()
+            withTimeout(5_000) {
+                cancel.join()
+                batch.join()
+            }
+            assertFalse(store.offline.value.values.any { it is OfflineState.Downloading })
+            assertFalse(store.offlineSummary.value.running)
+            client.hold.countDown()
+            delay(50)
+            assertFalse(File(bookDir(A), "posts.json").exists())
+            assertFalse(store.offline.value[A] is OfflineState.Downloaded)
+        } finally {
+            release.countDown()
+            client.hold.countDown()
+            hostedBeforeClaim = null
+        }
+    }
+
+    @Test
+    fun cancellingDownloadAllLeavesARowDownloadOfAFinishedBook() = runBlocking {
+        val client = OfflineClient()
+        client.blockIds = setOf(B)
+        val store = open(client, listOf(book(A, importedAt = 3), book(B, importedAt = 2)))
+        val batch = scope.launch { store.downloadAll() }
+        withTimeout(5_000) {
+            while (store.offline.value[A] !is OfflineState.Downloaded) delay(10)
+        }
+        withTimeout(5_000) {
+            while (client.entered.get() < 1) delay(10)
+        }
+
+        store.setDownloaded(A, false)
+        client.blockIds = setOf(A, B)
+        val row = scope.launch { store.setDownloaded(A, true) }
+        withTimeout(5_000) {
+            while (client.postsCalls.count { it == A } < 2) delay(10)
+        }
+        val cancel = scope.launch { store.downloadAll() }
+        withTimeout(5_000) { cancel.join() }
+        client.hold.countDown()
+        withTimeout(5_000) {
+            row.join()
+            batch.join()
+        }
+
+        assertTrue(store.offline.value[A] is OfflineState.Downloaded)
+        assertTrue(File(bookDir(A), "posts.json").exists())
+        assertFalse(File(bookDir(B), "posts.json").exists())
+    }
+
+    @Test
+    fun aRetryDuringCancelStartsAFreshDownload() = runBlocking {
+        val client = OfflineClient()
+        client.blockPosts = true
+        client.lingerAfterInterrupt = true
+        val store = open(client, listOf(book(A, importedAt = 3)))
+        val first = scope.launch { store.setDownloaded(A, true) }
+        withTimeout(5_000) {
+            while (client.entered.get() < 1) delay(10)
+        }
+        val stopping = scope.launch { store.setDownloaded(A, false) }
+        try {
+            withTimeout(5_000) {
+                while (client.lingerEntered.get() < 1) delay(10)
+            }
+            val retry = scope.launch { store.setDownloaded(A, true) }
+            client.lingerHold.countDown()
+            withTimeout(5_000) { stopping.join() }
+            withTimeout(5_000) {
+                while (client.postsCalls.size < 2) delay(10)
+            }
+            client.hold.countDown()
+            withTimeout(5_000) {
+                retry.join()
+                first.join()
+            }
+            assertTrue(store.offline.value[A] is OfflineState.Downloaded)
+            assertTrue(File(bookDir(A), "posts.json").exists())
+        } finally {
+            client.lingerHold.countDown()
+            client.hold.countDown()
+        }
+    }
+
+    @Test
     fun twoTapsShareOneDownload() = runBlocking {
         val client = OfflineClient()
         client.blockPosts = true
@@ -776,8 +877,10 @@ class HostedOfflineTest {
         val maxInFlight = AtomicInteger(0)
         var hold = CountDownLatch(1)
         var blockPosts = false
+        var blockIds: Set<String> = emptySet()
         var lingerAfterInterrupt = false
         val lingerHold = CountDownLatch(1)
+        val lingerEntered = AtomicInteger(0)
         var blockIndex = false
         val indexEntered = AtomicInteger(0)
         val indexHold = CountDownLatch(1)
@@ -802,12 +905,13 @@ class HostedOfflineTest {
             val now = entered.incrementAndGet()
             maxInFlight.updateAndGet { current -> maxOf(current, now) }
             onProgress(progress)
-            if (blockPosts) {
+            if (blockPosts || id in blockIds) {
                 try {
                     if (!hold.await(5, TimeUnit.SECONDS)) throw IOException("timed out")
                 } catch (err: InterruptedException) {
-                    if (lingerAfterInterrupt && !lingerHold.await(5, TimeUnit.SECONDS)) {
-                        throw IOException("linger timed out")
+                    if (lingerAfterInterrupt) {
+                        lingerEntered.incrementAndGet()
+                        if (!lingerHold.await(5, TimeUnit.SECONDS)) throw IOException("linger timed out")
                     }
                     throw err
                 }
