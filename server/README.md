@@ -157,11 +157,13 @@ Every `/admin` route is 401 without a token and 403 `Admins only.` for a signed-
 - `GET /books/{id}/cover`
 - `GET /books/{id}/likes` → `{ "ids" }`
 - `POST /books/{id}/likes/{postId}` toggles
+- `PUT /books/{id}/likes/{postId}` likes. A second PUT leaves it liked. Returns `{ "ids" }`, same as the toggle
+- `DELETE /books/{id}/likes/{postId}` unlikes. A second DELETE leaves it unliked. Returns `{ "ids" }`
 - `PUT /books/{id}/posts/{postId}/repost` → `{ "reposts": 1, "reposted": true }`. A second PUT keeps the count and the original time. `postId` is the canonical decimal index (`0`, `1`, …). `00`, `+0`, and `abc` are 400. A post that is not in the feed is 404
 - `DELETE /books/{id}/posts/{postId}/repost` → the same shape when you can see the book, including a second DELETE after yours is already gone. After the book is unshared, DELETE still removes your own row and returns `{ "reposts": 0, "reposted": false }` without anyone else's count. A DELETE of a book you cannot see, when you have no row, is 404
 - `GET /books/{id}/comments` → `{ "counts": { "0": 2 }, "mine": ["0"], "reposts": { "0": 1 }, "reposted": ["0"] }`
 - `GET /books/{id}/comments/{postId}` → `{ "comments": [ { "id", "username", "text", "createdAt", "mine" } ] }`
-- `POST /books/{id}/comments/{postId}` `{ "text" }`. The post id follows the same canonical-index rule as repost, and a missing post is 404
+- `POST /books/{id}/comments/{postId}` `{ "text", "id"?, "private"? }`. `id` is a lowercase UUID. Replaying it for the same user, book and post returns the thread and does not add a row. An id is only deduplicated while its row exists. The same id on a different user, book or post is 409. Omitted `id` is a server UUID. `private` defaults to false and can only mark a non-owner's reply private. The post id follows the same canonical-index rule as repost, and a missing post is 404
 - `DELETE /books/{id}/comments/{postId}/{commentId}`
 - `GET /profiles/{username}/replies` → `{ "username", "replies": [ { "bookId", "postId", "comment" } ] }`, newest first. An unknown username is an empty list. Lines from a book you cannot see are omitted. Shipped clients call this. `GET /users/{username}` is the newer profile and 404s an unknown username
 

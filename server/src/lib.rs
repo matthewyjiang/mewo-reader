@@ -84,7 +84,12 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/books/{id}/posts", get(routes::get_posts))
         .route("/v1/books/{id}/cover", get(routes::download_cover))
         .route("/v1/books/{id}/likes", get(routes::list_likes))
-        .route("/v1/books/{id}/likes/{post_id}", post(routes::toggle_like))
+        .route(
+            "/v1/books/{id}/likes/{post_id}",
+            post(routes::toggle_like)
+                .put(routes::put_like)
+                .delete(routes::delete_like),
+        )
         .route("/v1/books/{id}/comments", get(routes::comment_index))
         .route(
             "/v1/books/{id}/comments/{post_id}",

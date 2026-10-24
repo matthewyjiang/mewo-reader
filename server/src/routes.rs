@@ -365,8 +365,8 @@ pub async fn list_likes(
     authed: Authed,
     Path(id): Path<String>,
 ) -> Result<Json<LikeSet>, ApiError> {
-    let _ = visible_book(&state, &authed.user_id, &id).await?;
-    Ok(Json(likes_for(&state, &authed.user_id, &id).await?))
+    let book = visible_book(&state, &authed.user_id, &id).await?;
+    Ok(Json(likes_for(&state, &authed.user_id, &book.id).await?))
 }
 
 pub async fn toggle_like(
@@ -374,25 +374,58 @@ pub async fn toggle_like(
     authed: Authed,
     Path((id, post_id)): Path<(String, String)>,
 ) -> Result<Json<LikeSet>, ApiError> {
-    let _ = visible_book(&state, &authed.user_id, &id).await?;
+    let book = visible_book(&state, &authed.user_id, &id).await?;
     let inserted = sqlx::query(
         "INSERT INTO likes (user_id, book_id, post_id) VALUES (?, ?, ?)
          ON CONFLICT DO NOTHING",
     )
     .bind(&authed.user_id)
-    .bind(&id)
+    .bind(&book.id)
     .bind(&post_id)
     .execute(&state.pool)
     .await?;
     if inserted.rows_affected() == 0 {
         sqlx::query("DELETE FROM likes WHERE user_id = ? AND book_id = ? AND post_id = ?")
             .bind(&authed.user_id)
-            .bind(&id)
+            .bind(&book.id)
             .bind(&post_id)
             .execute(&state.pool)
             .await?;
     }
-    Ok(Json(likes_for(&state, &authed.user_id, &id).await?))
+    Ok(Json(likes_for(&state, &authed.user_id, &book.id).await?))
+}
+
+pub async fn put_like(
+    State(state): State<AppState>,
+    authed: Authed,
+    Path((id, post_id)): Path<(String, String)>,
+) -> Result<Json<LikeSet>, ApiError> {
+    let book = visible_book(&state, &authed.user_id, &id).await?;
+    sqlx::query(
+        "INSERT INTO likes (user_id, book_id, post_id) VALUES (?, ?, ?)
+         ON CONFLICT DO NOTHING",
+    )
+    .bind(&authed.user_id)
+    .bind(&book.id)
+    .bind(&post_id)
+    .execute(&state.pool)
+    .await?;
+    Ok(Json(likes_for(&state, &authed.user_id, &book.id).await?))
+}
+
+pub async fn delete_like(
+    State(state): State<AppState>,
+    authed: Authed,
+    Path((id, post_id)): Path<(String, String)>,
+) -> Result<Json<LikeSet>, ApiError> {
+    let book = visible_book(&state, &authed.user_id, &id).await?;
+    sqlx::query("DELETE FROM likes WHERE user_id = ? AND book_id = ? AND post_id = ?")
+        .bind(&authed.user_id)
+        .bind(&book.id)
+        .bind(&post_id)
+        .execute(&state.pool)
+        .await?;
+    Ok(Json(likes_for(&state, &authed.user_id, &book.id).await?))
 }
 
 pub async fn comment_index(
@@ -549,9 +582,9 @@ pub async fn list_comments(
     Path((id, post_id)): Path<(String, String)>,
 ) -> Result<Json<CommentThread>, ApiError> {
     let post_id = parse_post_id(&post_id)?;
-    let _ = visible_book(&state, &authed.user_id, &id).await?;
+    let book = visible_book(&state, &authed.user_id, &id).await?;
     Ok(Json(
-        thread_for(&state, &authed.user_id, &id, &post_id).await?,
+        thread_for(&state, &authed.user_id, &book.id, &post_id).await?,
     ))
 }
 
@@ -565,21 +598,86 @@ pub async fn add_comment(
     let book = visible_book(&state, &authed.user_id, &id).await?;
     require_post(&state, &book.id, &post_id).await?;
     let text = parse_comment_text(&body.text)?;
-    let comment_id = Uuid::new_v4().to_string();
-    sqlx::query(
-        "INSERT INTO comments (id, user_id, book_id, post_id, text, created_at)
-         VALUES (?, ?, ?, ?, ?, ?)",
-    )
-    .bind(&comment_id)
-    .bind(&authed.user_id)
-    .bind(&book.id)
-    .bind(&post_id)
-    .bind(&text)
-    .bind(now_ms())
-    .execute(&state.pool)
-    .await?;
+    let client_id = match body.id.as_deref() {
+        Some(raw) => Some(parse_comment_id(raw)?),
+        None => None,
+    };
+    // Insert and the privacy raise commit together. The trigger's update is
+    // visible to other connections only after that, so a late sync is never
+    // briefly public.
+    let mut tx = state.pool.begin().await?;
+    let (comment_id, inserted) = match client_id {
+        Some(comment_id) => {
+            let inserted = sqlx::query(
+                "INSERT INTO comments (id, user_id, book_id, post_id, text, created_at)
+                 VALUES (?, ?, ?, ?, ?, ?)
+                 ON CONFLICT(id) DO NOTHING",
+            )
+            .bind(&comment_id)
+            .bind(&authed.user_id)
+            .bind(&book.id)
+            .bind(&post_id)
+            .bind(&text)
+            .bind(now_ms())
+            .execute(&mut *tx)
+            .await?;
+            if inserted.rows_affected() == 0 {
+                // Only the caller's row. A missing row means another account
+                // holds this id, which is still a conflict.
+                let existing = sqlx::query_as::<_, (String, String)>(
+                    "SELECT book_id, post_id FROM comments
+                     WHERE id = ? AND user_id = ? -- own rows only",
+                )
+                .bind(&comment_id)
+                .bind(&authed.user_id)
+                .fetch_optional(&mut *tx)
+                .await?;
+                match existing {
+                    Some((book_id, existing_post))
+                        if book_id == book.id && existing_post == post_id => {}
+                    _ => return Err(ApiError::Conflict("That reply id is taken.".into())),
+                }
+                (comment_id, false)
+            } else {
+                (comment_id, true)
+            }
+        }
+        None => {
+            let comment_id = Uuid::new_v4().to_string();
+            sqlx::query(
+                "INSERT INTO comments (id, user_id, book_id, post_id, text, created_at)
+                 VALUES (?, ?, ?, ?, ?, ?)",
+            )
+            .bind(&comment_id)
+            .bind(&authed.user_id)
+            .bind(&book.id)
+            .bind(&post_id)
+            .bind(&text)
+            .bind(now_ms())
+            .execute(&mut *tx)
+            .await?;
+            (comment_id, true)
+        }
+    };
+    if inserted && body.private {
+        // OR the client's flag onto the trigger. The owner check is the
+        // trigger's own, so an owner's reply stays as it was written online.
+        // A replay does not run this, so it cannot hide a reply already stored.
+        sqlx::query(
+            "UPDATE comments SET private = 1
+             WHERE id = ? AND user_id = ?
+               AND (SELECT user_id FROM books WHERE id = ?) <> ?",
+        )
+        .bind(&comment_id)
+        .bind(&authed.user_id)
+        .bind(&book.id)
+        .bind(&authed.user_id)
+        .execute(&mut *tx)
+        .await?;
+    }
+    tx.commit().await?;
     Ok(Json(
-        thread_for(&state, &authed.user_id, &id, &post_id).await?,
+        thread_for(&state, &authed.user_id, &book.id, &post_id).await?,
     ))
 }
 
@@ -1262,12 +1360,12 @@ pub async fn delete_comment(
     Path((id, post_id, comment_id)): Path<(String, String, String)>,
 ) -> Result<Json<CommentThread>, ApiError> {
     let post_id = parse_post_id(&post_id)?;
-    let _ = visible_book(&state, &authed.user_id, &id).await?;
+    let book = visible_book(&state, &authed.user_id, &id).await?;
     let owner = sqlx::query_scalar::<_, String>(
         "SELECT user_id FROM comments WHERE id = ? AND book_id = ? AND post_id = ? -- own rows only",
     )
     .bind(&comment_id)
-    .bind(&id)
+    .bind(&book.id)
     .bind(&post_id)
     .fetch_optional(&state.pool)
     .await?;
@@ -1284,7 +1382,7 @@ pub async fn delete_comment(
         .execute(&state.pool)
         .await?;
     Ok(Json(
-        thread_for(&state, &authed.user_id, &id, &post_id).await?,
+        thread_for(&state, &authed.user_id, &book.id, &post_id).await?,
     ))
 }
 
@@ -1354,6 +1452,18 @@ async fn require_post(state: &AppState, book_id: &str, post_id: &str) -> Result<
         .fetch_optional(&state.pool)
         .await?;
     found.map(|_| ()).ok_or(ApiError::NotFound)
+}
+
+fn parse_comment_id(raw: &str) -> Result<String, ApiError> {
+    // Store the bytes the client will send again. Uuid::parse_str also accepts
+    // uppercase and the 32-character form, and to_string() is the lowercase one.
+    let canonical = Uuid::parse_str(raw).map(|id| id.to_string()).ok();
+    match canonical {
+        Some(canonical) if canonical == raw => Ok(canonical),
+        _ => Err(ApiError::BadRequest(
+            "Reply id must be a lowercase UUID.".into(),
+        )),
+    }
 }
 
 fn parse_comment_text(raw: &str) -> Result<String, ApiError> {

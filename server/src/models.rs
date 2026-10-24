@@ -206,8 +206,17 @@ pub struct CommentThread {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct NewComment {
     pub text: String,
+    /// Client-made comment id. Must be the lowercase hyphenated form; anything
+    /// else is 400. A replay with the same id, user, book and post returns the
+    /// thread without a second row. The same id from anyone else, or on a
+    /// different book or post, is 409. Omitted keeps today's server id.
+    pub id: Option<String>,
+    /// The client wrote this while the book was private to it. Only ever raises privacy.
+    #[serde(default)]
+    pub private: bool,
 }
 
 #[derive(Debug, FromRow)]
