@@ -100,6 +100,27 @@ class ReaderViewModelTest {
     }
 
     @Test
+    fun twoFailedLikesRevertOnlyTheirOwnPost() = runTest(main) {
+        val store = FakeReaderStore()
+        val vm = ReaderViewModel(store, BOOK)
+        advanceUntilIdle()
+
+        store.likeGate = CompletableDeferred()
+        store.likeError = IOException("offline")
+        vm.toggleLike("p1")
+        runCurrent()
+        vm.toggleLike("p2")
+        runCurrent()
+        assertEquals(setOf("p2"), vm.state.value.likes)
+
+        store.likeGate?.complete(Unit)
+        advanceUntilIdle()
+
+        assertEquals(setOf("p1"), vm.state.value.likes)
+        assertNull(vm.state.value.error)
+    }
+
+    @Test
     fun offlineProgressDoesNotCrashTheReader() = runTest(main) {
         val store = FakeReaderStore()
         store.progressError = IOException("offline")

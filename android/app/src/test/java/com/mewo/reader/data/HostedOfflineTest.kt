@@ -47,6 +47,7 @@ class HostedOfflineTest {
         job = SupervisorJob()
         scope = CoroutineScope(job + Dispatchers.Default)
         Dispatchers.setMain(Dispatchers.Unconfined)
+        hostedPostsDecodes.set(0)
         context.filesDir.listFiles()?.forEach { it.deleteRecursively() }
         context.getSharedPreferences("mewo_hosted", 0).edit().clear().commit()
     }
@@ -334,6 +335,162 @@ class HostedOfflineTest {
         }
     }
 
+    @Test
+    fun aCachedShelfCountsDownloadsWhenRefreshFails() = runBlocking {
+        val client = OfflineClient()
+        client.libraryError = IOException("offline")
+        writePosts(A, "secret")
+        val sessions = HostedSessionStore(context)
+        sessions.setBaseUrl(SERVER)
+        ShelfCache(File(context.filesDir, "hosted-shelves"), json)
+            .write(SERVER, "ada", listOf(book(A, importedAt = 3)))
+        val store = HostedLibraryStore(context, EpubOpener(context), sessions, client, scope)
+        sessions.setSignedIn("ada", "token-a")
+        withTimeout(5_000) {
+            while (store.loadState.value !is LibraryFailed) delay(20)
+        }
+
+        assertTrue(store.offline.value[A] is OfflineState.Downloaded)
+        assertEquals(OfflineSummary(1, 1, running = false), store.offlineSummary.value)
+    }
+
+    @Test
+    fun savingProgressDoesNotRereadPosts() = runBlocking {
+        val client = OfflineClient()
+        writePosts(A, "secret")
+        val store = open(client, listOf(book(A, importedAt = 3)))
+        val first = hostedPostsDecodes.get()
+        assertTrue(first > 0)
+
+        repeat(6) { index -> store.saveProgress(A, index) }
+
+        assertEquals(first, hostedPostsDecodes.get())
+    }
+
+    @Test
+    fun leavingTheCallerDoesNotCancelTheDownload() = runBlocking {
+        val client = OfflineClient()
+        client.blockPosts = true
+        val store = open(client, listOf(book(A, importedAt = 3)))
+        val caller = CoroutineScope(SupervisorJob())
+        val running = caller.launch { store.setDownloaded(A, true) }
+        withTimeout(5_000) {
+            while (client.entered.get() < 1) delay(10)
+        }
+
+        caller.cancel()
+        running.join()
+        client.hold.countDown()
+        withTimeout(5_000) {
+            while (store.offline.value[A] !is OfflineState.Downloaded) delay(10)
+        }
+        assertTrue(File(bookDir(A), "posts.json").exists())
+        caller.cancel()
+    }
+
+    @Test
+    fun aFailedDownloadClearsOnceThePostsExist() = runBlocking {
+        val client = OfflineClient()
+        client.likesError = IOException("offline")
+        val store = open(client, listOf(book(A, importedAt = 3)))
+        store.setDownloaded(A, true)
+        assertTrue(store.offline.value[A] is OfflineState.Failed)
+
+        client.likesError = null
+        assertEquals("secret", store.feed(A).single().text)
+        assertTrue(store.offline.value[A] is OfflineState.Downloaded)
+
+        client.likesError = IOException("offline")
+        store.setDownloaded(A, false)
+        store.setDownloaded(A, true)
+        assertTrue(store.offline.value[A] is OfflineState.Failed)
+        writePosts(A, "secret")
+        client.likesError = null
+        store.setDownloaded(A, true)
+        assertTrue(store.offline.value[A] is OfflineState.Downloaded)
+        assertEquals(3, client.postsCalls.size)
+    }
+
+    @Test
+    fun aBookThatLeavesTheShelfDropsSocialCache() = runBlocking {
+        val client = OfflineClient()
+        writePosts(B, "secret")
+        writeSocial(B, json.encodeToString(SocialCache(likes = setOf("p"))))
+        val store = open(client, listOf(book(A, importedAt = 3), book(B, importedAt = 2)))
+        client.shelf.clear()
+        client.shelf.add(book(A, importedAt = 3))
+        store.load()
+        withTimeout(5_000) {
+            while (store.library.value.books.any { it.id == B } || store.loadState.value.isRefreshing()) {
+                delay(20)
+            }
+        }
+
+        assertFalse(File(bookDir(B), "posts.json").exists())
+        assertFalse(File(bookDir(B), "social.json").exists())
+    }
+
+    @Test
+    fun signOutDuringADownloadLeavesTheCacheEmpty() = runBlocking {
+        val client = OfflineClient()
+        client.blockPosts = true
+        client.blockIndex = true
+        val sessions = HostedSessionStore(context)
+        sessions.setBaseUrl(SERVER)
+        val store = HostedLibraryStore(context, EpubOpener(context), sessions, client, scope)
+        client.shelf.add(book(A, importedAt = 3))
+        sessions.setSignedIn("ada", "token-a")
+        withTimeout(5_000) {
+            while (store.loadState.value !is LibraryLoaded || store.loadState.value.isRefreshing()) delay(20)
+        }
+        val hosted = File(context.filesDir, "hosted")
+        val marker = File(hosted, "marker")
+        marker.writeText("x")
+        val downloading = scope.launch { store.setDownloaded(A, true) }
+        withTimeout(5_000) {
+            while (client.entered.get() < 1) delay(10)
+        }
+        val reading = scope.launch { store.commentIndex(A) }
+        withTimeout(5_000) {
+            while (client.indexEntered.get() < 1) delay(10)
+        }
+
+        sessions.signOut()
+        withTimeout(5_000) {
+            while (marker.exists()) delay(10)
+        }
+        client.indexHold.countDown()
+        withTimeout(5_000) { reading.join() }
+        downloading.join()
+        val files = hosted.walkTopDown().filter { it.isFile }.map { it.name }.toList()
+        assertEquals(emptyList<String>(), files)
+    }
+
+    @Test
+    fun twoDownloadsFinishDownloaded() = runBlocking {
+        val client = OfflineClient()
+        val store = open(client, listOf(book(A, importedAt = 3), book(B, importedAt = 2)))
+        repeat(40) {
+            client.blockPosts = true
+            client.hold = CountDownLatch(1)
+            client.entered.set(0)
+            val first = scope.launch { store.setDownloaded(A, true) }
+            val second = scope.launch { store.setDownloaded(B, true) }
+            withTimeout(5_000) {
+                while (client.entered.get() < 2) delay(5)
+            }
+            client.hold.countDown()
+            withTimeout(5_000) {
+                first.join()
+                second.join()
+            }
+            assertTrue(store.offline.value[A] is OfflineState.Downloaded)
+            assertTrue(store.offline.value[B] is OfflineState.Downloaded)
+            store.setDownloaded(A, false)
+            store.setDownloaded(B, false)
+        }
+    }
+
     private fun open(client: OfflineClient, books: List<BookRecord>): HostedLibraryStore {
         client.shelf.clear()
         client.shelf.addAll(books)
@@ -397,6 +554,7 @@ class HostedOfflineTest {
         val shelf = mutableListOf<BookRecord>()
         var libraryGate: CompletableDeferred<List<BookRecord>>? = null
         val libraryEntered = CompletableDeferred<Unit>()
+        var libraryError: Exception? = null
         var postsError: Exception? = null
         var likesError: Exception? = null
         var indexError: Exception? = null
@@ -409,11 +567,15 @@ class HostedOfflineTest {
         val postsCalls = ConcurrentLinkedQueue<String>()
         val entered = AtomicInteger(0)
         val maxInFlight = AtomicInteger(0)
-        val hold = CountDownLatch(1)
+        var hold = CountDownLatch(1)
         var blockPosts = false
+        var blockIndex = false
+        val indexEntered = AtomicInteger(0)
+        val indexHold = CountDownLatch(1)
         var progress: Float? = 0.4f
 
         override fun library(session: HostedSession): LibrarySnapshot {
+            libraryError?.let { throw it }
             val gate = libraryGate
             if (gate != null) {
                 libraryEntered.complete(Unit)
@@ -451,8 +613,21 @@ class HostedOfflineTest {
         }
 
         override fun commentIndex(session: HostedSession, id: String): CommentIndex {
+            if (blockIndex) {
+                indexEntered.incrementAndGet()
+                try {
+                    if (!indexHold.await(5, TimeUnit.SECONDS)) throw IOException("timed out")
+                } catch (err: InterruptedException) {
+                    throw err
+                }
+            }
             indexError?.let { throw it }
             return index
+        }
+
+        override fun patch(session: HostedSession, id: String, body: PatchBook): BookRecord {
+            val current = shelf.first { it.id == id }
+            return current.copy(progressIndex = body.progressIndex ?: current.progressIndex)
         }
 
         override fun comments(session: HostedSession, id: String, postId: String): List<PostComment> {

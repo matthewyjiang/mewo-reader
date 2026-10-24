@@ -78,12 +78,18 @@ class ReaderViewModel(
                 val next = store.toggleLike(bookId, postId)
                 _state.update { it.copy(likes = next) }
             } catch (e: CancellationException) {
-                _state.update { if (it.likes == optimistic) it.copy(likes = before) else it }
+                _state.update { it.revertLike(postId, before) }
                 throw e
             } catch (e: Exception) {
-                _state.update { if (it.likes == optimistic) it.copy(likes = before) else it }
+                _state.update { it.revertLike(postId, before) }
             }
         }
+    }
+
+    private fun ReaderUiState.revertLike(postId: String, before: Set<String>): ReaderUiState {
+        val likes = likes.toMutableSet()
+        if (postId in before) likes.add(postId) else likes.remove(postId)
+        return copy(likes = likes)
     }
 
     fun toggleRepost(postId: String) {

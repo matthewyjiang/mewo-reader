@@ -148,7 +148,7 @@ open class HostedClient(
         http.newCall(req).execute().use { it.expectOk() }
     }
 
-    fun patch(session: HostedSession, id: String, body: PatchBook): BookRecord {
+    open fun patch(session: HostedSession, id: String, body: PatchBook): BookRecord {
         val req = request(session.api("/v1/books/$id"), session.token)
             .patch(json.encodeToString(body).toRequestBody(JSON))
             .build()
