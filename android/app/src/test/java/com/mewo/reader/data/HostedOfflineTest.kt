@@ -5,8 +5,10 @@ import java.io.File
 import java.io.IOException
 import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.CountDownLatch
+import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
+import kotlinx.coroutines.asCoroutineDispatcher
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -18,7 +20,9 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.test.resetMain
 import kotlinx.coroutines.test.setMain
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.serialization.json.Json
 import org.junit.After
 import org.junit.Assert.assertEquals
@@ -48,6 +52,7 @@ class HostedOfflineTest {
         scope = CoroutineScope(job + Dispatchers.Default)
         Dispatchers.setMain(Dispatchers.Unconfined)
         hostedPostsDecodes.set(0)
+        hostedDiskThreads.clear()
         context.filesDir.listFiles()?.forEach { it.deleteRecursively() }
         context.getSharedPreferences("mewo_hosted", 0).edit().clear().commit()
     }
@@ -467,6 +472,203 @@ class HostedOfflineTest {
     }
 
     @Test
+    fun aSecondDownloadAllLeavesTheRowDownloadRunning() = runBlocking {
+        val client = OfflineClient()
+        client.blockPosts = true
+        val store = open(client, listOf(book(A, importedAt = 3), book(B, importedAt = 2)))
+        val row = scope.launch { store.setDownloaded(A, true) }
+        withTimeout(5_000) {
+            while (client.entered.get() < 1) delay(10)
+        }
+        val batch = scope.launch { store.downloadAll() }
+        withTimeout(5_000) {
+            while (client.entered.get() < 2) delay(10)
+        }
+
+        val cancel = scope.launch { store.downloadAll() }
+        withTimeout(5_000) { cancel.join() }
+        client.hold.countDown()
+        withTimeout(5_000) {
+            row.join()
+            batch.join()
+        }
+
+        assertTrue(store.offline.value[A] is OfflineState.Downloaded)
+        assertTrue(File(bookDir(A), "posts.json").exists())
+        assertFalse(File(bookDir(B), "posts.json").exists())
+    }
+
+    @Test
+    fun cancellingDownloadAllJoinsTheBookJobsItStarted() = runBlocking {
+        val client = OfflineClient()
+        client.blockPosts = true
+        client.lingerAfterInterrupt = true
+        val store = open(client, listOf(book(A, importedAt = 3)))
+        val batch = scope.launch { store.downloadAll() }
+        withTimeout(5_000) {
+            while (client.entered.get() < 1) delay(10)
+        }
+
+        val cancel = scope.launch { store.downloadAll() }
+        try {
+            assertNull(withTimeoutOrNull(400) { cancel.join() })
+            client.lingerHold.countDown()
+            withTimeout(5_000) {
+                cancel.join()
+                batch.join()
+            }
+        } finally {
+            client.lingerHold.countDown()
+            client.hold.countDown()
+        }
+    }
+
+    @Test
+    fun twoTapsShareOneDownload() = runBlocking {
+        val client = OfflineClient()
+        client.blockPosts = true
+        val store = open(client, listOf(book(A, importedAt = 3)))
+        repeat(20) {
+            client.hold = CountDownLatch(1)
+            client.entered.set(0)
+            client.postsCalls.clear()
+            val taps = List(6) { scope.launch { store.setDownloaded(A, true) } }
+            withTimeout(5_000) {
+                while (client.entered.get() < 1) delay(5)
+            }
+            delay(30)
+            assertEquals(1, client.postsCalls.size)
+            client.hold.countDown()
+            withTimeout(5_000) { taps.forEach { tap -> tap.join() } }
+            store.setDownloaded(A, false)
+        }
+    }
+
+    @Test
+    fun shelfFileWorkStaysOffTheMainThread() = runBlocking {
+        val main = Executors.newSingleThreadExecutor { runnable -> Thread(runnable, "mewo-main") }
+        Dispatchers.setMain(main.asCoroutineDispatcher())
+        job.cancel()
+        job = SupervisorJob()
+        scope = CoroutineScope(job + Dispatchers.Main)
+        try {
+            val client = OfflineClient()
+            writePosts(A, "secret")
+            writePosts(B, "other")
+            val sessions = HostedSessionStore(context)
+            sessions.setBaseUrl(SERVER)
+            client.shelf.add(book(A, importedAt = 3))
+            client.shelf.add(book(B, importedAt = 2))
+            val store = HostedLibraryStore(context, EpubOpener(context), sessions, client, scope)
+            sessions.setSignedIn("ada", "token-a")
+            withTimeout(5_000) {
+                while (
+                    store.library.value.books.map { it.id }.toSet() != setOf(A, B) ||
+                    store.loadState.value !is LibraryLoaded ||
+                    store.loadState.value.isRefreshing()
+                ) {
+                    delay(20)
+                }
+            }
+
+            hostedDiskThreads.clear()
+            withContext(Dispatchers.Main) { store.saveProgress(A, 4) }
+            assertDiskOffMain()
+
+            client.shelf.removeIf { it.id == B }
+            hostedDiskThreads.clear()
+            withContext(Dispatchers.Main) { store.load() }
+            withTimeout(5_000) {
+                while (store.library.value.books.any { it.id == B } || store.loadState.value.isRefreshing()) {
+                    delay(20)
+                }
+            }
+            assertDiskOffMain()
+
+            writeSocial(A, json.encodeToString(SocialCache(likes = setOf("p"))))
+            hostedDiskThreads.clear()
+            sessions.setSignedIn("bea", "token-b")
+            withTimeout(5_000) {
+                while (
+                    File(bookDir(A), "social.json").exists() ||
+                    store.library.value.books.map { it.id }.toSet() != setOf(A) ||
+                    store.loadState.value !is LibraryLoaded ||
+                    store.loadState.value.isRefreshing()
+                ) {
+                    delay(20)
+                }
+            }
+            assertDiskOffMain()
+
+            hostedDiskThreads.clear()
+            sessions.signOut()
+            withTimeout(5_000) {
+                while (
+                    store.loadState.value !is LibraryLoaded ||
+                    store.loadState.value.isRefreshing() ||
+                    File(context.filesDir, "hosted").walkTopDown().any { it.isFile }
+                ) {
+                    delay(20)
+                }
+            }
+            assertDiskOffMain()
+        } finally {
+            job.cancel()
+            main.shutdown()
+        }
+    }
+
+    @Test
+    fun signOutDuringFeedLeavesTheCacheEmpty() = runBlocking {
+        val client = OfflineClient()
+        client.blockPosts = true
+        val sessions = HostedSessionStore(context)
+        sessions.setBaseUrl(SERVER)
+        val store = HostedLibraryStore(context, EpubOpener(context), sessions, client, scope)
+        client.shelf.add(book(A, importedAt = 3))
+        sessions.setSignedIn("ada", "token-a")
+        withTimeout(5_000) {
+            while (store.loadState.value !is LibraryLoaded || store.loadState.value.isRefreshing()) delay(20)
+        }
+        val hosted = File(context.filesDir, "hosted")
+        val reading = scope.launch { store.feed(A) }
+        withTimeout(5_000) {
+            while (client.entered.get() < 1) delay(10)
+        }
+        val marker = File(hosted, "marker")
+        marker.writeText("x")
+
+        sessions.signOut()
+        withTimeout(5_000) {
+            while (marker.exists()) delay(10)
+        }
+        client.hold.countDown()
+        withTimeout(5_000) { reading.join() }
+        val files = hosted.walkTopDown().filter { it.isFile }.map { it.name }.toList()
+        assertEquals(emptyList<String>(), files)
+    }
+
+    @Test
+    fun anOldPostsCacheIsParsedOnce() = runBlocking {
+        val client = OfflineClient()
+        writePosts(A, "old", version = 2)
+        val store = open(client, listOf(book(A, importedAt = 3)))
+        val first = hostedPostsDecodes.get()
+        assertTrue(first > 0)
+
+        repeat(6) { index -> store.saveProgress(A, index) }
+        assertEquals(first, hostedPostsDecodes.get())
+
+        File(bookDir(A), "posts.json").delete()
+        store.saveProgress(A, 8)
+        writePosts(A, "new", version = 1)
+        val mid = hostedPostsDecodes.get()
+        store.saveProgress(A, 9)
+        assertTrue(hostedPostsDecodes.get() > mid)
+        assertTrue(store.offline.value[A] is OfflineState.Downloaded)
+    }
+
+    @Test
     fun twoDownloadsFinishDownloaded() = runBlocking {
         val client = OfflineClient()
         val store = open(client, listOf(book(A, importedAt = 3), book(B, importedAt = 2)))
@@ -511,6 +713,11 @@ class HostedOfflineTest {
             }
         }
         return store
+    }
+
+    private fun assertDiskOffMain() {
+        val names = hostedDiskThreads.toList()
+        assertTrue(names.toString(), names.isNotEmpty() && names.none { it.startsWith("mewo-main") })
     }
 
     private fun writePosts(id: String, text: String, version: Int = 1) {
@@ -569,6 +776,8 @@ class HostedOfflineTest {
         val maxInFlight = AtomicInteger(0)
         var hold = CountDownLatch(1)
         var blockPosts = false
+        var lingerAfterInterrupt = false
+        val lingerHold = CountDownLatch(1)
         var blockIndex = false
         val indexEntered = AtomicInteger(0)
         val indexHold = CountDownLatch(1)
@@ -597,6 +806,9 @@ class HostedOfflineTest {
                 try {
                     if (!hold.await(5, TimeUnit.SECONDS)) throw IOException("timed out")
                 } catch (err: InterruptedException) {
+                    if (lingerAfterInterrupt && !lingerHold.await(5, TimeUnit.SECONDS)) {
+                        throw IOException("linger timed out")
+                    }
                     throw err
                 }
             }
