@@ -68,6 +68,8 @@ import kotlinx.coroutines.launch
 fun MewoNav() {
     val store = LocalLibraryStore.current
     val offlineSummary by store.offlineSummary.collectAsStateWithLifecycle()
+    val replyRevision by store.replyRevision.collectAsStateWithLifecycle()
+    val unsentReplies = replyRevision.let { store.unsentReplies() }
     val catalog = LocalCatalogStore.current
     val context = LocalContext.current
     val searchKinds = remember { PrefSearchKind(context) }
@@ -355,6 +357,8 @@ fun MewoNav() {
                         onBack = { nav.popBackStack() },
                         offlineSummary = offlineSummary,
                         onDownloadAll = { scope.launch { store.downloadAll() } },
+                        unsentReplies = unsentReplies,
+                        onDiscardOutbox = { store.discardOutbox() },
                     )
                 }
                 composable(

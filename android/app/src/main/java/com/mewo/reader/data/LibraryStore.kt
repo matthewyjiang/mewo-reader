@@ -93,6 +93,22 @@ interface LibraryStore {
     val offlineSummary: StateFlow<OfflineSummary>
         get() = NO_SUMMARY
 
+    /** Bumps when a queued reply is added, sent, refused, retried, or dropped. */
+    val replyRevision: StateFlow<Int>
+        get() = NO_REVISION
+
+    /** Hosted replies still in the outbox, including ones the server refused. */
+    fun unsentReplies(): Int = 0
+
+    /** Clears a refused reply and sends it again. */
+    suspend fun retryReply(commentId: String) {}
+
+    /** Drops a queued reply. A request already in flight is deleted on the server if it landed. */
+    suspend fun discardReply(commentId: String) {}
+
+    /** Explicit sign-out after the reader confirms, or a switch to another account. */
+    suspend fun discardOutbox() {}
+
     /** on = fetch posts, cover and social now; off = delete posts.json and social.json. Idempotent. */
     suspend fun setDownloaded(id: String, on: Boolean) {}
 
@@ -106,6 +122,7 @@ interface LibraryStore {
 private val NO_OFFLINE: StateFlow<Map<String, OfflineState>> = MutableStateFlow(emptyMap())
 private val NO_SUMMARY: StateFlow<OfflineSummary> =
     MutableStateFlow(OfflineSummary(downloaded = 0, total = 0, running = false))
+private val NO_REVISION: StateFlow<Int> = MutableStateFlow(0)
 
 /** Forwards each call to the backend chosen in settings. */
 @OptIn(ExperimentalCoroutinesApi::class)
@@ -135,6 +152,10 @@ class SwitchingLibraryStore(
     override val offlineSummary: StateFlow<OfflineSummary> = kind
         .flatMapLatest { which -> active(which).offlineSummary }
         .stateIn(scope, SharingStarted.Eagerly, OfflineSummary(0, 0, false))
+
+    override val replyRevision: StateFlow<Int> = kind
+        .flatMapLatest { which -> active(which).replyRevision }
+        .stateIn(scope, SharingStarted.Eagerly, 0)
 
     init {
         scope.launch {
@@ -201,6 +222,14 @@ class SwitchingLibraryStore(
     override suspend fun profileReplies(handle: String) = active().profileReplies(handle)
 
     override fun coverFile(id: String) = active().coverFile(id)
+
+    override fun unsentReplies() = active().unsentReplies()
+
+    override suspend fun retryReply(commentId: String) = active().retryReply(commentId)
+
+    override suspend fun discardReply(commentId: String) = active().discardReply(commentId)
+
+    override suspend fun discardOutbox() = active().discardOutbox()
 
     override suspend fun setDownloaded(id: String, on: Boolean) = active().setDownloaded(id, on)
 

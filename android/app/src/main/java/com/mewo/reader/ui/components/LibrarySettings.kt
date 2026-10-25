@@ -12,9 +12,11 @@ import androidx.compose.foundation.selection.selectable
 import androidx.compose.foundation.selection.selectableGroup
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -60,6 +62,8 @@ fun LibrarySettings(
     signupsOpen: Boolean? = null,
     offlineSummary: OfflineSummary = OfflineSummary(downloaded = 0, total = 1, running = false),
     onDownloadAll: () -> Unit = {},
+    unsentReplies: Int = 0,
+    onDiscardOutbox: suspend () -> Unit = {},
 ) {
     val backend = LocalBackend.current
     Column(modifier = modifier.fillMaxWidth()) {
@@ -81,6 +85,8 @@ fun LibrarySettings(
                 signupsOpen = signupsOpen,
                 offlineSummary = offlineSummary,
                 onDownloadAll = onDownloadAll,
+                unsentReplies = unsentReplies,
+                onDiscardOutbox = onDiscardOutbox,
             )
         }
     }
@@ -92,6 +98,8 @@ private fun HostedAccountForm(
     signupsOpen: Boolean?,
     offlineSummary: OfflineSummary,
     onDownloadAll: () -> Unit,
+    unsentReplies: Int,
+    onDiscardOutbox: suspend () -> Unit,
 ) {
     val hosted = LocalHostedAuth.current
     val scope = rememberCoroutineScope()
@@ -121,6 +129,7 @@ private fun HostedAccountForm(
     var password by remember { mutableStateOf("") }
     var busy by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
+    var discardCount by remember { mutableStateOf(0) }
     val usernameError = usernameError(username)
     val passwordError = passwordError(password)
     val ready = !busy &&
@@ -160,7 +169,11 @@ private fun HostedAccountForm(
                     .fillMaxWidth()
                     .heightIn(min = 52.dp)
                     .clickable(enabled = !busy, role = Role.Button) {
-                        runAuth { hosted.signOut() }
+                        if (unsentReplies > 0) {
+                            discardCount = unsentReplies
+                        } else {
+                            runAuth { hosted.signOut() }
+                        }
                     },
                 contentAlignment = Alignment.CenterStart,
             ) {
@@ -274,6 +287,56 @@ private fun HostedAccountForm(
             }
         }
     }
+    if (discardCount > 0) {
+        DiscardUnsentDialog(
+            count = discardCount,
+            onConfirm = {
+                discardCount = 0
+                runAuth {
+                    onDiscardOutbox()
+                    hosted.signOut()
+                }
+            },
+            onDismiss = { discardCount = 0 },
+        )
+    }
+}
+
+/** Title for the sign-out confirm. One reply stays singular. */
+internal fun discardUnsentTitle(count: Int): String {
+    val noun = if (count == 1) "reply" else "replies"
+    return "Discard $count unsent $noun?"
+}
+
+/** Same alert shape as [com.mewo.reader.ui.library.RemoveBookDialog]. */
+@Composable
+internal fun DiscardUnsentDialog(
+    count: Int,
+    onConfirm: () -> Unit,
+    onDismiss: () -> Unit,
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        containerColor = MaterialTheme.colorScheme.surface,
+        titleContentColor = MaterialTheme.colorScheme.onBackground,
+        textContentColor = MaterialTheme.colorScheme.onSurfaceVariant,
+        title = {
+            Text(
+                text = discardUnsentTitle(count),
+                style = MaterialTheme.typography.titleLarge,
+            )
+        },
+        confirmButton = {
+            TextButton(onClick = onConfirm) {
+                Text("Discard", color = MaterialTheme.colorScheme.error)
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text("Cancel", color = MaterialTheme.colorScheme.primary)
+            }
+        },
+    )
 }
 
 @Composable

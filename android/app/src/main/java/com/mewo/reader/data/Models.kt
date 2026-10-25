@@ -1,6 +1,7 @@
 package com.mewo.reader.data
 
 import kotlinx.serialization.Serializable
+import kotlinx.serialization.Transient
 
 @Serializable
 data class LibrarySnapshot(
@@ -80,6 +81,19 @@ data class CommentIndex(
     }
 }
 
+/** Where a reply is relative to the server. Server JSON never includes this. */
+@Serializable
+sealed interface CommentStatus {
+    @Serializable
+    data object Sent : CommentStatus
+
+    @Serializable
+    data object Sending : CommentStatus
+
+    @Serializable
+    data class Failed(val message: String) : CommentStatus
+}
+
 @Serializable
 data class PostComment(
     val id: String,
@@ -87,7 +101,32 @@ data class PostComment(
     val text: String,
     val createdAt: Long,
     val mine: Boolean = false,
-)
+    /**
+     * Client-only. Kept out of [equals] and [hashCode] so a thread diff against
+     * the server does not treat Sending or Failed as a different reply.
+     */
+    @Transient
+    val status: CommentStatus = CommentStatus.Sent,
+) {
+    override fun equals(other: Any?): Boolean {
+        if (this === other) return true
+        if (other !is PostComment) return false
+        return id == other.id &&
+            username == other.username &&
+            text == other.text &&
+            createdAt == other.createdAt &&
+            mine == other.mine
+    }
+
+    override fun hashCode(): Int {
+        var result = id.hashCode()
+        result = 31 * result + username.hashCode()
+        result = 31 * result + text.hashCode()
+        result = 31 * result + createdAt.hashCode()
+        result = 31 * result + mine.hashCode()
+        return result
+    }
+}
 
 @Serializable
 data class CommentThread(
@@ -128,6 +167,10 @@ data class SocialCache(
 @Serializable
 data class NewComment(
     val text: String,
+    /** Lowercase client UUID. A replay with this id returns the same thread. */
+    val id: String? = null,
+    /** Only ever raises privacy. The server ORs this with the insert trigger. */
+    val `private`: Boolean = false,
 )
 
 @Serializable

@@ -15,6 +15,8 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.runInterruptible
@@ -28,6 +30,7 @@ import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicReference
 
 /**
  * Hosted shelf. Talks HTTP. The server parses each book, so every client
@@ -77,8 +80,48 @@ class HostedLibraryStore(
         books = { _library.value.books },
         replace = { replaceBook(it) },
     )
+    private val _replies = MutableStateFlow(0)
+    override val replyRevision: StateFlow<Int> = _replies.asStateFlow()
+    /** Account the outbox is publishing a thread for. Null outside that callback. */
+    private val socialOwner = AtomicReference<OutboxAccount?>(null)
+    private val outbox = HostedOutbox(
+        file = File(context.filesDir, HOSTED_OUTBOX_FILE),
+        sessions = sessions,
+        client = client,
+        social = { bookId, thread ->
+            val safe = safeBookId(bookId) ?: return@HostedOutbox
+            val owner = socialOwner.get() ?: return@HostedOutbox
+            synchronized(socialLock) {
+                if (sessions.session.value.outboxAccount() != owner) return@synchronized
+                if (socialOwner.get() != owner) return@synchronized
+                writeSocial(safe) { cache ->
+                    cache.copy(
+                        threads = cache.threads + thread,
+                        index = cache.index.afterThread(thread.first, thread.second),
+                    )
+                }
+            }
+        },
+        scope = scope,
+        socialOwner = socialOwner,
+    )
+    private val connectivity = HostedConnectivity(context)
 
     init {
+        scope.launch {
+            outbox.pending
+                .map { ops -> ops.filterIsInstance<OutboxOp.Reply>() }
+                .distinctUntilChanged()
+                .collect { _replies.value = _replies.value + 1 }
+        }
+        scope.launch {
+            var online = connectivity.online.value
+            connectivity.online.collect { now ->
+                val regained = now && !online
+                online = now
+                if (regained) outbox.drain()
+            }
+        }
         scope.launch {
             var previous = sessions.session.value
             // Don't load inside the collector. A blocked refresh must not delay
@@ -107,7 +150,13 @@ class HostedLibraryStore(
                     }
                 }
                 previous = session
-                launch { runCatching { load() } }
+                // Attach before the refresh so a resumed queue is in memory for the
+                // shelf overlay. Launch it: a drain must not delay the next account's clear.
+                val attached = session
+                launch {
+                    outbox.attach(attached)
+                    runCatching { load() }
+                }
             }
         }
     }
@@ -177,9 +226,10 @@ class HostedLibraryStore(
         val start = mutex.withLock {
             if (sessions.session.value.token != session.token) return@withLock null
             if (cached != null && _library.value.books.isEmpty()) {
-                _library.value = LibrarySnapshot(cached)
-                _load.value = reduceLibraryLoad(_load.value, LibraryEvent.Cached(cached))
-                showCached = cached
+                val shown = overlayProgress(cached, outbox.pending.value)
+                _library.value = LibrarySnapshot(shown)
+                _load.value = reduceLibraryLoad(_load.value, LibraryEvent.Cached(shown))
+                showCached = shown
             }
             _load.value = reduceLibraryLoad(_load.value, LibraryEvent.RefreshStarted)
             importedWhileRefreshing.clear()
@@ -216,6 +266,7 @@ class HostedLibraryStore(
                 }
                 publish(merged, LibraryEvent.RefreshSucceeded(merged), session)
             }
+            if (sessions.session.value.token == session.token) outbox.drain()
         } catch (err: Exception) {
             if (err is CancellationException) throw err
             if (sessions.session.value.token == session.token) {
@@ -438,53 +489,59 @@ class HostedLibraryStore(
     }
 
     override suspend fun saveProgress(id: String, index: Int) {
-        val session = requireSession()
+        requireSession()
         val safe = requireBookId(id)
-        val updated = withContext(Dispatchers.IO) {
-            sessions.expireOn401(session) {
-                client.patch(session, safe, PatchBook(progressIndex = index.coerceAtLeast(0)))
-            }
+        outbox.enqueue(OutboxOp.Progress(safe, index.coerceAtLeast(0)))
+        mutex.withLock {
+            val books = _library.value.books
+            publish(books, LibraryEvent.BooksReplaced(books))
         }
-        replaceBook(updated)
     }
 
     override suspend fun likes(id: String): Set<String> = withContext(Dispatchers.IO) {
         val session = requireSession()
         val safe = requireBookId(id)
-        val likes = try {
-            sessions.expireOn401(session) { client.likes(session, safe) }
+        val base = try {
+            readLikes(session, safe)
         } catch (err: IOException) {
-            return@withContext readSocial(safe)?.likes ?: throw err
+            if (outbox.pending.value.none { it is OutboxOp.Like && it.bookId == safe }) throw err
+            emptySet()
         }
-        synchronized(socialLock) {
-            if (sessions.session.value.token == session.token) {
-                writeSocial(safe) { it.copy(likes = likes) }
-            }
-        }
-        likes
+        overlayLikes(base, outbox.pending.value, safe)
     }
 
     override suspend fun toggleLike(id: String, postId: String): Set<String> =
         withContext(Dispatchers.IO) {
             val session = requireSession()
             val safe = requireBookId(id)
-            sessions.expireOn401(session) { client.toggleLike(session, safe, postId) }
+            val base = try {
+                readLikes(session, safe)
+            } catch (err: IOException) {
+                readSocial(safe)?.likes ?: emptySet()
+            }
+            val shown = overlayLikes(base, outbox.pending.value, safe)
+            outbox.enqueue(OutboxOp.Like(safe, postId, liked = postId !in shown))
+            overlayLikes(base, outbox.pending.value, safe)
         }
 
     override suspend fun commentIndex(id: String): CommentIndex = withContext(Dispatchers.IO) {
         val session = requireSession()
         val safe = requireBookId(id)
         val index = try {
-            sessions.expireOn401(session) { client.commentIndex(session, safe) }
-        } catch (err: IOException) {
-            return@withContext readSocial(safe)?.index ?: throw err
-        }
-        synchronized(socialLock) {
-            if (sessions.session.value.token == session.token) {
-                writeSocial(safe) { it.copy(index = index) }
+            val remote = sessions.expireOn401(session) { client.commentIndex(session, safe) }
+            synchronized(socialLock) {
+                if (sessions.session.value.token == session.token) {
+                    writeSocial(safe) { it.copy(index = remote) }
+                }
             }
+            remote
+        } catch (err: IOException) {
+            val cached = readSocial(safe)?.index
+            val pending = outbox.pending.value.any { it is OutboxOp.Reply && it.bookId == safe }
+            if (cached == null && !pending) throw err
+            cached ?: CommentIndex()
         }
-        index
+        overlayIndex(index, outbox.pending.value, safe)
     }
 
     override suspend fun comments(id: String, postId: String): List<PostComment> =
@@ -492,29 +549,71 @@ class HostedLibraryStore(
             val session = requireSession()
             val safe = requireBookId(id)
             val thread = try {
-                sessions.expireOn401(session) { client.comments(session, safe, postId) }
-            } catch (err: IOException) {
-                return@withContext readSocial(safe)?.threads?.get(postId)
-                    ?: throw IOException("You're offline.", err)
-            }
-            synchronized(socialLock) {
-                if (sessions.session.value.token != session.token) return@withContext thread
-                writeSocial(safe) {
-                    it.copy(
-                        threads = it.threads + (postId to thread),
-                        index = it.index.afterThread(postId, thread),
-                    )
+                val remote = sessions.expireOn401(session) { client.comments(session, safe, postId) }
+                synchronized(socialLock) {
+                    if (sessions.session.value.token != session.token) return@synchronized
+                    writeSocial(safe) {
+                        it.copy(
+                            threads = it.threads + (postId to remote),
+                            index = it.index.afterThread(postId, remote),
+                        )
+                    }
                 }
+                remote
+            } catch (err: IOException) {
+                val cached = readSocial(safe)?.threads?.get(postId)
+                val pending = outbox.pending.value.any { op ->
+                    op is OutboxOp.Reply && op.bookId == safe && op.postId == postId
+                }
+                if (cached == null && !pending) throw IOException("You're offline.", err)
+                cached.orEmpty()
             }
-            thread
+            overlayThread(thread, outbox.pending.value, safe, postId, session.username.orEmpty())
         }
 
     override suspend fun addComment(id: String, postId: String, text: String): List<PostComment> =
         withContext(Dispatchers.IO) {
             val session = requireSession()
             val safe = requireBookId(id)
-            sessions.expireOn401(session) { client.addComment(session, safe, postId, text) }
+            val book = book(safe) ?: error("That book is gone.")
+            val trimmed = text.trim()
+            if (trimmed.isEmpty()) error("Write something first.")
+            val asked = trimmed.length
+            if (asked > MAX_COMMENT_CHARS) {
+                error("Comment is longer than $MAX_COMMENT_CHARS characters (asked $asked).")
+            }
+            outbox.enqueue(
+                OutboxOp.Reply(
+                    bookId = safe,
+                    postId = postId,
+                    id = UUID.randomUUID().toString(),
+                    text = trimmed,
+                    `private` = replyIsPrivate(book),
+                    createdAt = System.currentTimeMillis(),
+                ),
+            )
+            try {
+                comments(id, postId)
+            } catch (err: CancellationException) {
+                throw err
+            } catch (err: Exception) {
+                overlayThread(
+                    readSocial(safe)?.threads?.get(postId).orEmpty(),
+                    outbox.pending.value,
+                    safe,
+                    postId,
+                    session.username.orEmpty(),
+                )
+            }
         }
+
+    override fun unsentReplies(): Int = outbox.unsentReplies()
+
+    override suspend fun retryReply(commentId: String) = outbox.retry(commentId)
+
+    override suspend fun discardReply(commentId: String) = outbox.discard(commentId)
+
+    override suspend fun discardOutbox() = outbox.discardAll()
 
     override suspend fun deleteComment(
         id: String,
@@ -593,7 +692,11 @@ class HostedLibraryStore(
         val session = sessions.session.value
         if (!session.signedIn) return@withContext emptyList()
         _library.value.books.flatMap { book ->
-            val ids = sessions.expireOn401(session) { client.likes(session, book.id) }
+            val ids = overlayLikes(
+                sessions.expireOn401(session) { client.likes(session, book.id) },
+                outbox.pending.value,
+                book.id,
+            )
             if (ids.isEmpty()) emptyList()
             else {
                 val posts = cachedFeed(book.id) ?: emptyList()
@@ -683,12 +786,19 @@ class HostedLibraryStore(
         event: LibraryEvent,
         owner: HostedSession = sessions.session.value,
     ) {
+        val shown = overlayProgress(books, outbox.pending.value)
+        val shownEvent = when (event) {
+            is LibraryEvent.RefreshSucceeded -> LibraryEvent.RefreshSucceeded(shown)
+            is LibraryEvent.BooksReplaced -> LibraryEvent.BooksReplaced(shown)
+            is LibraryEvent.Cached -> LibraryEvent.Cached(shown)
+            else -> event
+        }
         if (sessions.session.value.token == owner.token) {
             val previous = _library.value.books
-            _library.value = LibrarySnapshot(books)
-            _load.value = reduceLibraryLoad(_load.value, event)
+            _library.value = LibrarySnapshot(shown)
+            _load.value = reduceLibraryLoad(_load.value, shownEvent)
             if (event is LibraryEvent.RefreshSucceeded) forgetPosts(previous, books)
-            rescan(books)
+            rescan(shown)
         }
         val url = owner.normalizedUrl()
         val user = owner.username
@@ -697,8 +807,22 @@ class HostedLibraryStore(
         ) {
             withContext(Dispatchers.IO) {
                 noteDisk()
-                runCatching { shelfCache.write(url, user, books) }
+                runCatching { shelfCache.write(url, user, shown) }
             }
+        }
+    }
+
+    private fun readLikes(session: HostedSession, id: String): Set<String> {
+        return try {
+            val likes = sessions.expireOn401(session) { client.likes(session, id) }
+            synchronized(socialLock) {
+                if (sessions.session.value.token == session.token) {
+                    writeSocial(id) { it.copy(likes = likes) }
+                }
+            }
+            likes
+        } catch (err: IOException) {
+            readSocial(id)?.likes ?: throw err
         }
     }
 
@@ -974,7 +1098,7 @@ internal val hostedDiskThreads = ConcurrentLinkedQueue<String>()
 /** When set, a Download all worker blocks here before it claims a book. Tests cancel in that gap. */
 internal var hostedBeforeClaim: (() -> Unit)? = null
 
-private fun noteDisk() {
+internal fun noteDisk() {
     hostedDiskThreads.add(Thread.currentThread().name)
 }
 

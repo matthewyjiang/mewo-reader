@@ -291,6 +291,8 @@ fun SettingsLibraryPage(
     signupsOpen: Boolean? = null,
     offlineSummary: OfflineSummary = OfflineSummary(downloaded = 0, total = 1, running = false),
     onDownloadAll: () -> Unit = {},
+    unsentReplies: Int = 0,
+    onDiscardOutbox: suspend () -> Unit = {},
 ) {
     SettingsScaffold(title = "Library", onBack = onBack) {
         LibrarySettings(
@@ -299,6 +301,8 @@ fun SettingsLibraryPage(
             signupsOpen = signupsOpen,
             offlineSummary = offlineSummary,
             onDownloadAll = onDownloadAll,
+            unsentReplies = unsentReplies,
+            onDiscardOutbox = onDiscardOutbox,
         )
     }
 }
