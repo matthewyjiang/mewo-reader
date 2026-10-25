@@ -223,6 +223,7 @@ internal class HostedOutbox(
     private val sessions: HostedSessionStore,
     private val client: HostedClient,
     private val social: (bookId: String, thread: Pair<String, List<PostComment>>) -> Unit,
+    private val likes: (bookId: String, ids: Set<String>) -> Unit = { _, _ -> },
     private val scope: CoroutineScope,
     private val waitForRetry: suspend (Long) -> Unit = { delay(it) },
     /**
@@ -241,8 +242,13 @@ internal class HostedOutbox(
     val pending: StateFlow<List<OutboxOp>> = _pending.asStateFlow()
 
     private var ops: List<OutboxOp> = emptyList()
-    /** Progress that landed and may be missing from a shelf read still in flight. */
-    private var confirmedProgress: Map<String, Int> = emptyMap()
+    /**
+     * Progress that landed and may be missing from a shelf read still in flight.
+     * [LandedProgress.epoch] is the newest shelf fetch that had already started.
+     */
+    private var confirmedProgress: Map<String, LandedProgress> = emptyMap()
+    /** Incremented each time a shelf fetch starts. */
+    private var refreshEpoch = 0L
     private val viewRef = AtomicReference(OutboxView(emptyList(), emptyMap()))
     /** Account [ops] was loaded for. A different account must not reuse this list. */
     private var loadedFor: OutboxAccount? = null
@@ -344,12 +350,20 @@ internal class HostedOutbox(
 
     fun view(): OutboxView = viewRef.get()
 
-    /** Drops confirmed places the shelf already shows, so a later edit can move. */
-    suspend fun reconcileProgress(serverBooks: List<BookRecord>) {
+    /** A shelf fetch is starting. [refreshFinished] drops places this fetch is new enough to replace. */
+    suspend fun refreshStarted(): Long = mutex.withLock {
+        refreshEpoch += 1
+        refreshEpoch
+    }
+
+    /**
+     * The fetch that started at [started] has a server snapshot. Places confirmed
+     * before that start are dropped, whatever index the server returned. A fetch
+     * that was already running when the place landed keeps the overlay.
+     */
+    suspend fun refreshFinished(started: Long) {
         mutex.withLock {
-            val next = confirmedProgress.filterNot { (id, index) ->
-                serverBooks.any { it.id == id && it.progressIndex == index }
-            }
+            val next = confirmedProgress.filterNot { (_, mark) -> started > mark.epoch }
             if (next != confirmedProgress) commit(ops, next)
         }
     }
@@ -446,7 +460,12 @@ internal class HostedOutbox(
                 // put the previous account's queue back.
                 if (sessions.session.value.outboxAccount() != session.outboxAccount()) return@withLock false
                 val next = session.outboxAccount()
-                val stored = readFile()
+                val stored = try {
+                    readFile()
+                } catch (_: IOException) {
+                    quarantine()
+                    null
+                }
                 when {
                     next == null -> {
                         epoch += 1
@@ -594,8 +613,13 @@ internal class HostedOutbox(
                 publishThread(acct, op.bookId, op.postId to sent.comments)
             }
         }
+        if (op is OutboxOp.Like && sent is SendResult.Likes) {
+            publishLikes(acct, op.bookId, sent.ids)
+        }
         var progress = confirmedProgress
-        if (op is OutboxOp.Progress) progress = progress + (op.bookId to op.index)
+        if (op is OutboxOp.Progress) {
+            progress = progress + (op.bookId to LandedProgress(op.index, refreshEpoch))
+        }
         val next = without(op)
         if (next != ops || progress != confirmedProgress) {
             commit(next, progress)
@@ -721,11 +745,20 @@ internal class HostedOutbox(
         bookId: String,
         thread: Pair<String, List<PostComment>>,
     ) {
+        publishSocial(acct) { social(bookId, thread) }
+    }
+
+    /** Writes the like set the server returned, with the same account check as a thread. */
+    private fun publishLikes(acct: OutboxAccount, bookId: String, ids: Set<String>) {
+        publishSocial(acct) { likes(bookId, ids) }
+    }
+
+    private fun publishSocial(acct: OutboxAccount, block: () -> Unit) {
         if (account() != acct) return
         socialOwner.set(acct)
         try {
             if (account() != acct) return
-            social(bookId, thread)
+            block()
         } finally {
             socialOwner.compareAndSet(acct, null)
         }
@@ -734,10 +767,10 @@ internal class HostedOutbox(
     private fun send(session: HostedSession, op: OutboxOp): SendResult {
         return when (op) {
             is OutboxOp.Like -> {
-                sessions.expireOn401(session) {
+                val ids = sessions.expireOn401(session) {
                     client.setLike(session, op.bookId, op.postId, op.liked)
                 }
-                SendResult.Empty
+                SendResult.Likes(ids)
             }
             is OutboxOp.Progress -> {
                 sessions.expireOn401(session) {
@@ -806,11 +839,26 @@ internal class HostedOutbox(
         commit(stored.ops)
     }
 
-    private fun commit(next: List<OutboxOp>, progress: Map<String, Int> = confirmedProgress) {
+    private fun commit(
+        next: List<OutboxOp>,
+        progress: Map<String, LandedProgress> = confirmedProgress,
+    ) {
         ops = next
         confirmedProgress = progress
-        viewRef.set(OutboxView(next, progress))
+        viewRef.set(OutboxView(next, progress.mapValues { it.value.index }))
         _pending.value = next
+    }
+
+    /** A file that will not parse is kept aside so the next launch can start empty. */
+    private fun quarantine() {
+        if (!file.exists()) return
+        val bad = File(file.parentFile, "${file.name}.bad")
+        val dest = if (!bad.exists()) {
+            bad
+        } else {
+            File(file.parentFile, "${file.name}.${System.currentTimeMillis()}.bad")
+        }
+        if (!file.renameTo(dest)) throw IOException("Could not read the outbox.")
     }
 
     private fun account(): OutboxAccount? = sessions.session.value.outboxAccount()
@@ -883,7 +931,10 @@ internal class HostedOutbox(
     private sealed interface SendResult {
         data object Empty : SendResult
         data class Thread(val comments: List<PostComment>) : SendResult
+        data class Likes(val ids: Set<String>) : SendResult
     }
+
+    private data class LandedProgress(val index: Int, val epoch: Long)
 }
 
 /** Ops plus progress that has landed but may not be on the shelf snapshot yet. */

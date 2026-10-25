@@ -293,13 +293,32 @@ private fun HostedAccountForm(
             onConfirm = {
                 discardCount = 0
                 runAuth {
-                    onDiscardOutbox()
-                    hosted.signOut()
+                    discardThenSignOut(onDiscardOutbox, hosted.signOut)
                 }
             },
             onDismiss = { discardCount = 0 },
         )
     }
+}
+
+/**
+ * The queue is cleared before the landed reply is deleted. Sign-out still finishes
+ * when that delete fails, and the failure is raised for the caller to show.
+ */
+internal suspend fun discardThenSignOut(
+    discard: suspend () -> Unit,
+    signOut: suspend () -> Unit,
+) {
+    val failure = try {
+        discard()
+        null
+    } catch (err: CancellationException) {
+        throw err
+    } catch (err: Exception) {
+        err
+    }
+    signOut()
+    failure?.let { throw it }
 }
 
 /** Title for the sign-out confirm. One reply stays singular. */

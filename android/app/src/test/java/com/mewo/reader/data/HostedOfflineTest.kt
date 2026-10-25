@@ -54,12 +54,14 @@ class HostedOfflineTest {
         hostedPostsDecodes.set(0)
         hostedDiskThreads.clear()
         hostedBeforeClaim = null
+        hostedAfterShelfShown = null
         context.filesDir.listFiles()?.forEach { it.deleteRecursively() }
         context.getSharedPreferences("mewo_hosted", 0).edit().clear().commit()
     }
 
     @After
     fun tearDown() {
+        hostedAfterShelfShown = null
         job.cancel()
         Dispatchers.resetMain()
     }
@@ -422,6 +424,9 @@ class HostedOfflineTest {
         val client = OfflineClient()
         writePosts(B, "secret")
         writeSocial(B, json.encodeToString(SocialCache(likes = setOf("p"))))
+        // The shelf is visible before the refresh that published it has finished.
+        // A load() in that gap must fetch again, or a book that left the server stays.
+        hostedAfterShelfShown = { Thread.sleep(300) }
         val store = open(client, listOf(book(A, importedAt = 3), book(B, importedAt = 2)))
         client.shelf.clear()
         client.shelf.add(book(A, importedAt = 3))

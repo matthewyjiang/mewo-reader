@@ -2,12 +2,14 @@ package com.mewo.reader.data
 
 import android.content.Context
 import android.net.ConnectivityManager
+import com.mewo.reader.ui.components.discardThenSignOut
 import com.mewo.reader.ui.components.discardUnsentTitle
 import java.io.File
 import java.io.IOException
 import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.atomic.AtomicInteger
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.async
 import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -18,6 +20,7 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.supervisorScope
 import kotlinx.coroutines.test.resetMain
 import kotlinx.coroutines.test.setMain
 import kotlinx.coroutines.withContext
@@ -618,6 +621,23 @@ class HostedOutboxTest {
     }
 
     @Test
+    fun aLandedLikeIsRememberedSoTheNextToggleUnlikes() = runBlocking {
+        val client = ScriptedClient()
+        client.likes = emptySet()
+        val store = open(client)
+        store.toggleLike(BOOK, "p")
+        withTimeout(5_000) {
+            while (client.likesCalls.size < 1 || outboxFile().exists()) delay(10)
+        }
+        val social = File(context.filesDir, "hosted/$BOOK/social.json")
+        assertTrue(social.readText().contains("\"p\""))
+
+        store.toggleLike(BOOK, "p")
+        withTimeout(5_000) { while (client.likesCalls.size < 2) delay(10) }
+        assertEquals(listOf("p" to true, "p" to false), client.likesCalls.toList())
+    }
+
+    @Test
     fun otherClientErrorsDoNotBlockTheQueue() = runBlocking {
         assertTrue(classify(HostedException("nope", 405)) is Outcome.Refused)
         assertTrue(classify(HostedException("nope", 422)) is Outcome.Refused)
@@ -676,6 +696,38 @@ class HostedOutboxTest {
     }
 
     @Test
+    fun signOutFinishesWhenDeletingALandedReplyFails() = runBlocking {
+        val client = ScriptedClient()
+        client.commentGate = CompletableDeferred()
+        client.deleteError = IOException("could not delete")
+        val outbox = outbox(client)
+        launch { outbox.enqueue(reply("c1", "hello")) }
+        withTimeout(5_000) { while (client.commentEntered.get() < 1) delay(10) }
+        var signedOut = false
+        supervisorScope {
+            val leaving = async {
+                discardThenSignOut(
+                    discard = { outbox.discardAll() },
+                    signOut = { signedOut = true },
+                )
+            }
+            delay(50)
+            assertTrue(leaving.isActive)
+            client.thread = listOf(PostComment("c1", "ada", "hello", 5, mine = true))
+            client.commentGate?.complete(Unit)
+            var surfaced: Throwable? = null
+            try {
+                withTimeout(5_000) { leaving.await() }
+            } catch (err: IOException) {
+                surfaced = err
+            }
+            assertTrue(signedOut)
+            assertEquals("could not delete", surfaced?.message)
+        }
+        assertTrue(outbox.pending.value.isEmpty())
+    }
+
+    @Test
     fun aDiskErrorWhileDrainingStaysInsideTheOutbox() = runBlocking {
         val client = ScriptedClient()
         client.commentGate = CompletableDeferred()
@@ -723,6 +775,21 @@ class HostedOutboxTest {
     }
 
     @Test
+    fun aCorruptOutboxIsQuarantinedAndAttachContinues() = runBlocking {
+        outboxFile().writeText("{not json")
+        val client = ScriptedClient()
+        val outbox = outbox(client)
+        outbox.attach(sessionStore.session.value)
+        val bad = File(outboxFile().parentFile, "${outboxFile().name}.bad")
+        assertTrue(bad.isFile)
+        assertEquals("{not json", bad.readText())
+        assertFalse(outboxFile().exists())
+        outbox.enqueue(reply("c1", "hi"))
+        withTimeout(5_000) { while (client.attempts.isEmpty()) delay(10) }
+        assertEquals(listOf("c1"), client.attempts.toList())
+    }
+
+    @Test
     fun queuedReplyAlreadyInTheThreadDoesNotDoubleTheCount() = runBlocking {
         val client = ScriptedClient()
         client.commentError = IOException("offline")
@@ -759,6 +826,20 @@ class HostedOutboxTest {
             loading.join()
         }
         assertEquals(6, store.library.value.books.single().progressIndex)
+    }
+
+    @Test
+    fun aLaterShelfRefreshReplacesConfirmedProgress() = runBlocking {
+        val client = ScriptedClient()
+        val store = open(client)
+        store.saveProgress(BOOK, 10)
+        withTimeout(5_000) { while (outboxFile().exists()) delay(10) }
+        client.shelf[0] = book(progress = 20)
+        store.load()
+        withTimeout(5_000) {
+            while (store.loadState.value.isRefreshing()) delay(10)
+        }
+        assertEquals(20, store.library.value.books.single().progressIndex)
     }
 
     @OptIn(ExperimentalCoroutinesApi::class)
@@ -896,6 +977,7 @@ class HostedOutboxTest {
         var likeError: Exception? = null
         var progressError: Exception? = null
         var commentError: Exception? = null
+        var deleteError: Exception? = null
         var likesError: Exception? = null
         var indexError: Exception? = null
         var commentsError: Exception? = null
@@ -992,6 +1074,7 @@ class HostedOutboxTest {
             commentId: String,
         ): List<PostComment> {
             deleted.add(commentId)
+            deleteError?.let { throw it }
             thread = thread.filterNot { it.id == commentId }
             return thread
         }

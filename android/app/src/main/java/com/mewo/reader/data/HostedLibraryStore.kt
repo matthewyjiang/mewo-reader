@@ -6,6 +6,7 @@ import android.net.Uri
 import androidx.lifecycle.DefaultLifecycleObserver
 import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.ProcessLifecycleOwner
+import kotlin.coroutines.coroutineContext
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
@@ -103,6 +104,15 @@ class HostedLibraryStore(
                         index = cache.index.afterThread(thread.first, thread.second),
                     )
                 }
+            }
+        },
+        likes = { bookId, ids ->
+            val safe = safeBookId(bookId) ?: return@HostedOutbox
+            val owner = socialOwner.get() ?: return@HostedOutbox
+            synchronized(socialLock) {
+                if (sessions.session.value.outboxAccount() != owner) return@synchronized
+                if (socialOwner.get() != owner) return@synchronized
+                writeSocial(safe) { cache -> cache.copy(likes = ids) }
             }
         },
         scope = scope,
@@ -238,7 +248,6 @@ class HostedLibraryStore(
         val start = mutex.withLock {
             if (sessions.session.value.token != session.token) return@withLock null
             if (cached != null && _library.value.books.isEmpty()) {
-                outbox.reconcileProgress(cached)
                 val snap = outbox.view()
                 val shown = overlayProgress(cached, snap.ops, snap.progress)
                 _library.value = LibrarySnapshot(shown)
@@ -250,6 +259,7 @@ class HostedLibraryStore(
             epoch
         } ?: return
         showCached?.let { rescan(it) }
+        val started = outbox.refreshStarted()
         try {
             val snap = withContext(Dispatchers.IO) {
                 try {
@@ -269,6 +279,10 @@ class HostedLibraryStore(
             if (sessions.session.value.token != session.token) return
             mutex.withLock {
                 if (sessions.session.value.token != session.token) return@withLock
+                // Drop places this fetch is allowed to replace before the shelf is shown.
+                // Clearing the in-flight mark in this same lock means a load() that was
+                // waiting on it starts a new fetch instead of joining one that already published.
+                outbox.refreshFinished(started)
                 val serverBooks = snap.books
                 val merged = if (epoch == start) {
                     serverBooks
@@ -279,6 +293,11 @@ class HostedLibraryStore(
                     (serverBooks + extras).sortedByDescending { it.importedAt }
                 }
                 publish(merged, LibraryEvent.RefreshSucceeded(merged), session)
+                if (refreshJob === coroutineContext[Job]) {
+                    inFlight = null
+                    inFlightToken = null
+                    refreshJob = null
+                }
             }
             if (sessions.session.value.token == session.token) outbox.drain(bypassBackoff = true)
         } catch (err: Exception) {
@@ -801,7 +820,6 @@ class HostedLibraryStore(
         event: LibraryEvent,
         owner: HostedSession = sessions.session.value,
     ) {
-        outbox.reconcileProgress(books)
         val snap = outbox.view()
         val shown = overlayProgress(books, snap.ops, snap.progress)
         val shownEvent = when (event) {
@@ -827,6 +845,8 @@ class HostedLibraryStore(
                 runCatching { shelfCache.write(url, user, shown) }
             }
         }
+        // Tests hold this after the shelf is visible, while this refresh is still in flight.
+        hostedAfterShelfShown?.invoke()
     }
 
     private fun readLikes(session: HostedSession, id: String): Set<String> {
@@ -1114,6 +1134,12 @@ internal val hostedDiskThreads = ConcurrentLinkedQueue<String>()
 
 /** When set, a Download all worker blocks here before it claims a book. Tests cancel in that gap. */
 internal var hostedBeforeClaim: (() -> Unit)? = null
+
+/**
+ * Runs at the end of a shelf publish, after the rows are visible. Tests pause here
+ * so a second load can arrive before the refresh that just published has finished.
+ */
+internal var hostedAfterShelfShown: (() -> Unit)? = null
 
 internal fun noteDisk() {
     hostedDiskThreads.add(Thread.currentThread().name)
