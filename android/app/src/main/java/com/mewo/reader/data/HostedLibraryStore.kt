@@ -3,6 +3,9 @@ package com.mewo.reader.data
 import android.content.Context
 import android.graphics.Bitmap
 import android.net.Uri
+import androidx.lifecycle.DefaultLifecycleObserver
+import androidx.lifecycle.LifecycleOwner
+import androidx.lifecycle.ProcessLifecycleOwner
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
@@ -108,6 +111,15 @@ class HostedLibraryStore(
     private val connectivity = HostedConnectivity(context)
 
     init {
+        ProcessLifecycleOwner.get().lifecycle.addObserver(object : DefaultLifecycleObserver {
+            override fun onStart(owner: LifecycleOwner) {
+                outbox.setForeground(true)
+            }
+
+            override fun onStop(owner: LifecycleOwner) {
+                outbox.setForeground(false)
+            }
+        })
         scope.launch {
             outbox.pending
                 .map { ops -> ops.filterIsInstance<OutboxOp.Reply>() }
@@ -119,7 +131,7 @@ class HostedLibraryStore(
             connectivity.online.collect { now ->
                 val regained = now && !online
                 online = now
-                if (regained) outbox.drain()
+                if (regained) outbox.drain(bypassBackoff = true)
             }
         }
         scope.launch {
@@ -226,7 +238,9 @@ class HostedLibraryStore(
         val start = mutex.withLock {
             if (sessions.session.value.token != session.token) return@withLock null
             if (cached != null && _library.value.books.isEmpty()) {
-                val shown = overlayProgress(cached, outbox.pending.value)
+                outbox.reconcileProgress(cached)
+                val snap = outbox.view()
+                val shown = overlayProgress(cached, snap.ops, snap.progress)
                 _library.value = LibrarySnapshot(shown)
                 _load.value = reduceLibraryLoad(_load.value, LibraryEvent.Cached(shown))
                 showCached = shown
@@ -266,7 +280,7 @@ class HostedLibraryStore(
                 }
                 publish(merged, LibraryEvent.RefreshSucceeded(merged), session)
             }
-            if (sessions.session.value.token == session.token) outbox.drain()
+            if (sessions.session.value.token == session.token) outbox.drain(bypassBackoff = true)
         } catch (err: Exception) {
             if (err is CancellationException) throw err
             if (sessions.session.value.token == session.token) {
@@ -512,16 +526,10 @@ class HostedLibraryStore(
 
     override suspend fun toggleLike(id: String, postId: String): Set<String> =
         withContext(Dispatchers.IO) {
-            val session = requireSession()
+            requireSession()
             val safe = requireBookId(id)
-            val base = try {
-                readLikes(session, safe)
-            } catch (err: IOException) {
-                readSocial(safe)?.likes ?: emptySet()
-            }
-            val shown = overlayLikes(base, outbox.pending.value, safe)
-            outbox.enqueue(OutboxOp.Like(safe, postId, liked = postId !in shown))
-            overlayLikes(base, outbox.pending.value, safe)
+            val base = readSocial(safe)?.likes ?: emptySet()
+            outbox.enqueueLike(safe, postId, base)
         }
 
     override suspend fun commentIndex(id: String): CommentIndex = withContext(Dispatchers.IO) {
@@ -541,7 +549,7 @@ class HostedLibraryStore(
             if (cached == null && !pending) throw err
             cached ?: CommentIndex()
         }
-        overlayIndex(index, outbox.pending.value, safe)
+        overlayIndex(index, outbox.pending.value, safe, readSocial(safe)?.threads.orEmpty())
     }
 
     override suspend fun comments(id: String, postId: String): List<PostComment> =
@@ -592,19 +600,13 @@ class HostedLibraryStore(
                     createdAt = System.currentTimeMillis(),
                 ),
             )
-            try {
-                comments(id, postId)
-            } catch (err: CancellationException) {
-                throw err
-            } catch (err: Exception) {
-                overlayThread(
-                    readSocial(safe)?.threads?.get(postId).orEmpty(),
-                    outbox.pending.value,
-                    safe,
-                    postId,
-                    session.username.orEmpty(),
-                )
-            }
+            overlayThread(
+                readSocial(safe)?.threads?.get(postId).orEmpty(),
+                outbox.pending.value,
+                safe,
+                postId,
+                session.username.orEmpty(),
+            )
         }
 
     override fun unsentReplies(): Int = outbox.unsentReplies()
@@ -622,7 +624,20 @@ class HostedLibraryStore(
     ): List<PostComment> = withContext(Dispatchers.IO) {
         val session = requireSession()
         val safe = requireBookId(id)
-        sessions.expireOn401(session) { client.deleteComment(session, safe, postId, commentId) }
+        val remote = sessions.expireOn401(session) {
+            client.deleteComment(session, safe, postId, commentId)
+        }
+        synchronized(socialLock) {
+            if (sessions.session.value.token == session.token) {
+                writeSocial(safe) { cache ->
+                    cache.copy(
+                        threads = cache.threads + (postId to remote),
+                        index = cache.index.afterThread(postId, remote),
+                    )
+                }
+            }
+        }
+        overlayThread(remote, outbox.pending.value, safe, postId, session.username.orEmpty())
     }
 
     override suspend fun searchPage(query: String, kind: SearchKind, cursor: String?): SearchPage =
@@ -786,7 +801,9 @@ class HostedLibraryStore(
         event: LibraryEvent,
         owner: HostedSession = sessions.session.value,
     ) {
-        val shown = overlayProgress(books, outbox.pending.value)
+        outbox.reconcileProgress(books)
+        val snap = outbox.view()
+        val shown = overlayProgress(books, snap.ops, snap.progress)
         val shownEvent = when (event) {
             is LibraryEvent.RefreshSucceeded -> LibraryEvent.RefreshSucceeded(shown)
             is LibraryEvent.BooksReplaced -> LibraryEvent.BooksReplaced(shown)

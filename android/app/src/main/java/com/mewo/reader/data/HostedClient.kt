@@ -209,14 +209,6 @@ open class HostedClient(
         return set.ids
     }
 
-    fun toggleLike(session: HostedSession, id: String, postId: String): Set<String> {
-        val req = request(session.api("/v1/books/$id/likes/$postId"), session.token)
-            .post(ByteArray(0).toRequestBody(null))
-            .build()
-        val set: LikeSet = http.newCall(req).execute().use { it.decode() }
-        return set.ids
-    }
-
     /** Idempotent like. PUT sets it, DELETE clears it. */
     open fun setLike(session: HostedSession, id: String, postId: String, on: Boolean): Set<String> {
         val call = request(session.api("/v1/books/$id/likes/$postId"), session.token)

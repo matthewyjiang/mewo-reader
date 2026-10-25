@@ -1,5 +1,6 @@
 package com.mewo.reader.data
 
+import androidx.core.util.AtomicFile
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CancellationException
@@ -72,6 +73,8 @@ internal sealed interface Outcome {
     data object Hold401 : Outcome
     data class Refused(val message: String) : Outcome
     data object Gone : Outcome
+    /** A 2xx whose body did not decode. The write landed; there is nothing to publish. */
+    data object Accepted : Outcome
 }
 
 /**
@@ -130,28 +133,44 @@ internal fun overlayThread(
     return kept + extra
 }
 
-/** Pending replies count, and mark the post as mine. */
-internal fun overlayIndex(base: CommentIndex, ops: List<OutboxOp>, bookId: String): CommentIndex {
+/**
+ * Pending replies count, and mark the post as mine.
+ * A reply already in [threads] is already in [base], so it is not counted again.
+ */
+internal fun overlayIndex(
+    base: CommentIndex,
+    ops: List<OutboxOp>,
+    bookId: String,
+    threads: Map<String, List<PostComment>> = emptyMap(),
+): CommentIndex {
     val replies = ops.filterIsInstance<OutboxOp.Reply>().filter { it.bookId == bookId }
     if (replies.isEmpty()) return base
     val counts = base.counts.toMutableMap()
     val mine = base.mine.toMutableSet()
     for (reply in replies) {
-        counts[reply.postId] = (counts[reply.postId] ?: 0) + 1
+        val already = threads[reply.postId].orEmpty().any { it.id == reply.id }
+        if (!already) counts[reply.postId] = (counts[reply.postId] ?: 0) + 1
         mine.add(reply.postId)
     }
     return base.copy(counts = counts, mine = mine)
 }
 
-/** Pending progress replaces the server place. One op per book after coalesce. */
-internal fun overlayProgress(books: List<BookRecord>, ops: List<OutboxOp>): List<BookRecord> {
+/**
+ * Pending progress replaces the server place. [confirmed] covers a place that
+ * already landed while a shelf read, started earlier, is still in flight.
+ */
+internal fun overlayProgress(
+    books: List<BookRecord>,
+    ops: List<OutboxOp>,
+    confirmed: Map<String, Int> = emptyMap(),
+): List<BookRecord> {
     val pending = LinkedHashMap<String, Int>()
     for (op in ops) {
         if (op is OutboxOp.Progress) pending[op.bookId] = op.index
     }
-    if (pending.isEmpty()) return books
+    if (pending.isEmpty() && confirmed.isEmpty()) return books
     return books.map { book ->
-        val index = pending[book.id] ?: return@map book
+        val index = pending[book.id] ?: confirmed[book.id] ?: return@map book
         if (book.progressIndex == index) book else book.copy(progressIndex = index)
     }
 }
@@ -175,8 +194,9 @@ internal fun coalesce(ops: List<OutboxOp>, next: OutboxOp): List<OutboxOp> {
 }
 
 /**
- * Transport and throttle errors retry. 401 holds the file. A reply refusal is
- * kept; 403 and 404 on a like or progress are [Outcome.Gone].
+ * Transport and throttle errors retry. 401 holds the file. Any other 4xx is
+ * terminal: a reply is kept, a like or progress is dropped. A 2xx whose body
+ * did not decode is [Outcome.Accepted].
  */
 internal fun classify(err: Throwable): Outcome {
     if (err is IOException) return Outcome.Retry
@@ -186,8 +206,9 @@ internal fun classify(err: Throwable): Outcome {
         401 -> Outcome.Hold401
         408, 429 -> Outcome.Retry
         in 500..599 -> Outcome.Retry
-        400, 409 -> Outcome.Refused(message)
+        in 200..299 -> Outcome.Accepted
         403, 404 -> Outcome.Gone
+        in 400..499 -> Outcome.Refused(message)
         else -> Outcome.Retry
     }
 }
@@ -220,11 +241,17 @@ internal class HostedOutbox(
     val pending: StateFlow<List<OutboxOp>> = _pending.asStateFlow()
 
     private var ops: List<OutboxOp> = emptyList()
-    private var loaded = false
+    /** Progress that landed and may be missing from a shelf read still in flight. */
+    private var confirmedProgress: Map<String, Int> = emptyMap()
+    private val viewRef = AtomicReference(OutboxView(emptyList(), emptyMap()))
+    /** Account [ops] was loaded for. A different account must not reuse this list. */
+    private var loadedFor: OutboxAccount? = null
     private var epoch = 0
     private var running = false
     private var queued = false
     private var retryMs = OUTBOX_RETRY_MS
+    private var backoffUntil = 0L
+    private var foreground = true
     private var retryJob: Job? = null
     private var active: CompletableDeferred<Unit>? = null
     private var activeReplyId: String? = null
@@ -237,18 +264,42 @@ internal class HostedOutbox(
         withContext(Dispatchers.IO) {
             mutex.withLock {
                 val acct = account() ?: error(HOSTED_NOT_SIGNED_IN)
-                loadIntoMemory(acct)
-                ops = coalesce(ops, op)
+                if (!ensureLoaded(acct)) adopt(acct)
+                commit(coalesce(ops, op))
                 write(acct, ops)
-                _pending.value = ops
             }
         }
         drain()
     }
 
-    fun drain() {
+    /**
+     * Flips [postId] against the pending like, over the cached [base].
+     * The decision and the write share the outbox lock, so two taps cannot
+     * both record the same intent, and nothing is fetched first.
+     */
+    suspend fun enqueueLike(bookId: String, postId: String, base: Set<String>): Set<String> {
+        val shown = withContext(Dispatchers.IO) {
+            mutex.withLock {
+                val acct = account() ?: error(HOSTED_NOT_SIGNED_IN)
+                if (!ensureLoaded(acct)) adopt(acct)
+                val pending = ops.firstOrNull { op ->
+                    op is OutboxOp.Like && op.bookId == bookId && op.postId == postId
+                } as OutboxOp.Like?
+                val liked = !(pending?.liked ?: (postId in base))
+                commit(coalesce(ops, OutboxOp.Like(bookId, postId, liked)))
+                write(acct, ops)
+                overlayLikes(base, ops, bookId)
+            }
+        }
+        drain()
+        return shown
+    }
+
+    /** [bypassBackoff] is the timer, a connectivity regain, Retry, or a shelf load. */
+    fun drain(bypassBackoff: Boolean = false) {
         scope.launch(Dispatchers.IO) {
             val start = mutex.withLock {
+                if (bypassBackoff) backoffUntil = 0L
                 if (running) {
                     queued = true
                     false
@@ -260,10 +311,46 @@ internal class HostedOutbox(
             }
             if (!start) return@launch
             try {
-                drainPass()
+                runDrain()
             } finally {
                 finishDrain()
             }
+        }
+    }
+
+    /** Pauses the retry timer while the process is backgrounded. */
+    fun setForeground(on: Boolean) {
+        scope.launch(Dispatchers.IO) {
+            val resume = mutex.withLock {
+                foreground = on
+                if (!on) {
+                    cancelRetryLocked()
+                    return@withLock false
+                }
+                val until = backoffUntil
+                if (until <= 0L) return@withLock false
+                val now = System.currentTimeMillis()
+                if (until <= now) {
+                    backoffUntil = 0L
+                    true
+                } else {
+                    armRetryLocked(until - now)
+                    false
+                }
+            }
+            if (resume) drain(bypassBackoff = true)
+        }
+    }
+
+    fun view(): OutboxView = viewRef.get()
+
+    /** Drops confirmed places the shelf already shows, so a later edit can move. */
+    suspend fun reconcileProgress(serverBooks: List<BookRecord>) {
+        mutex.withLock {
+            val next = confirmedProgress.filterNot { (id, index) ->
+                serverBooks.any { it.id == id && it.progressIndex == index }
+            }
+            if (next != confirmedProgress) commit(ops, next)
         }
     }
 
@@ -271,17 +358,16 @@ internal class HostedOutbox(
         withContext(Dispatchers.IO) {
             mutex.withLock {
                 val acct = account() ?: return@withLock
-                loadIntoMemory(acct)
+                if (!ensureLoaded(acct)) return@withLock
                 val next = ops.map { op ->
                     if (op is OutboxOp.Reply && op.id == commentId) op.copy(failed = null) else op
                 }
                 if (next == ops) return@withLock
-                ops = next
+                commit(next)
                 write(acct, ops)
-                _pending.value = ops
             }
         }
-        drain()
+        drain(bypassBackoff = true)
     }
 
     /**
@@ -318,26 +404,36 @@ internal class HostedOutbox(
         if (sent != null) deleteSent(sent)
     }
 
-    /** Explicit sign-out, or a different account. The in-flight request cannot write after this. */
+    /**
+     * Explicit sign-out. The queue is cleared before the wait, so a drain that
+     * arrives while the in-flight reply is still on the wire cannot send the rest.
+     * If that reply lands, it is deleted the same way [discard] deletes one.
+     */
     suspend fun discardAll() {
-        val wait = mutex.withLock {
-            epoch += 1
-            queued = false
-            retryJob?.cancel()
-            retryJob = null
-            active
-        }
-        wait?.await()
-        withContext(Dispatchers.IO) {
+        val flight = withContext(Dispatchers.IO) {
             mutex.withLock {
-                ops = emptyList()
-                loaded = true
-                awaitingDiscard.clear()
-                landed.clear()
-                _pending.value = emptyList()
+                epoch += 1
+                queued = false
+                backoffUntil = 0L
+                cancelRetryLocked()
+                val id = activeReplyId
+                if (id != null) awaitingDiscard += id
+                loadedFor = account()
+                commit(emptyList(), emptyMap())
                 deleteFile()
+                active to id
             }
         }
+        val (wait, id) = flight
+        if (wait == null || id == null) return
+        wait.await()
+        val sent = withContext(Dispatchers.IO) {
+            mutex.withLock {
+                awaitingDiscard -= id
+                landed.remove(id)?.takeIf { it.sent }
+            }
+        }
+        if (sent != null) deleteSent(sent)
     }
 
     fun unsentReplies(): Int = _pending.value.count { it is OutboxOp.Reply }
@@ -355,34 +451,46 @@ internal class HostedOutbox(
                     next == null -> {
                         epoch += 1
                         queued = false
-                        retryJob?.cancel()
-                        retryJob = null
-                        ops = emptyList()
-                        loaded = false
-                        _pending.value = emptyList()
+                        backoffUntil = 0L
+                        cancelRetryLocked()
+                        loadedFor = null
+                        commit(emptyList(), emptyMap())
                         false
                     }
                     stored != null && stored.account != next -> {
                         epoch += 1
                         queued = false
-                        retryJob?.cancel()
-                        retryJob = null
-                        ops = emptyList()
-                        loaded = true
-                        _pending.value = emptyList()
+                        backoffUntil = 0L
+                        cancelRetryLocked()
+                        loadedFor = next
+                        commit(emptyList(), emptyMap())
                         deleteFile()
                         false
                     }
                     else -> {
-                        ops = stored?.ops.orEmpty()
-                        loaded = true
-                        _pending.value = ops
+                        loadedFor = next
+                        commit(stored?.ops.orEmpty())
                         true
                     }
                 }
             }
         }
         if (resume) drain()
+    }
+
+    private suspend fun runDrain() {
+        try {
+            drainPass()
+        } catch (err: CancellationException) {
+            throw err
+        } catch (_: IOException) {
+            mutex.withLock {
+                reloadAfterDiskError()
+                val wait = takeBackoff()
+                backoffUntil = System.currentTimeMillis() + wait
+                armRetryLocked(wait)
+            }
+        }
     }
 
     private suspend fun finishDrain() {
@@ -397,19 +505,22 @@ internal class HostedOutbox(
                 }
             }
             if (!more) return
-            drainPass()
+            runDrain()
         }
     }
 
     private suspend fun drainPass() {
         val acct = account() ?: return
         val passEpoch = mutex.withLock { epoch }
-        val stored = mutex.withLock { if (loaded) null else readFile()?.account }
-        if (stored != null && stored != acct) return
+        mutex.withLock {
+            if (epoch != passEpoch || account() != acct) return
+            if (backoffUntil > System.currentTimeMillis()) return
+            if (!ensureLoaded(acct)) return
+        }
         while (true) {
             val claim = mutex.withLock {
                 if (epoch != passEpoch || account() != acct) return
-                if (!loaded) loadIntoMemory(acct)
+                if (loadedFor != acct && !ensureLoaded(acct)) return
                 val op = ops.firstOrNull { it !is OutboxOp.Reply || it.failed == null } ?: return
                 val done = CompletableDeferred<Unit>()
                 active = done
@@ -442,7 +553,7 @@ internal class HostedOutbox(
                                 epoch != passEpoch || account() != acct || skipped -> {
                                     // The queue belongs to someone else now. A Discard that
                                     // is waiting still has to hear that this send landed.
-                                    rememberLanded(claim.op, sent)
+                                    rememberLanded(claim.op, sent, acct)
                                     Step.Stop
                                 }
                                 thrown != null -> applyFailure(acct, claim.op, thrown)
@@ -466,7 +577,9 @@ internal class HostedOutbox(
                 Step.Continue -> Unit
                 Step.Stop -> return
                 is Step.Backoff -> {
-                    armRetry(step.wait)
+                    mutex.withLock {
+                        if (epoch == passEpoch && account() == acct) armRetryLocked(step.wait)
+                    }
                     return
                 }
             }
@@ -476,24 +589,35 @@ internal class HostedOutbox(
     private fun applySuccess(acct: OutboxAccount, op: OutboxOp, sent: SendResult?) {
         if (op is OutboxOp.Reply && sent is SendResult.Thread) {
             if (op.id in awaitingDiscard) {
-                rememberLanded(op, sent)
+                rememberLanded(op, sent, acct)
             } else {
                 publishThread(acct, op.bookId, op.postId to sent.comments)
             }
         }
+        var progress = confirmedProgress
+        if (op is OutboxOp.Progress) progress = progress + (op.bookId to op.index)
         val next = without(op)
-        if (next != ops) {
-            ops = next
+        if (next != ops || progress != confirmedProgress) {
+            commit(next, progress)
             write(acct, ops)
-            _pending.value = ops
         }
         retryMs = OUTBOX_RETRY_MS
+        backoffUntil = 0L
+        cancelRetryLocked()
     }
 
     private fun applyFailure(acct: OutboxAccount, op: OutboxOp, err: Throwable): Step {
         return when (val outcome = classify(err)) {
-            Outcome.Retry -> Step.Backoff(takeBackoff())
+            Outcome.Retry -> {
+                val wait = takeBackoff()
+                backoffUntil = System.currentTimeMillis() + wait
+                Step.Backoff(wait)
+            }
             Outcome.Hold401 -> Step.Stop
+            Outcome.Accepted -> {
+                drop(acct, op)
+                Step.Continue
+            }
             is Outcome.Refused -> {
                 if (op is OutboxOp.Reply) failReply(acct, op.id, outcome.message)
                 else drop(acct, op)
@@ -512,19 +636,19 @@ internal class HostedOutbox(
     }
 
     private fun failReply(acct: OutboxAccount, id: String, message: String) {
-        ops = ops.map { op ->
-            if (op is OutboxOp.Reply && op.id == id) op.copy(failed = message) else op
-        }
+        commit(
+            ops.map { op ->
+                if (op is OutboxOp.Reply && op.id == id) op.copy(failed = message) else op
+            },
+        )
         write(acct, ops)
-        _pending.value = ops
     }
 
     private fun drop(acct: OutboxAccount, op: OutboxOp) {
         val next = without(op)
         if (next == ops) return
-        ops = next
+        commit(next)
         write(acct, ops)
-        _pending.value = ops
     }
 
     private fun without(sent: OutboxOp): List<OutboxOp> = when (sent) {
@@ -557,34 +681,38 @@ internal class HostedOutbox(
         return wait
     }
 
-    private fun armRetry(wait: Long) {
-        retryJob?.cancel()
+    /** Caller holds [mutex]. A backgrounded process does not start the timer. */
+    private fun armRetryLocked(wait: Long) {
+        cancelRetryLocked()
+        if (!foreground || wait <= 0L) return
         retryJob = scope.launch {
             waitForRetry(wait)
-            drain()
+            drain(bypassBackoff = true)
         }
+    }
+
+    /** Caller holds [mutex]. */
+    private fun cancelRetryLocked() {
+        retryJob?.cancel()
+        retryJob = null
     }
 
     private suspend fun deleteSent(flight: Flight) {
         val session = sessions.session.value
-        if (session.outboxAccount() == null) return
+        if (session.outboxAccount() != flight.account) return
         val thread = withContext(Dispatchers.IO) {
             sessions.expireOn401(session) {
                 client.deleteComment(session, flight.op.bookId, flight.op.postId, flight.op.id)
             }
         }
-        if (sessions.session.value.outboxAccount() != session.outboxAccount()) return
-        publishThread(
-            session.outboxAccount() ?: return,
-            flight.op.bookId,
-            flight.op.postId to thread,
-        )
+        if (sessions.session.value.outboxAccount() != flight.account) return
+        publishThread(flight.account, flight.op.bookId, flight.op.postId to thread)
     }
 
-    private fun rememberLanded(op: OutboxOp, sent: SendResult?) {
+    private fun rememberLanded(op: OutboxOp, sent: SendResult?, acct: OutboxAccount) {
         if (op !is OutboxOp.Reply || sent !is SendResult.Thread) return
         if (op.id !in awaitingDiscard) return
-        landed[op.id] = Flight(op, sent = true, thread = sent.comments)
+        landed[op.id] = Flight(acct, op, sent = true, thread = sent.comments)
     }
 
     /** Hands the thread to the store only while [acct] is still the signed-in account. */
@@ -635,19 +763,54 @@ internal class HostedOutbox(
 
     private fun removeReply(commentId: String) {
         val acct = account() ?: return
-        if (!loaded) loadIntoMemory(acct)
+        if (!ensureLoaded(acct)) return
         val next = ops.filterNot { it is OutboxOp.Reply && it.id == commentId }
         if (next == ops) return
-        ops = next
+        commit(next)
         write(acct, ops)
-        _pending.value = ops
     }
 
-    private fun loadIntoMemory(acct: OutboxAccount) {
-        if (loaded) return
+    /**
+     * @return false when the file belongs to someone else. The file is left as it is,
+     * so a drain for the new account cannot send or relabel the previous queue.
+     */
+    private fun ensureLoaded(acct: OutboxAccount): Boolean {
+        if (loadedFor == acct) return true
         val stored = readFile()
-        ops = if (stored?.account == acct) stored.ops else emptyList()
-        loaded = true
+        if (stored != null && stored.account != acct) return false
+        loadedFor = acct
+        commit(stored?.ops.orEmpty())
+        return true
+    }
+
+    /** The on-disk queue is another account's. Start this account empty. */
+    private fun adopt(acct: OutboxAccount) {
+        epoch += 1
+        queued = false
+        backoffUntil = 0L
+        cancelRetryLocked()
+        loadedFor = acct
+        commit(emptyList(), emptyMap())
+        deleteFile()
+    }
+
+    private fun reloadAfterDiskError() {
+        val acct = account() ?: return
+        val stored = try {
+            readFile()
+        } catch (_: IOException) {
+            return
+        }
+        if (stored == null || stored.account != acct) return
+        loadedFor = acct
+        commit(stored.ops)
+    }
+
+    private fun commit(next: List<OutboxOp>, progress: Map<String, Int> = confirmedProgress) {
+        ops = next
+        confirmedProgress = progress
+        viewRef.set(OutboxView(next, progress))
+        _pending.value = next
     }
 
     private fun account(): OutboxAccount? = sessions.session.value.outboxAccount()
@@ -655,9 +818,14 @@ internal class HostedOutbox(
     private fun readFile(): OutboxFile? {
         if (!file.isFile) return null
         noteDisk()
-        return runCatching { json.decodeFromString<OutboxFile>(file.readText()) }
-            .getOrNull()
-            ?.takeIf { it.version == OUTBOX_VERSION }
+        val text = file.readText()
+        val decoded = try {
+            json.decodeFromString<OutboxFile>(text)
+        } catch (err: Exception) {
+            throw IOException("Could not read the outbox.", err)
+        }
+        if (decoded.version != OUTBOX_VERSION) return null
+        return decoded
     }
 
     private fun write(acct: OutboxAccount, next: List<OutboxOp>) {
@@ -666,27 +834,41 @@ internal class HostedOutbox(
             return
         }
         noteDisk()
-        val dir = file.parentFile ?: return
-        dir.mkdirs()
-        val tmp = File(dir, file.name + ".tmp")
-        tmp.writeText(json.encodeToString(OutboxFile(account = acct, ops = next)))
-        if (!tmp.renameTo(file)) {
-            tmp.copyTo(file, overwrite = true)
-            tmp.delete()
+        val dir = file.parentFile ?: throw IOException("Could not update the outbox.")
+        if (!dir.isDirectory && !dir.mkdirs()) throw IOException("Could not update the outbox.")
+        val atomic = AtomicFile(file)
+        val stream = atomic.startWrite()
+        try {
+            stream.write(
+                json.encodeToString(OutboxFile(account = acct, ops = next)).toByteArray(Charsets.UTF_8),
+            )
+            stream.fd.sync()
+            atomic.finishWrite(stream)
+        } catch (err: IOException) {
+            atomic.failWrite(stream)
+            throw err
         }
     }
 
     private fun deleteFile() {
-        val tmp = File(file.parentFile, file.name + ".tmp")
-        if (!file.exists() && !tmp.exists()) return
+        val extras = listOf(
+            file,
+            File(file.parentFile, file.name + ".tmp"),
+            File(file.path + ".new"),
+        )
+        if (extras.none { it.exists() }) return
         noteDisk()
-        file.delete()
-        tmp.delete()
+        for (extra in extras) {
+            if (extra.exists() && !extra.delete()) {
+                throw IOException("Could not update the outbox.")
+            }
+        }
     }
 
     private data class Claim(val op: OutboxOp, val done: CompletableDeferred<Unit>)
 
     private data class Flight(
+        val account: OutboxAccount,
         val op: OutboxOp.Reply,
         val sent: Boolean,
         val thread: List<PostComment>?,
@@ -703,6 +885,9 @@ internal class HostedOutbox(
         data class Thread(val comments: List<PostComment>) : SendResult
     }
 }
+
+/** Ops plus progress that has landed but may not be on the shelf snapshot yet. */
+internal data class OutboxView(val ops: List<OutboxOp>, val progress: Map<String, Int>)
 
 internal const val HOSTED_OUTBOX_FILE = "hosted-outbox.json"
 internal const val OUTBOX_VERSION = 1
