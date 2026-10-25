@@ -908,10 +908,11 @@ class HostedLibraryStore(
     }
 
     private suspend fun downloadBody(id: String) = withContext(Dispatchers.IO) {
-        setLive(id, OfflineState.Downloading(null))
         try {
             val session = requireSession()
             val fetched = runInterruptible {
+                // The client reports the ring. A placeholder published before this
+                // runs stays visible while the call waits behind other file work.
                 val posts = sessions.expireOn401(session) {
                     client.posts(session, id) { fraction ->
                         setLive(id, OfflineState.Downloading(fraction))

@@ -238,6 +238,7 @@ class HostedOfflineTest {
         val client = OfflineClient()
         client.blockPosts = true
         client.progress = 0.4f
+        client.delayProgress = true
         val store = open(client, listOf(book(A, importedAt = 3)))
         val running = scope.launch { store.setDownloaded(A, true) }
         withTimeout(5_000) {
@@ -890,6 +891,7 @@ class HostedOfflineTest {
         val indexEntered = AtomicInteger(0)
         val indexHold = CountDownLatch(1)
         var progress: Float? = 0.4f
+        var delayProgress = false
 
         override fun library(session: HostedSession): LibrarySnapshot {
             libraryError?.let { throw it }
@@ -909,6 +911,7 @@ class HostedOfflineTest {
             postsCalls.add(id)
             val now = entered.incrementAndGet()
             maxInFlight.updateAndGet { current -> maxOf(current, now) }
+            if (delayProgress) Thread.sleep(30)
             onProgress(progress)
             if (blockPosts || id in blockIds) {
                 try {
