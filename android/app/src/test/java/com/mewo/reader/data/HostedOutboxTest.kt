@@ -787,6 +787,65 @@ class HostedOutboxTest {
         assertEquals("{not json", bad.readText())
         assertFalse(outboxFile().exists())
         outbox.enqueue(reply("c1", "hi"))
+        withTimeout(5_000) {
+            while (client.attempts.isEmpty() || outbox.pending.value.isNotEmpty()) delay(10)
+        }
+        assertEquals(listOf("c1"), client.attempts.toList())
+
+        outboxFile().writeText("{again")
+        outbox.attach(sessionStore.session.value)
+        val bads = outboxFile().parentFile!!.listFiles { child -> child.name.endsWith(".bad") }!!
+        assertEquals(listOf(bad.name), bads.map { it.name })
+        assertEquals("{again", bad.readText())
+    }
+
+    @Test
+    fun aQuarantinedOutboxIsDeletedOnSignOutAndAccountSwitch() = runBlocking {
+        val client = ScriptedClient()
+        val store = open(client)
+        val bad = File(outboxFile().parentFile, "${outboxFile().name}.bad")
+        bad.writeText("ada's unsent reply")
+        store.discardOutbox()
+        assertFalse(bad.exists())
+
+        bad.writeText("ada's unsent reply")
+        sessionStore.signOut()
+        withTimeout(5_000) { while (bad.exists() || sessionStore.session.value.signedIn) delay(10) }
+        assertFalse(bad.exists())
+
+        bad.writeText("ada's unsent reply")
+        sessionStore.setSignedIn("ada", "token-a")
+        withTimeout(5_000) {
+            while (store.library.value.books.singleOrNull()?.id != BOOK) delay(10)
+        }
+        assertTrue(bad.exists())
+        sessionStore.setSignedIn("bea", "token-b")
+        withTimeout(5_000) { while (bad.exists()) delay(10) }
+        assertFalse(bad.exists())
+    }
+
+    @Test
+    fun aCorruptOutboxWhoseRenameFailsStartsEmpty() = runBlocking {
+        val path = outboxFile()
+        path.writeText("{not json")
+        val stuck = object : File(path.absolutePath) {
+            override fun renameTo(dest: File): Boolean = false
+        }
+        val client = ScriptedClient()
+        sessionStore.setBaseUrl(SERVER)
+        sessionStore.setSignedIn("ada", "token-a")
+        val outbox = HostedOutbox(
+            file = stuck,
+            sessions = sessionStore,
+            client = client,
+            social = { _, _ -> },
+            scope = scope,
+            waitForRetry = { delay(it) },
+        )
+        outbox.attach(sessionStore.session.value)
+        assertTrue(outbox.pending.value.isEmpty())
+        assertFalse(path.exists())
+        outbox.enqueue(reply("c1", "hi"))
         withTimeout(5_000) { while (client.attempts.isEmpty()) delay(10) }
         assertEquals(listOf("c1"), client.attempts.toList())
     }

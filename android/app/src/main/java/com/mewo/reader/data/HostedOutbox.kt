@@ -1,5 +1,6 @@
 package com.mewo.reader.data
 
+import android.util.Log
 import androidx.core.util.AtomicFile
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
@@ -435,6 +436,7 @@ internal class HostedOutbox(
                 loadedFor = account()
                 commit(emptyList(), emptyMap())
                 deleteFile()
+                deleteQuarantine()
                 active to id
             }
         }
@@ -474,6 +476,7 @@ internal class HostedOutbox(
                         cancelRetryLocked()
                         loadedFor = null
                         commit(emptyList(), emptyMap())
+                        deleteQuarantine()
                         false
                     }
                     stored != null && stored.account != next -> {
@@ -484,7 +487,14 @@ internal class HostedOutbox(
                         loadedFor = next
                         commit(emptyList(), emptyMap())
                         deleteFile()
+                        deleteQuarantine()
                         false
+                    }
+                    loadedFor != null && loadedFor != next -> {
+                        loadedFor = next
+                        deleteQuarantine()
+                        commit(stored?.ops.orEmpty())
+                        true
                     }
                     else -> {
                         loadedFor = next
@@ -825,6 +835,7 @@ internal class HostedOutbox(
         loadedFor = acct
         commit(emptyList(), emptyMap())
         deleteFile()
+        deleteQuarantine()
     }
 
     private fun reloadAfterDiskError() {
@@ -849,16 +860,35 @@ internal class HostedOutbox(
         _pending.value = next
     }
 
-    /** A file that will not parse is kept aside so the next launch can start empty. */
+    /**
+     * Keeps one copy of a file that will not parse. A failed rename deletes the
+     * corrupt file. If that fails too, launch still continues with an empty queue.
+     */
     private fun quarantine() {
         if (!file.exists()) return
         val bad = File(file.parentFile, "${file.name}.bad")
-        val dest = if (!bad.exists()) {
-            bad
-        } else {
-            File(file.parentFile, "${file.name}.${System.currentTimeMillis()}.bad")
+        if (bad.exists()) bad.delete()
+        if (file.renameTo(bad)) return
+        if (file.delete()) return
+        Log.e(OUTBOX_LOG_TAG, "Could not move aside a corrupt outbox.")
+    }
+
+    /** Sign-out and account switches drop every leftover corrupt copy. */
+    private fun deleteQuarantine() {
+        val dir = file.parentFile ?: return
+        val stem = file.name
+        val children = dir.listFiles() ?: return
+        var noted = false
+        for (child in children) {
+            if (!isOutboxQuarantine(child.name, stem)) continue
+            if (!noted) {
+                noteDisk()
+                noted = true
+            }
+            if (child.exists() && !child.delete()) {
+                Log.e(OUTBOX_LOG_TAG, "Could not delete ${child.name}.")
+            }
         }
-        if (!file.renameTo(dest)) throw IOException("Could not read the outbox.")
     }
 
     private fun account(): OutboxAccount? = sessions.session.value.outboxAccount()
@@ -941,6 +971,12 @@ internal class HostedOutbox(
 internal data class OutboxView(val ops: List<OutboxOp>, val progress: Map<String, Int>)
 
 internal const val HOSTED_OUTBOX_FILE = "hosted-outbox.json"
+
+private const val OUTBOX_LOG_TAG = "HostedOutbox"
+
+private fun isOutboxQuarantine(name: String, stem: String): Boolean =
+    name.startsWith("$stem.") && name.endsWith(".bad")
+
 internal const val OUTBOX_VERSION = 1
 internal const val OUTBOX_RETRY_MS = 30_000L
 internal const val OUTBOX_RETRY_MAX_MS = 5 * 60_000L
