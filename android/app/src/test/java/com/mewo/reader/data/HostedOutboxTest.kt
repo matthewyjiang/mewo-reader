@@ -67,10 +67,12 @@ class HostedOutboxTest {
 
     @Test
     fun losingAnOlderDefaultDoesNotGoOffline() {
+        val manager = context.getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
+        val before = Shadows.shadowOf(manager).networkCallbacks.toSet()
         val connectivity = HostedConnectivity(context)
         try {
-            val manager = context.getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
-            val callback = Shadows.shadowOf(manager).networkCallbacks.last()
+            // The shadow stores callbacks in a HashSet, so last() is not the one just registered.
+            val callback = (Shadows.shadowOf(manager).networkCallbacks - before).single()
             val older = ShadowNetwork.newInstance(1)
             val current = ShadowNetwork.newInstance(2)
             callback.onAvailable(current)
