@@ -825,6 +825,29 @@ class HostedOutboxTest {
     }
 
     @Test
+    fun anAccountSwitchDropsPlacesThePreviousAccountLanded() = runBlocking {
+        val client = ScriptedClient()
+        val store = open(client)
+        store.saveProgress(BOOK, 9)
+        withTimeout(5_000) { while (outboxFile().exists()) delay(10) }
+        assertEquals(9, store.library.value.books.single().progressIndex)
+        ShelfCache(File(context.filesDir, "hosted-shelves"), Json { ignoreUnknownKeys = true })
+            .write(SERVER, "bea", listOf(book(progress = 2)))
+
+        val before = store.library.value
+        client.libraryGate = CompletableDeferred()
+        sessionStore.setSignedIn("bea", "token-b")
+        try {
+            withTimeout(5_000) {
+                while (store.library.value === before || store.library.value.books.isEmpty()) delay(10)
+            }
+            assertEquals(2, store.library.value.books.single().progressIndex)
+        } finally {
+            client.libraryGate?.complete(Unit)
+        }
+    }
+
+    @Test
     fun aCorruptOutboxWhoseRenameFailsStartsEmpty() = runBlocking {
         val path = outboxFile()
         path.writeText("{not json")

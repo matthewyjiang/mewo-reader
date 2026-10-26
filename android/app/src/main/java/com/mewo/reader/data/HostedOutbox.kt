@@ -491,9 +491,13 @@ internal class HostedOutbox(
                         false
                     }
                     loadedFor != null && loadedFor != next -> {
+                        epoch += 1
+                        queued = false
+                        backoffUntil = 0L
+                        cancelRetryLocked()
                         loadedFor = next
+                        commit(stored?.ops.orEmpty(), emptyMap())
                         deleteQuarantine()
-                        commit(stored?.ops.orEmpty())
                         true
                     }
                     else -> {
