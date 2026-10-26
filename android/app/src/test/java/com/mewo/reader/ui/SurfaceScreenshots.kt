@@ -78,7 +78,11 @@ import com.mewo.reader.ui.reader.relativeTime
 import com.mewo.reader.ui.search.AccountHitRow
 import com.mewo.reader.ui.search.SearchField
 import com.mewo.reader.ui.library.AddBookAnchor
+import com.mewo.reader.data.CommentStatus
+import com.mewo.reader.data.PostComment
+import com.mewo.reader.ui.components.DiscardUnsentDialog
 import com.mewo.reader.ui.components.DownloadAllRow
+import com.mewo.reader.ui.reader.ThreadReply
 import com.mewo.reader.ui.library.BookPost
 import com.mewo.reader.ui.library.addBookOptions
 import com.mewo.reader.ui.library.EmptyTimeline
@@ -228,6 +232,45 @@ class SurfaceScreenshots {
             onConfirm = {},
             onDismiss = {},
         )
+    }
+
+    @Test
+    fun replySending() = shoot("reply-sending") {
+        Column(
+            Modifier
+                .fillMaxSize()
+                .background(MaterialTheme.colorScheme.background),
+        ) {
+            ThreadReply(
+                comment = pendingReply(CommentStatus.Sending),
+                onOpenProfile = { _, _ -> },
+                onRetry = {},
+                onDiscard = {},
+                onDeleteSent = null,
+            )
+        }
+    }
+
+    @Test
+    fun replyNotSent() = shoot("reply-not-sent") {
+        Column(
+            Modifier
+                .fillMaxSize()
+                .background(MaterialTheme.colorScheme.background),
+        ) {
+            ThreadReply(
+                comment = pendingReply(CommentStatus.Failed("That post is gone.")),
+                onOpenProfile = { _, _ -> },
+                onRetry = {},
+                onDiscard = {},
+                onDeleteSent = null,
+            )
+        }
+    }
+
+    @Test
+    fun discardUnsent() = shoot("discard-unsent") {
+        DiscardUnsentDialog(count = 2, onConfirm = {}, onDismiss = {})
     }
 
     @Test
@@ -1017,6 +1060,15 @@ private fun shelfBook(book: BookRecord, offline: OfflineState? = OfflineState.No
         thickness = 0.6.dp,
     )
 }
+
+private fun pendingReply(status: CommentStatus) = PostComment(
+    id = "c1",
+    username = "ada",
+    text = "This opening still lands.",
+    createdAt = COMMENT_AT,
+    mine = true,
+    status = status,
+)
 
 private val privateBook = book(
     id = "private",

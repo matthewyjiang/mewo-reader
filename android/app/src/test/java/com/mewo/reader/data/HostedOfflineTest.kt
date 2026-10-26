@@ -54,12 +54,14 @@ class HostedOfflineTest {
         hostedPostsDecodes.set(0)
         hostedDiskThreads.clear()
         hostedBeforeClaim = null
+        hostedAfterShelfShown = null
         context.filesDir.listFiles()?.forEach { it.deleteRecursively() }
         context.getSharedPreferences("mewo_hosted", 0).edit().clear().commit()
     }
 
     @After
     fun tearDown() {
+        hostedAfterShelfShown = null
         job.cancel()
         Dispatchers.resetMain()
     }
@@ -236,6 +238,7 @@ class HostedOfflineTest {
         val client = OfflineClient()
         client.blockPosts = true
         client.progress = 0.4f
+        client.delayProgress = true
         val store = open(client, listOf(book(A, importedAt = 3)))
         val running = scope.launch { store.setDownloaded(A, true) }
         withTimeout(5_000) {
@@ -422,6 +425,9 @@ class HostedOfflineTest {
         val client = OfflineClient()
         writePosts(B, "secret")
         writeSocial(B, json.encodeToString(SocialCache(likes = setOf("p"))))
+        // The shelf is visible before the refresh that published it has finished.
+        // A load() in that gap must fetch again, or a book that left the server stays.
+        hostedAfterShelfShown = { Thread.sleep(300) }
         val store = open(client, listOf(book(A, importedAt = 3), book(B, importedAt = 2)))
         client.shelf.clear()
         client.shelf.add(book(A, importedAt = 3))
@@ -885,6 +891,7 @@ class HostedOfflineTest {
         val indexEntered = AtomicInteger(0)
         val indexHold = CountDownLatch(1)
         var progress: Float? = 0.4f
+        var delayProgress = false
 
         override fun library(session: HostedSession): LibrarySnapshot {
             libraryError?.let { throw it }
@@ -904,6 +911,7 @@ class HostedOfflineTest {
             postsCalls.add(id)
             val now = entered.incrementAndGet()
             maxInFlight.updateAndGet { current -> maxOf(current, now) }
+            if (delayProgress) Thread.sleep(30)
             onProgress(progress)
             if (blockPosts || id in blockIds) {
                 try {

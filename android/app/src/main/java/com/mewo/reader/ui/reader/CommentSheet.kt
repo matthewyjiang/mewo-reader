@@ -12,6 +12,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.WindowInsetsSides
 import androidx.compose.foundation.layout.imePadding
@@ -38,18 +39,22 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.neverEqualPolicy
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.onFocusChanged
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
@@ -61,6 +66,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import com.mewo.reader.data.BookRecord
+import com.mewo.reader.data.CommentStatus
 import com.mewo.reader.data.FeedPost
 import com.mewo.reader.data.PostComment
 import com.mewo.reader.data.PostKind
@@ -91,7 +97,11 @@ fun CommentSheet(
     val meName = me.name
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     val scope = rememberCoroutineScope()
-    var comments by remember { mutableStateOf<List<PostComment>>(emptyList()) }
+    // Status is outside PostComment equality, so a Sending → Not sent update must still redraw.
+    var comments by remember {
+        mutableStateOf(emptyList<PostComment>(), neverEqualPolicy())
+    }
+    val revision by store.replyRevision.collectAsStateWithLifecycle()
     var draft by remember { mutableStateOf("") }
     var sending by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
@@ -120,12 +130,14 @@ fun CommentSheet(
         }
     }
 
-    LaunchedEffect(target.book.id, target.post.id) {
-        error = null
+    LaunchedEffect(target.book.id, target.post.id, revision) {
         runCatching { store.comments(target.book.id, target.post.id) }
-            .onSuccess { publishThread(it) }
+            .onSuccess {
+                error = null
+                publishThread(it)
+            }
             .onFailure { err ->
-                error = err.message ?: "Could not load replies."
+                if (comments.isEmpty()) error = err.message ?: "Could not load replies."
             }
     }
 
@@ -169,18 +181,22 @@ fun CommentSheet(
                         connectDown = true,
                     )
                 }
-                items(comments, key = { it.id }) { comment ->
-                    val identity = commenterIdentity(comment)
-                    ThreadPost(
-                        name = identity.name,
-                        handle = identity.handle,
-                        meta = relativeTime(comment.createdAt),
-                        text = comment.text,
-                        heading = false,
-                        cover = null,
-                        connectDown = true,
+                items(comments, key = { "${it.id}-${replyStatusKey(it.status)}" }) { comment ->
+                    ThreadReply(
+                        comment = comment,
                         onOpenProfile = onOpenProfile,
-                        onDelete = if (comment.mine) {
+                        onRetry = {
+                            scope.launch { runCatching { store.retryReply(comment.id) } }
+                        },
+                        onDiscard = {
+                            scope.launch {
+                                runCatching { store.discardReply(comment.id) }
+                                    .onFailure { err ->
+                                        error = err.message ?: "Could not delete that reply."
+                                    }
+                            }
+                        },
+                        onDeleteSent = if (comment.mine && comment.status is CommentStatus.Sent) {
                             {
                                 scope.launch {
                                     runCatching {
@@ -276,6 +292,67 @@ private fun ReplyPill(
 }
 
 @Composable
+internal fun ThreadReply(
+    comment: PostComment,
+    onOpenProfile: ((handle: String, name: String) -> Unit)?,
+    onRetry: () -> Unit,
+    onDiscard: () -> Unit,
+    onDeleteSent: (() -> Unit)?,
+) {
+    val identity = commenterIdentity(comment)
+    val failed = comment.status is CommentStatus.Failed
+    ThreadPost(
+        name = identity.name,
+        handle = identity.handle,
+        meta = when (comment.status) {
+            CommentStatus.Sent -> relativeTime(comment.createdAt)
+            CommentStatus.Sending -> "Sending…"
+            is CommentStatus.Failed -> "Not sent"
+        },
+        metaColor = if (failed) {
+            MaterialTheme.colorScheme.error
+        } else {
+            MaterialTheme.colorScheme.onSurfaceVariant
+        },
+        text = comment.text,
+        heading = false,
+        cover = null,
+        connectDown = true,
+        onOpenProfile = onOpenProfile,
+        onDelete = onDeleteSent,
+        underName = if (failed) {
+            {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    TextButton(
+                        onClick = onRetry,
+                        contentPadding = PaddingValues(horizontal = 0.dp, vertical = 0.dp),
+                        modifier = Modifier.heightIn(min = 32.dp),
+                    ) {
+                        Text("Retry", color = MaterialTheme.colorScheme.primary)
+                    }
+                    Spacer(Modifier.width(12.dp))
+                    TextButton(
+                        onClick = onDiscard,
+                        contentPadding = PaddingValues(horizontal = 0.dp, vertical = 0.dp),
+                        modifier = Modifier.heightIn(min = 32.dp),
+                    ) {
+                        Text("Delete", color = MaterialTheme.colorScheme.primary)
+                    }
+                }
+            }
+        } else {
+            null
+        },
+    )
+}
+
+private fun replyStatusKey(status: CommentStatus): String = when (status) {
+    CommentStatus.Sent -> "sent"
+    CommentStatus.Sending -> "sending"
+    is CommentStatus.Failed -> "failed"
+}
+
+@Composable
 fun ThreadPost(
     name: String,
     handle: String,
@@ -288,6 +365,8 @@ fun ThreadPost(
     onOpen: (() -> Unit)? = null,
     onDelete: (() -> Unit)? = null,
     endPadding: Dp = 4.dp,
+    metaColor: Color = Color.Unspecified,
+    underName: (@Composable () -> Unit)? = null,
 ) {
     val readerType = LocalReaderFont.current.scale
     var menu by remember { mutableStateOf(false) }
@@ -351,7 +430,11 @@ fun ThreadPost(
                 Text(
                     text = "@$handle · $meta",
                     style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    color = if (metaColor == Color.Unspecified) {
+                        MaterialTheme.colorScheme.onSurfaceVariant
+                    } else {
+                        metaColor
+                    },
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                     modifier = Modifier
@@ -415,6 +498,7 @@ fun ThreadPost(
                     Modifier
                 },
             )
+            underName?.invoke()
         }
     }
 }

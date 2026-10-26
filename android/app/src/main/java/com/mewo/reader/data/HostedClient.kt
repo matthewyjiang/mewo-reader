@@ -209,11 +209,12 @@ open class HostedClient(
         return set.ids
     }
 
-    fun toggleLike(session: HostedSession, id: String, postId: String): Set<String> {
-        val req = request(session.api("/v1/books/$id/likes/$postId"), session.token)
-            .post(ByteArray(0).toRequestBody(null))
+    /** Idempotent like. PUT sets it, DELETE clears it. */
+    open fun setLike(session: HostedSession, id: String, postId: String, on: Boolean): Set<String> {
+        val call = request(session.api("/v1/books/$id/likes/$postId"), session.token)
+            .method(if (on) "PUT" else "DELETE", ByteArray(0).toRequestBody(null))
             .build()
-        val set: LikeSet = http.newCall(req).execute().use { it.decode() }
+        val set: LikeSet = http.newCall(call).execute().use { it.decode() }
         return set.ids
     }
 
@@ -226,14 +227,17 @@ open class HostedClient(
         return thread.comments
     }
 
-    fun addComment(
+    open fun addComment(
         session: HostedSession,
         id: String,
         postId: String,
         text: String,
+        commentId: String,
+        `private`: Boolean,
     ): List<PostComment> {
+        val body = NewComment(text = text, id = commentId, `private` = `private`)
         val req = request(session.api("/v1/books/$id/comments/$postId"), session.token)
-            .post(json.encodeToString(NewComment(text)).toRequestBody(JSON))
+            .post(json.encodeToString(body).toRequestBody(JSON))
             .build()
         val thread: CommentThread = http.newCall(req).execute().use { it.decode() }
         return thread.comments
@@ -326,7 +330,7 @@ open class HostedClient(
         return "/v1/users/${android.net.Uri.encode(username)}/$suffix$cursorPart"
     }
 
-    fun deleteComment(
+    open fun deleteComment(
         session: HostedSession,
         id: String,
         postId: String,
