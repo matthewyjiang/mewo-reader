@@ -26,6 +26,22 @@ protocol LibraryStore: AnyObject {
     func likedPosts() async throws -> [PostHit]
     func profileReplies(handle: String) async throws -> [ProfileReply]
     func coverFile(id: String) -> URL?
+
+    /// Hosted only. Empty on the local backend (local books are already on the phone).
+    var offline: [String: OfflineState] { get }
+    var offlineSummary: OfflineSummary { get }
+    /// on = fetch posts, cover and social now; off = delete posts.json and social.json. Idempotent.
+    func setDownloaded(id: String, on: Bool) async
+    /// Downloads every shelf book that is not downloaded yet, two at a time, in shelf order.
+    /// Tap again while that run is going and it cancels. One shot, not a saved setting.
+    func downloadAll() async
+}
+
+extension LibraryStore {
+    var offline: [String: OfflineState] { [:] }
+    var offlineSummary: OfflineSummary { OfflineSummary(downloaded: 0, total: 0, running: false) }
+    func setDownloaded(id: String, on: Bool) async {}
+    func downloadAll() async {}
 }
 
 @MainActor
@@ -78,6 +94,10 @@ final class SwitchingLibraryStore: LibraryStore {
         try await active.profileReplies(handle: handle)
     }
     func coverFile(id: String) -> URL? { active.coverFile(id: id) }
+    var offline: [String: OfflineState] { active.offline }
+    var offlineSummary: OfflineSummary { active.offlineSummary }
+    func setDownloaded(id: String, on: Bool) async { await active.setDownloaded(id: id, on: on) }
+    func downloadAll() async { await active.downloadAll() }
 }
 
 /// One book and the cached feed file a search reads for it. Stores build these

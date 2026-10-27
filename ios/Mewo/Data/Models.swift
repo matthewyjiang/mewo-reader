@@ -183,6 +183,65 @@ struct NewComment: Codable, Equatable, Sendable {
     var text: String
 }
 
+/// Per-book offline availability. Downloaded and notDownloaded come from files.
+enum OfflineState: Equatable, Sendable {
+    case notDownloaded
+    /// Nil until the server sends Content-Length.
+    case downloading(Double?)
+    case downloaded
+    case failed(String)
+}
+
+/// Shelf-wide status for the Settings row. Derived, never stored.
+struct OfflineSummary: Equatable, Sendable {
+    var downloaded: Int
+    var total: Int
+    var running: Bool
+}
+
+let socialCacheVersion = 1
+
+/// Last social state the server returned for a book. Read only when the network fails.
+struct SocialCache: Codable, Equatable, Sendable {
+    var version: Int = socialCacheVersion
+    var likes: Set<String> = []
+    var index = CommentIndex()
+    /// Threads opened for this book, by post id. Not prefetched.
+    var threads: [String: [PostComment]] = [:]
+
+    init(
+        version: Int = socialCacheVersion,
+        likes: Set<String> = [],
+        index: CommentIndex = CommentIndex(),
+        threads: [String: [PostComment]] = [:]
+    ) {
+        self.version = version
+        self.likes = likes
+        self.index = index
+        self.threads = threads
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case version, likes, index, threads
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        version = try container.decodeIfPresent(Int.self, forKey: .version) ?? socialCacheVersion
+        likes = try container.decodeIfPresent(Set<String>.self, forKey: .likes) ?? []
+        index = try container.decodeIfPresent(CommentIndex.self, forKey: .index) ?? CommentIndex()
+        threads = try container.decodeIfPresent([String: [PostComment]].self, forKey: .threads) ?? [:]
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(version, forKey: .version)
+        try container.encode(likes, forKey: .likes)
+        try container.encode(index, forKey: .index)
+        try container.encode(threads, forKey: .threads)
+    }
+}
+
 struct LocalCommentFile: Codable, Equatable, Sendable {
     var posts: [String: [LocalComment]] = [:]
 }

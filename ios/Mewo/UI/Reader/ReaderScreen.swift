@@ -10,13 +10,19 @@ final class ReaderViewModel {
     var startIndex = 0
     var loading = true
     var error: String?
-    private let env: AppEnvironment
+    private let library: LibraryStore
     private let bookId: String
     private let focusPostId: String?
     private let reposts = RepostOverlay()
 
     init(env: AppEnvironment, bookId: String, focusPostId: String?) {
-        self.env = env
+        self.library = env.library
+        self.bookId = bookId
+        self.focusPostId = focusPostId
+    }
+
+    init(library: LibraryStore, bookId: String, focusPostId: String? = nil) {
+        self.library = library
         self.bookId = bookId
         self.focusPostId = focusPostId
     }
@@ -25,16 +31,17 @@ final class ReaderViewModel {
         loading = true
         error = nil
         do {
-            var found = env.library.book(id: bookId)
+            var found = library.book(id: bookId)
             if found == nil {
-                try await env.library.load()
-                found = env.library.book(id: bookId)
+                try await library.load()
+                found = library.book(id: bookId)
             }
             guard found != nil else { throw NSError(domain: "mewo", code: 11, userInfo: [NSLocalizedDescriptionKey: "That book is gone."]) }
-            let posts = try await env.library.feed(id: bookId)
-            let book = env.library.book(id: bookId) ?? found!
-            let likes = try await env.library.likes(id: bookId)
-            let comments = try await env.library.commentIndex(id: bookId)
+            let posts = try await library.feed(id: bookId)
+            let book = library.book(id: bookId) ?? found!
+            // Likes and replies are not what makes the book readable.
+            let likes = try await socialOrNil { try await library.likes(id: bookId) } ?? []
+            let comments = try await socialOrNil { try await library.commentIndex(id: bookId) } ?? CommentIndex()
             let focus = focusPostId.flatMap { id in posts.firstIndex(where: { $0.id == id }) }
             let start = focus ?? book.progressIndex.clamped(to: 0...max(0, posts.count - 1))
             self.book = book
@@ -43,6 +50,10 @@ final class ReaderViewModel {
             self.comments = reposts.replay(over: comments)
             self.startIndex = start
             self.loading = false
+        } catch is CancellationError {
+            return
+        } catch let url as URLError where url.code == .cancelled {
+            return
         } catch {
             loading = false
             self.error = error.localizedDescription
@@ -50,7 +61,21 @@ final class ReaderViewModel {
     }
 
     func toggleLike(_ postId: String) {
-        Task { likes = (try? await env.library.toggleLike(id: bookId, postId: postId)) ?? likes }
+        let before = likes
+        if likes.contains(postId) {
+            likes.remove(postId)
+        } else {
+            likes.insert(postId)
+        }
+        Task {
+            do {
+                likes = try await library.toggleLike(id: bookId, postId: postId)
+            } catch is CancellationError {
+                likes = revertLike(likes, postId: postId, before: before)
+            } catch {
+                likes = revertLike(likes, postId: postId, before: before)
+            }
+        }
     }
 
     func toggleRepost(_ postId: String) {
@@ -58,7 +83,7 @@ final class ReaderViewModel {
             bookId: bookId,
             postId: postId,
             read: { self.comments },
-            library: env.library,
+            library: library,
             publish: { self.comments = $0 },
             overlay: reposts
         )
@@ -69,8 +94,39 @@ final class ReaderViewModel {
     }
 
     func saveProgress(_ index: Int) {
-        Task { try? await env.library.saveProgress(id: bookId, index: index) }
+        Task {
+            do {
+                try await library.saveProgress(id: bookId, index: index)
+            } catch is CancellationError {
+                return
+            } catch {
+                // The reader stays on this post. The shelf percent is whatever the server kept.
+            }
+        }
     }
+
+    private func socialOrNil<T>(_ block: () async throws -> T) async throws -> T? {
+        do {
+            return try await block()
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch let url as URLError where url.code == .cancelled {
+            throw CancellationError()
+        } catch {
+            return nil
+        }
+    }
+}
+
+/// Puts one post back. A second like that failed in the meantime stays where it is.
+func revertLike(_ likes: Set<String>, postId: String, before: Set<String>) -> Set<String> {
+    var next = likes
+    if before.contains(postId) {
+        next.insert(postId)
+    } else {
+        next.remove(postId)
+    }
+    return next
 }
 
 struct ReaderScreen: View {

@@ -24,6 +24,19 @@ final class HostedLibraryStore: LibraryStore {
     private var shareTokens: [String: UUID] = [:]
     private(set) var books: [BookRecord] = []
     private(set) var loadState: LibraryLoad = .loading
+    private(set) var offline: [String: OfflineState] = [:]
+    private(set) var offlineSummary = OfflineSummary(downloaded: 0, total: 0, running: false)
+    /// In-flight download marks. Downloaded and notDownloaded are derived in `publishOffline`.
+    private var live: [String: OfflineState] = [:]
+    private var liveGeneration: [String: Int] = [:]
+    private var onDisk: Set<String> = []
+    private var stalePosts: Set<String> = []
+    private var bookJobs: [String: DownloadJob] = [:]
+    private var feedTasks: [UUID: Task<[FeedPost], Error>] = [:]
+    private var batch: DownloadJob?
+    private var maintenance: Task<Void, Never>?
+    /// Token check and hosted-file writes share this lock with the sign-out wipe.
+    private let files = HostedFileGate()
 
     init(
         opener: EpubOpener,
@@ -38,6 +51,7 @@ final class HostedLibraryStore: LibraryStore {
         self.root = files.appendingPathComponent("hosted", isDirectory: true)
         self.shelfCache = ShelfCache(directory: files.appendingPathComponent("hosted-shelves", isDirectory: true))
         try? FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        self.files.setToken(sessions.session.token)
         sessions.onSessionChange = { [weak self] previous, next in
             self?.sessionChanged(from: previous, to: next)
         }
@@ -97,11 +111,14 @@ final class HostedLibraryStore: LibraryStore {
         guard sessions.session.token == session.token else { return }
         if let cached, books.isEmpty {
             books = cached
+            files.setShelf(Set(cached.map(\.id)))
             loadState = reduceLibraryLoad(loadState, .cached(cached))
         }
         loadState = reduceLibraryLoad(loadState, .refreshStarted)
         importedWhileRefreshing.removeAll()
         removedWhileRefreshing.removeAll()
+        // A failed refresh must still mark books whose posts.json is already on disk.
+        await rescan(books)
         let start = epoch
         do {
             let remote = try await fetchLibrary(session)
@@ -119,7 +136,7 @@ final class HostedLibraryStore: LibraryStore {
                 merged = (serverBooks + extras).sorted { $0.importedAt > $1.importedAt }
             }
             let shown = keepingInFlightShare(merged)
-            publish(shown, .refreshSucceeded(shown), owner: session)
+            await publish(shown, .refreshSucceeded(shown), owner: session)
         } catch is CancellationError {
             throw CancellationError()
         } catch let url as URLError where url.code == .cancelled {
@@ -157,27 +174,48 @@ final class HostedLibraryStore: LibraryStore {
 
     /// Any token change drops the shelf that was on screen before the next load paints.
     /// Signing in with nothing saved stays `.loading`, so the empty copy does not flash first.
+    /// File wipes wait until in-flight downloads and reader loads have stopped.
     private func sessionChanged(from previous: HostedSession, to next: HostedSession) {
+        files.setToken(next.token)
         let urlChanged = previous.normalizedUrl() != next.normalizedUrl()
         let userChanged = previous.username != next.username
         let signedOut = previous.signedIn && !next.signedIn
         let tokenChanged = previous.token != next.token
-        if tokenChanged || (previous.signedIn && (urlChanged || userChanged)) {
+        let reset = tokenChanged || (previous.signedIn && (urlChanged || userChanged))
+        if reset {
             flight?.task.cancel()
-            if previous.signedIn && (signedOut || urlChanged || userChanged) {
-                clearShelf(previous)
-            }
-            if signedOut || (previous.signedIn && urlChanged) {
-                wipeHostedFiles()
-            }
             books = []
+            live.removeAll()
+            onDisk.removeAll()
+            stalePosts.removeAll()
+            publishOffline()
             if next.signedIn {
                 restoreCachedShelf()
             } else {
                 loadState = .loaded(books: [], refreshing: false)
+                files.setShelf([])
             }
         }
-        Task { try? await self.load() }
+        let dropShelf = previous.signedIn && (signedOut || urlChanged || userChanged)
+        let wipe = signedOut || (previous.signedIn && urlChanged)
+        let clearSocial = previous.signedIn && userChanged && !wipe
+        let prior = maintenance
+        let task = Task { @MainActor in
+            await prior?.value
+            if dropShelf {
+                await self.clearShelf(previous)
+            }
+            if wipe || clearSocial {
+                await self.cancelTransfers()
+            }
+            if wipe {
+                await self.wipeHostedFiles()
+            } else if clearSocial {
+                await self.clearSocialFiles()
+            }
+            try? await self.load()
+        }
+        maintenance = task
     }
 
     private func restoreCachedShelf() {
@@ -188,21 +226,30 @@ final class HostedLibraryStore: LibraryStore {
         }
         if let cached = shelfCache.read(serverUrl: url, username: user) {
             books = cached
+            files.setShelf(Set(cached.map(\.id)))
             loadState = .loaded(books: cached, refreshing: true)
         } else {
             books = []
+            files.setShelf([])
             loadState = .loading
         }
     }
 
-    private func clearShelf(_ session: HostedSession) {
+    private func clearShelf(_ session: HostedSession) async {
         guard let url = session.normalizedUrl(), let user = session.username else { return }
-        shelfCache.clear(serverUrl: url, username: user)
+        let cache = shelfCache
+        await offMain { cache.clear(serverUrl: url, username: user) }
     }
 
-    private func wipeHostedFiles() {
-        try? FileManager.default.removeItem(at: root)
-        try? FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    private func wipeHostedFiles() async {
+        let root = self.root
+        let gate = files
+        await offMain {
+            gate.sync { _, _ in
+                try? FileManager.default.removeItem(at: root)
+                try? FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+            }
+        }
     }
 
     func importFromFile(_ file: URL) async throws -> BookRecord {
@@ -234,12 +281,21 @@ final class HostedLibraryStore: LibraryStore {
     func delete(id: String) async throws {
         let session = try requireSession()
         let safe = try requireBookId(id)
+        if let job = bookJobs[safe] {
+            job.cancel()
+            await waitUntilDone(job.task)
+        }
         try await expireOn401(session) { try await client.delete(session, id: safe) }
-        try? FileManager.default.removeItem(at: bookDir(safe))
+        let dir = bookDir(safe)
+        await offMain { try? FileManager.default.removeItem(at: dir) }
+        onDisk.remove(safe)
+        stalePosts.remove(safe)
+        live[safe] = nil
+        publishOffline()
         epoch += 1
         removedWhileRefreshing.insert(safe)
         let next = books.filter { $0.id != safe }
-        publish(next, .booksReplaced(next), owner: session)
+        await publish(next, .booksReplaced(next), owner: session)
     }
 
     func book(id: String) -> BookRecord? { books.first { $0.id == id } }
@@ -260,22 +316,21 @@ final class HostedLibraryStore: LibraryStore {
                 userInfo: [NSLocalizedDescriptionKey: "That book is not on your shelf."]
             )
         }
-        if let cached = cachedFeed(safe) { return cached }
-        let posts = try await expireOn401(session) { try await client.posts(session, id: safe) }
-        guard sessions.session.token == session.token else { return posts }
-        let dir = bookDir(safe)
-        // The posts already came back. A full disk, or a file where this directory should be, stays a cache miss.
-        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        // Builds before server parsing kept the EPUB and a Readium feed here.
-        try? FileManager.default.removeItem(at: dir.appendingPathComponent("book.epub"))
-        try? FileManager.default.removeItem(at: dir.appendingPathComponent("feed.json"))
-        try? JSONFiles.write(FeedCache(version: hostedPostsCacheVersion, posts: posts), to: dir.appendingPathComponent(hostedPostsCache))
-        // The server set postCount when it parsed; mirror it so Finished works before the next load.
-        if var record = books.first(where: { $0.id == safe }), record.postCount != posts.count {
-            record.postCount = posts.count
-            replaceBook(record, owner: session)
+        if let cached = await readCached(safe) { return cached }
+        let key = UUID()
+        let task = Task { @MainActor () throws -> [FeedPost] in
+            let posts = try await self.expireOn401(session) { try await self.client.posts(session, id: safe) }
+            try Task.checkCancellation()
+            _ = await self.writeCachedPosts(safe, posts: posts, session: session, onShelf: false)
+            return posts
         }
-        return posts
+        feedTasks[key] = task
+        defer { feedTasks[key] = nil }
+        return try await withTaskCancellationHandler {
+            try await task.value
+        } onCancel: {
+            task.cancel()
+        }
     }
 
     func setShared(id: String, shared: Bool) async throws {
@@ -302,7 +357,7 @@ final class HostedLibraryStore: LibraryStore {
             if book.shared != toggle.displayed {
                 var next = book
                 next.shared = toggle.displayed
-                replaceBook(next, owner: session)
+                await replaceBook(next, owner: session)
             }
         }
 
@@ -317,9 +372,9 @@ final class HostedLibraryStore: LibraryStore {
                 let updated = try await self.expireOn401(session) {
                     try await self.client.patch(session, id: safe, body: PatchBook(shared: shared))
                 }
-                self.finishShare(id: safe, requested: shared, server: updated, failed: false, owner: session)
+                await self.finishShare(id: safe, requested: shared, server: updated, failed: false, owner: session)
             } catch {
-                self.finishShare(id: safe, requested: shared, server: nil, failed: true, owner: session)
+                await self.finishShare(id: safe, requested: shared, server: nil, failed: true, owner: session)
                 throw error
             }
         }
@@ -345,13 +400,24 @@ final class HostedLibraryStore: LibraryStore {
         if shareTails[safe] != nil, let shown = books.first(where: { $0.id == safe })?.shared {
             record.shared = shown
         }
-        replaceBook(record, owner: session)
+        await replaceBook(record, owner: session)
     }
 
     func likes(id: String) async throws -> Set<String> {
         let safe = try requireBookId(id)
         let session = try requireSession()
-        return try await expireOn401(session) { try await client.likes(session, id: safe) }
+        do {
+            let likes = try await expireOn401(session) { try await client.likes(session, id: safe) }
+            await updateSocial(safe, session: session) { cache in
+                var next = cache
+                next.likes = likes
+                return next
+            }
+            return likes
+        } catch let error as URLError {
+            if let cached = await readSocial(safe) { return cached.likes }
+            throw error
+        }
     }
 
     func toggleLike(id: String, postId: String) async throws -> Set<String> {
@@ -371,13 +437,58 @@ final class HostedLibraryStore: LibraryStore {
     func commentIndex(id: String) async throws -> CommentIndex {
         let session = try requireSession()
         let safe = try requireBookId(id)
-        return try await expireOn401(session) { try await client.commentIndex(session, id: safe) }
+        do {
+            let index = try await expireOn401(session) { try await client.commentIndex(session, id: safe) }
+            await updateSocial(safe, session: session) { cache in
+                var next = cache
+                next.index = index
+                return next
+            }
+            return index
+        } catch let error as URLError {
+            if let cached = await readSocial(safe) { return cached.index }
+            throw error
+        }
     }
 
     func comments(id: String, postId: String) async throws -> [PostComment] {
         let session = try requireSession()
         let safe = try requireBookId(id)
-        return try await expireOn401(session) { try await client.comments(session, id: safe, postId: postId) }
+        do {
+            let thread = try await expireOn401(session) { try await client.comments(session, id: safe, postId: postId) }
+            await updateSocial(safe, session: session) { cache in
+                var next = cache
+                next.threads[postId] = thread
+                next.index = next.index.afterThread(postId: postId, comments: thread)
+                return next
+            }
+            return thread
+        } catch let error as URLError {
+            if let thread = await readSocial(safe)?.threads[postId] { return thread }
+            throw NSError(domain: "mewo", code: 13, userInfo: [NSLocalizedDescriptionKey: "You're offline."])
+        }
+    }
+
+    func setDownloaded(id: String, on: Bool) async {
+        await changeDownload(id, on: on, fromBatch: false)
+    }
+
+    /// Downloads every shelf book that is not downloaded yet, two at a time, in shelf order.
+    /// A second call while that run is going cancels it.
+    func downloadAll() async {
+        if let current = batch, !current.isFinished {
+            current.cancel()
+            await waitUntilDone(current.task)
+            return
+        }
+        let pending = PreparedDownload { job in
+            await self.runDownloadAll(owner: job)
+        }
+        batch = pending.job
+        publishOffline()
+        pending.start()
+        // The caller's task dies with the screen. The batch does not.
+        _ = await cancelledWhileJoining(pending.job.task)
     }
 
     func addComment(id: String, postId: String, text: String) async throws -> [PostComment] {
@@ -410,7 +521,7 @@ final class HostedLibraryStore: LibraryStore {
         for book in books {
             let ids = try await expireOn401(session) { try await client.likes(session, id: book.id) }
             if ids.isEmpty { continue }
-            let posts = cachedFeed(book.id) ?? []
+            let posts = await readCached(book.id) ?? []
             hits.append(contentsOf: posts.filter { ids.contains($0.id) }.map { PostHit(book: book, post: $0) })
         }
         return hits
@@ -426,7 +537,7 @@ final class HostedLibraryStore: LibraryStore {
             guard let book = byId[row.bookId] else { continue }
             if feeds[book.id] == nil {
                 let list: [FeedPost]
-                if let cached = cachedFeed(book.id) {
+                if let cached = await readCached(book.id) {
                     list = cached
                 } else {
                     list = (try? await feed(id: book.id)) ?? []
@@ -464,32 +575,29 @@ final class HostedLibraryStore: LibraryStore {
             try? FileManager.default.copyItem(at: cover, to: dest.appendingPathComponent("cover.jpg"))
         }
         record.id = safe
-        replaceBook(record, owner: session)
+        await replaceBook(record, owner: session)
         return record
     }
 
-    private func cachedFeed(_ id: String) -> [FeedPost]? {
+    private func readCached(_ id: String) async -> [FeedPost]? {
         guard let safe = safeBookId(id) else { return nil }
-        let cacheFile = bookDir(safe).appendingPathComponent(hostedPostsCache)
-        guard let cache = JSONFiles.read(FeedCache.self, from: cacheFile), cache.version == hostedPostsCacheVersion else {
-            return nil
-        }
-        return cache.posts
+        let root = self.root
+        return await offMain { readHostedPosts(root: root, id: safe)?.posts }
     }
 
-    private func finishShare(id: String, requested: Bool, server: BookRecord?, failed: Bool, owner: HostedSession) {
+    private func finishShare(id: String, requested: Bool, server: BookRecord?, failed: Bool, owner: HostedSession) async {
         guard let current = books.first(where: { $0.id == id }) else { return }
         if failed {
             if let confirmed = shareConfirmed[id],
                let rolled = applyShareFailure(book: current, requested: requested, confirmed: confirmed) {
-                replaceBook(rolled, owner: owner)
+                await replaceBook(rolled, owner: owner)
             }
             return
         }
         guard let server else { return }
         shareConfirmed[id] = server.shared
         if let merged = applyShareSuccess(book: current, requested: requested, server: server) {
-            replaceBook(merged, owner: owner)
+            await replaceBook(merged, owner: owner)
         }
     }
 
@@ -513,7 +621,7 @@ final class HostedLibraryStore: LibraryStore {
         }
     }
 
-    private func replaceBook(_ record: BookRecord, owner: HostedSession? = nil) {
+    private func replaceBook(_ record: BookRecord, owner: HostedSession? = nil) async {
         let owner = owner ?? sessions.session
         guard sessions.session.token == owner.token else { return }
         epoch += 1
@@ -521,40 +629,62 @@ final class HostedLibraryStore: LibraryStore {
             importedWhileRefreshing.insert(record.id)
         }
         let next = (books.filter { $0.id != record.id } + [record]).sorted { $0.importedAt > $1.importedAt }
-        publish(next, .booksReplaced(next), owner: owner)
+        await publish(next, .booksReplaced(next), owner: owner)
     }
 
     /// Updates the on-screen shelf only while `owner` is still signed in. A cache write failure stays a success.
-    private func publish(_ next: [BookRecord], _ event: LibraryEvent, owner: HostedSession) {
+    private func publish(_ next: [BookRecord], _ event: LibraryEvent, owner: HostedSession) async {
         let stillHere = sessions.session.token == owner.token
+        var dropped: [String] = []
         if stillHere {
             let previous = books
             books = next
+            files.setShelf(Set(next.map(\.id)))
             loadState = reduceLibraryLoad(loadState, event)
             if case .refreshSucceeded = event {
-                forgetPosts(previous: previous, next: next)
+                let kept = Set(next.map(\.id))
+                dropped = previous.compactMap { book in
+                    guard kept.contains(book.id) == false else { return nil }
+                    return safeBookId(book.id)
+                }
             }
         }
-        guard stillHere, owner.signedIn, let url = owner.normalizedUrl(), let user = owner.username, !user.isEmpty else {
-            return
-        }
-        switch event {
-        case .booksReplaced, .refreshSucceeded:
-            do {
-                try shelfCache.write(serverUrl: url, username: user, books: next)
-            } catch {
-                // A full disk must not turn a fetched shelf into an error.
+        if stillHere, owner.signedIn, let url = owner.normalizedUrl(), let user = owner.username, !user.isEmpty {
+            switch event {
+            case .booksReplaced, .refreshSucceeded:
+                let cache = shelfCache
+                let snapshot = next
+                await offMain {
+                    // A full disk must not turn a fetched shelf into an error.
+                    try? cache.write(serverUrl: url, username: user, books: snapshot)
+                }
+            default:
+                break
             }
-        default:
-            break
+        }
+        if !dropped.isEmpty {
+            await forgetFiles(dropped)
+            for id in dropped {
+                onDisk.remove(id)
+                stalePosts.remove(id)
+            }
+        }
+        if stillHere {
+            await rescan(books)
         }
     }
 
-    private func forgetPosts(previous: [BookRecord], next: [BookRecord]) {
-        let kept = Set(next.map(\.id))
-        for book in previous where kept.contains(book.id) == false {
-            guard let safe = safeBookId(book.id) else { continue }
-            try? FileManager.default.removeItem(at: bookDir(safe).appendingPathComponent(hostedPostsCache))
+    private func forgetFiles(_ ids: [String]) async {
+        let root = self.root
+        let gate = files
+        await offMain {
+            gate.sync { _, _ in
+                for id in ids {
+                    let dir = root.appendingPathComponent(id, isDirectory: true)
+                    try? FileManager.default.removeItem(at: dir.appendingPathComponent(hostedPostsCache))
+                    try? FileManager.default.removeItem(at: dir.appendingPathComponent(hostedSocialFile))
+                }
+            }
         }
     }
 
@@ -573,6 +703,643 @@ final class HostedLibraryStore: LibraryStore {
 
     private func bookDir(_ id: String) -> URL {
         root.appendingPathComponent(id, isDirectory: true)
+    }
+
+    /// The caller's task dies on navigation. The download does not.
+    /// A Download all worker owns the job it started, and cancels that job if the worker
+    /// itself is cancelled. A row download the pass only joined keeps running.
+    private func changeDownload(_ id: String, on: Bool, fromBatch: Bool) async {
+        guard let safe = safeBookId(id) else { return }
+        if !on {
+            if let job = bookJobs[safe] {
+                job.cancel()
+                await waitUntilDone(job.task)
+            }
+            await removeDownloadFiles(safe)
+            onDisk.remove(safe)
+            stalePosts.remove(safe)
+            live[safe] = nil
+            publishOffline()
+            return
+        }
+        if await postsAreCurrent(safe) {
+            onDisk.insert(safe)
+            if case .failed = live[safe] { live[safe] = nil }
+            publishOffline()
+            return
+        }
+        if fromBatch, let beforeClaim = HostedOfflineProbe.beforeClaim {
+            await beforeClaim()
+        }
+        let claim = await claimDownload(safe)
+        let cancelled = await cancelledWhileJoining(claim.job.task)
+        if cancelled && fromBatch && claim.started {
+            claim.job.cancel()
+            await waitUntilDone(claim.job.task)
+        }
+    }
+
+    /// One live download per book. A second caller joins that job.
+    /// A job that is cancelled or already finished is awaited, then the slot is claimed again.
+    private func claimDownload(_ id: String) async -> DownloadClaim {
+        while true {
+            if let existing = bookJobs[id] {
+                if existing.task.isCancelled || existing.isFinished {
+                    await waitUntilDone(existing.task)
+                    if bookJobs[id] === existing {
+                        bookJobs[id] = nil
+                    }
+                    continue
+                }
+                return DownloadClaim(job: existing, started: false)
+            }
+            let pending = PreparedDownload { job in
+                defer {
+                    job.markFinished()
+                    if self.bookJobs[id] === job {
+                        self.bookJobs[id] = nil
+                    }
+                }
+                guard !Task.isCancelled else { return }
+                await self.downloadBody(id)
+            }
+            bookJobs[id] = pending.job
+            pending.start()
+            return DownloadClaim(job: pending.job, started: true)
+        }
+    }
+
+    private func runDownloadAll(owner: DownloadJob) async {
+        defer {
+            owner.markFinished()
+            if batch === owner { batch = nil }
+            publishOffline()
+        }
+        publishOffline()
+        let ids = books.map(\.id)
+        let pending = await idsNeedingDownload(ids)
+        await withTaskGroup(of: Void.self) { group in
+            var queue = pending
+            var running = 0
+            func fill() {
+                while running < 2, !queue.isEmpty, !Task.isCancelled {
+                    let next = queue.removeFirst()
+                    running += 1
+                    group.addTask { @MainActor in
+                        await self.changeDownload(next, on: true, fromBatch: true)
+                    }
+                }
+            }
+            fill()
+            while !Task.isCancelled, await group.next() != nil {
+                running -= 1
+                fill()
+            }
+        }
+    }
+
+    private func downloadBody(_ id: String) async {
+        let generation = beginLive(id)
+        setDownloading(id, nil, generation: generation)
+        do {
+            let session = try requireSession()
+            let posts = try await expireOn401(session) {
+                try await client.posts(session, id: id) { [weak self] fraction in
+                    self?.reportProgress(id, fraction: fraction, generation: generation)
+                }
+            }
+            try Task.checkCancellation()
+            let cover = bookDir(id).appendingPathComponent("cover.jpg")
+            _ = try await expireOn401(session) {
+                try await client.downloadCover(session, id: id, dest: cover)
+            }
+            let likes = try await expireOn401(session) { try await client.likes(session, id: id) }
+            let index = try await expireOn401(session) { try await client.commentIndex(session, id: id) }
+            try Task.checkCancellation()
+            let wrote = await writeCachedPosts(id, posts: posts, session: session, onShelf: true)
+            guard wrote else {
+                endLive(id, nil, generation: generation)
+                return
+            }
+            await updateSocial(id, session: session) { cache in
+                var next = cache
+                next.likes = likes
+                next.index = index
+                return next
+            }
+            endLive(id, nil, generation: generation)
+        } catch {
+            if isCancellation(error) || Task.isCancelled {
+                endLive(id, nil, generation: generation)
+                return
+            }
+            endLive(id, .failed(errorText(error)), generation: generation)
+        }
+    }
+
+    /// Writes posts.json only while `session` is still current, under the same lock as the wipe.
+    /// Returns false when the file was left untouched.
+    private func writeCachedPosts(
+        _ id: String,
+        posts: [FeedPost],
+        session: HostedSession,
+        onShelf: Bool
+    ) async -> Bool {
+        let root = self.root
+        let gate = files
+        let token = session.token
+        let wrote = await offMain { () -> Bool in
+            gate.sync { current, shelf in
+                guard current == token else { return false }
+                if onShelf && shelf.contains(id) == false { return false }
+                writePostsFile(root: root, id: id, posts: posts)
+                return true
+            }
+        }
+        guard wrote else { return false }
+        onDisk.insert(id)
+        stalePosts.remove(id)
+        if case .failed = live[id] { live[id] = nil }
+        publishOffline()
+        if var record = books.first(where: { $0.id == id }), record.postCount != posts.count {
+            record.postCount = posts.count
+            await replaceBook(record, owner: session)
+        }
+        return true
+    }
+
+    private func postsAreCurrent(_ id: String) async -> Bool {
+        let stale = stalePosts.contains(id)
+        let root = self.root
+        let found = await offMain { () -> PostsFile in
+            inspectPosts(root: root, id: id, knownStale: stale)
+        }
+        switch found {
+        case .missing:
+            stalePosts.remove(id)
+            return false
+        case .mismatch:
+            stalePosts.insert(id)
+            return false
+        case .current:
+            stalePosts.remove(id)
+            return true
+        }
+    }
+
+    private func idsNeedingDownload(_ ids: [String]) async -> [String] {
+        var pending: [String] = []
+        for id in ids {
+            guard safeBookId(id) != nil else { continue }
+            if await postsAreCurrent(id) {
+                onDisk.insert(id)
+            } else {
+                pending.append(id)
+            }
+        }
+        return pending
+    }
+
+    /// Parses a posts file once, the first time it is seen. Later saves only check the set.
+    private func rescan(_ books: [BookRecord]) async {
+        let ids = Set(books.map(\.id))
+        let known = onDisk
+        let stale = stalePosts
+        let root = self.root
+        let result = await offMain { () -> PostsScan in
+            var nextStale = stale
+            for id in stale {
+                let exists = postsFileExists(root: root, id: id)
+                if ids.contains(id) == false || !exists { nextStale.remove(id) }
+            }
+            let gone = known.filter { ids.contains($0) == false || !postsFileExists(root: root, id: $0) }
+            var present: [String] = []
+            for id in ids where known.contains(id) == false && nextStale.contains(id) == false {
+                switch inspectPosts(root: root, id: id, knownStale: false) {
+                case .current:
+                    present.append(id)
+                    nextStale.remove(id)
+                case .mismatch:
+                    nextStale.insert(id)
+                case .missing:
+                    nextStale.remove(id)
+                }
+            }
+            return PostsScan(gone: Array(gone), present: present, stale: nextStale)
+        }
+        for id in result.gone { onDisk.remove(id) }
+        for id in result.present { onDisk.insert(id) }
+        stalePosts = result.stale
+        live = live.filter { ids.contains($0.key) }
+        publishOffline()
+    }
+
+    private func publishOffline() {
+        let marks = live
+        let running = batch.map { !$0.isFinished } ?? false
+        var map: [String: OfflineState] = [:]
+        map.reserveCapacity(books.count)
+        var downloaded = 0
+        for book in books {
+            let state: OfflineState
+            switch marks[book.id] {
+            case .downloading, .failed:
+                state = marks[book.id] ?? .notDownloaded
+            default:
+                state = onDisk.contains(book.id) ? .downloaded : .notDownloaded
+            }
+            if case .downloaded = state { downloaded += 1 }
+            map[book.id] = state
+        }
+        offline = map
+        offlineSummary = OfflineSummary(downloaded: downloaded, total: books.count, running: running)
+    }
+
+    private func beginLive(_ id: String) -> Int {
+        let next = (liveGeneration[id] ?? 0) + 1
+        liveGeneration[id] = next
+        return next
+    }
+
+    private func setDownloading(_ id: String, _ fraction: Double?, generation: Int) {
+        guard liveGeneration[id] == generation else { return }
+        live[id] = .downloading(fraction)
+        publishOffline()
+    }
+
+    private func endLive(_ id: String, _ state: OfflineState?, generation: Int) {
+        liveGeneration[id] = generation + 1
+        if let state {
+            live[id] = state
+        } else {
+            live[id] = nil
+        }
+        publishOffline()
+    }
+
+    /// Progress arrives on the URLSession queue. Hop without awaiting so a finish cannot pass it.
+    nonisolated private func reportProgress(_ id: String, fraction: Double?, generation: Int) {
+        let apply = { @MainActor in
+            self.setDownloading(id, fraction, generation: generation)
+        }
+        if Thread.isMainThread {
+            MainActor.assumeIsolated(apply)
+        } else {
+            DispatchQueue.main.sync {
+                MainActor.assumeIsolated(apply)
+            }
+        }
+    }
+
+    private func removeDownloadFiles(_ id: String) async {
+        let root = self.root
+        let gate = files
+        await offMain {
+            gate.sync { _, _ in
+                let dir = root.appendingPathComponent(id, isDirectory: true)
+                try? FileManager.default.removeItem(at: dir.appendingPathComponent(hostedPostsCache))
+                try? FileManager.default.removeItem(at: dir.appendingPathComponent(hostedSocialFile))
+            }
+        }
+    }
+
+    private func readSocial(_ id: String) async -> SocialCache? {
+        let root = self.root
+        return await offMain { readSocialFile(root: root, id: id) }
+    }
+
+    private func updateSocial(_ id: String, session: HostedSession, _ update: @escaping @Sendable (SocialCache) -> SocialCache) async {
+        let root = self.root
+        let gate = files
+        let token = session.token
+        await offMain {
+            gate.sync { current, _ in
+                guard current == token else { return }
+                let next = update(readSocialFile(root: root, id: id) ?? SocialCache())
+                let dir = root.appendingPathComponent(id, isDirectory: true)
+                try? JSONFiles.write(next, to: dir.appendingPathComponent(hostedSocialFile))
+            }
+        }
+    }
+
+    private func clearSocialFiles() async {
+        let root = self.root
+        let gate = files
+        await offMain {
+            gate.sync { _, _ in
+                let dirs = (try? FileManager.default.contentsOfDirectory(
+                    at: root,
+                    includingPropertiesForKeys: [.isDirectoryKey]
+                )) ?? []
+                for dir in dirs {
+                    try? FileManager.default.removeItem(at: dir.appendingPathComponent(hostedSocialFile))
+                }
+            }
+        }
+    }
+
+    private func cancelTransfers() async {
+        let running = batch
+        let jobs = Array(bookJobs.values)
+        let feeds = Array(feedTasks.values)
+        running?.cancel()
+        jobs.forEach { $0.cancel() }
+        feeds.forEach { $0.cancel() }
+        if let running { await waitUntilDone(running.task) }
+        for job in jobs { await waitUntilDone(job.task) }
+        for feed in feeds { _ = await feed.result }
+        if batch === running { batch = nil }
+        publishOffline()
+    }
+
+    /// True when this caller was cancelled. The joined task keeps running.
+    private func cancelledWhileJoining(_ task: Task<Void, Never>) async -> Bool {
+        if Task.isCancelled { return true }
+        let box = ResumeBox()
+        return await withTaskCancellationHandler {
+            await withCheckedContinuation { (cont: CheckedContinuation<Bool, Never>) in
+                box.start(cont)
+                Task {
+                    await task.value
+                    box.finish(false)
+                }
+            }
+        } onCancel: {
+            box.finish(true)
+        }
+    }
+}
+
+/// Waits for a task without cancelling it when the waiter is cancelled.
+private func waitUntilDone(_ task: Task<Void, Never>) async {
+    await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
+        Task {
+            await task.value
+            cont.resume()
+        }
+    }
+}
+
+private func offMain<T: Sendable>(_ work: @escaping @Sendable () -> T) async -> T {
+    await withCheckedContinuation { cont in
+        HostedOfflineProbe.queue.async {
+            HostedOfflineProbe.log.note()
+            cont.resume(returning: work())
+        }
+    }
+}
+
+private func isCancellation(_ error: Error) -> Bool {
+    if error is CancellationError { return true }
+    if let url = error as? URLError, url.code == .cancelled { return true }
+    return false
+}
+
+private func errorText(_ error: Error) -> String {
+    if let hosted = error as? HostedException, !hosted.message.isEmpty { return hosted.message }
+    let text = error.localizedDescription
+    return text.isEmpty ? "Could not download." : text
+}
+
+private enum PostsFile: Sendable {
+    case missing, current, mismatch
+}
+
+private struct PostsScan: Sendable {
+    var gone: [String]
+    var present: [String]
+    var stale: Set<String>
+}
+
+private func postsFileExists(root: URL, id: String) -> Bool {
+    let url = root.appendingPathComponent(id, isDirectory: true).appendingPathComponent(hostedPostsCache)
+    return FileManager.default.fileExists(atPath: url.path)
+}
+
+private func inspectPosts(root: URL, id: String, knownStale: Bool) -> PostsFile {
+    let url = root.appendingPathComponent(id, isDirectory: true).appendingPathComponent(hostedPostsCache)
+    guard FileManager.default.fileExists(atPath: url.path) else { return .missing }
+    if knownStale { return .mismatch }
+    return readHostedPosts(file: url) == nil ? .mismatch : .current
+}
+
+private func readHostedPosts(root: URL, id: String) -> FeedCache? {
+    let url = root.appendingPathComponent(id, isDirectory: true).appendingPathComponent(hostedPostsCache)
+    guard FileManager.default.fileExists(atPath: url.path) else { return nil }
+    return readHostedPosts(file: url)
+}
+
+private func readHostedPosts(file: URL) -> FeedCache? {
+    HostedOfflineProbe.log.noteDecode()
+    guard let cache = JSONFiles.read(FeedCache.self, from: file), cache.version == hostedPostsCacheVersion else {
+        return nil
+    }
+    return cache
+}
+
+private func writePostsFile(root: URL, id: String, posts: [FeedPost]) {
+    let dir = root.appendingPathComponent(id, isDirectory: true)
+    try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+    try? FileManager.default.removeItem(at: dir.appendingPathComponent("book.epub"))
+    try? FileManager.default.removeItem(at: dir.appendingPathComponent("feed.json"))
+    try? JSONFiles.write(FeedCache(version: hostedPostsCacheVersion, posts: posts), to: dir.appendingPathComponent(hostedPostsCache))
+}
+
+private func readSocialFile(root: URL, id: String) -> SocialCache? {
+    let url = root.appendingPathComponent(id, isDirectory: true).appendingPathComponent(hostedSocialFile)
+    guard let cache = JSONFiles.read(SocialCache.self, from: url), cache.version == socialCacheVersion else {
+        return nil
+    }
+    return cache
+}
+
+private let hostedSocialFile = "social.json"
+
+/// Decode attempts of a posts file that exists, and which threads touched hosted files.
+enum HostedOfflineProbe {
+    static let log = HostedDiskLog()
+    static let queue = DispatchQueue(label: "mewo.hosted.disk", qos: .userInitiated)
+    static var beforeClaim: (@MainActor () async -> Void)?
+}
+
+final class HostedDiskLog: @unchecked Sendable {
+    private let lock = NSLock()
+    private var flags: [Bool] = []
+    private var decodes = 0
+
+    func note() {
+        lock.lock()
+        flags.append(Thread.isMainThread)
+        lock.unlock()
+    }
+
+    func noteDecode() {
+        lock.lock()
+        decodes += 1
+        lock.unlock()
+    }
+
+    func reset() {
+        lock.lock()
+        flags.removeAll()
+        decodes = 0
+        lock.unlock()
+    }
+
+    var decodeCount: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return decodes
+    }
+
+    var touchedMain: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return flags.contains(true)
+    }
+
+    var touches: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return flags.count
+    }
+}
+
+/// The session token and the shelf ids, read inside the same lock as a file write or wipe.
+final class HostedFileGate: @unchecked Sendable {
+    private let lock = NSLock()
+    private var token: String?
+    private var shelf: Set<String> = []
+
+    func setToken(_ token: String?) {
+        lock.lock()
+        self.token = token
+        lock.unlock()
+    }
+
+    func setShelf(_ ids: Set<String>) {
+        lock.lock()
+        shelf = ids
+        lock.unlock()
+    }
+
+    func sync<T>(_ body: (String?, Set<String>) -> T) -> T {
+        lock.lock()
+        defer { lock.unlock() }
+        return body(token, shelf)
+    }
+}
+
+private struct DownloadClaim {
+    var job: DownloadJob
+    var started: Bool
+}
+
+private final class DownloadJob: @unchecked Sendable {
+    let task: Task<Void, Never>
+    private let lock = NSLock()
+    private var finished = false
+
+    init(task: Task<Void, Never>) {
+        self.task = task
+    }
+
+    func markFinished() {
+        lock.lock()
+        finished = true
+        lock.unlock()
+    }
+
+    var isFinished: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return finished
+    }
+
+    func cancel() { task.cancel() }
+}
+
+/// The task exists before `job` is readable. `start` is what lets the body see the job,
+/// and the caller does that only after the job is in `batch` or `bookJobs`.
+private final class PreparedDownload {
+    let job: DownloadJob
+    private let gate: StartGate
+
+    init(body: @escaping @MainActor (DownloadJob) async -> Void) {
+        let gate = StartGate()
+        let box = DownloadBox()
+        let task = Task { @MainActor in
+            await gate.wait()
+            await body(box.job)
+        }
+        let job = DownloadJob(task: task)
+        box.job = job
+        self.gate = gate
+        self.job = job
+    }
+
+    func start() { gate.release() }
+}
+
+private final class DownloadBox {
+    var job: DownloadJob!
+}
+
+private final class StartGate: @unchecked Sendable {
+    private let lock = NSLock()
+    private var waiters: [CheckedContinuation<Void, Never>] = []
+    private var open = false
+
+    func wait() async {
+        await withCheckedContinuation { cont in
+            lock.lock()
+            if open {
+                lock.unlock()
+                cont.resume()
+            } else {
+                waiters.append(cont)
+                lock.unlock()
+            }
+        }
+    }
+
+    func release() {
+        lock.lock()
+        open = true
+        let pending = waiters
+        waiters.removeAll()
+        lock.unlock()
+        pending.forEach { $0.resume() }
+    }
+}
+
+private final class ResumeBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var cont: CheckedContinuation<Bool, Never>?
+    private var value: Bool?
+
+    func start(_ cont: CheckedContinuation<Bool, Never>) {
+        lock.lock()
+        if let value {
+            lock.unlock()
+            cont.resume(returning: value)
+            return
+        }
+        self.cont = cont
+        lock.unlock()
+    }
+
+    func finish(_ cancelled: Bool) {
+        lock.lock()
+        if value != nil {
+            lock.unlock()
+            return
+        }
+        value = cancelled
+        let cont = self.cont
+        self.cont = nil
+        lock.unlock()
+        cont?.resume(returning: cancelled)
     }
 }
 

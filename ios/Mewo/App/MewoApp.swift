@@ -22,17 +22,21 @@ struct RootView: View {
     @Environment(\.scenePhase) private var scenePhase
 
     var body: some View {
+        let shots = ProcessInfo.processInfo.arguments.contains("--offline-shots")
+        let palette = shots ? DisplayTheme.xLight.palette : app.themeStore.theme.palette
         Group {
-            if app.localProfile.profile.ready {
+            if shots {
+                OfflinePreview()
+            } else if app.localProfile.profile.ready {
                 MewoNav()
             } else {
                 OnboardingScreen()
             }
         }
         .environment(\.app, app)
-        .environment(\.mewo, app.themeStore.theme.palette)
+        .environment(\.mewo, palette)
         .environment(\.readerScale, app.readerFont.scale)
-        .preferredColorScheme(app.themeStore.theme.palette.isDark ? .dark : .light)
+        .preferredColorScheme(palette.isDark ? .dark : .light)
         .tint(app.themeStore.theme.palette.accent)
         .background(app.themeStore.theme.palette.ground.ignoresSafeArea())
         .onChange(of: app.backend.kind) { _, kind in
