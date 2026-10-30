@@ -45,6 +45,12 @@ docker run --rm -p 8787:8787 -v mewo-data:/data ghcr.io/matthewyjiang/mewo-reade
 
 The package is private until it is made public. A 403 on pull means the token cannot read packages, or the package is still private.
 
+A fresh `docker run` has signups off. Pass `-e MEWO_ALLOW_SIGNUP=1` for open signup, or create the first account with `mewo-server admin create <name>`.
+
+## HTTPS
+
+The server speaks plain HTTP. Passwords and bearer tokens travel in the clear, so terminate TLS in a reverse proxy (Traefik, Caddy, or nginx) and give phones an `https://` URL unless the server is on a trusted LAN. Set `MEWO_TRUSTED_PROXY_HOPS` to match the proxy chain (see [Env](#env)).
+
 ## Env
 
 Runtime:
@@ -53,15 +59,16 @@ Runtime:
 - `MEWO_DATA_DIR` — default `data`
 - `MEWO_WEB_DIR` — unset means API only. An existing directory is served as static files, with `index.html` for other non-API paths. Relative paths are relative to the process working directory. Unknown `/v1/...` routes stay a JSON 404. From `server/`, a local web build is `MEWO_WEB_DIR=../web/dist`. The image sets `/srv/web`
 - `MEWO_DATABASE_URL` — default `sqlite://<data>/mewo.db?mode=rwc`. SQLite only
-- `MEWO_ALLOW_SIGNUP` — first-boot seed only. Default on when unset. A set value is on only for `1`, `true`, `yes`, or `on` (any case). After the settings row exists, the database wins. A set variable that disagrees with the row logs one warning and is ignored
+- `MEWO_ALLOW_SIGNUP` — first-boot seed only. Default **off** when unset. A set value is on only for `1`, `true`, `yes`, or `on` (any case). After the settings row exists, the database wins. A set variable that disagrees with the row logs one warning and is ignored
 - `MEWO_MAX_EPUB_BYTES` — first-boot seed only. Default `67108864` (64 MiB). A seed outside 1 MiB to 1 GiB is clamped into that range, with one warning that names the variable. After the settings row exists, the database wins. A set variable that disagrees with the row logs one warning and is ignored. The panel accepts 1 to 1024 MB
 - `MEWO_DOWNLOADS_DIR` — completed SABnzbd folders are read only from here. Unset means a request can be created but the worker will not import. The path is not a setting: `GET /v1/admin/settings` reports it as `downloadsDir` (or null), and `PATCH` rejects that key. A folder is imported only when its canonical path stays inside this directory and its name is `mewo-<request id>` or `mewo-<request id>.<n>`
 - `MEWO_OPENLIBRARY_URL` — catalog search base. Default `https://openlibrary.org`. Empty is the same as unset
 - `MEWO_TRUSTED_PROXY_HOPS` — set this to the number of trusted proxies that append `X-Forwarded-For`. Default `0` ignores the header and uses the socket peer. A value that does not parse is `0`, with one warning. Cloudflare in front of Traefik is `2`. This is only safe when the outermost proxy overwrites any `X-Forwarded-For` it does not trust; otherwise a client can choose its own address, including a private one that skips the per-IP limit. A shorter header uses the leftmost entry. Every comma-separated slot counts, and only the selected entry is parsed (`ip`, `ip:port`, `[ipv6]`, or `[ipv6]:port`); if that entry is not an address, the request shares one unknown key. Per-IP limits still skip loopback, RFC1918, link-local, CGNAT (`100.64.0.0/10`), and IPv6 ULA (`fc00::/7`); those requests stay limited per username
+- `MEWO_MIN_FREE_BYTES` — free bytes that must remain on the data directory before an upload, and on both the downloads directory and the data directory before a request download or import. Default `1073741824` (1 GiB). `0` turns the floor off. A value that does not parse is the default, with one warning. An upload under the floor is 507. The request worker waits and keeps its job. Reads such as `GET /v1/books/{id}/epub` are not checked
 
 Compile-time, via `build.rs`: `MEWO_VERSION`, `MEWO_COMMIT`. See [Version and release](../README.md#version-and-release).
 
-Parsing reads at most `MAX_EPUB_TEXT_BYTES` (32 MiB) of inflated XML/XHTML per book (`src/epub.rs`). A cover is at most 4 MiB. JSON and other non-upload routes reject a body over 1 MiB with 413. `POST /v1/books` accepts up to 1 GiB plus 4 MiB plus 64 KiB of form fields. The live EPUB cap is the settings value, checked while the upload streams. Over that cap is 413 `EPUB too large: asked N bytes, limit is N bytes`.
+Parsing reads at most `MAX_EPUB_TEXT_BYTES` (32 MiB) of inflated XML/XHTML per book (`src/epub.rs`). A cover is at most 4 MiB. JSON and other non-upload routes reject a body over 1 MiB with 413. `POST /v1/books` follows the live EPUB cap plus 4 MiB cover and 64 KiB of fields. A route-level backstop stays at 1 GiB plus that same cover and field allowance. One EPUB over the cap is 413 `EPUB too large: asked N bytes, limit is N bytes`. A multipart body over the envelope is 413 `Request body is too large.`
 
 ## Auth
 

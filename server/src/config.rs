@@ -9,10 +9,14 @@ pub const DEFAULT_MAX_EPUB_BYTES: u64 = 64 * 1024 * 1024;
 /// Lowest EPUB cap an admin can save.
 pub const MIN_EPUB_BYTES: u64 = 1024 * 1024;
 
-/// The HTTP body limit for `POST /v1/books` is fixed at router build. The
-/// admin-set EPUB cap is enforced per upload in `write_limited`, and this is
-/// the most it can be.
+/// Highest EPUB cap an admin can save. Also the fixed `POST /v1/books` body
+/// backstop: the live envelope is [`request_body_limit`] of the settings
+/// value, which is read per upload and cannot be a router layer.
 pub const MAX_EPUB_BYTES_CEILING: u64 = 1024 * 1024 * 1024;
+
+/// Free bytes that must remain after an upload or a request download.
+/// `0` turns the floor off.
+pub const DEFAULT_MIN_FREE_BYTES: u64 = 1024 * 1024 * 1024;
 
 /// JSON and other non-upload routes. Larger than a comment or a settings
 /// patch, and small enough that an anonymous request is not buffered to the
@@ -38,7 +42,7 @@ pub struct Config {
     pub data_dir: PathBuf,
     /// Unset means API only. Docker sets this to /srv/web.
     pub web_dir: Option<PathBuf>,
-    /// First-boot seed. Unset env means signups are on. After the settings row
+    /// First-boot seed. Unset env means signups are off. After the settings row
     /// exists, the database wins and a set `MEWO_ALLOW_SIGNUP` is ignored.
     pub allow_signup: bool,
     /// First-boot seed for the upload cap. After the settings row exists, the
@@ -53,6 +57,27 @@ pub struct Config {
     /// Password hashing cap and auth rate limits. Limits are code constants.
     /// `trusted_proxy_hops` is `MEWO_TRUSTED_PROXY_HOPS`.
     pub auth: AuthConfig,
+    /// Parse concurrency and the free-disk floor. `min_free_bytes` is
+    /// `MEWO_MIN_FREE_BYTES`. The parse cap and wait are code constants.
+    pub limits: LimitsConfig,
+}
+
+/// How many EPUB parses may run at once, and how long a caller waits for one.
+#[derive(Clone, Copy, Debug)]
+pub struct LimitsConfig {
+    pub max_parses: usize,
+    pub parse_wait: Duration,
+    pub min_free_bytes: u64,
+}
+
+impl Default for LimitsConfig {
+    fn default() -> Self {
+        Self {
+            max_parses: 2,
+            parse_wait: Duration::from_secs(30),
+            min_free_bytes: DEFAULT_MIN_FREE_BYTES,
+        }
+    }
 }
 
 /// How many attempts a bucket holds, and how often one token comes back.
@@ -107,10 +132,7 @@ impl Config {
     pub fn from_env() -> Self {
         let data_dir =
             PathBuf::from(std::env::var("MEWO_DATA_DIR").unwrap_or_else(|_| "data".into()));
-        let allow_signup = match std::env::var("MEWO_ALLOW_SIGNUP") {
-            Ok(v) => matches!(v.to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"),
-            Err(_) => true,
-        };
+        let allow_signup = parse_allow_signup(std::env::var("MEWO_ALLOW_SIGNUP").ok().as_deref());
         let max_epub_bytes = std::env::var("MEWO_MAX_EPUB_BYTES")
             .ok()
             .and_then(|v| v.parse().ok())
@@ -137,6 +159,12 @@ impl Config {
                 .map(PathBuf::from),
             openlibrary_url,
             auth,
+            limits: LimitsConfig {
+                min_free_bytes: parse_min_free_bytes(
+                    std::env::var("MEWO_MIN_FREE_BYTES").ok().as_deref(),
+                ),
+                ..LimitsConfig::default()
+            },
         }
     }
 
@@ -146,6 +174,34 @@ impl Config {
         }
         let db = self.data_dir.join("mewo.db");
         format!("sqlite://{}?mode=rwc", db.display())
+    }
+}
+
+/// `None` and anything other than `1`, `true`, `yes`, or `on` are off.
+pub fn parse_allow_signup(raw: Option<&str>) -> bool {
+    match raw {
+        Some(value) => matches!(
+            value.to_ascii_lowercase().as_str(),
+            "1" | "true" | "yes" | "on"
+        ),
+        None => false,
+    }
+}
+
+/// Unset is [`DEFAULT_MIN_FREE_BYTES`]. `0` is a real value and disables the
+/// floor. Anything that is not a `u64` is the default, with one warning.
+pub fn parse_min_free_bytes(raw: Option<&str>) -> u64 {
+    let Some(value) = raw else {
+        return DEFAULT_MIN_FREE_BYTES;
+    };
+    match value.parse::<u64>() {
+        Ok(bytes) => bytes,
+        Err(_) => {
+            tracing::warn!(
+                "MEWO_MIN_FREE_BYTES={value} is not a number; using {DEFAULT_MIN_FREE_BYTES}"
+            );
+            DEFAULT_MIN_FREE_BYTES
+        }
     }
 }
 
@@ -161,5 +217,29 @@ fn trusted_proxy_hops() -> u8 {
             );
             0
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn signup_env_defaults_off() {
+        assert!(!parse_allow_signup(None));
+        for on in ["1", "true", "YES", "on"] {
+            assert!(parse_allow_signup(Some(on)), "{on}");
+        }
+        for off in ["0", "", "off", "garbage"] {
+            assert!(!parse_allow_signup(Some(off)), "{off}");
+        }
+    }
+
+    #[test]
+    fn min_free_env_defaults_to_one_gib() {
+        assert_eq!(parse_min_free_bytes(None), DEFAULT_MIN_FREE_BYTES);
+        assert_eq!(parse_min_free_bytes(Some("0")), 0);
+        assert_eq!(parse_min_free_bytes(Some("abc")), DEFAULT_MIN_FREE_BYTES);
+        assert_eq!(parse_min_free_bytes(Some("4096")), 4096);
     }
 }

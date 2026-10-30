@@ -23,6 +23,8 @@ pub enum ApiError {
     PayloadTooLarge { asked: u64, limit: u64 },
     #[error("Request body is too large.")]
     RequestTooLarge,
+    #[error("The server is low on disk space. Try again later.")]
+    DiskLow,
     #[error("{0}")]
     BadGateway(String),
     #[error("Internal error.")]
@@ -75,6 +77,7 @@ impl IntoResponse for ApiError {
             ApiError::PayloadTooLarge { .. } | ApiError::RequestTooLarge => {
                 StatusCode::PAYLOAD_TOO_LARGE
             }
+            ApiError::DiskLow => StatusCode::INSUFFICIENT_STORAGE,
             ApiError::BadGateway(_) => StatusCode::BAD_GATEWAY,
             ApiError::Internal => StatusCode::INTERNAL_SERVER_ERROR,
         };

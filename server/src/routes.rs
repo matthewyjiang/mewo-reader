@@ -1,5 +1,5 @@
 use crate::auth::{check_password, new_token, normalize_username, Authed, ClientIp};
-use crate::config::MAX_COVER_BYTES;
+use crate::config::{request_body_limit, MAX_COVER_BYTES};
 use crate::db::now_ms;
 use crate::error::ApiError;
 use crate::feed::{slug, Post, Posts};
@@ -16,8 +16,8 @@ use crate::version::VersionInfo;
 use crate::visibility::{social_visible, BOOK_SELECT, BOOK_VISIBLE_TO};
 use crate::AppState;
 use axum::extract::{Multipart, Path, Query, State};
-use axum::http::header::{CONTENT_DISPOSITION, CONTENT_TYPE};
-use axum::http::HeaderValue;
+use axum::http::header::{CONTENT_DISPOSITION, CONTENT_LENGTH, CONTENT_TYPE};
+use axum::http::{HeaderMap, HeaderValue};
 use axum::response::IntoResponse;
 use axum::Json;
 use serde::Deserialize;
@@ -169,9 +169,19 @@ pub async fn library(
 pub async fn upload_book(
     State(state): State<AppState>,
     authed: Authed,
+    headers: HeaderMap,
     multipart: Multipart,
 ) -> Result<Json<BookRecord>, ApiError> {
-    let staged = read_upload(&state, multipart).await?;
+    let max = crate::settings::load(&state.pool).await?.max_epub_bytes;
+    let limit = request_body_limit(max) as u64;
+    let declared = content_length(&headers);
+    if declared.is_some_and(|n| n > limit) {
+        return Err(ApiError::RequestTooLarge);
+    }
+    state
+        .disk
+        .require(&state.data_dir, declared.unwrap_or(max))?;
+    let staged = read_upload(&state, multipart, max, Budget::new(max)).await?;
     let book = library::import(
         &state,
         &library::Owner {
@@ -342,13 +352,18 @@ async fn fill_posts(
     book_id: &str,
     dir: &std::path::Path,
 ) -> Result<Vec<u8>, ApiError> {
-    // Simple global lock for legacy fills; cache hits and new uploads bypass it.
-    // Recheck after locking so concurrent requests don't duplicate the parse.
-    let _guard = state.lazy_parse_lock.lock().await;
+    // This book's lock, then the permit. A process-wide lock either serialized
+    // every fill or let a second permit sit idle while the first parse ran.
+    // Readers of this book wait here; they need this parse anyway.
+    let _guard = state.fill_locks.lock(book_id).await;
     if let Some(bytes) = search::read_posts(dir).await? {
         return Ok(bytes);
     }
-    let parsed = library::parse_epub(dir.join("book.epub")).await?;
+    let permit = state.parsers.acquire().await?;
+    let parsed = state
+        .parsers
+        .parse_owned(dir.join("book.epub"), permit)
+        .await?;
     search::store_feed(
         &state.pool,
         dir,
@@ -1519,8 +1534,36 @@ async fn likes_for(state: &AppState, user_id: &str, book_id: &str) -> Result<Lik
     Ok(LikeSet { ids })
 }
 
-async fn read_upload(state: &AppState, mut multipart: Multipart) -> Result<Staged, ApiError> {
-    let max_epub_bytes = crate::settings::load(&state.pool).await?.max_epub_bytes;
+/// Bytes still allowed for the whole multipart body. Starts at
+/// [`request_body_limit`] of the live EPUB cap. Counts payload, not framing.
+struct Budget {
+    left: u64,
+}
+
+impl Budget {
+    fn new(max_epub_bytes: u64) -> Self {
+        Self {
+            left: request_body_limit(max_epub_bytes) as u64,
+        }
+    }
+
+    /// `Err` once the sum of every field's payload passes the envelope.
+    fn take(&mut self, n: usize) -> Result<(), ApiError> {
+        let n = n as u64;
+        if n > self.left {
+            return Err(ApiError::RequestTooLarge);
+        }
+        self.left -= n;
+        Ok(())
+    }
+}
+
+async fn read_upload(
+    state: &AppState,
+    mut multipart: Multipart,
+    max_epub_bytes: u64,
+    mut budget: Budget,
+) -> Result<Staged, ApiError> {
     let temp_dir = state.data_dir.join("tmp").join(Uuid::new_v4().to_string());
     tokio::fs::create_dir_all(&temp_dir).await?;
     let mut title = None;
@@ -1534,25 +1577,25 @@ async fn read_upload(state: &AppState, mut multipart: Multipart) -> Result<Stage
         while let Some(field) = multipart.next_field().await? {
             let name = field.name().unwrap_or("").to_string();
             match name.as_str() {
-                "title" => title = Some(field_text(field, 512).await?),
-                "author" => author = Some(field_text(field, 256).await?),
-                "handle" => handle = Some(field_text(field, 32).await?),
+                "title" => title = Some(field_text(field, 512, &mut budget).await?),
+                "author" => author = Some(field_text(field, 256, &mut budget).await?),
+                "handle" => handle = Some(field_text(field, 32, &mut budget).await?),
                 "isSample" | "is_sample" => {
-                    let value = field_text(field, 16).await?;
+                    let value = field_text(field, 16, &mut budget).await?;
                     is_sample = matches!(value.to_ascii_lowercase().as_str(), "1" | "true" | "yes");
                 }
                 "epub" => {
                     let dest = temp_dir.join("book.epub");
-                    write_limited(field, &dest, max_epub_bytes).await?;
+                    write_limited(field, &dest, max_epub_bytes, &mut budget).await?;
                     epub_path = Some(dest);
                 }
                 "cover" => {
                     let dest = temp_dir.join("cover.jpg");
-                    write_limited(field, &dest, MAX_COVER_BYTES).await?;
+                    write_limited(field, &dest, MAX_COVER_BYTES, &mut budget).await?;
                     cover_path = Some(dest);
                 }
                 _ => {
-                    skip_field(field, 8 * 1024).await?;
+                    skip_field(field, 8 * 1024, &mut budget).await?;
                 }
             }
         }
@@ -1570,7 +1613,7 @@ async fn read_upload(state: &AppState, mut multipart: Multipart) -> Result<Stage
         return Err(ApiError::BadRequest("EPUB file is required.".into()));
     };
     let result = async {
-        let parsed = library::parse_epub(epub_path).await?;
+        let parsed = state.parsers.parse(epub_path).await?;
         let title = title
             .filter(|s| !s.is_empty())
             .or(parsed.title)
@@ -1616,6 +1659,7 @@ async fn read_upload(state: &AppState, mut multipart: Multipart) -> Result<Stage
 async fn field_text(
     mut field: axum::extract::multipart::Field<'_>,
     max: usize,
+    budget: &mut Budget,
 ) -> Result<String, ApiError> {
     let mut written = 0usize;
     let mut bytes = Vec::new();
@@ -1626,6 +1670,7 @@ async fn field_text(
                 "Field is longer than {max} bytes."
             )));
         }
+        budget.take(chunk.len())?;
         bytes.extend_from_slice(&chunk);
     }
     Ok(String::from_utf8_lossy(&bytes).trim().to_string())
@@ -1634,6 +1679,7 @@ async fn field_text(
 async fn skip_field(
     mut field: axum::extract::multipart::Field<'_>,
     max: u64,
+    budget: &mut Budget,
 ) -> Result<(), ApiError> {
     let mut written = 0u64;
     while let Some(chunk) = field.chunk().await? {
@@ -1643,6 +1689,7 @@ async fn skip_field(
                 "Unknown upload field is too large.".into(),
             ));
         }
+        budget.take(chunk.len())?;
     }
     Ok(())
 }
@@ -1651,6 +1698,7 @@ async fn write_limited(
     mut field: axum::extract::multipart::Field<'_>,
     dest: &std::path::Path,
     limit: u64,
+    budget: &mut Budget,
 ) -> Result<(), ApiError> {
     if let Some(len) = field.headers().typed_get_content_length() {
         if len > limit {
@@ -1669,10 +1717,22 @@ async fn write_limited(
                 limit,
             });
         }
+        if let Err(err) = budget.take(chunk.len()) {
+            drop(file);
+            let _ = tokio::fs::remove_file(dest).await;
+            return Err(err);
+        }
         file.write_all(&chunk).await?;
     }
     file.flush().await?;
     Ok(())
+}
+
+fn content_length(headers: &HeaderMap) -> Option<u64> {
+    headers
+        .get(CONTENT_LENGTH)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse().ok())
 }
 
 trait ContentLengthHeader {

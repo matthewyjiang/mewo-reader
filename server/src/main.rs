@@ -41,6 +41,11 @@ async fn serve(config: Config) {
         config.auth.trusted_proxy_hops,
         config.auth.max_concurrent
     );
+    tracing::info!(
+        "limits: parses={}, min_free={}",
+        config.limits.max_parses,
+        config.limits.min_free_bytes
+    );
     let app = build(config).await.expect("database");
     let listener = tokio::net::TcpListener::bind(&listen)
         .await

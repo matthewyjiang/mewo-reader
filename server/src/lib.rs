@@ -3,11 +3,13 @@ pub mod auth;
 pub mod cli;
 pub mod config;
 pub mod db;
+pub mod disk;
 pub mod epub;
 pub mod error;
 pub mod feed;
 mod library;
 pub mod models;
+pub mod parse_pool;
 pub mod requests;
 pub mod routes;
 mod search;
@@ -26,7 +28,7 @@ use axum::{Extension, Router};
 use sqlx::SqlitePool;
 use std::path::PathBuf;
 use std::sync::Arc;
-use tokio::sync::{Mutex, Notify};
+use tokio::sync::Notify;
 use tower_http::compression::CompressionLayer;
 use tower_http::services::{ServeDir, ServeFile};
 use tower_http::trace::TraceLayer;
@@ -36,9 +38,10 @@ pub struct AppState {
     pub pool: SqlitePool,
     pub data_dir: PathBuf,
     pub web_dir: Option<PathBuf>,
-    /// Serializes legacy cache fills and search backfill for one book.
-    /// Normal reads and uploads do not take this lock.
-    pub lazy_parse_lock: Arc<Mutex<()>>,
+    /// Per-book lock for a legacy fill or a backfill of that book.
+    /// Normal reads and uploads do not take it. One book waiting on a parse
+    /// permit does not block a different book.
+    pub(crate) fill_locks: search::FillLocks,
     pub(crate) upstream: requests::http::Upstream,
     /// `MEWO_DOWNLOADS_DIR`. Completed folders are read only from here.
     pub downloads_dir: Option<PathBuf>,
@@ -48,6 +51,10 @@ pub struct AppState {
     pub(crate) catalog_limit: Arc<requests::Limiter>,
     pub passwords: auth::Passwords,
     pub throttle: auth::Throttle,
+    /// EPUB parse concurrency. Every parse takes a permit from here.
+    pub parsers: parse_pool::ParsePool,
+    /// Free-disk floor. `min_free_bytes == 0` allows every write.
+    pub disk: disk::DiskGuard,
     /// Open Library work context, 24h, keyed by work key. Not durable.
     pub(crate) work_cache: Arc<requests::WorkCache>,
     /// Weekly trending. Fresh 6h, stale up to 48h. Not durable.
@@ -70,6 +77,9 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/library", get(routes::library))
         .route(
             "/v1/books",
+            // Hard backstop. The live envelope is `request_body_limit` of the
+            // settings cap, checked in `upload_book` before the body is read.
+            // A layer cannot follow that value: it is fixed when the router is built.
             post(routes::upload_book).layer(DefaultBodyLimit::max(request_body_limit(
                 MAX_EPUB_BYTES_CEILING,
             ))),
@@ -154,7 +164,7 @@ pub async fn prepare(config: Config) -> Result<AppState, sqlx::Error> {
         pool,
         data_dir,
         web_dir: config.web_dir,
-        lazy_parse_lock: Arc::new(Mutex::new(())),
+        fill_locks: search::FillLocks::new(),
         upstream,
         downloads_dir: config.downloads_dir,
         openlibrary_url: config.openlibrary_url,
@@ -162,6 +172,8 @@ pub async fn prepare(config: Config) -> Result<AppState, sqlx::Error> {
         catalog_limit: Arc::new(requests::Limiter::new()),
         passwords,
         throttle,
+        parsers: parse_pool::ParsePool::new(&config.limits),
+        disk: disk::DiskGuard::new(config.limits.min_free_bytes),
         work_cache: Arc::new(requests::WorkCache::new()),
         trending: Arc::new(requests::TrendingCache::new()),
         info_cache: Arc::new(requests::InfoCache::new()),

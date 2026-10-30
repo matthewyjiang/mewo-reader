@@ -3,7 +3,6 @@
 //! Uploads and the request worker both finish here, so ownership, `shared = 0`,
 //! the progress row, and the search feed stay on one path.
 
-use crate::config::MAX_COVER_BYTES;
 use crate::db::now_ms;
 use crate::error::ApiError;
 use crate::feed::{slug, Posts};
@@ -52,7 +51,7 @@ pub(crate) enum NewId {
 /// Copies `src` (a regular file, not a symlink) into a fresh tmp dir as
 /// `book.epub`, stopping at `limit` bytes ([`ApiError::PayloadTooLarge`]), then
 /// runs the same parse as uploads. A non-EPUB fails here with the parser's
-/// 400 message.
+/// 400 message. A full parse queue is [`ApiError::Busy`] before the copy.
 pub(crate) async fn stage_file(
     state: &AppState,
     src: &Path,
@@ -70,6 +69,9 @@ pub(crate) async fn stage_file(
             limit,
         });
     }
+    // The worker retries this whole call. Take the permit first so a busy
+    // parser does not copy the EPUB into tmp and delete it five minutes later.
+    let permit = state.parsers.try_acquire()?;
     let temp_dir = state.data_dir.join("tmp").join(Uuid::new_v4().to_string());
     tokio::fs::create_dir_all(&temp_dir).await?;
     let dest = temp_dir.join("book.epub");
@@ -78,7 +80,7 @@ pub(crate) async fn stage_file(
         let _ = tokio::fs::remove_dir_all(&temp_dir).await;
         return Err(err);
     }
-    let staged = staged_from_epub(temp_dir.clone(), dest, false).await;
+    let staged = staged_from_epub(&state.parsers, temp_dir.clone(), dest, false, permit).await;
     if staged.is_err() {
         let _ = tokio::fs::remove_dir_all(&temp_dir).await;
     }
@@ -316,22 +318,14 @@ pub(crate) async fn release_hold(
     Ok(true)
 }
 
-pub(crate) async fn parse_epub(path: PathBuf) -> Result<crate::epub::ParsedEpub, ApiError> {
-    tokio::task::spawn_blocking(move || crate::epub::parse_file(&path, MAX_COVER_BYTES))
-        .await
-        .map_err(|err| {
-            tracing::error!(error = %err, "EPUB parser task failed");
-            ApiError::Internal
-        })?
-        .map_err(|reason| ApiError::BadRequest(format!("Could not read that EPUB: {reason}")))
-}
-
 async fn staged_from_epub(
+    parsers: &crate::parse_pool::ParsePool,
     temp_dir: PathBuf,
     epub_path: PathBuf,
     is_sample: bool,
+    permit: tokio::sync::OwnedSemaphorePermit,
 ) -> Result<Staged, ApiError> {
-    let parsed = parse_epub(epub_path).await?;
+    let parsed = parsers.parse_owned(epub_path, permit).await?;
     let title = parsed
         .title
         .filter(|title| !title.is_empty())

@@ -9,7 +9,8 @@ use axum::response::IntoResponse;
 use axum::routing::get;
 use axum::{Json, Router};
 use http_body_util::BodyExt;
-use mewo_server::config::{AuthConfig, Config, MIN_EPUB_BYTES};
+use mewo_server::config::{AuthConfig, Config, LimitsConfig, MIN_EPUB_BYTES};
+use mewo_server::disk::DiskGuard;
 use mewo_server::requests::worker;
 use mewo_server::{prepare, router, AppState};
 use serde_json::{json, Value};
@@ -41,7 +42,18 @@ struct World {
     user_id: String,
 }
 
+fn test_limits() -> LimitsConfig {
+    LimitsConfig {
+        min_free_bytes: 0,
+        ..LimitsConfig::default()
+    }
+}
+
 async fn world() -> World {
+    world_with(test_limits()).await
+}
+
+async fn world_with(limits: LimitsConfig) -> World {
     let downloads = TempDir::new().unwrap();
     let data = TempDir::new().unwrap();
     let prowlarr = Arc::new(Mutex::new(Prowl::default()));
@@ -60,6 +72,7 @@ async fn world() -> World {
         downloads_dir: Some(downloads.path().to_path_buf()),
         openlibrary_url: library_url,
         auth: AuthConfig::default(),
+        limits,
     })
     .await
     .unwrap();
@@ -1170,6 +1183,7 @@ async fn catalog_upstream_failure_is_502() {
         downloads_dir: None,
         openlibrary_url: origin,
         auth: AuthConfig::default(),
+        limits: test_limits(),
     })
     .await
     .unwrap();
@@ -1468,6 +1482,7 @@ async fn permissions() {
         downloads_dir: None,
         openlibrary_url: "https://openlibrary.org".into(),
         auth: AuthConfig::default(),
+        limits: test_limits(),
     })
     .await
     .unwrap();
@@ -1766,6 +1781,7 @@ async fn test_connection_reports() {
         downloads_dir: None,
         openlibrary_url: "https://openlibrary.org".into(),
         auth: AuthConfig::default(),
+        limits: test_limits(),
     })
     .await
     .unwrap();
@@ -1818,6 +1834,7 @@ async fn migration_007_adds_empty_secrets() {
         downloads_dir: None,
         openlibrary_url: "https://openlibrary.org".into(),
         auth: AuthConfig::default(),
+        limits: test_limits(),
     })
     .await
     .unwrap();
@@ -4237,6 +4254,7 @@ async fn catalog_app(catalog: Arc<Mutex<Catalog>>) -> (AppState, axum::Router, T
         downloads_dir: None,
         openlibrary_url: origin,
         auth: AuthConfig::default(),
+        limits: test_limits(),
     })
     .await
     .unwrap();
@@ -4668,4 +4686,133 @@ async fn work_detail_follows_redirects_leaders_and_negative_cache() {
     let (status, _) = empty_req(&app, "GET", "/v1/catalog/works/OL8W", Some(&bob_token)).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(catalog.lock().await.hits.len(), before + 1);
+}
+
+const BACKOFF: i64 = 5 * 60 * 1000;
+
+#[tokio::test]
+async fn the_worker_waits_for_disk_before_sabnzbd() {
+    let mut world = world().await;
+    let floor = 1024 * 1024u64;
+    world.state.disk = DiskGuard::with_probe(floor, move |_| Ok(floor - 1));
+    world.prowlarr.lock().await.key_ok = true;
+    let created = ask(&world, "/works/OL893414W").await;
+    let id = created["id"].as_str().unwrap().to_string();
+    let now = created["createdAt"].as_i64().unwrap();
+    let before = stored(&world.state.pool, &id).await;
+    worker::tick_at(&world.state, now).await.unwrap();
+    let row = stored(&world.state.pool, &id).await;
+    assert_eq!(row.state, "requested");
+    assert_eq!(row.attempts, before.attempts);
+    assert_eq!(row.error.as_deref(), Some("Waiting for disk space."));
+    assert_eq!(detail_phase(&world).await, "held");
+    assert_eq!(row.next_check_at, now + BACKOFF);
+    assert!(world.sab.lock().await.adds.is_empty());
+
+    world.state.disk = DiskGuard::new(0);
+    worker::tick_at(&world.state, row.next_check_at)
+        .await
+        .unwrap();
+    let row = stored(&world.state.pool, &id).await;
+    assert_eq!(row.state, "downloading", "{:?}", row.error);
+    assert_eq!(world.sab.lock().await.adds.len(), 1);
+}
+
+#[tokio::test]
+async fn the_worker_keeps_a_finished_download_when_disk_is_low() {
+    let mut world = world().await;
+    world.prowlarr.lock().await.key_ok = true;
+    let created = ask(&world, "/works/OL893414W").await;
+    let id = created["id"].as_str().unwrap().to_string();
+    let now = created["createdAt"].as_i64().unwrap();
+    worker::tick_at(&world.state, now).await.unwrap();
+    let before = stored(&world.state.pool, &id).await;
+    assert_eq!(before.state, "downloading");
+    complete_with(&world, &id, "Dune.epub", &common::epub()).await;
+
+    let floor = 1024 * 1024u64;
+    world.state.disk = DiskGuard::with_probe(floor, move |_| Ok(floor - 1));
+    worker::tick_at(&world.state, now + POLL).await.unwrap();
+    let held = stored(&world.state.pool, &id).await;
+    assert_eq!(held.state, "downloading");
+    assert_eq!(held.attempts, before.attempts);
+    assert_eq!(held.download_id, before.download_id);
+    assert_eq!(held.error.as_deref(), Some("Waiting for disk space."));
+    assert_eq!(detail_phase(&world).await, "held");
+    assert!(world.downloads.path().join(format!("mewo-{id}")).exists());
+    {
+        let sab = world.sab.lock().await;
+        assert!(sab.deletes.is_empty());
+        assert_eq!(sab.jobs.len(), 1);
+    }
+    assert!(download_tmp(&world).await.is_empty());
+
+    world.state.disk = DiskGuard::new(0);
+    worker::tick_at(&world.state, held.next_check_at)
+        .await
+        .unwrap();
+    let row = stored(&world.state.pool, &id).await;
+    assert_eq!(row.state, "imported", "{:?}", row.error);
+}
+
+#[tokio::test]
+async fn a_busy_parser_does_not_fail_the_download() {
+    let world = world_with(LimitsConfig {
+        max_parses: 0,
+        parse_wait: Duration::from_millis(10),
+        min_free_bytes: 0,
+    })
+    .await;
+    world.prowlarr.lock().await.key_ok = true;
+    let created = ask(&world, "/works/OL893414W").await;
+    let id = created["id"].as_str().unwrap().to_string();
+    let now = created["createdAt"].as_i64().unwrap();
+    worker::tick_at(&world.state, now).await.unwrap();
+    let before = stored(&world.state.pool, &id).await;
+    assert_eq!(before.state, "downloading");
+    complete_with(&world, &id, "Dune.epub", &common::epub()).await;
+    worker::tick_at(&world.state, now + POLL).await.unwrap();
+    let held = stored(&world.state.pool, &id).await;
+    assert_eq!(held.state, "downloading");
+    assert_eq!(held.attempts, before.attempts);
+    assert_eq!(held.download_id, before.download_id);
+    assert_eq!(
+        held.error.as_deref(),
+        Some("Server is busy. Waiting to import.")
+    );
+    assert_eq!(detail_phase(&world).await, "held");
+    assert!(world.downloads.path().join(format!("mewo-{id}")).exists());
+    assert!(download_tmp(&world).await.is_empty());
+    let sab = world.sab.lock().await;
+    assert!(sab.deletes.is_empty());
+    assert_eq!(sab.jobs.len(), 1);
+}
+
+async fn detail_phase(world: &World) -> String {
+    let (status, body) = empty_req(
+        &world.app,
+        "GET",
+        "/v1/catalog/works/OL893414W",
+        Some(&world.token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    body["status"]["request"]["phase"]
+        .as_str()
+        .unwrap_or("")
+        .to_string()
+}
+
+async fn download_tmp(world: &World) -> Vec<String> {
+    let tmp = world.state.data_dir.join("tmp");
+    let mut names = Vec::new();
+    let mut dir = match tokio::fs::read_dir(&tmp).await {
+        Ok(dir) => dir,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return names,
+        Err(err) => panic!("read {tmp:?}: {err}"),
+    };
+    while let Some(entry) = dir.next_entry().await.unwrap() {
+        names.push(entry.file_name().to_string_lossy().into_owned());
+    }
+    names
 }
