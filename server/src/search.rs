@@ -1098,33 +1098,34 @@ async fn index_pending(
     if !unindexed(state, book_id).await? {
         return Ok(false);
     }
-    // Non-waiting, and only after the recheck, so a full queue does not keep
-    // a permit that this book is not going to use. The caller sleeps after
-    // this returns, which drops the guard first.
-    let permit = state.parsers.try_acquire()?;
     let dir = crate::library::book_dir(&state.data_dir, files_owner, book_id);
+    // A crash can leave posts.json on disk before posts_indexed commits. That
+    // file needs no parse, so a full queue must not turn the retry into Busy.
     let posts = match read_posts(&dir).await? {
-        Some(bytes) => {
-            drop(permit);
-            serde_json::from_slice::<Posts>(&bytes).map_err(|err| {
-                tracing::error!(error = %err, book_id, "posts.json is not a feed");
-                ApiError::Internal
-            })?
-        }
-        None => match posts_from_epub(state, dir.join("book.epub"), permit).await {
-            Ok(posts) => posts,
-            Err(err @ ApiError::BadRequest(_)) => {
-                tracing::error!(%book_id, error = %err, "search backfill skipped an unreadable EPUB");
-                sqlx::query(
-                    "UPDATE books SET posts_indexed = -1 WHERE id = ? AND posts_indexed = 0",
-                )
-                .bind(book_id)
-                .execute(&state.pool)
-                .await?;
-                return Ok(false);
+        Some(bytes) => serde_json::from_slice::<Posts>(&bytes).map_err(|err| {
+            tracing::error!(error = %err, book_id, "posts.json is not a feed");
+            ApiError::Internal
+        })?,
+        None => {
+            // Non-waiting, and only on the EPUB path, so a full queue does not
+            // keep a permit that this book is not going to use. The caller
+            // sleeps after this returns, which drops the guard first.
+            let permit = state.parsers.try_acquire()?;
+            match posts_from_epub(state, dir.join("book.epub"), permit).await {
+                Ok(posts) => posts,
+                Err(err @ ApiError::BadRequest(_)) => {
+                    tracing::error!(%book_id, error = %err, "search backfill skipped an unreadable EPUB");
+                    sqlx::query(
+                        "UPDATE books SET posts_indexed = -1 WHERE id = ? AND posts_indexed = 0",
+                    )
+                    .bind(book_id)
+                    .execute(&state.pool)
+                    .await?;
+                    return Ok(false);
+                }
+                Err(err) => return Err(err),
             }
-            Err(err) => return Err(err),
-        },
+        }
     };
     store_feed(&state.pool, &dir, book_id, &posts).await?;
     Ok(true)
@@ -1233,5 +1234,60 @@ mod tests {
             .unwrap();
         assert_eq!(indexed, 0);
         assert!(state.parsers.stats().busy >= 1);
+    }
+
+    #[tokio::test]
+    async fn a_saved_feed_indexes_without_a_parse_permit() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let state = crate::prepare(crate::config::Config {
+            listen: "127.0.0.1:0".into(),
+            data_dir: tmp.path().to_path_buf(),
+            web_dir: None,
+            allow_signup: false,
+            max_epub_bytes: crate::config::MIN_EPUB_BYTES,
+            downloads_dir: None,
+            openlibrary_url: "https://openlibrary.org".into(),
+            auth: crate::config::AuthConfig::default(),
+            limits: crate::config::LimitsConfig {
+                max_parses: 0,
+                parse_wait: Duration::from_millis(10),
+                min_free_bytes: 0,
+            },
+        })
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO users (id, username, username_norm, password_hash, created_at)
+             VALUES ('owner', 'owner', 'owner', 'x', 1)",
+        )
+        .execute(&state.pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO books
+             (id, user_id, title, author, handle, imported_at, post_count, progress_index, is_sample, shared, posts_indexed)
+             VALUES ('book', 'owner', 'Legacy', 'Author', 'author', 1, 0, 0, 0, 0, 0)",
+        )
+        .execute(&state.pool)
+        .await
+        .unwrap();
+        let dir = crate::library::book_dir(&state.data_dir, "owner", "book");
+        tokio::fs::create_dir_all(&dir).await.unwrap();
+        tokio::fs::write(
+            dir.join("posts.json"),
+            r#"{"posts":[{"id":"0","kind":"Body","text":"Hi","chapter":"I"}]}"#,
+        )
+        .await
+        .unwrap();
+
+        let stored = index_pending(&state, "book", "owner").await.unwrap();
+        assert!(stored);
+        let indexed: i64 = sqlx::query_scalar("SELECT posts_indexed FROM books WHERE id = 'book'")
+            .fetch_one(&state.pool)
+            .await
+            .unwrap();
+        assert_eq!(indexed, 1);
+        assert_eq!(state.parsers.stats().busy, 0);
+        assert_eq!(state.parsers.stats().parses, 0);
     }
 }
