@@ -281,25 +281,31 @@ impl RequestRow {
 }
 
 /// Sheet label for a request. `state` and `error` are the leader's when this
-/// row is following one. Held wins over importing: an upstream pause at 100%
-/// is not the import window. A requested row that still has a retry error
-/// (attempts left; the worker stores `failed` once they are gone) is
-/// `retrying`, so that error stays on the sheet.
+/// row is following one. Held wins over importing: an upstream pause, a disk
+/// wait, or a busy parser at 100% is not the import window. A requested row
+/// that still has a retry error (attempts left; the worker stores `failed`
+/// once they are gone) is `retrying`, so that error stays on the sheet.
 pub(crate) fn phase(state: &str, error: Option<&str>, progress: i64) -> &'static str {
     let error = error.unwrap_or("");
     match state {
         "imported" => "imported",
         "failed" => "failed",
         "canceled" => "canceled",
-        "downloading" if worker::upstream_hold(error) => "held",
+        "downloading" if held_error(error) => "held",
         "downloading" if progress >= 100 => "importing",
         "downloading" => "downloading",
         "requested" if error == worker::NO_RELEASE_YET => "waiting",
         "requested" if error.starts_with(worker::NO_MATCHING_RELEASE) => "no_match",
-        "requested" if worker::upstream_hold(error) => "held",
+        "requested" if held_error(error) => "held",
         "requested" if !error.is_empty() => "retrying",
         _ => "searching",
     }
+}
+
+fn held_error(error: &str) -> bool {
+    worker::upstream_hold(error)
+        || error == worker::WAITING_FOR_DISK
+        || error == worker::WAITING_TO_IMPORT
 }
 
 const REQUEST_COLUMNS: &str =
@@ -1718,7 +1724,9 @@ mod tests {
     #[test]
     fn phase_covers_each_worker_message() {
         use super::phase;
-        use super::worker::{NO_MATCHING_RELEASE, NO_RELEASE_YET};
+        use super::worker::{
+            NO_MATCHING_RELEASE, NO_RELEASE_YET, WAITING_FOR_DISK, WAITING_TO_IMPORT,
+        };
 
         assert_eq!(phase("requested", None, 0), "searching");
         assert_eq!(phase("requested", Some(NO_RELEASE_YET), 0), "waiting");
@@ -1750,6 +1758,10 @@ mod tests {
         assert_eq!(phase("downloading", None, 40), "downloading");
         assert_eq!(phase("downloading", None, 100), "importing");
         assert_eq!(phase("downloading", Some("SABnzbd: paused"), 100), "held");
+        assert_eq!(phase("requested", Some(WAITING_FOR_DISK), 0), "held");
+        assert_eq!(phase("downloading", Some(WAITING_FOR_DISK), 60), "held");
+        assert_eq!(phase("downloading", Some(WAITING_FOR_DISK), 100), "held");
+        assert_eq!(phase("downloading", Some(WAITING_TO_IMPORT), 100), "held");
         assert_eq!(phase("failed", Some("No release found."), 0), "failed");
         assert_eq!(phase("canceled", None, 0), "canceled");
         assert_eq!(phase("imported", None, 100), "imported");

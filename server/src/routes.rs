@@ -352,13 +352,19 @@ async fn fill_posts(
     book_id: &str,
     dir: &std::path::Path,
 ) -> Result<Vec<u8>, ApiError> {
+    // The permit wait stays outside the lock. Holding the lock across it made
+    // every other legacy fill queue behind this timeout.
+    let permit = state.parsers.acquire().await?;
     // Simple global lock for legacy fills; cache hits and new uploads bypass it.
     // Recheck after locking so concurrent requests don't duplicate the parse.
     let _guard = state.lazy_parse_lock.lock().await;
     if let Some(bytes) = search::read_posts(dir).await? {
         return Ok(bytes);
     }
-    let parsed = state.parsers.parse(dir.join("book.epub")).await?;
+    let parsed = state
+        .parsers
+        .parse_owned(dir.join("book.epub"), permit)
+        .await?;
     search::store_feed(
         &state.pool,
         dir,

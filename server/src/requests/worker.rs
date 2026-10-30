@@ -44,6 +44,8 @@ pub(crate) const MAX_ATTEMPTS: i64 = 3;
 const DUE_LIMIT: i64 = 20;
 
 pub(crate) const NO_RELEASE_YET: &str = "No release yet.";
+pub(crate) const WAITING_FOR_DISK: &str = "Waiting for disk space.";
+pub(crate) const WAITING_TO_IMPORT: &str = "Server is busy. Waiting to import.";
 const NO_RELEASE_FOUND: &str = "No release found.";
 /// `note` stores this, then the closest title. `phase` matches the prefix.
 pub(crate) const NO_MATCHING_RELEASE: &str = "No matching release";
@@ -387,7 +389,7 @@ async fn requested(
             &state.pool,
             &row.id,
             "requested",
-            "Waiting for disk space.",
+            WAITING_FOR_DISK,
             now_ms.saturating_add(BACKOFF_MS),
         )
         .await;
@@ -564,7 +566,7 @@ async fn completed(
             &state.pool,
             &row.id,
             "downloading",
-            "Waiting for disk space.",
+            WAITING_FOR_DISK,
             now_ms.saturating_add(BACKOFF_MS),
         )
         .await;
@@ -576,7 +578,7 @@ async fn completed(
                 &state.pool,
                 &row.id,
                 "downloading",
-                "Server is busy. Waiting to import.",
+                WAITING_TO_IMPORT,
                 now_ms.saturating_add(BACKOFF_MS),
             )
             .await;

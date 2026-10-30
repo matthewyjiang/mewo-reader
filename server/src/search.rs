@@ -985,8 +985,9 @@ pub(crate) async fn read_posts(dir: &Path) -> Result<Option<Vec<u8>>, ApiError> 
 /// Indexes every book still at `posts_indexed = 0`. Safe to run again: a book
 /// is marked only after its file and rows commit, and a second pass skips it.
 /// An unreadable EPUB with no `posts.json` is marked `-1` and left alone.
-/// [`ApiError::Busy`] is not unreadable: the row stays at 0 and the next pass
-/// tries again.
+/// [`ApiError::Busy`] is not unreadable: the row stays at 0, and this pass
+/// retries that same book after a pause. The pause does not hold the legacy
+/// parse lock.
 pub(crate) async fn backfill(state: AppState) {
     let pending = sqlx::query_as::<_, (String, String)>(
         "SELECT id, COALESCE(files_user_id, user_id)
@@ -1003,11 +1004,18 @@ pub(crate) async fn backfill(state: AppState) {
     };
     let mut indexed = 0u64;
     for (offset, (book_id, files_owner)) in pending.iter().enumerate() {
-        match index_pending(&state, book_id, files_owner).await {
-            Ok(true) => indexed += 1,
-            Ok(false) => {}
-            Err(err) => {
-                tracing::error!(error = %err, %book_id, "search backfill failed for a book");
+        loop {
+            match index_pending(&state, book_id, files_owner).await {
+                Ok(true) => {
+                    indexed += 1;
+                    break;
+                }
+                Ok(false) => break,
+                Err(ApiError::Busy) => tokio::time::sleep(BACKFILL_PAUSE).await,
+                Err(err) => {
+                    tracing::error!(error = %err, %book_id, "search backfill failed for a book");
+                    break;
+                }
             }
         }
         // The write lock is free between books. A pause lets comments and
@@ -1026,21 +1034,25 @@ async fn index_pending(
     book_id: &str,
     files_owner: &str,
 ) -> Result<bool, ApiError> {
+    if !unindexed(state, book_id).await? {
+        return Ok(false);
+    }
+    // Non-waiting: a startup pass must not sit on the legacy lock for parse_wait.
+    let permit = state.parsers.try_acquire()?;
     let _guard = state.lazy_parse_lock.lock().await;
-    let indexed: Option<i64> = sqlx::query_scalar("SELECT posts_indexed FROM books WHERE id = ?")
-        .bind(book_id)
-        .fetch_optional(&state.pool)
-        .await?;
-    if indexed != Some(0) {
+    if !unindexed(state, book_id).await? {
         return Ok(false);
     }
     let dir = crate::library::book_dir(&state.data_dir, files_owner, book_id);
     let posts = match read_posts(&dir).await? {
-        Some(bytes) => serde_json::from_slice::<Posts>(&bytes).map_err(|err| {
-            tracing::error!(error = %err, book_id, "posts.json is not a feed");
-            ApiError::Internal
-        })?,
-        None => match posts_from_epub(state, dir.join("book.epub")).await {
+        Some(bytes) => {
+            drop(permit);
+            serde_json::from_slice::<Posts>(&bytes).map_err(|err| {
+                tracing::error!(error = %err, book_id, "posts.json is not a feed");
+                ApiError::Internal
+            })?
+        }
+        None => match posts_from_epub(state, dir.join("book.epub"), permit).await {
             Ok(posts) => posts,
             Err(err @ ApiError::BadRequest(_)) => {
                 tracing::error!(%book_id, error = %err, "search backfill skipped an unreadable EPUB");
@@ -1059,8 +1071,20 @@ async fn index_pending(
     Ok(true)
 }
 
-async fn posts_from_epub(state: &AppState, path: PathBuf) -> Result<Posts, ApiError> {
-    let parsed = state.parsers.parse(path).await?;
+async fn unindexed(state: &AppState, book_id: &str) -> Result<bool, ApiError> {
+    let indexed: Option<i64> = sqlx::query_scalar("SELECT posts_indexed FROM books WHERE id = ?")
+        .bind(book_id)
+        .fetch_optional(&state.pool)
+        .await?;
+    Ok(indexed == Some(0))
+}
+
+async fn posts_from_epub(
+    state: &AppState,
+    path: PathBuf,
+    permit: tokio::sync::OwnedSemaphorePermit,
+) -> Result<Posts, ApiError> {
+    let parsed = state.parsers.parse_owned(path, permit).await?;
     Ok(Posts {
         posts: parsed.posts,
     })

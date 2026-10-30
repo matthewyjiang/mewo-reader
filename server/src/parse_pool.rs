@@ -8,7 +8,7 @@ use crate::config::{LimitsConfig, MAX_COVER_BYTES};
 use crate::error::ApiError;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
-use tokio::sync::{OwnedSemaphorePermit, Semaphore};
+use tokio::sync::{OwnedSemaphorePermit, Semaphore, TryAcquireError};
 
 #[derive(Clone, Copy, Debug, Default)]
 pub struct ParseStats {
@@ -82,6 +82,16 @@ impl ParsePool {
         path: std::path::PathBuf,
     ) -> Result<crate::epub::ParsedEpub, ApiError> {
         let permit = self.acquire().await?;
+        self.parse_owned(path, permit).await
+    }
+
+    /// Parse with a permit the caller already holds. The permit moves into
+    /// the blocking task, so the caller can take it before any other wait.
+    pub(crate) async fn parse_owned(
+        &self,
+        path: std::path::PathBuf,
+        permit: OwnedSemaphorePermit,
+    ) -> Result<crate::epub::ParsedEpub, ApiError> {
         let inner = Arc::clone(&self.inner);
         let joined = tokio::task::spawn_blocking(move || {
             let _permit = permit;
@@ -101,7 +111,9 @@ impl ParsePool {
         }
     }
 
-    async fn acquire(&self) -> Result<OwnedSemaphorePermit, ApiError> {
+    /// Wait up to `parse_wait`. Callers that must not block other work use
+    /// [`try_acquire`] instead.
+    pub(crate) async fn acquire(&self) -> Result<OwnedSemaphorePermit, ApiError> {
         match tokio::time::timeout(self.inner.wait, Arc::clone(&self.inner.sem).acquire_owned())
             .await
         {
@@ -111,6 +123,22 @@ impl ParsePool {
                 Err(ApiError::Internal)
             }
             Err(_) => {
+                self.inner.busy.fetch_add(1, Ordering::Relaxed);
+                Err(ApiError::Busy)
+            }
+        }
+    }
+
+    /// A permit, or [`ApiError::Busy`] with no wait. Background work uses this
+    /// so a full queue does not sit on the legacy parse lock.
+    pub(crate) fn try_acquire(&self) -> Result<OwnedSemaphorePermit, ApiError> {
+        match Arc::clone(&self.inner.sem).try_acquire_owned() {
+            Ok(permit) => Ok(permit),
+            Err(TryAcquireError::Closed) => {
+                tracing::error!("parse semaphore closed");
+                Err(ApiError::Internal)
+            }
+            Err(TryAcquireError::NoPermits) => {
                 self.inner.busy.fetch_add(1, Ordering::Relaxed);
                 Err(ApiError::Busy)
             }

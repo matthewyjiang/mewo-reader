@@ -6351,6 +6351,65 @@ async fn a_full_parse_queue_is_503_and_leaves_no_book() {
 }
 
 #[tokio::test]
+async fn two_lazy_fills_wait_together_when_the_parser_is_busy() {
+    let wait = Duration::from_millis(300);
+    let limits = LimitsConfig {
+        max_parses: 0,
+        parse_wait: wait,
+        min_free_bytes: 0,
+    };
+    let (state, _tmp) = open_state(limits, MIN_EPUB_BYTES).await;
+    let app = router(state.clone());
+    let token = register(&app, "matt", "password1").await;
+    let user_id: String = sqlx::query_scalar("SELECT id FROM users WHERE username = 'matt'")
+        .fetch_one(&state.pool)
+        .await
+        .unwrap();
+    for id in [
+        "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa1",
+        "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa2",
+    ] {
+        sqlx::query(
+            "INSERT INTO books
+             (id, user_id, title, author, handle, imported_at, post_count, progress_index, is_sample, shared, posts_indexed)
+             VALUES (?, ?, 'Legacy', 'Author', 'author', 1, 0, 0, 0, 0, 0)",
+        )
+        .bind(id)
+        .bind(&user_id)
+        .execute(&state.pool)
+        .await
+        .unwrap();
+        let dir = state.data_dir.join("books").join(&user_id).join(id);
+        tokio::fs::create_dir_all(&dir).await.unwrap();
+        tokio::fs::write(dir.join("book.epub"), common::epub())
+            .await
+            .unwrap();
+    }
+    let started = std::time::Instant::now();
+    let first = posts_status(&app, &token, "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa1");
+    let second = posts_status(&app, &token, "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa2");
+    let (left, right) = tokio::join!(first, second);
+    let elapsed = started.elapsed();
+    assert_eq!(left, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(right, StatusCode::SERVICE_UNAVAILABLE);
+    assert!(
+        elapsed < wait + Duration::from_millis(150),
+        "fills waited one after another: {elapsed:?}"
+    );
+}
+
+async fn posts_status(app: &axum::Router, token: &str, id: &str) -> StatusCode {
+    let req = Request::builder()
+        .method("GET")
+        .uri(format!("/v1/books/{id}/posts"))
+        .header(header::AUTHORIZATION, format!("Bearer {token}"))
+        .body(Body::empty())
+        .unwrap();
+    let (status, _, _) = call(app, req).await;
+    status
+}
+
+#[tokio::test]
 async fn a_legacy_fill_waits_on_the_parse_pool() {
     let limits = LimitsConfig {
         max_parses: 0,

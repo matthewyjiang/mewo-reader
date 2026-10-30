@@ -4705,6 +4705,7 @@ async fn the_worker_waits_for_disk_before_sabnzbd() {
     assert_eq!(row.state, "requested");
     assert_eq!(row.attempts, before.attempts);
     assert_eq!(row.error.as_deref(), Some("Waiting for disk space."));
+    assert_eq!(detail_phase(&world).await, "held");
     assert_eq!(row.next_check_at, now + BACKOFF);
     assert!(world.sab.lock().await.adds.is_empty());
 
@@ -4737,6 +4738,7 @@ async fn the_worker_keeps_a_finished_download_when_disk_is_low() {
     assert_eq!(held.attempts, before.attempts);
     assert_eq!(held.download_id, before.download_id);
     assert_eq!(held.error.as_deref(), Some("Waiting for disk space."));
+    assert_eq!(detail_phase(&world).await, "held");
     assert!(world.downloads.path().join(format!("mewo-{id}")).exists());
     {
         let sab = world.sab.lock().await;
@@ -4778,10 +4780,27 @@ async fn a_busy_parser_does_not_fail_the_download() {
         held.error.as_deref(),
         Some("Server is busy. Waiting to import.")
     );
+    assert_eq!(detail_phase(&world).await, "held");
     assert!(world.downloads.path().join(format!("mewo-{id}")).exists());
+    assert!(download_tmp(&world).await.is_empty());
     let sab = world.sab.lock().await;
     assert!(sab.deletes.is_empty());
     assert_eq!(sab.jobs.len(), 1);
+}
+
+async fn detail_phase(world: &World) -> String {
+    let (status, body) = empty_req(
+        &world.app,
+        "GET",
+        "/v1/catalog/works/OL893414W",
+        Some(&world.token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    body["status"]["request"]["phase"]
+        .as_str()
+        .unwrap_or("")
+        .to_string()
 }
 
 async fn download_tmp(world: &World) -> Vec<String> {
