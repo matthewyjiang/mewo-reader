@@ -534,12 +534,16 @@ final class BodyWait: @unchecked Sendable {
         }
     }
 
-    /// Stores `result` when nobody is waiting yet. A cancel that lands first wins.
+    /// Stores `result` when nobody is waiting yet. A finish keeps that result. A cancel that lands first wins.
     private func take(_ result: Result<(Data, HTTPURLResponse), Error>) -> CheckedContinuation<(Data, HTTPURLResponse), Error>? {
         lock.lock()
         switch state {
         case .waiting(let cont):
-            state = .cancelled
+            if case .failure(let error) = result, error is CancellationError {
+                state = .cancelled
+            } else {
+                state = .done(result)
+            }
             lock.unlock()
             return cont
         case .idle:

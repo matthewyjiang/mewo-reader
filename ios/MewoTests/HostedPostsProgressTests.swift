@@ -34,6 +34,24 @@ final class HostedPostsProgressTests: XCTestCase {
         XCTAssertEqual(http, 200)
     }
 
+    func testAFinishWhileWaitingKeepsTheResult() async throws {
+        let wait = BodyWait()
+        let response = HTTPURLResponse(
+            url: URL(string: "https://mewo.example/posts")!,
+            statusCode: 200,
+            httpVersion: nil,
+            headerFields: nil
+        )!
+        let body = Data("ok".utf8)
+        let first = try await wait.value { start in
+            if start { wait.finish(.success((body, response))) }
+        }
+        XCTAssertEqual(first.0, body)
+        let again = try await wait.value { _ in }
+        XCTAssertEqual(again.0, body)
+        XCTAssertEqual(again.1.statusCode, 200)
+    }
+
     func testACancelThatArrivesBeforeTheWaiterResumes() async {
         let wait = BodyWait()
         wait.cancel()

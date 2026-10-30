@@ -671,7 +671,6 @@ final class HostedLibraryStore: LibraryStore {
             let previous = books
             books = next
             files.setShelf(Set(next.map(\.id)))
-            loadState = reduceLibraryLoad(loadState, event)
             if case .refreshSucceeded = event {
                 let kept = Set(next.map(\.id))
                 dropped = previous.compactMap { book in
@@ -703,6 +702,11 @@ final class HostedLibraryStore: LibraryStore {
         if stillHere {
             await rescan(books)
         }
+        // The refresh stays in progress until dropped files are gone and offline marks
+        // are published. A caller that sees a finished shelf can load again; joining
+        // the scan that is still running would keep the shelf it already fetched.
+        guard stillHere, sessions.session.token == owner.token else { return }
+        loadState = reduceLibraryLoad(loadState, event)
     }
 
     private func forgetFiles(_ ids: [String]) async {
@@ -998,9 +1002,11 @@ final class HostedLibraryStore: LibraryStore {
     private func setDownloading(_ id: String, _ fraction: Double?, generation: Int) {
         guard liveGeneration[id] == generation else { return }
         let fraction = quantized(fraction)
-        if live[id] == .downloading(fraction) { return }
-        live[id] = .downloading(fraction)
-        publishOffline()
+        if live[id] != .downloading(fraction) {
+            live[id] = .downloading(fraction)
+            publishOffline()
+        }
+        HostedDisk.noteApply()
     }
 
     /// Whole percents. Nil stays nil, so a gzipped body does not republish on every chunk.
@@ -1231,11 +1237,20 @@ enum HostedDisk {
     static var recordPublishes = false
     private static let publishLock = NSLock()
     private static var publishes = 0
+    private static var applies = 0
 
     static func notePublish() {
         guard recordPublishes else { return }
         publishLock.lock()
         publishes += 1
+        publishLock.unlock()
+    }
+
+    /// Counts every progress update that reached the store, including ones that did not republish.
+    static func noteApply() {
+        guard recordPublishes else { return }
+        publishLock.lock()
+        applies += 1
         publishLock.unlock()
     }
 
@@ -1245,9 +1260,16 @@ enum HostedDisk {
         return publishes
     }
 
+    static var applyCount: Int {
+        publishLock.lock()
+        defer { publishLock.unlock() }
+        return applies
+    }
+
     static func resetPublishes() {
         publishLock.lock()
         publishes = 0
+        applies = 0
         publishLock.unlock()
     }
 }

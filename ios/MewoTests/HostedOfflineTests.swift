@@ -761,8 +761,7 @@ final class HostedOfflineTests: XCTestCase {
         for _ in 0..<1000 {
             store.reportProgress(idA, fraction: nil, generation: generation)
         }
-        try await waitUntil("progress did not publish") { HostedDisk.publishCount >= 1 }
-        try await Task.sleep(nanoseconds: 200_000_000)
+        try await waitUntil("progress did not settle") { HostedDisk.applyCount == 1000 }
         XCTAssertEqual(HostedDisk.publishCount, 1)
     }
 
@@ -832,6 +831,35 @@ final class HostedOfflineTests: XCTestCase {
         } catch let error as URLError {
             XCTAssertEqual(error.code, .cancelled)
         }
+    }
+
+    /// The post-fetch scan fills `offline`. The shelf stays refreshing until that scan publishes.
+    func testASettledShelfAlreadyHasOfflineMarks() async throws {
+        writePosts(idA, "secret")
+        let gate = DispatchSemaphore(value: 0)
+        let scanning = Flag()
+        HostedDisk.beforeScan = {
+            scanning.set()
+            gate.wait()
+        }
+        defer {
+            HostedDisk.beforeScan = nil
+            gate.signal()
+        }
+        client.shelf = [book(idA, importedAt: 3)]
+        let store = makeStore()
+        self.store = store
+        sessions.setSignedIn(username: "ada", token: "token-a")
+        try await waitUntil("the first scan did not start") { scanning.isSet }
+        XCTAssertFalse(settled(store, ids: [idA]))
+        scanning.clear()
+        gate.signal()
+        try await waitUntil("the shelf scan did not start") { scanning.isSet }
+        XCTAssertFalse(settled(store, ids: [idA]))
+        HostedDisk.beforeScan = nil
+        gate.signal()
+        try await waitUntil("shelf did not settle") { settled(store, ids: [idA]) }
+        XCTAssertEqual(try XCTUnwrap(store.offline[idA]), .downloaded)
     }
 
     private func open(_ books: [BookRecord]) async throws -> HostedLibraryStore {
@@ -1345,6 +1373,7 @@ private final class Flag: @unchecked Sendable {
     private let lock = NSLock()
     private var value = false
     func set() { lock.lock(); value = true; lock.unlock() }
+    func clear() { lock.lock(); value = false; lock.unlock() }
     var isSet: Bool { lock.lock(); defer { lock.unlock() }; return value }
 }
 

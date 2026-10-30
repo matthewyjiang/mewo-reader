@@ -37,8 +37,8 @@ struct RootView: View {
         .environment(\.mewo, palette)
         .environment(\.readerScale, app.readerFont.scale)
         .preferredColorScheme(palette.isDark ? .dark : .light)
-        .tint(app.themeStore.theme.palette.accent)
-        .background(app.themeStore.theme.palette.ground.ignoresSafeArea())
+        .tint(palette.accent)
+        .background(palette.ground.ignoresSafeArea())
         .onChange(of: app.backend.kind) { _, kind in
             Task { try? await app.library.load() }
             if kind == .hosted {
