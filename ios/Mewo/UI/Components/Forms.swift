@@ -140,6 +140,9 @@ struct LibrarySettings: View {
                     .font(MewoFont.bold(17))
                     .foregroundStyle(mewo.ink)
                     .frame(maxWidth: .infinity, minHeight: 52, alignment: .leading)
+                DownloadAllRow(summary: app.hostedLibrary.offlineSummary) {
+                    Task { await app.library.downloadAll() }
+                }
                 Button { run { await app.hostedAuth.signOut() } } label: {
                     Text("Sign out")
                         .font(MewoFont.bold(17))
@@ -432,4 +435,40 @@ struct DisplaySettings: View {
             }
         }
     }
+}
+
+struct DownloadAllRow: View {
+    @Environment(\.mewo) private var mewo
+    var summary: OfflineSummary
+    var identifier: String = "download-all"
+    var action: () -> Void
+
+    var body: some View {
+        let enabled = downloadAllEnabled(summary)
+        let label = Text(downloadAllLabel(summary))
+            .font(MewoFont.bold(17))
+            .foregroundStyle(enabled ? mewo.accent : mewo.ink)
+            .frame(maxWidth: .infinity, minHeight: 52, alignment: .leading)
+            .contentShape(Rectangle())
+        if enabled {
+            Button(action: action) { label }
+                .buttonStyle(.plain)
+                .accessibilityIdentifier(identifier)
+                .accessibilityLabel(downloadAllLabel(summary))
+        } else {
+            label
+                .accessibilityIdentifier(identifier)
+                .accessibilityLabel(downloadAllLabel(summary))
+        }
+    }
+}
+
+func downloadAllLabel(_ summary: OfflineSummary) -> String {
+    if summary.running { return "Downloading \(summary.downloaded) of \(summary.total)" }
+    if summary.downloaded < summary.total { return "Download all books" }
+    return "All books downloaded"
+}
+
+func downloadAllEnabled(_ summary: OfflineSummary) -> Bool {
+    summary.running || summary.downloaded < summary.total
 }

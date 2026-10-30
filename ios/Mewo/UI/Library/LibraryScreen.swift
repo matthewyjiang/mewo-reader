@@ -368,12 +368,37 @@ struct LibraryScreen: View {
     }
 
     private func bookRow(_ book: BookRecord) -> some View {
+        ShelfBookRow(
+            book: book,
+            cover: app.library.coverFile(id: book.id),
+            offline: hosted ? (app.hostedLibrary.offline[book.id] ?? .notDownloaded) : nil,
+            onOpen: { onOpenBook(book.id) },
+            onDownload: hosted ? { download in
+                Task { await app.library.setDownloaded(id: book.id, on: download) }
+            } : nil,
+            onShare: hosted && book.mine ? {
+                model.setShared(id: book.id, shared: !book.shared)
+            } : nil,
+            onDelete: book.mine ? { pendingDelete = book } : nil
+        )
+    }
+}
+
+struct ShelfBookRow: View {
+    @Environment(\.mewo) private var mewo
+    var book: BookRecord
+    var cover: URL?
+    var offline: OfflineState?
+    var onOpen: () -> Void
+    var onDownload: ((Bool) -> Void)?
+    var onShare: (() -> Void)?
+    var onDelete: (() -> Void)?
+
+    var body: some View {
         HStack(alignment: .center, spacing: 0) {
-            Button {
-                onOpenBook(book.id)
-            } label: {
+            Button(action: onOpen) {
                 HStack(alignment: .center, spacing: 12) {
-                    Avatar(name: book.author, cover: app.library.coverFile(id: book.id), size: 40)
+                    Avatar(name: book.author, cover: cover, size: 40)
                     VStack(alignment: .leading, spacing: 2) {
                         HStack(spacing: 6) {
                             Text(book.title).font(MewoFont.bold(15)).lineLimit(1)
@@ -394,18 +419,19 @@ struct LibraryScreen: View {
             }
             .buttonStyle(.plain)
             HStack(alignment: .center, spacing: 0) {
-                if hosted && book.mine {
+                if let offline, let onDownload {
+                    downloadButton(offline, onDownload: onDownload)
+                }
+                if let onShare {
                     shelfAction(
                         symbol: book.shared ? "person.2.fill" : "lock",
                         label: book.shared ? "Make private" : "Share",
                         identifier: "share-\(book.id)"
-                    ) {
-                        model.setShared(id: book.id, shared: !book.shared)
-                    }
+                    ) { onShare() }
                 }
-                if book.mine {
+                if let onDelete {
                     shelfAction(symbol: "trash", label: "Remove \(book.title)", identifier: "remove-\(book.id)") {
-                        pendingDelete = book
+                        onDelete()
                     }
                 }
             }
@@ -417,7 +443,39 @@ struct LibraryScreen: View {
         .accessibilityElement(children: .contain)
     }
 
-    /// Same 40pt cell as remove, so the two icons share one vertical axis.
+    @ViewBuilder
+    private func downloadButton(_ state: OfflineState, onDownload: @escaping (Bool) -> Void) -> some View {
+        switch state {
+        case .notDownloaded:
+            shelfAction(symbol: "arrow.down.circle", label: "Download", identifier: "download-\(book.id)") {
+                onDownload(true)
+            }
+        case .downloading(let fraction):
+            Button { onDownload(false) } label: {
+                DownloadRing(fraction: fraction)
+                    .frame(width: 40, height: 40)
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel(downloadingLabel(fraction))
+            .accessibilityIdentifier("download-\(book.id)")
+        case .downloaded:
+            shelfAction(symbol: "arrow.down.circle.fill", label: "Remove download", identifier: "download-\(book.id)") {
+                onDownload(false)
+            }
+        case .failed:
+            Button { onDownload(true) } label: {
+                Image(systemName: "exclamationmark.circle")
+                    .font(.system(size: 17))
+                    .foregroundStyle(mewo.like)
+                    .frame(width: 40, height: 40, alignment: .center)
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Download failed, try again")
+            .accessibilityIdentifier("download-\(book.id)")
+        }
+    }
+
+    /// Same 40pt cell as remove, so the icons share one vertical axis.
     private func shelfAction(symbol: String, label: String, identifier: String, action: @escaping () -> Void) -> some View {
         Button(action: action) {
             Image(systemName: symbol)
@@ -429,6 +487,38 @@ struct LibraryScreen: View {
         .accessibilityLabel(label)
         .accessibilityIdentifier(identifier)
     }
+}
+
+/// 20pt ring. A nil fraction spins; a value is a trimmed circle because `ProgressView` ignores it.
+struct DownloadRing: View {
+    @Environment(\.mewo) private var mewo
+    var fraction: Double?
+
+    var body: some View {
+        Group {
+            if let fraction {
+                ZStack {
+                    Circle().stroke(mewo.line, lineWidth: 2)
+                    Circle()
+                        .trim(from: 0, to: min(1, max(0, fraction)))
+                        .stroke(mewo.mute, style: StrokeStyle(lineWidth: 2, lineCap: .round))
+                        .rotationEffect(.degrees(-90))
+                }
+            } else {
+                ProgressView()
+                    .controlSize(.small)
+                    .tint(mewo.mute)
+            }
+        }
+        .frame(width: 20, height: 20)
+    }
+}
+
+/// Spoken name for the shelf ring. A missing length has no percent.
+func downloadingLabel(_ fraction: Double?) -> String {
+    guard let fraction else { return "Downloading" }
+    let pct = min(100, max(0, Int((fraction * 100).rounded())))
+    return "Downloading, \(pct)%"
 }
 
 struct ScrollOffsetKey: PreferenceKey {

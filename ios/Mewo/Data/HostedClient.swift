@@ -10,6 +10,14 @@ struct HostedException: LocalizedError {
 final class HostedClientHooks: @unchecked Sendable {
     var library: (@Sendable (HostedSession) async throws -> LibrarySnapshot)?
     var posts: (@Sendable (HostedSession, String) async throws -> [FeedPost])?
+    var postsProgress: (@Sendable (HostedSession, String, @escaping @Sendable (Double?) -> Void) async throws -> [FeedPost])?
+    var likes: (@Sendable (HostedSession, String) async throws -> Set<String>)?
+    var commentIndex: (@Sendable (HostedSession, String) async throws -> CommentIndex)?
+    var comments: (@Sendable (HostedSession, String, String) async throws -> [PostComment])?
+    var toggleLike: (@Sendable (HostedSession, String, String) async throws -> Set<String>)?
+    var addComment: (@Sendable (HostedSession, String, String, String) async throws -> [PostComment])?
+    var deleteComment: (@Sendable (HostedSession, String, String, String) async throws -> [PostComment])?
+    var patch: (@Sendable (HostedSession, String, PatchBook) async throws -> BookRecord)?
     var downloadCover: (@Sendable (HostedSession, String, URL) async throws -> Bool)?
     var delete: (@Sendable (HostedSession, String) async throws -> Void)?
     var feed: (@Sendable (HostedSession, String?) async throws -> HomeFeedPage)?
@@ -119,6 +127,7 @@ final class HostedClient: Sendable {
     }
 
     func patch(_ hosted: HostedSession, id: String, body: PatchBook) async throws -> BookRecord {
+        if let patch = hooks.patch { return try await patch(hosted, id, body) }
         var request = try authorized(hosted, path: "/v1/books/\(id)")
         request.httpMethod = "PATCH"
         request.setValue("application/json; charset=utf-8", forHTTPHeaderField: "Content-Type")
@@ -127,10 +136,25 @@ final class HostedClient: Sendable {
     }
 
     /// Timeline posts the server parsed from this book. Ids match likes and comments.
-    func posts(_ hosted: HostedSession, id: String) async throws -> [FeedPost] {
+    /// `onProgress` is nil until the response has a Content-Length, then the fraction read.
+    /// The server gzips this route, so the length is usually missing. That stays indeterminate.
+    func posts(
+        _ hosted: HostedSession,
+        id: String,
+        onProgress: @escaping @Sendable (Double?) -> Void = { _ in }
+    ) async throws -> [FeedPost] {
+        if let postsProgress = hooks.postsProgress {
+            return try await postsProgress(hosted, id, onProgress)
+        }
         if let posts = hooks.posts { return try await posts(hosted, id) }
-        let body: PostsResponse = try await get(hosted, path: "/v1/books/\(id)/posts")
-        return body.posts
+        let request = try authorized(hosted, path: "/v1/books/\(id)/posts")
+        let (data, response) = try await readBody(request, onProgress: onProgress)
+        try expectOk(response, data: data)
+        do {
+            return try JSONFiles.decoder.decode(PostsResponse.self, from: data).posts
+        } catch {
+            throw HostedException(message: "Could not read the server response.", code: response.statusCode)
+        }
     }
 
     func downloadCover(_ hosted: HostedSession, id: String, dest: URL) async throws -> Bool {
@@ -146,11 +170,13 @@ final class HostedClient: Sendable {
     }
 
     func likes(_ hosted: HostedSession, id: String) async throws -> Set<String> {
+        if let likes = hooks.likes { return try await likes(hosted, id) }
         let set: LikeSet = try await get(hosted, path: "/v1/books/\(id)/likes")
         return set.ids
     }
 
     func toggleLike(_ hosted: HostedSession, id: String, postId: String) async throws -> Set<String> {
+        if let toggleLike = hooks.toggleLike { return try await toggleLike(hosted, id, postId) }
         var request = try authorized(hosted, path: "/v1/books/\(id)/likes/\(postId)")
         request.httpMethod = "POST"
         request.httpBody = Data()
@@ -159,15 +185,18 @@ final class HostedClient: Sendable {
     }
 
     func commentIndex(_ hosted: HostedSession, id: String) async throws -> CommentIndex {
-        try await get(hosted, path: "/v1/books/\(id)/comments")
+        if let commentIndex = hooks.commentIndex { return try await commentIndex(hosted, id) }
+        return try await get(hosted, path: "/v1/books/\(id)/comments")
     }
 
     func comments(_ hosted: HostedSession, id: String, postId: String) async throws -> [PostComment] {
+        if let comments = hooks.comments { return try await comments(hosted, id, postId) }
         let thread: CommentThread = try await get(hosted, path: "/v1/books/\(id)/comments/\(postId)")
         return thread.comments
     }
 
     func addComment(_ hosted: HostedSession, id: String, postId: String, text: String) async throws -> [PostComment] {
+        if let addComment = hooks.addComment { return try await addComment(hosted, id, postId, text) }
         var request = try authorized(hosted, path: "/v1/books/\(id)/comments/\(postId)")
         request.httpMethod = "POST"
         request.setValue("application/json; charset=utf-8", forHTTPHeaderField: "Content-Type")
@@ -177,6 +206,7 @@ final class HostedClient: Sendable {
     }
 
     func deleteComment(_ hosted: HostedSession, id: String, postId: String, commentId: String) async throws -> [PostComment] {
+        if let deleteComment = hooks.deleteComment { return try await deleteComment(hosted, id, postId, commentId) }
         var request = try authorized(hosted, path: "/v1/books/\(id)/comments/\(postId)/\(commentId)")
         request.httpMethod = "DELETE"
         let thread: CommentThread = try await decode(request)
@@ -300,6 +330,18 @@ final class HostedClient: Sendable {
         return components.string ?? path
     }
 
+    /// Reads the body in chunks so a known Content-Length can move the shelf ring.
+    private func readBody(
+        _ request: URLRequest,
+        onProgress: @escaping @Sendable (Double?) -> Void
+    ) async throws -> (Data, HTTPURLResponse) {
+        let reader = BodyReader(onProgress: onProgress)
+        let config = session.configuration
+        let owned = URLSession(configuration: config, delegate: reader, delegateQueue: nil)
+        defer { owned.finishTasksAndInvalidate() }
+        return try await reader.start(owned, request)
+    }
+
     private func get<T: Decodable>(_ hosted: HostedSession, path: String) async throws -> T {
         let request = try authorized(hosted, path: path)
         return try await decode(request)
@@ -359,5 +401,162 @@ final class HostedClient: Sendable {
         body.append("Content-Type: \(mime)\r\n\r\n".data(using: .utf8)!)
         body.append(try Data(contentsOf: url))
         body.append("\r\n".data(using: .utf8)!)
+    }
+}
+
+/// One posts response. Reports byte progress, and cancels the URLSession task with the caller.
+private final class BodyReader: NSObject, URLSessionDataDelegate, @unchecked Sendable {
+    private let onProgress: @Sendable (Double?) -> Void
+    private let wait = BodyWait()
+    private let lock = NSLock()
+    private var data = Data()
+    private var expected: Int64 = -1
+    private var http: HTTPURLResponse?
+    private var ok = false
+
+    init(onProgress: @escaping @Sendable (Double?) -> Void) {
+        self.onProgress = onProgress
+    }
+
+    func start(_ session: URLSession, _ request: URLRequest) async throws -> (Data, HTTPURLResponse) {
+        if Task.isCancelled { throw CancellationError() }
+        let task = session.dataTask(with: request)
+        return try await withTaskCancellationHandler {
+            try await wait.value { start in
+                if start { task.resume() }
+            }
+        } onCancel: {
+            task.cancel()
+            wait.cancel()
+        }
+    }
+
+    func urlSession(
+        _ session: URLSession,
+        dataTask: URLSessionDataTask,
+        didReceive response: URLResponse,
+        completionHandler: @escaping (URLSession.ResponseDisposition) -> Void
+    ) {
+        let http = response as? HTTPURLResponse
+        let code = http?.statusCode ?? 0
+        lock.lock()
+        self.http = http
+        ok = (200..<300).contains(code)
+        expected = response.expectedContentLength
+        lock.unlock()
+        if ok {
+            onProgress(expected > 0 ? 0 : nil)
+        }
+        completionHandler(.allow)
+    }
+
+    func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data) {
+        lock.lock()
+        self.data.append(data)
+        let count = self.data.count
+        let expected = self.expected
+        let ok = self.ok
+        lock.unlock()
+        guard ok else { return }
+        if expected > 0 {
+            onProgress(min(1, Double(count) / Double(expected)))
+        } else {
+            onProgress(nil)
+        }
+    }
+
+    func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
+        lock.lock()
+        let data = self.data
+        let http = self.http
+        lock.unlock()
+        let result: Result<(Data, HTTPURLResponse), Error>
+        if let error {
+            result = .failure(error)
+        } else if let http {
+            result = .success((data, http))
+        } else {
+            result = .failure(HostedException(message: "Empty download."))
+        }
+        wait.finish(result)
+    }
+}
+
+/// The URLSession task can finish, or be cancelled, before the caller is waiting.
+/// The result is kept until then. Dropping it leaves the download suspended forever.
+final class BodyWait: @unchecked Sendable {
+    private enum State {
+        case idle
+        case waiting(CheckedContinuation<(Data, HTTPURLResponse), Error>)
+        case done(Result<(Data, HTTPURLResponse), Error>)
+        case cancelled
+    }
+
+    private let lock = NSLock()
+    private var state = State.idle
+
+    /// `onReady(true)` is the signal to resume the URLSession task. A stored result resumes immediately.
+    func value(onReady: (Bool) -> Void) async throws -> (Data, HTTPURLResponse) {
+        try await withCheckedThrowingContinuation { cont in
+            onReady(register(cont))
+        }
+    }
+
+    func finish(_ result: Result<(Data, HTTPURLResponse), Error>) {
+        let waiting = take(result)
+        waiting?.resume(with: result)
+    }
+
+    func cancel() {
+        let waiting = take(.failure(CancellationError()))
+        waiting?.resume(throwing: CancellationError())
+    }
+
+    private func register(_ cont: CheckedContinuation<(Data, HTTPURLResponse), Error>) -> Bool {
+        lock.lock()
+        switch state {
+        case .done(let result):
+            lock.unlock()
+            cont.resume(with: result)
+            return false
+        case .cancelled:
+            lock.unlock()
+            cont.resume(throwing: CancellationError())
+            return false
+        case .idle:
+            state = .waiting(cont)
+            lock.unlock()
+            return true
+        case .waiting:
+            lock.unlock()
+            cont.resume(throwing: CancellationError())
+            return false
+        }
+    }
+
+    /// Stores `result` when nobody is waiting yet. A finish keeps that result. A cancel that lands first wins.
+    private func take(_ result: Result<(Data, HTTPURLResponse), Error>) -> CheckedContinuation<(Data, HTTPURLResponse), Error>? {
+        lock.lock()
+        switch state {
+        case .waiting(let cont):
+            if case .failure(let error) = result, error is CancellationError {
+                state = .cancelled
+            } else {
+                state = .done(result)
+            }
+            lock.unlock()
+            return cont
+        case .idle:
+            if case .failure(let error) = result, error is CancellationError {
+                state = .cancelled
+            } else {
+                state = .done(result)
+            }
+            lock.unlock()
+            return nil
+        case .done, .cancelled:
+            lock.unlock()
+            return nil
+        }
     }
 }

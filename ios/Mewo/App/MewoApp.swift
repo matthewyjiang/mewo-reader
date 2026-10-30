@@ -22,19 +22,23 @@ struct RootView: View {
     @Environment(\.scenePhase) private var scenePhase
 
     var body: some View {
+        let shots = offlineShots
+        let palette = shots ? DisplayTheme.xLight.palette : app.themeStore.theme.palette
         Group {
-            if app.localProfile.profile.ready {
+            if shots {
+                offlinePreview
+            } else if app.localProfile.profile.ready {
                 MewoNav()
             } else {
                 OnboardingScreen()
             }
         }
         .environment(\.app, app)
-        .environment(\.mewo, app.themeStore.theme.palette)
+        .environment(\.mewo, palette)
         .environment(\.readerScale, app.readerFont.scale)
-        .preferredColorScheme(app.themeStore.theme.palette.isDark ? .dark : .light)
-        .tint(app.themeStore.theme.palette.accent)
-        .background(app.themeStore.theme.palette.ground.ignoresSafeArea())
+        .preferredColorScheme(palette.isDark ? .dark : .light)
+        .tint(palette.accent)
+        .background(palette.ground.ignoresSafeArea())
         .onChange(of: app.backend.kind) { _, kind in
             Task { try? await app.library.load() }
             if kind == .hosted {
@@ -46,5 +50,21 @@ struct RootView: View {
                 Task { await app.catalog.refreshAccess() }
             }
         }
+    }
+
+    /// Screenshot launches only. Release builds do not contain the preview.
+    private var offlineShots: Bool {
+        #if DEBUG
+        ProcessInfo.processInfo.arguments.contains("--offline-shots")
+        #else
+        false
+        #endif
+    }
+
+    @ViewBuilder
+    private var offlinePreview: some View {
+        #if DEBUG
+        OfflinePreview()
+        #endif
     }
 }
