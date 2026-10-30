@@ -4,7 +4,10 @@ use axum::http::{header, Request, StatusCode};
 use http_body_util::BodyExt;
 use mewo_server::build;
 use mewo_server::cli::{self, AdminCommand};
-use mewo_server::config::{AuthConfig, Config, Rate, MIN_EPUB_BYTES};
+use mewo_server::config::{
+    request_body_limit, AuthConfig, Config, LimitsConfig, Rate, MAX_COVER_BYTES, MIN_EPUB_BYTES,
+};
+use mewo_server::disk::DiskGuard;
 use mewo_server::{prepare, router};
 use serde_json::{json, Value};
 use sqlx::migrate::Migrate;
@@ -13,6 +16,8 @@ use sqlx::SqlitePool;
 use std::net::{IpAddr, SocketAddr};
 use std::path::Path;
 use std::str::FromStr;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 use tempfile::TempDir;
 use tower::ServiceExt;
@@ -30,6 +35,7 @@ async fn app_with(allow_signup: bool, max_epub_bytes: u64) -> (axum::Router, Tem
         downloads_dir: None,
         openlibrary_url: "https://openlibrary.org".into(),
         auth: roomy_auth(),
+        limits: test_limits(),
     };
     let router = build(config).await.unwrap();
     (router, tmp)
@@ -127,6 +133,15 @@ fn config_at(path: &Path, allow_signup: bool, max_epub_bytes: u64) -> Config {
         downloads_dir: None,
         openlibrary_url: "https://openlibrary.org".into(),
         auth: roomy_auth(),
+        limits: test_limits(),
+    }
+}
+
+/// The suite runs on small disks. `0` turns the free-space floor off.
+fn test_limits() -> LimitsConfig {
+    LimitsConfig {
+        min_free_bytes: 0,
+        ..LimitsConfig::default()
     }
 }
 
@@ -1560,6 +1575,7 @@ async fn static_history_fallback_does_not_swallow_unknown_api_routes() {
         downloads_dir: None,
         openlibrary_url: "https://openlibrary.org".into(),
         auth: roomy_auth(),
+        limits: test_limits(),
     })
     .await
     .unwrap();
@@ -3258,6 +3274,7 @@ async fn backfill_indexes_unindexed_books_once() {
         downloads_dir: None,
         openlibrary_url: "https://openlibrary.org".into(),
         auth: roomy_auth(),
+        limits: test_limits(),
     };
     let app = build(config.clone()).await.unwrap();
     let pool = open_db(tmp.path()).await;
@@ -4138,6 +4155,7 @@ async fn backfill_lets_writers_through() {
         downloads_dir: None,
         openlibrary_url: "https://openlibrary.org".into(),
         auth: roomy_auth(),
+        limits: test_limits(),
     };
     let app = build(config).await.unwrap();
     let pool = open_db(tmp.path()).await;
@@ -4410,6 +4428,7 @@ async fn backfill_skips_an_unreadable_epub_after_recording_it() {
         downloads_dir: None,
         openlibrary_url: "https://openlibrary.org".into(),
         auth: roomy_auth(),
+        limits: test_limits(),
     };
     let _app = build(config.clone()).await.unwrap();
     let pool = open_db(tmp.path()).await;
@@ -4891,7 +4910,7 @@ async fn settings_doc_forward_compatible() {
     }
     let (status, body) = empty_req(&app, "GET", "/v1/admin/settings", Some(&token)).await;
     assert_eq!(status, StatusCode::OK, "{body}");
-    assert_eq!(body["allowSignup"], true);
+    assert_eq!(body["allowSignup"], false);
     assert_eq!(body["maxEpubBytes"], 67_108_864);
     assert!(body.get("future").is_none(), "{body}");
 
@@ -4900,11 +4919,11 @@ async fn settings_doc_forward_compatible() {
         "PATCH",
         "/v1/admin/settings",
         Some(&token),
-        json!({ "allowSignup": false }),
+        json!({ "allowSignup": true }),
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{body}");
-    assert_eq!(body["allowSignup"], false);
+    assert_eq!(body["allowSignup"], true);
     assert_eq!(body["maxEpubBytes"], 67_108_864);
     let doc = settings_doc(tmp.path()).await;
     assert!(doc.contains("\"future\""), "{doc}");
@@ -5121,6 +5140,7 @@ async fn auth_app(auth: AuthConfig) -> (mewo_server::AppState, axum::Router, Tem
         downloads_dir: None,
         openlibrary_url: "https://openlibrary.org".into(),
         auth,
+        limits: test_limits(),
     })
     .await
     .unwrap();
@@ -6039,4 +6059,459 @@ fn every_social_read_uses_social_visible() {
         }
     }
     assert!(misses.is_empty(), "{misses:#?}");
+}
+
+#[tokio::test]
+async fn many_epub_parts_share_one_request_budget() {
+    let (app, tmp) = app().await;
+    let token = register(&app, "matt", "password1").await;
+    let part = common::with_stored_padding(600 * 1024);
+    assert!(
+        part.len() < MIN_EPUB_BYTES as usize && part.len() >= 600 * 1024,
+        "{}",
+        part.len()
+    );
+    let envelope = request_body_limit(MIN_EPUB_BYTES);
+    assert!(part.len() * 12 > envelope);
+    assert!(part.len() * 2 < envelope);
+
+    let (status, body) = upload_fields(&app, &token, &repeat("epub", &part, 12)).await;
+    assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE, "{body}");
+    assert_eq!(body["error"], "Request body is too large.");
+    assert!(tmp_entries(tmp.path()).await.is_empty(), "tmp left behind");
+
+    let (status, book) = upload_fields(&app, &token, &repeat("epub", &part, 2)).await;
+    assert_eq!(status, StatusCode::OK, "{book}");
+}
+
+#[tokio::test]
+async fn the_envelope_follows_the_live_epub_cap() {
+    let (app, tmp) = app().await;
+    let token = register(&app, "matt", "password1").await;
+    grant(tmp.path(), "matt").await;
+    let junk = vec![0u8; 600 * 1024];
+    let epub = common::epub();
+    let mut fields = repeat("epub", &junk, 9);
+    fields.push(("epub", Some("book.epub"), epub.as_slice()));
+    let payload: usize = fields.iter().map(|(_, _, bytes)| bytes.len()).sum();
+    assert!(payload > request_body_limit(MIN_EPUB_BYTES));
+    assert!(payload < request_body_limit(4 * 1024 * 1024));
+
+    let (status, body) = upload_fields(&app, &token, &fields).await;
+    assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE, "{body}");
+    assert_eq!(body["error"], "Request body is too large.");
+
+    let (status, body) = json_req(
+        &app,
+        "PATCH",
+        "/v1/admin/settings",
+        Some(&token),
+        json!({ "maxEpubBytes": 4 * 1024 * 1024 }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (status, book) = upload_fields(&app, &token, &fields).await;
+    assert_eq!(status, StatusCode::OK, "{book}");
+}
+
+#[tokio::test]
+async fn many_small_fields_share_the_envelope() {
+    let (app, _tmp) = app().await;
+    let token = register(&app, "matt", "password1").await;
+    let chunk = vec![b'a'; 8 * 1024];
+    let fields = repeat("extra", &chunk, 700);
+    assert!(700 * chunk.len() > request_body_limit(MIN_EPUB_BYTES));
+    let (status, body) = upload_fields(&app, &token, &fields).await;
+    assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE, "{body}");
+    assert_eq!(body["error"], "Request body is too large.");
+}
+
+#[tokio::test]
+async fn declared_length_is_rejected_before_any_work() {
+    let (mut state, tmp) = open_state(test_limits(), MIN_EPUB_BYTES).await;
+    let calls = Arc::new(AtomicU64::new(0));
+    let seen = Arc::clone(&calls);
+    state.disk = DiskGuard::with_probe(1, move |_| {
+        seen.fetch_add(1, Ordering::SeqCst);
+        Ok(u64::MAX)
+    });
+    let app = router(state);
+    let token = register(&app, "matt", "password1").await;
+    let declared = request_body_limit(MIN_EPUB_BYTES) as u64 + 1;
+    let (status, _headers, body) =
+        post_books(&app, &token, Some(declared), b"short".to_vec()).await;
+    assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE, "{body}");
+    assert_eq!(body["error"], "Request body is too large.");
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+    assert!(tmp_entries(tmp.path()).await.is_empty());
+}
+
+#[tokio::test]
+async fn an_over_envelope_length_is_413_before_the_body() {
+    let tmp = TempDir::new().unwrap();
+    let app = build(config_at(tmp.path(), true, MIN_EPUB_BYTES))
+        .await
+        .unwrap();
+    let token = register(&app, "matt", "password1").await;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let served = app.clone();
+    tokio::spawn(async move {
+        axum::serve(listener, served).await.unwrap();
+    });
+    let mut stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+    let declared = request_body_limit(MIN_EPUB_BYTES) as u64 + 1;
+    let head = format!(
+        "POST /v1/books HTTP/1.1\r\n\
+         Host: 127.0.0.1\r\n\
+         Authorization: Bearer {token}\r\n\
+         Content-Type: multipart/form-data; boundary=x\r\n\
+         Content-Length: {declared}\r\n\
+         Connection: close\r\n\
+         \r\n"
+    );
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    stream.write_all(head.as_bytes()).await.unwrap();
+    let mut buf = [0u8; 128];
+    let n = tokio::time::timeout(Duration::from_secs(1), stream.read(&mut buf))
+        .await
+        .expect("413 did not arrive within a second")
+        .unwrap();
+    let text = String::from_utf8_lossy(&buf[..n]);
+    assert!(text.starts_with("HTTP/1.1 413"), "{text}");
+    assert!(tmp_entries(tmp.path()).await.is_empty());
+}
+
+#[tokio::test]
+async fn an_epub_under_the_cap_plus_a_full_cover_fits_the_envelope() {
+    let (app, _tmp) = app_with(true, MIN_EPUB_BYTES).await;
+    let token = register(&app, "matt", "password1").await;
+    let slack = 8 * 1024;
+    let epub = common::with_stored_padding((MIN_EPUB_BYTES as usize) - slack);
+    assert!(epub.len() < MIN_EPUB_BYTES as usize, "{}", epub.len());
+    assert!(
+        epub.len() > MIN_EPUB_BYTES as usize - slack * 2,
+        "{}",
+        epub.len()
+    );
+    let cover = vec![0u8; MAX_COVER_BYTES as usize];
+    let payload = epub.len()
+        + cover.len()
+        + "Just under".len()
+        + "Author".len()
+        + "author".len()
+        + "false".len();
+    assert!(payload < request_body_limit(MIN_EPUB_BYTES), "{payload}");
+    let (status, book) = upload(
+        &app,
+        &token,
+        "Just under",
+        "Author",
+        &epub,
+        Some(&cover),
+        false,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{book}");
+}
+
+#[tokio::test]
+async fn a_low_disk_refuses_the_upload_and_not_a_read() {
+    let floor = 1024 * 1024u64;
+    let (mut state, tmp) = open_state(test_limits(), MIN_EPUB_BYTES).await;
+    let free = Arc::new(AtomicU64::new(floor + 64 * 1024 * 1024));
+    let reported = Arc::clone(&free);
+    state.disk = DiskGuard::with_probe(floor, move |_| Ok(reported.load(Ordering::SeqCst)));
+    let app = router(state.clone());
+    let token = register(&app, "matt", "password1").await;
+    let (status, book) = upload(&app, &token, "Pride", "Jane", &common::epub(), None, false).await;
+    assert_eq!(status, StatusCode::OK, "{book}");
+    let id = book["id"].as_str().unwrap();
+    let (status, likes) =
+        empty_req(&app, "GET", &format!("/v1/books/{id}/likes"), Some(&token)).await;
+    assert_eq!(status, StatusCode::OK, "{likes}");
+
+    free.store(floor - 1, Ordering::SeqCst);
+    let (status, body) = upload(&app, &token, "More", "Jane", &common::epub(), None, false).await;
+    assert_eq!(status, StatusCode::INSUFFICIENT_STORAGE, "{body}");
+    assert_eq!(
+        body["error"],
+        "The server is low on disk space. Try again later."
+    );
+    assert_eq!(book_count(&state.pool).await, 1);
+    assert!(tmp_entries(tmp.path()).await.is_empty());
+
+    let (status, library) = empty_req(&app, "GET", "/v1/library", Some(&token)).await;
+    assert_eq!(status, StatusCode::OK, "{library}");
+    let (status, _) = send(
+        &app,
+        Request::builder()
+            .method("GET")
+            .uri(format!("/v1/books/{id}/epub"))
+            .header(header::AUTHORIZATION, format!("Bearer {token}"))
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, likes) =
+        empty_req(&app, "GET", &format!("/v1/books/{id}/likes"), Some(&token)).await;
+    assert_eq!(status, StatusCode::OK, "{likes}");
+
+    free.store(floor + 64 * 1024 * 1024, Ordering::SeqCst);
+    let (status, book) = upload(&app, &token, "Again", "Jane", &common::epub(), None, false).await;
+    assert_eq!(status, StatusCode::OK, "{book}");
+}
+
+#[tokio::test]
+async fn declared_length_counts_against_free_disk() {
+    let floor = 1024 * 1024u64;
+    let (mut state, tmp) = open_state(test_limits(), MIN_EPUB_BYTES).await;
+    state.disk = DiskGuard::with_probe(floor, move |_| Ok(floor + 100));
+    let app = router(state.clone());
+    let token = register(&app, "matt", "password1").await;
+    let (content_type, body) = multipart(&[
+        ("title", None, b"Pride"),
+        ("author", None, b"Jane"),
+        ("epub", Some("book.epub"), &common::epub()),
+    ]);
+    let (status, _, value) =
+        post_books_typed(&app, &token, &content_type, Some(5000), body.clone()).await;
+    assert_eq!(status, StatusCode::INSUFFICIENT_STORAGE, "{value}");
+    assert_eq!(book_count(&state.pool).await, 0);
+    assert!(tmp_entries(tmp.path()).await.is_empty());
+
+    let (status, _, value) = post_books_typed(&app, &token, &content_type, Some(50), body).await;
+    assert_eq!(status, StatusCode::OK, "{value}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn one_parse_permit_is_shared_by_parallel_uploads() {
+    let limits = LimitsConfig {
+        max_parses: 1,
+        parse_wait: Duration::from_secs(30),
+        min_free_bytes: 0,
+    };
+    let (state, tmp) = open_state(limits, 8 * 1024 * 1024).await;
+    let app = router(state.clone());
+    let epub = common::book(true, 1024 * 1024);
+    let start = Arc::new(tokio::sync::Barrier::new(6));
+    let mut handles = Vec::new();
+    for i in 0..6 {
+        let app = app.clone();
+        let epub = epub.clone();
+        let start = Arc::clone(&start);
+        handles.push(tokio::spawn(async move {
+            let token = register(&app, &format!("user{i:02}"), "password1").await;
+            start.wait().await;
+            upload(&app, &token, "Book", "Author", &epub, None, false).await
+        }));
+    }
+    for handle in handles {
+        let (status, book) = handle.await.unwrap();
+        assert_eq!(status, StatusCode::OK, "{book}");
+    }
+    let stats = state.parsers.stats();
+    assert_eq!(stats.peak_in_flight, 1);
+    assert_eq!(stats.parses, 6);
+    assert_eq!(book_count(&state.pool).await, 6);
+    drop(tmp);
+}
+
+#[tokio::test]
+async fn a_full_parse_queue_is_503_and_leaves_no_book() {
+    let limits = LimitsConfig {
+        max_parses: 0,
+        parse_wait: Duration::from_millis(10),
+        min_free_bytes: 0,
+    };
+    let (state, tmp) = open_state(limits, MIN_EPUB_BYTES).await;
+    let app = router(state.clone());
+    let token = register(&app, "matt", "password1").await;
+    let (content_type, body) = multipart(&[("epub", Some("book.epub"), &common::epub())]);
+    let req = Request::builder()
+        .method("POST")
+        .uri("/v1/books")
+        .header(header::AUTHORIZATION, format!("Bearer {token}"))
+        .header(header::CONTENT_TYPE, content_type)
+        .body(Body::from(body))
+        .unwrap();
+    let (status, headers, bytes) = call(&app, req).await;
+    let value: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{value}");
+    assert_eq!(value["error"], "Server is busy. Try again in a moment.");
+    assert_eq!(
+        headers.get(header::RETRY_AFTER).unwrap().to_str().unwrap(),
+        "1"
+    );
+    assert_eq!(book_count(&state.pool).await, 0);
+    assert!(tmp_entries(tmp.path()).await.is_empty());
+    assert_eq!(state.parsers.stats().busy, 1);
+    assert_eq!(state.parsers.stats().parses, 0);
+}
+
+#[tokio::test]
+async fn a_legacy_fill_waits_on_the_parse_pool() {
+    let limits = LimitsConfig {
+        max_parses: 0,
+        parse_wait: Duration::from_millis(10),
+        min_free_bytes: 0,
+    };
+    let (state, _tmp) = open_state(limits, MIN_EPUB_BYTES).await;
+    let app = router(state.clone());
+    let token = register(&app, "matt", "password1").await;
+    let user_id: String = sqlx::query_scalar("SELECT id FROM users WHERE username = 'matt'")
+        .fetch_one(&state.pool)
+        .await
+        .unwrap();
+    let id = "11111111-1111-4111-8111-111111111111";
+    sqlx::query(
+        "INSERT INTO books
+         (id, user_id, title, author, handle, imported_at, post_count, progress_index, is_sample, shared, posts_indexed)
+         VALUES (?, ?, 'Legacy', 'Author', 'author', 1, 0, 0, 0, 0, 0)",
+    )
+    .bind(id)
+    .bind(&user_id)
+    .execute(&state.pool)
+    .await
+    .unwrap();
+    let dir = state.data_dir.join("books").join(&user_id).join(id);
+    tokio::fs::create_dir_all(&dir).await.unwrap();
+    tokio::fs::write(dir.join("book.epub"), common::epub())
+        .await
+        .unwrap();
+    let req = Request::builder()
+        .method("GET")
+        .uri(format!("/v1/books/{id}/posts"))
+        .header(header::AUTHORIZATION, format!("Bearer {token}"))
+        .body(Body::empty())
+        .unwrap();
+    let (status, headers, bytes) = call(&app, req).await;
+    let value: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{value}");
+    assert_eq!(value["error"], "Server is busy. Try again in a moment.");
+    assert_eq!(
+        headers.get(header::RETRY_AFTER).unwrap().to_str().unwrap(),
+        "1"
+    );
+    let indexed: i64 = sqlx::query_scalar("SELECT posts_indexed FROM books WHERE id = ?")
+        .bind(id)
+        .fetch_one(&state.pool)
+        .await
+        .unwrap();
+    assert_eq!(indexed, 0);
+    assert!(!dir.join("posts.json").exists());
+}
+
+#[tokio::test]
+async fn fresh_signups_are_off_and_an_existing_row_wins() {
+    let (app, _tmp) = app_with(false, MIN_EPUB_BYTES).await;
+    let (status, body) = empty_req(&app, "GET", "/v1/instance", None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["allowSignup"], false);
+    let (status, body) = json_req(
+        &app,
+        "POST",
+        "/v1/auth/register",
+        None,
+        json!({ "username": "matt", "password": "password1" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+    assert_eq!(body["error"], "Signups are off.");
+
+    let (app, tmp) = app_with(true, MIN_EPUB_BYTES).await;
+    let (status, body) = empty_req(&app, "GET", "/v1/instance", None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["allowSignup"], true);
+    let app = build(config_at(tmp.path(), false, MIN_EPUB_BYTES))
+        .await
+        .unwrap();
+    let (status, body) = empty_req(&app, "GET", "/v1/instance", None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["allowSignup"], true);
+}
+
+fn repeat<'a>(
+    name: &'a str,
+    bytes: &'a [u8],
+    n: usize,
+) -> Vec<(&'a str, Option<&'a str>, &'a [u8])> {
+    let file = (name == "epub").then_some("book.epub");
+    (0..n).map(|_| (name, file, bytes)).collect()
+}
+
+async fn open_state(limits: LimitsConfig, max_epub_bytes: u64) -> (mewo_server::AppState, TempDir) {
+    let tmp = TempDir::new().unwrap();
+    let state = prepare(Config {
+        listen: "127.0.0.1:0".into(),
+        data_dir: tmp.path().to_path_buf(),
+        web_dir: None,
+        allow_signup: true,
+        max_epub_bytes,
+        downloads_dir: None,
+        openlibrary_url: "https://openlibrary.org".into(),
+        auth: roomy_auth(),
+        limits,
+    })
+    .await
+    .unwrap();
+    (state, tmp)
+}
+
+async fn book_count(pool: &SqlitePool) -> i64 {
+    sqlx::query_scalar("SELECT COUNT(*) FROM books")
+        .fetch_one(pool)
+        .await
+        .unwrap()
+}
+
+async fn post_books(
+    app: &axum::Router,
+    token: &str,
+    content_length: Option<u64>,
+    body: Vec<u8>,
+) -> (StatusCode, axum::http::HeaderMap, Value) {
+    post_books_typed(
+        app,
+        token,
+        "multipart/form-data; boundary=x",
+        content_length,
+        body,
+    )
+    .await
+}
+
+async fn post_books_typed(
+    app: &axum::Router,
+    token: &str,
+    content_type: &str,
+    content_length: Option<u64>,
+    body: Vec<u8>,
+) -> (StatusCode, axum::http::HeaderMap, Value) {
+    let mut builder = Request::builder()
+        .method("POST")
+        .uri("/v1/books")
+        .header(header::AUTHORIZATION, format!("Bearer {token}"))
+        .header(header::CONTENT_TYPE, content_type);
+    if let Some(len) = content_length {
+        builder = builder.header(header::CONTENT_LENGTH, len.to_string());
+    }
+    let (status, headers, bytes) = call(app, builder.body(Body::from(body)).unwrap()).await;
+    let value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+    (status, headers, value)
+}
+
+async fn tmp_entries(data: &Path) -> Vec<String> {
+    let tmp = data.join("tmp");
+    let mut names = Vec::new();
+    let mut dir = match tokio::fs::read_dir(&tmp).await {
+        Ok(dir) => dir,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return names,
+        Err(err) => panic!("read {tmp:?}: {err}"),
+    };
+    while let Some(entry) = dir.next_entry().await.unwrap() {
+        names.push(entry.file_name().to_string_lossy().into_owned());
+    }
+    names
 }

@@ -98,8 +98,10 @@ pub struct SupportedLanguage {
     pub name: &'static str,
 }
 
+/// Missing row or a stored doc with no `allowSignup` key. A row written by
+/// `seed` always includes the key, so this only matters for a partial doc.
 fn default_allow_signup() -> bool {
-    true
+    false
 }
 
 fn default_max_epub_bytes() -> u64 {
@@ -544,7 +546,19 @@ fn json_error(err: impl std::error::Error + Send + Sync + 'static) -> sqlx::Erro
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::AuthConfig;
+    use crate::config::{AuthConfig, LimitsConfig};
+
+    #[test]
+    fn signup_default_is_off_and_a_stored_true_stays_true() {
+        assert!(!default_allow_signup());
+        assert!(!Settings::default().allow_signup);
+        assert!(
+            decode_settings(r#"{"allowSignup":true}"#)
+                .unwrap()
+                .allow_signup
+        );
+        assert!(!decode_settings("{}").unwrap().allow_signup);
+    }
 
     #[test]
     fn bounds_message_names_the_key() {
@@ -624,6 +638,10 @@ mod tests {
             downloads_dir: None,
             openlibrary_url: "https://openlibrary.org".into(),
             auth: AuthConfig::default(),
+            limits: LimitsConfig {
+                min_free_bytes: 0,
+                ..LimitsConfig::default()
+            },
         };
         seed(&pool, &config).await.unwrap();
         let first: String = sqlx::query_scalar("SELECT doc FROM settings WHERE id = 1")
@@ -665,6 +683,10 @@ mod tests {
             downloads_dir: None,
             openlibrary_url: "https://openlibrary.org".into(),
             auth: AuthConfig::default(),
+            limits: LimitsConfig {
+                min_free_bytes: 0,
+                ..LimitsConfig::default()
+            },
         }
     }
 

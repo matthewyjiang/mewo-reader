@@ -207,7 +207,7 @@ mod tests {
     use super::*;
     use crate::auth::Passwords;
     use crate::build;
-    use crate::config::{AuthConfig, Config, MIN_EPUB_BYTES};
+    use crate::config::{AuthConfig, Config, LimitsConfig, MIN_EPUB_BYTES};
     use crate::error::ApiError;
     use axum::body::Body;
     use axum::http::{header, Request, StatusCode};
@@ -232,6 +232,10 @@ mod tests {
             downloads_dir: None,
             openlibrary_url: "https://openlibrary.org".into(),
             auth: AuthConfig::default(),
+            limits: LimitsConfig {
+                min_free_bytes: 0,
+                ..LimitsConfig::default()
+            },
         }
     }
 

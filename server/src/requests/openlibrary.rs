@@ -1668,6 +1668,10 @@ mod tests {
             downloads_dir: None,
             openlibrary_url: origin,
             auth: crate::config::AuthConfig::default(),
+            limits: crate::config::LimitsConfig {
+                min_free_bytes: 0,
+                ..crate::config::LimitsConfig::default()
+            },
         })
         .await
         .unwrap();

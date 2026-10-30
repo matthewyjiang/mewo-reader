@@ -34,7 +34,7 @@ xcodegen generate
 xcodebuild -project Mewo.xcodeproj -scheme Mewo -destination 'platform=iOS Simulator,name=iPhone 17' -jobs 12 build
 ```
 
-**Server.** Rust 1.88. Listens on `0.0.0.0:8787`. [server/README.md](server/README.md)
+**Server.** Rust 1.88. Listens on `0.0.0.0:8787`. The server speaks plain HTTP, so put a reverse proxy in front of it before a password leaves your own machine. [server/README.md](server/README.md)
 
 ```bash
 cd server

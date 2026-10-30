@@ -3,7 +3,6 @@
 //! Uploads and the request worker both finish here, so ownership, `shared = 0`,
 //! the progress row, and the search feed stay on one path.
 
-use crate::config::MAX_COVER_BYTES;
 use crate::db::now_ms;
 use crate::error::ApiError;
 use crate::feed::{slug, Posts};
@@ -78,7 +77,7 @@ pub(crate) async fn stage_file(
         let _ = tokio::fs::remove_dir_all(&temp_dir).await;
         return Err(err);
     }
-    let staged = staged_from_epub(temp_dir.clone(), dest, false).await;
+    let staged = staged_from_epub(&state.parsers, temp_dir.clone(), dest, false).await;
     if staged.is_err() {
         let _ = tokio::fs::remove_dir_all(&temp_dir).await;
     }
@@ -316,22 +315,13 @@ pub(crate) async fn release_hold(
     Ok(true)
 }
 
-pub(crate) async fn parse_epub(path: PathBuf) -> Result<crate::epub::ParsedEpub, ApiError> {
-    tokio::task::spawn_blocking(move || crate::epub::parse_file(&path, MAX_COVER_BYTES))
-        .await
-        .map_err(|err| {
-            tracing::error!(error = %err, "EPUB parser task failed");
-            ApiError::Internal
-        })?
-        .map_err(|reason| ApiError::BadRequest(format!("Could not read that EPUB: {reason}")))
-}
-
 async fn staged_from_epub(
+    parsers: &crate::parse_pool::ParsePool,
     temp_dir: PathBuf,
     epub_path: PathBuf,
     is_sample: bool,
 ) -> Result<Staged, ApiError> {
-    let parsed = parse_epub(epub_path).await?;
+    let parsed = parsers.parse(epub_path).await?;
     let title = parsed
         .title
         .filter(|title| !title.is_empty())

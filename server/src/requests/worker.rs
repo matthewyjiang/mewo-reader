@@ -381,6 +381,17 @@ async fn requested(
         )
         .await;
     };
+    let dirs = download_dirs(state);
+    if disk_low(state, &dirs, release.size) {
+        return note(
+            &state.pool,
+            &row.id,
+            "requested",
+            "Waiting for disk space.",
+            now_ms.saturating_add(BACKOFF_MS),
+        )
+        .await;
+    }
     let nzo = match clients.sab.add_url(url, &job).await {
         Ok(nzo) => nzo,
         Err(err) => return hold(&state.pool, &row.id, "requested", "SABnzbd", &err, now_ms).await,
@@ -543,8 +554,33 @@ async fn completed(
     let Some(epub) = pick::choose_epub(&matcher, &files) else {
         return retry_or_fail(state, sab, row, nzo, NO_EPUB, Some(&dir), now_ms).await;
     };
+    let need = files
+        .iter()
+        .find(|(path, _)| path == &epub)
+        .map(|(_, size)| *size)
+        .unwrap_or(0);
+    if state.disk.require(&state.data_dir, need).is_err() {
+        return note(
+            &state.pool,
+            &row.id,
+            "downloading",
+            "Waiting for disk space.",
+            now_ms.saturating_add(BACKOFF_MS),
+        )
+        .await;
+    }
     let staged = match library::stage_file(state, &epub, ready.settings.max_epub_bytes).await {
         Ok(staged) => staged,
+        Err(ApiError::Busy) => {
+            return note(
+                &state.pool,
+                &row.id,
+                "downloading",
+                "Server is busy. Waiting to import.",
+                now_ms.saturating_add(BACKOFF_MS),
+            )
+            .await;
+        }
         Err(err) => {
             return retry_or_fail(state, sab, row, nzo, &err.to_string(), Some(&dir), now_ms).await
         }
@@ -738,6 +774,20 @@ async fn hold(
 ) -> Result<(), ApiError> {
     let error = format!("{who}: {err}");
     note(pool, id, state, &error, now_ms.saturating_add(BACKOFF_MS)).await
+}
+
+fn download_dirs(state: &AppState) -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
+    if let Some(dir) = state.downloads_dir.clone() {
+        dirs.push(dir);
+    }
+    dirs.push(state.data_dir.clone());
+    dirs
+}
+
+fn disk_low(state: &AppState, dirs: &[PathBuf], need: u64) -> bool {
+    dirs.iter()
+        .any(|dir| state.disk.require(dir, need).is_err())
 }
 
 async fn note(

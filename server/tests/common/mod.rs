@@ -25,6 +25,21 @@ pub fn epub() -> Vec<u8> {
     book(true, 0)
 }
 
+/// A real EPUB with `padding` extra stored bytes, so the file is about that big.
+/// Deflate would shrink a zero pad to nothing. Integration tests call this;
+/// the in-crate epub fixtures do not.
+#[allow(dead_code)]
+pub fn with_stored_padding(padding: usize) -> Vec<u8> {
+    let mut zip = ZipWriter::new_append(Cursor::new(epub())).unwrap();
+    zip.start_file(
+        "pad-stored.bin",
+        SimpleFileOptions::default().compression_method(CompressionMethod::Stored),
+    )
+    .unwrap();
+    zip.write_all(&vec![0u8; padding]).unwrap();
+    zip.finish().unwrap().into_inner()
+}
+
 const CHAPTER: &str = "<html><body><h1>I</h1><p>First&nbsp; paragraph &amp; second.</p><p>Last paragraph.</p></body></html>";
 
 /// Minimal EPUB3 whose package metadata is `metadata` (already-escaped XML).
