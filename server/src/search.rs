@@ -849,6 +849,62 @@ pub(crate) async fn store_feed(
 }
 
 const POST_INSERT_BATCH: usize = 500;
+
+type BookMutex = std::sync::Arc<tokio::sync::Mutex<()>>;
+
+/// One mutex per book. The map entry is removed when the last guard drops,
+/// so a book that has already been filled does not stay in the table.
+#[derive(Clone)]
+pub(crate) struct FillLocks {
+    books: std::sync::Arc<std::sync::Mutex<std::collections::HashMap<String, BookMutex>>>,
+}
+
+pub(crate) struct FillGuard {
+    id: String,
+    books: std::sync::Arc<std::sync::Mutex<std::collections::HashMap<String, BookMutex>>>,
+    mutex: BookMutex,
+    guard: Option<tokio::sync::OwnedMutexGuard<()>>,
+}
+
+impl FillLocks {
+    pub(crate) fn new() -> Self {
+        Self {
+            books: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+        }
+    }
+
+    pub(crate) async fn lock(&self, book_id: &str) -> FillGuard {
+        let mutex = {
+            let mut books = self.books.lock().unwrap_or_else(|err| err.into_inner());
+            books
+                .entry(book_id.to_string())
+                .or_insert_with(|| std::sync::Arc::new(tokio::sync::Mutex::new(())))
+                .clone()
+        };
+        let guard = mutex.clone().lock_owned().await;
+        FillGuard {
+            id: book_id.to_string(),
+            books: std::sync::Arc::clone(&self.books),
+            mutex,
+            guard: Some(guard),
+        }
+    }
+}
+
+impl Drop for FillGuard {
+    fn drop(&mut self) {
+        self.guard.take();
+        let mut books = self.books.lock().unwrap_or_else(|err| err.into_inner());
+        let idle = books.get(&self.id).is_some_and(|existing| {
+            std::sync::Arc::ptr_eq(existing, &self.mutex)
+                && std::sync::Arc::strong_count(&self.mutex) == 2
+        });
+        if idle {
+            books.remove(&self.id);
+        }
+    }
+}
+
 const BACKFILL_PAUSE: Duration = Duration::from_millis(75);
 const FEED_WRITE_ATTEMPTS: usize = 40;
 const FEED_BUSY_MS: u64 = 250;
@@ -986,8 +1042,8 @@ pub(crate) async fn read_posts(dir: &Path) -> Result<Option<Vec<u8>>, ApiError> 
 /// is marked only after its file and rows commit, and a second pass skips it.
 /// An unreadable EPUB with no `posts.json` is marked `-1` and left alone.
 /// [`ApiError::Busy`] is not unreadable: the row stays at 0, and this pass
-/// retries that same book after a pause. The pause does not hold the legacy
-/// parse lock.
+/// retries that same book after a pause. The pause does not hold the book's
+/// fill lock.
 pub(crate) async fn backfill(state: AppState) {
     let pending = sqlx::query_as::<_, (String, String)>(
         "SELECT id, COALESCE(files_user_id, user_id)
@@ -1037,12 +1093,15 @@ async fn index_pending(
     if !unindexed(state, book_id).await? {
         return Ok(false);
     }
-    // Non-waiting: a startup pass must not sit on the legacy lock for parse_wait.
-    let permit = state.parsers.try_acquire()?;
-    let _guard = state.lazy_parse_lock.lock().await;
+    let _guard = state.fill_locks.lock(book_id).await;
+    // The other caller of this book may have stored the feed while we waited.
     if !unindexed(state, book_id).await? {
         return Ok(false);
     }
+    // Non-waiting, and only after the recheck, so a full queue does not keep
+    // a permit that this book is not going to use. The caller sleeps after
+    // this returns, which drops the guard first.
+    let permit = state.parsers.try_acquire()?;
     let dir = crate::library::book_dir(&state.data_dir, files_owner, book_id);
     let posts = match read_posts(&dir).await? {
         Some(bytes) => {

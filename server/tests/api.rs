@@ -6350,6 +6350,97 @@ async fn a_full_parse_queue_is_503_and_leaves_no_book() {
     assert_eq!(state.parsers.stats().parses, 0);
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn different_books_fill_at_the_same_time() {
+    let limits = LimitsConfig {
+        max_parses: 2,
+        parse_wait: Duration::from_secs(5),
+        min_free_bytes: 0,
+    };
+    let (state, _tmp) = open_state(limits, 8 * 1024 * 1024).await;
+    let app = router(state.clone());
+    let token = register(&app, "matt", "password1").await;
+    let user_id: String = sqlx::query_scalar("SELECT id FROM users WHERE username = 'matt'")
+        .fetch_one(&state.pool)
+        .await
+        .unwrap();
+    let chapter = fat_chapter(4_000);
+    let epub = common::with_chapter(&chapter);
+    let ids = [
+        "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbb1",
+        "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbb2",
+    ];
+    for id in ids {
+        legacy_book(&state, &user_id, id, &epub).await;
+    }
+    let started = std::time::Instant::now();
+    let (left, right) = tokio::join!(
+        posts_status(&app, &token, ids[0]),
+        posts_status(&app, &token, ids[1]),
+    );
+    let elapsed = started.elapsed();
+    assert_eq!(left, StatusCode::OK);
+    assert_eq!(right, StatusCode::OK);
+    let stats = state.parsers.stats();
+    assert_eq!(stats.busy, 0, "{elapsed:?} {stats:?}");
+    assert_eq!(stats.parses, 2, "{elapsed:?}");
+    assert_eq!(
+        stats.peak_in_flight, 2,
+        "fills did not overlap: {elapsed:?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn one_book_is_filled_once() {
+    let limits = LimitsConfig {
+        max_parses: 2,
+        parse_wait: Duration::from_secs(5),
+        min_free_bytes: 0,
+    };
+    let (state, _tmp) = open_state(limits, MIN_EPUB_BYTES).await;
+    let app = router(state.clone());
+    let token = register(&app, "matt", "password1").await;
+    let user_id: String = sqlx::query_scalar("SELECT id FROM users WHERE username = 'matt'")
+        .fetch_one(&state.pool)
+        .await
+        .unwrap();
+    let id = "cccccccc-cccc-4ccc-8ccc-ccccccccccc1";
+    legacy_book(&state, &user_id, id, &common::epub()).await;
+    let (left, right) = tokio::join!(
+        posts_status(&app, &token, id),
+        posts_status(&app, &token, id),
+    );
+    assert_eq!(left, StatusCode::OK);
+    assert_eq!(right, StatusCode::OK);
+    assert_eq!(state.parsers.stats().parses, 1);
+    assert_eq!(state.parsers.stats().busy, 0);
+}
+
+fn fat_chapter(paragraphs: usize) -> String {
+    let mut chapter = String::from("<html><body>");
+    for _ in 0..paragraphs {
+        chapter.push_str("<p>One sentence for the parser.</p>");
+    }
+    chapter.push_str("</body></html>");
+    chapter
+}
+
+async fn legacy_book(state: &mewo_server::AppState, user_id: &str, id: &str, epub: &[u8]) {
+    sqlx::query(
+        "INSERT INTO books
+         (id, user_id, title, author, handle, imported_at, post_count, progress_index, is_sample, shared, posts_indexed)
+         VALUES (?, ?, 'Legacy', 'Author', 'author', 1, 0, 0, 0, 0, 0)",
+    )
+    .bind(id)
+    .bind(user_id)
+    .execute(&state.pool)
+    .await
+    .unwrap();
+    let dir = state.data_dir.join("books").join(user_id).join(id);
+    tokio::fs::create_dir_all(&dir).await.unwrap();
+    tokio::fs::write(dir.join("book.epub"), epub).await.unwrap();
+}
+
 #[tokio::test]
 async fn two_lazy_fills_wait_together_when_the_parser_is_busy() {
     let wait = Duration::from_millis(300);

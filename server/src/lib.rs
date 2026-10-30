@@ -28,7 +28,7 @@ use axum::{Extension, Router};
 use sqlx::SqlitePool;
 use std::path::PathBuf;
 use std::sync::Arc;
-use tokio::sync::{Mutex, Notify};
+use tokio::sync::Notify;
 use tower_http::compression::CompressionLayer;
 use tower_http::services::{ServeDir, ServeFile};
 use tower_http::trace::TraceLayer;
@@ -38,9 +38,10 @@ pub struct AppState {
     pub pool: SqlitePool,
     pub data_dir: PathBuf,
     pub web_dir: Option<PathBuf>,
-    /// Serializes legacy cache fills and search backfill for one book.
-    /// Normal reads and uploads do not take this lock.
-    pub lazy_parse_lock: Arc<Mutex<()>>,
+    /// Per-book lock for a legacy fill or a backfill of that book.
+    /// Normal reads and uploads do not take it. One book waiting on a parse
+    /// permit does not block a different book.
+    pub(crate) fill_locks: search::FillLocks,
     pub(crate) upstream: requests::http::Upstream,
     /// `MEWO_DOWNLOADS_DIR`. Completed folders are read only from here.
     pub downloads_dir: Option<PathBuf>,
@@ -163,7 +164,7 @@ pub async fn prepare(config: Config) -> Result<AppState, sqlx::Error> {
         pool,
         data_dir,
         web_dir: config.web_dir,
-        lazy_parse_lock: Arc::new(Mutex::new(())),
+        fill_locks: search::FillLocks::new(),
         upstream,
         downloads_dir: config.downloads_dir,
         openlibrary_url: config.openlibrary_url,

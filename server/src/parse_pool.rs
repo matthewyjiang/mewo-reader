@@ -130,7 +130,7 @@ impl ParsePool {
     }
 
     /// A permit, or [`ApiError::Busy`] with no wait. Background work uses this
-    /// so a full queue does not sit on the legacy parse lock.
+    /// so a full queue does not block the book's fill lock for `parse_wait`.
     pub(crate) fn try_acquire(&self) -> Result<OwnedSemaphorePermit, ApiError> {
         match Arc::clone(&self.inner.sem).try_acquire_owned() {
             Ok(permit) => Ok(permit),
