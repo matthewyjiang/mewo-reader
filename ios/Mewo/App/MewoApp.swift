@@ -22,11 +22,11 @@ struct RootView: View {
     @Environment(\.scenePhase) private var scenePhase
 
     var body: some View {
-        let shots = ProcessInfo.processInfo.arguments.contains("--offline-shots")
+        let shots = offlineShots
         let palette = shots ? DisplayTheme.xLight.palette : app.themeStore.theme.palette
         Group {
             if shots {
-                OfflinePreview()
+                offlinePreview
             } else if app.localProfile.profile.ready {
                 MewoNav()
             } else {
@@ -50,5 +50,21 @@ struct RootView: View {
                 Task { await app.catalog.refreshAccess() }
             }
         }
+    }
+
+    /// Screenshot launches only. Release builds do not contain the preview.
+    private var offlineShots: Bool {
+        #if DEBUG
+        ProcessInfo.processInfo.arguments.contains("--offline-shots")
+        #else
+        false
+        #endif
+    }
+
+    @ViewBuilder
+    private var offlinePreview: some View {
+        #if DEBUG
+        OfflinePreview()
+        #endif
     }
 }

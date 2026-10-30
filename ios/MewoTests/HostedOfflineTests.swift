@@ -11,8 +11,13 @@ final class HostedOfflineTests: XCTestCase {
     private var store: HostedLibraryStore?
 
     override func setUp() async throws {
-        HostedOfflineProbe.beforeClaim = nil
-        HostedOfflineProbe.log.reset()
+        HostedDisk.beforeClaim = nil
+        HostedDisk.beforeScan = nil
+        HostedDisk.recordPublishes = false
+        HostedDisk.resetPublishes()
+        HostedDisk.note = { HostedDiskLog.shared.note() }
+        HostedDisk.noteDecode = { HostedDiskLog.shared.noteDecode() }
+        HostedDiskLog.shared.reset()
         root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         suite = "mewo-offline-\(UUID().uuidString)"
@@ -29,7 +34,11 @@ final class HostedOfflineTests: XCTestCase {
             if let suite { defaults?.removePersistentDomain(forName: suite) }
             if let root { try? FileManager.default.removeItem(at: root) }
         }
-        HostedOfflineProbe.beforeClaim = nil
+        HostedDisk.beforeClaim = nil
+        HostedDisk.beforeScan = nil
+        HostedDisk.note = nil
+        HostedDisk.noteDecode = nil
+        HostedDisk.recordPublishes = false
         client?.releaseAll()
         sessions?.signOut()
         if let store {
@@ -327,13 +336,12 @@ final class HostedOfflineTests: XCTestCase {
     func testSavingProgressDoesNotRereadPosts() async throws {
         writePosts(idA, "secret")
         let store = try await open([book(idA, importedAt: 3)])
-        let first = HostedOfflineProbe.log.decodeCount
-        XCTAssertGreaterThan(first, 0)
+        XCTAssertEqual(HostedDiskLog.shared.decodeCount, 0)
 
         for index in 0..<6 {
             try await store.saveProgress(id: idA, index: index)
         }
-        XCTAssertEqual(HostedOfflineProbe.log.decodeCount, first)
+        XCTAssertEqual(HostedDiskLog.shared.decodeCount, 0)
     }
 
     func testLeavingTheCallerDoesNotCancelTheDownload() async throws {
@@ -468,12 +476,12 @@ final class HostedOfflineTests: XCTestCase {
         let store = try await open([book(idA, importedAt: 3)])
         let release = QuietPark()
         var enteredClaim = false
-        HostedOfflineProbe.beforeClaim = {
+        HostedDisk.beforeClaim = {
             enteredClaim = true
             await release.wait()
         }
         defer {
-            HostedOfflineProbe.beforeClaim = nil
+            HostedDisk.beforeClaim = nil
             release.release()
         }
         let batch = Task { await store.downloadAll() }
@@ -571,12 +579,12 @@ final class HostedOfflineTests: XCTestCase {
         sessions.setSignedIn(username: "ada", token: "token-a")
         try await waitUntil("shelf did not load") { settled(store, ids: [idA, idB]) }
 
-        HostedOfflineProbe.log.reset()
+        HostedDiskLog.shared.reset()
         try await store.saveProgress(id: idA, index: 4)
         assertDiskOffMain()
 
         client.removeFromShelf(idB)
-        HostedOfflineProbe.log.reset()
+        HostedDiskLog.shared.reset()
         try await store.load()
         try await waitUntil("dropped book stayed") {
             !store.books.contains { $0.id == idB } && !store.loadState.isRefreshing
@@ -584,14 +592,14 @@ final class HostedOfflineTests: XCTestCase {
         assertDiskOffMain()
 
         try JSONFiles.write(SocialCache(likes: ["p"]), to: bookDir(idA).appendingPathComponent("social.json"))
-        HostedOfflineProbe.log.reset()
+        HostedDiskLog.shared.reset()
         sessions.setSignedIn(username: "bea", token: "token-b")
         try await waitUntil("account switch did not finish") {
             !socialExists(idA) && settled(store, ids: [idA])
         }
         assertDiskOffMain()
 
-        HostedOfflineProbe.log.reset()
+        HostedDiskLog.shared.reset()
         sessions.signOut()
         try await waitUntil("sign-out left hosted files") {
             if case .loaded(_, false) = store.loadState { return hostedFileNames().isEmpty }
@@ -627,23 +635,24 @@ final class HostedOfflineTests: XCTestCase {
     func testAnOldPostsCacheIsParsedOnce() async throws {
         writePosts(idA, "old", version: 2)
         let store = try await open([book(idA, importedAt: 3)])
-        let first = HostedOfflineProbe.log.decodeCount
-        XCTAssertGreaterThan(first, 0)
+        XCTAssertEqual(HostedDiskLog.shared.decodeCount, 0)
+        XCTAssertFalse(isDownloaded(store.offline[idA]))
 
         for index in 0..<6 {
             try await store.saveProgress(id: idA, index: index)
         }
-        XCTAssertEqual(HostedOfflineProbe.log.decodeCount, first)
+        XCTAssertEqual(HostedDiskLog.shared.decodeCount, 0)
 
         try FileManager.default.removeItem(at: bookDir(idA).appendingPathComponent("posts.json"))
-        let afterDelete = HostedOfflineProbe.log.decodeCount
         try await store.saveProgress(id: idA, index: 8)
-        XCTAssertEqual(HostedOfflineProbe.log.decodeCount, afterDelete)
+        XCTAssertEqual(HostedDiskLog.shared.decodeCount, 0)
         writePosts(idA, "new", version: 1)
-        let mid = HostedOfflineProbe.log.decodeCount
         try await store.saveProgress(id: idA, index: 9)
-        XCTAssertGreaterThan(HostedOfflineProbe.log.decodeCount, mid)
+        XCTAssertEqual(HostedDiskLog.shared.decodeCount, 0)
         XCTAssertEqual(try XCTUnwrap(store.offline[idA]), .downloaded)
+        let posts = try await store.feed(id: idA)
+        XCTAssertEqual(posts.map(\.text), ["new"])
+        XCTAssertEqual(HostedDiskLog.shared.decodeCount, 1)
     }
 
     func testTwoDownloadsFinishDownloaded() async throws {
@@ -663,6 +672,165 @@ final class HostedOfflineTests: XCTestCase {
             XCTAssertEqual(store.offlineSummary, OfflineSummary(downloaded: 2, total: 2, running: false))
             await store.setDownloaded(id: idA, on: false)
             await store.setDownloaded(id: idB, on: false)
+        }
+    }
+
+    func testToggleLikeIsStillThereOffline() async throws {
+        try JSONFiles.write(SocialCache(likes: []), to: bookDir(idA).appendingPathComponent("social.json"))
+        let store = try await open([book(idA, importedAt: 3)])
+        client.likes = ["p"]
+        let toggled = try await store.toggleLike(id: idA, postId: "p")
+        XCTAssertEqual(toggled, ["p"])
+        client.likesError = offlineError()
+        let offline = try await store.likes(id: idA)
+        XCTAssertEqual(offline, ["p"])
+    }
+
+    func testAReplyIsStillThereOffline() async throws {
+        try JSONFiles.write(SocialCache(), to: bookDir(idA).appendingPathComponent("social.json"))
+        let store = try await open([book(idA, importedAt: 3)])
+        let thread = try await store.addComment(id: idA, postId: "p", text: "hello")
+        XCTAssertEqual(thread.map(\.text), ["hello"])
+        client.commentsError = offlineError()
+        let offline = try await store.comments(id: idA, postId: "p")
+        XCTAssertEqual(offline.map(\.text), ["hello"])
+        XCTAssertEqual(try readSocial(idA).index.count("p"), 1)
+    }
+
+    func testADeletedReplyIsStillThereOffline() async throws {
+        let kept = PostComment(id: "c", username: "ada", text: "kept", createdAt: 1, mine: true)
+        try JSONFiles.write(
+            SocialCache(threads: ["p": [kept, PostComment(id: "d", username: "ada", text: "gone", createdAt: 2, mine: true)]]),
+            to: bookDir(idA).appendingPathComponent("social.json")
+        )
+        let store = try await open([book(idA, importedAt: 3)])
+        client.deletedThread = [kept]
+        let thread = try await store.deleteComment(id: idA, postId: "p", commentId: "d")
+        XCTAssertEqual(thread.map(\.id), ["c"])
+        client.commentsError = offlineError()
+        let offline = try await store.comments(id: idA, postId: "p")
+        XCTAssertEqual(offline.map(\.id), ["c"])
+    }
+
+    func testAFeedThatFinishesAfterTheBookLeavesDoesNotWritePosts() async throws {
+        client.blockPosts = true
+        let store = try await open([book(idA, importedAt: 3), book(idB, importedAt: 2)])
+        var readDone = false
+        let reading = Task { @MainActor in
+            _ = try? await store.feed(id: idA)
+            readDone = true
+        }
+        try await waitUntil("feed did not start") { client.entered >= 1 }
+        client.shelf = [book(idB, importedAt: 2)]
+        try await store.load()
+        try await waitUntil("the book stayed on the shelf") {
+            !store.books.contains { $0.id == idA } && !store.loadState.isRefreshing
+        }
+        client.hold.release()
+        try await waitUntil("feed did not finish") { readDone }
+        _ = reading
+        XCTAssertFalse(postsExist(idA))
+    }
+
+    func testLikesThatFinishAfterTheBookLeavesDoNotWriteSocial() async throws {
+        client.blockLikes = true
+        let store = try await open([book(idA, importedAt: 3), book(idB, importedAt: 2)])
+        var readDone = false
+        let reading = Task { @MainActor in
+            _ = try? await store.likes(id: idA)
+            readDone = true
+        }
+        try await waitUntil("likes did not start") { client.likesEntered >= 1 }
+        client.shelf = [book(idB, importedAt: 2)]
+        try await store.load()
+        try await waitUntil("the book stayed on the shelf") {
+            !store.books.contains { $0.id == idA } && !store.loadState.isRefreshing
+        }
+        client.likesHold.release()
+        try await waitUntil("likes did not finish") { readDone }
+        _ = reading
+        XCTAssertFalse(socialExists(idA))
+    }
+
+    func testRepeatedProgressPublishesOnce() async throws {
+        let store = try await open([book(idA, importedAt: 3)])
+        let generation = store.beginLive(idA)
+        HostedDisk.recordPublishes = true
+        HostedDisk.resetPublishes()
+        defer { HostedDisk.recordPublishes = false }
+        for _ in 0..<1000 {
+            store.reportProgress(idA, fraction: nil, generation: generation)
+        }
+        try await waitUntil("progress did not publish") { HostedDisk.publishCount >= 1 }
+        try await Task.sleep(nanoseconds: 200_000_000)
+        XCTAssertEqual(HostedDisk.publishCount, 1)
+    }
+
+    func testAShelfScanDoesNotBlockOpeningAnotherBook() async throws {
+        writePosts(idA, String(repeating: "a", count: 200_000))
+        writePosts(idB, "ready")
+        let gate = DispatchSemaphore(value: 0)
+        let scanning = Flag()
+        HostedDisk.beforeScan = {
+            HostedDisk.beforeScan = nil
+            scanning.set()
+            gate.wait()
+        }
+        defer {
+            HostedDisk.beforeScan = nil
+            gate.signal()
+        }
+        client.shelf = [book(idA, importedAt: 3), book(idB, importedAt: 2)]
+        let store = makeStore()
+        self.store = store
+        sessions.setSignedIn(username: "ada", token: "token-a")
+        try await waitUntil("scan did not start") { scanning.isSet }
+        let posts = try await store.feed(id: idB)
+        XCTAssertEqual(posts.map(\.text), ["ready"])
+        gate.signal()
+        try await waitUntil("shelf did not settle") { settled(store, ids: [idA, idB]) }
+    }
+
+    func testSignInDuringSignOutKeepsTheNewDownload() async throws {
+        client.blockPosts = true
+        client.lingerAfterInterrupt = true
+        client.shelf = [book(idA, importedAt: 3)]
+        let store = makeStore()
+        self.store = store
+        sessions.setSignedIn(username: "ada", token: "token-a")
+        try await waitUntil("shelf did not load") { settled(store, ids: [idA]) }
+        let downloading = Task { await store.setDownloaded(id: idA, on: true) }
+        try await waitUntil("download did not start") { client.entered >= 1 }
+        sessions.signOut()
+        try await waitUntil("cancel did not reach the book job") { client.lingerEntered >= 1 }
+        sessions.setSignedIn(username: "ada", token: "token-b")
+        let cover = bookDir(idA).appendingPathComponent("cover.jpg")
+        try FileManager.default.createDirectory(at: cover.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try Data("cover".utf8).write(to: cover)
+        client.lingerHold.release()
+        client.hold.release()
+        await downloading.value
+        try await waitUntil("sign-in did not settle") { settled(store, ids: [idA]) }
+        XCTAssertTrue(FileManager.default.fileExists(atPath: cover.path))
+    }
+
+    func testACancelledLikeDoesNotReadTheCache() async throws {
+        try JSONFiles.write(SocialCache(likes: ["stale"]), to: bookDir(idA).appendingPathComponent("social.json"))
+        let store = try await open([book(idA, importedAt: 3)])
+        client.likesError = URLError(.cancelled)
+        do {
+            _ = try await store.likes(id: idA)
+            XCTFail("cancelled like returned the cache")
+        } catch let error as URLError {
+            XCTAssertEqual(error.code, .cancelled)
+        }
+        client.likesError = nil
+        client.commentsError = URLError(.cancelled)
+        do {
+            _ = try await store.comments(id: idA, postId: "p")
+            XCTFail("cancelled comments returned the cache")
+        } catch let error as URLError {
+            XCTAssertEqual(error.code, .cancelled)
         }
     }
 
@@ -686,7 +854,7 @@ final class HostedOfflineTests: XCTestCase {
     }
 
     private func assertDiskOffMain() {
-        let log = HostedOfflineProbe.log
+        let log = HostedDiskLog.shared
         XCTAssertGreaterThan(log.touches, 0)
         XCTAssertFalse(log.touchedMain)
     }
@@ -791,9 +959,12 @@ private final class OfflineClient: @unchecked Sendable {
     var progress: Double? = 0.4
     var lingerAfterInterrupt = false
     var blockIndex = false
+    var blockLikes = false
+    var deletedThread: [PostComment] = []
     let hold = TestPark()
     let lingerHold = QuietPark()
     let indexHold = TestPark()
+    let likesHold = TestPark()
     private let libraryHold = BooksGate()
     private var libraryGated = false
     private(set) var libraryArrived = false
@@ -802,6 +973,7 @@ private final class OfflineClient: @unchecked Sendable {
     private var peak = 0
     private var lingerCount = 0
     private var indexCount = 0
+    private var likesCount = 0
 
     init() {
         client.hooks.library = { [weak self] _ in
@@ -836,8 +1008,26 @@ private final class OfflineClient: @unchecked Sendable {
         client.hooks.downloadCover = { _, _, _ in false }
         client.hooks.likes = { [weak self] _, _ in
             guard let self else { throw CancellationError() }
+            if self.blockLikes {
+                self.noteLikes()
+                try await self.likesHold.wait()
+            }
             if let likesError = self.likesError { throw likesError }
             return self.likes
+        }
+        client.hooks.toggleLike = { [weak self] _, _, _ in
+            guard let self else { throw CancellationError() }
+            return self.likes
+        }
+        client.hooks.addComment = { [weak self] _, _, _, text in
+            guard let self else { throw CancellationError() }
+            let thread = [PostComment(id: "n", username: "ada", text: text, createdAt: 2, mine: true)]
+            self.thread = thread
+            return thread
+        }
+        client.hooks.deleteComment = { [weak self] _, _, _, _ in
+            guard let self else { throw CancellationError() }
+            return self.deletedThread
         }
         client.hooks.commentIndex = { [weak self] _, _ in
             guard let self else { throw CancellationError() }
@@ -894,6 +1084,10 @@ private final class OfflineClient: @unchecked Sendable {
         lock.lock(); defer { lock.unlock() }; return indexCount
     }
 
+    var likesEntered: Int {
+        lock.lock(); defer { lock.unlock() }; return likesCount
+    }
+
     func resetCalls() {
         lock.lock()
         calls.removeAll()
@@ -915,6 +1109,7 @@ private final class OfflineClient: @unchecked Sendable {
         hold.release()
         lingerHold.release()
         indexHold.release()
+        likesHold.release()
         libraryHold.complete([])
     }
 
@@ -959,6 +1154,12 @@ private final class OfflineClient: @unchecked Sendable {
     private func noteIndex() {
         lock.lock()
         indexCount += 1
+        lock.unlock()
+    }
+
+    private func noteLikes() {
+        lock.lock()
+        likesCount += 1
         lock.unlock()
     }
 }
@@ -1093,6 +1294,58 @@ final class QuietPark: @unchecked Sendable {
         lock.unlock()
         pending.forEach { $0.resume() }
     }
+}
+
+/// Records which threads touched hosted files. Installed on `HostedDisk` by the tests.
+final class HostedDiskLog: @unchecked Sendable {
+    static let shared = HostedDiskLog()
+    private let lock = NSLock()
+    private var flags: [Bool] = []
+    private var decodes = 0
+
+    func note() {
+        lock.lock()
+        flags.append(Thread.isMainThread)
+        lock.unlock()
+    }
+
+    func noteDecode() {
+        lock.lock()
+        decodes += 1
+        lock.unlock()
+    }
+
+    func reset() {
+        lock.lock()
+        flags.removeAll()
+        decodes = 0
+        lock.unlock()
+    }
+
+    var decodeCount: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return decodes
+    }
+
+    var touchedMain: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return flags.contains(true)
+    }
+
+    var touches: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return flags.count
+    }
+}
+
+private final class Flag: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value = false
+    func set() { lock.lock(); value = true; lock.unlock() }
+    var isSet: Bool { lock.lock(); defer { lock.unlock() }; return value }
 }
 
 func offlineError(_ message: String = "offline") -> Error {

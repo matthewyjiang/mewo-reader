@@ -1,3 +1,4 @@
+#if DEBUG
 import SwiftUI
 
 /// Shelf rows and the Settings line, one of each offline state. UI tests screenshot this.
@@ -73,3 +74,4 @@ struct OfflinePreview: View {
         )
     }
 }
+#endif

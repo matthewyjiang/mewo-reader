@@ -175,8 +175,10 @@ final class HostedLibraryStore: LibraryStore {
     /// Any token change drops the shelf that was on screen before the next load paints.
     /// Signing in with nothing saved stays `.loading`, so the empty copy does not flash first.
     /// File wipes wait until in-flight downloads and reader loads have stopped.
+    /// A newer sign-in does not have its downloads cancelled or its files deleted by that wipe.
     private func sessionChanged(from previous: HostedSession, to next: HostedSession) {
-        files.setToken(next.token)
+        let stamp = next.token
+        files.setToken(stamp)
         let urlChanged = previous.normalizedUrl() != next.normalizedUrl()
         let userChanged = previous.username != next.username
         let signedOut = previous.signedIn && !next.signedIn
@@ -199,20 +201,22 @@ final class HostedLibraryStore: LibraryStore {
         let dropShelf = previous.signedIn && (signedOut || urlChanged || userChanged)
         let wipe = signedOut || (previous.signedIn && urlChanged)
         let clearSocial = previous.signedIn && userChanged && !wipe
+        // Cancel what is running for this session now, before a newer sign-in can start its own.
+        let watched = (wipe || clearSocial) ? detachCancelledTransfers() : nil
         let prior = maintenance
         let task = Task { @MainActor in
             await prior?.value
             if dropShelf {
                 await self.clearShelf(previous)
             }
-            if wipe || clearSocial {
-                await self.cancelTransfers()
-            }
+            if let watched { await watched.value }
+            guard self.sessions.session.token == stamp else { return }
             if wipe {
-                await self.wipeHostedFiles()
+                await self.wipeHostedFiles(stamp: stamp)
             } else if clearSocial {
-                await self.clearSocialFiles()
+                await self.clearSocialFiles(stamp: stamp)
             }
+            guard self.sessions.session.token == stamp else { return }
             try? await self.load()
         }
         maintenance = task
@@ -241,11 +245,12 @@ final class HostedLibraryStore: LibraryStore {
         await offMain { cache.clear(serverUrl: url, username: user) }
     }
 
-    private func wipeHostedFiles() async {
+    private func wipeHostedFiles(stamp: String?) async {
         let root = self.root
         let gate = files
         await offMain {
-            gate.sync { _, _ in
+            gate.sync { current, _ in
+                guard current == stamp else { return }
                 try? FileManager.default.removeItem(at: root)
                 try? FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
             }
@@ -321,7 +326,7 @@ final class HostedLibraryStore: LibraryStore {
         let task = Task { @MainActor () throws -> [FeedPost] in
             let posts = try await self.expireOn401(session) { try await self.client.posts(session, id: safe) }
             try Task.checkCancellation()
-            _ = await self.writeCachedPosts(safe, posts: posts, session: session, onShelf: false)
+            _ = await self.writeCachedPosts(safe, posts: posts, session: session, onShelf: true)
             return posts
         }
         feedTasks[key] = task
@@ -415,6 +420,7 @@ final class HostedLibraryStore: LibraryStore {
             }
             return likes
         } catch let error as URLError {
+            if error.code == .cancelled { throw error }
             if let cached = await readSocial(safe) { return cached.likes }
             throw error
         }
@@ -423,7 +429,13 @@ final class HostedLibraryStore: LibraryStore {
     func toggleLike(id: String, postId: String) async throws -> Set<String> {
         let session = try requireSession()
         let safe = try requireBookId(id)
-        return try await expireOn401(session) { try await client.toggleLike(session, id: safe, postId: postId) }
+        let likes = try await expireOn401(session) { try await client.toggleLike(session, id: safe, postId: postId) }
+        await updateSocial(safe, session: session) { cache in
+            var next = cache
+            next.likes = likes
+            return next
+        }
+        return likes
     }
 
     func setRepost(id: String, postId: String, on: Bool) async throws -> RepostState {
@@ -446,6 +458,7 @@ final class HostedLibraryStore: LibraryStore {
             }
             return index
         } catch let error as URLError {
+            if error.code == .cancelled { throw error }
             if let cached = await readSocial(safe) { return cached.index }
             throw error
         }
@@ -464,6 +477,7 @@ final class HostedLibraryStore: LibraryStore {
             }
             return thread
         } catch let error as URLError {
+            if error.code == .cancelled { throw error }
             if let thread = await readSocial(safe)?.threads[postId] { return thread }
             throw NSError(domain: "mewo", code: 13, userInfo: [NSLocalizedDescriptionKey: "You're offline."])
         }
@@ -494,13 +508,30 @@ final class HostedLibraryStore: LibraryStore {
     func addComment(id: String, postId: String, text: String) async throws -> [PostComment] {
         let session = try requireSession()
         let safe = try requireBookId(id)
-        return try await expireOn401(session) { try await client.addComment(session, id: safe, postId: postId, text: text) }
+        let thread = try await expireOn401(session) {
+            try await client.addComment(session, id: safe, postId: postId, text: text)
+        }
+        await rememberThread(safe, postId: postId, thread: thread, session: session)
+        return thread
     }
 
     func deleteComment(id: String, postId: String, commentId: String) async throws -> [PostComment] {
         let session = try requireSession()
         let safe = try requireBookId(id)
-        return try await expireOn401(session) { try await client.deleteComment(session, id: safe, postId: postId, commentId: commentId) }
+        let thread = try await expireOn401(session) {
+            try await client.deleteComment(session, id: safe, postId: postId, commentId: commentId)
+        }
+        await rememberThread(safe, postId: postId, thread: thread, session: session)
+        return thread
+    }
+
+    private func rememberThread(_ id: String, postId: String, thread: [PostComment], session: HostedSession) async {
+        await updateSocial(id, session: session) { cache in
+            var next = cache
+            next.threads[postId] = thread
+            next.index = next.index.afterThread(postId: postId, comments: thread)
+            return next
+        }
     }
 
     func search(query: String) async throws -> SearchResult {
@@ -728,7 +759,7 @@ final class HostedLibraryStore: LibraryStore {
             publishOffline()
             return
         }
-        if fromBatch, let beforeClaim = HostedOfflineProbe.beforeClaim {
+        if fromBatch, let beforeClaim = HostedDisk.beforeClaim {
             await beforeClaim()
         }
         let claim = await claimDownload(safe)
@@ -901,12 +932,14 @@ final class HostedLibraryStore: LibraryStore {
     }
 
     /// Parses a posts file once, the first time it is seen. Later saves only check the set.
+    /// The scan has its own queue, so opening a book does not wait behind it.
     private func rescan(_ books: [BookRecord]) async {
         let ids = Set(books.map(\.id))
         let known = onDisk
         let stale = stalePosts
         let root = self.root
-        let result = await offMain { () -> PostsScan in
+        let result = await offScan { () -> PostsScan in
+            HostedDisk.beforeScan?()
             var nextStale = stale
             for id in stale {
                 let exists = postsFileExists(root: root, id: id)
@@ -935,6 +968,7 @@ final class HostedLibraryStore: LibraryStore {
     }
 
     private func publishOffline() {
+        HostedDisk.notePublish()
         let marks = live
         let running = batch.map { !$0.isFinished } ?? false
         var map: [String: OfflineState] = [:]
@@ -955,7 +989,7 @@ final class HostedLibraryStore: LibraryStore {
         offlineSummary = OfflineSummary(downloaded: downloaded, total: books.count, running: running)
     }
 
-    private func beginLive(_ id: String) -> Int {
+    func beginLive(_ id: String) -> Int {
         let next = (liveGeneration[id] ?? 0) + 1
         liveGeneration[id] = next
         return next
@@ -963,8 +997,16 @@ final class HostedLibraryStore: LibraryStore {
 
     private func setDownloading(_ id: String, _ fraction: Double?, generation: Int) {
         guard liveGeneration[id] == generation else { return }
+        let fraction = quantized(fraction)
+        if live[id] == .downloading(fraction) { return }
         live[id] = .downloading(fraction)
         publishOffline()
+    }
+
+    /// Whole percents. Nil stays nil, so a gzipped body does not republish on every chunk.
+    private func quantized(_ fraction: Double?) -> Double? {
+        guard let fraction, fraction.isFinite else { return nil }
+        return min(1, max(0, (fraction * 100).rounded() / 100))
     }
 
     private func endLive(_ id: String, _ state: OfflineState?, generation: Int) {
@@ -977,17 +1019,10 @@ final class HostedLibraryStore: LibraryStore {
         publishOffline()
     }
 
-    /// Progress arrives on the URLSession queue. Hop without awaiting so a finish cannot pass it.
-    nonisolated private func reportProgress(_ id: String, fraction: Double?, generation: Int) {
-        let apply = { @MainActor in
+    /// Progress arrives on the URLSession queue. A later finish bumps the generation, so it cannot be overwritten.
+    nonisolated func reportProgress(_ id: String, fraction: Double?, generation: Int) {
+        Task { @MainActor in
             self.setDownloading(id, fraction, generation: generation)
-        }
-        if Thread.isMainThread {
-            MainActor.assumeIsolated(apply)
-        } else {
-            DispatchQueue.main.sync {
-                MainActor.assumeIsolated(apply)
-            }
         }
     }
 
@@ -1013,8 +1048,8 @@ final class HostedLibraryStore: LibraryStore {
         let gate = files
         let token = session.token
         await offMain {
-            gate.sync { current, _ in
-                guard current == token else { return }
+            gate.sync { current, shelf in
+                guard current == token, shelf.contains(id) else { return }
                 let next = update(readSocialFile(root: root, id: id) ?? SocialCache())
                 let dir = root.appendingPathComponent(id, isDirectory: true)
                 try? JSONFiles.write(next, to: dir.appendingPathComponent(hostedSocialFile))
@@ -1022,11 +1057,12 @@ final class HostedLibraryStore: LibraryStore {
         }
     }
 
-    private func clearSocialFiles() async {
+    private func clearSocialFiles(stamp: String?) async {
         let root = self.root
         let gate = files
         await offMain {
-            gate.sync { _, _ in
+            gate.sync { current, _ in
+                guard current == stamp else { return }
                 let dirs = (try? FileManager.default.contentsOfDirectory(
                     at: root,
                     includingPropertiesForKeys: [.isDirectoryKey]
@@ -1038,18 +1074,22 @@ final class HostedLibraryStore: LibraryStore {
         }
     }
 
-    private func cancelTransfers() async {
+    /// Cancels the transfers that exist right now and returns the wait for them.
+    /// A download started after this returns is not cancelled.
+    private func detachCancelledTransfers() -> Task<Void, Never> {
         let running = batch
         let jobs = Array(bookJobs.values)
         let feeds = Array(feedTasks.values)
         running?.cancel()
         jobs.forEach { $0.cancel() }
         feeds.forEach { $0.cancel() }
-        if let running { await waitUntilDone(running.task) }
-        for job in jobs { await waitUntilDone(job.task) }
-        for feed in feeds { _ = await feed.result }
-        if batch === running { batch = nil }
-        publishOffline()
+        return Task { @MainActor in
+            if let running { await waitUntilDone(running.task) }
+            for job in jobs { await waitUntilDone(job.task) }
+            for feed in feeds { _ = await feed.result }
+            if self.batch === running { self.batch = nil }
+            self.publishOffline()
+        }
     }
 
     /// True when this caller was cancelled. The joined task keeps running.
@@ -1082,8 +1122,17 @@ private func waitUntilDone(_ task: Task<Void, Never>) async {
 
 private func offMain<T: Sendable>(_ work: @escaping @Sendable () -> T) async -> T {
     await withCheckedContinuation { cont in
-        HostedOfflineProbe.queue.async {
-            HostedOfflineProbe.log.note()
+        HostedDisk.io.async {
+            HostedDisk.note?()
+            cont.resume(returning: work())
+        }
+    }
+}
+
+/// Shelf scans stay off the queue that opens a book and writes the shelf cache.
+private func offScan<T: Sendable>(_ work: @escaping @Sendable () -> T) async -> T {
+    await withCheckedContinuation { cont in
+        HostedDisk.scan.async {
             cont.resume(returning: work())
         }
     }
@@ -1120,7 +1169,23 @@ private func inspectPosts(root: URL, id: String, knownStale: Bool) -> PostsFile 
     let url = root.appendingPathComponent(id, isDirectory: true).appendingPathComponent(hostedPostsCache)
     guard FileManager.default.fileExists(atPath: url.path) else { return .missing }
     if knownStale { return .mismatch }
-    return readHostedPosts(file: url) == nil ? .mismatch : .current
+    return postsFileVersion(url) == hostedPostsCacheVersion ? .current : .mismatch
+}
+
+/// The posts array is not decoded. The encoder sorts keys, so `version` is the tail of the file.
+private func postsFileVersion(_ url: URL) -> Int? {
+    guard let handle = try? FileHandle(forReadingFrom: url) else { return nil }
+    defer { try? handle.close() }
+    let length: UInt64
+    do { length = try handle.seekToEnd() } catch { return nil }
+    if length == 0 { return nil }
+    let tail = min(UInt64(80), length)
+    do { try handle.seek(toOffset: length - tail) } catch { return nil }
+    guard let data = try? handle.read(upToCount: Int(tail)),
+          let text = String(data: data, encoding: .utf8),
+          let range = text.range(of: "\"version\"", options: .backwards) else { return nil }
+    let digits = text[range.upperBound...].drop { !$0.isNumber }.prefix { $0.isNumber }
+    return Int(digits)
 }
 
 private func readHostedPosts(root: URL, id: String) -> FeedCache? {
@@ -1130,7 +1195,7 @@ private func readHostedPosts(root: URL, id: String) -> FeedCache? {
 }
 
 private func readHostedPosts(file: URL) -> FeedCache? {
-    HostedOfflineProbe.log.noteDecode()
+    HostedDisk.noteDecode?()
     guard let cache = JSONFiles.read(FeedCache.self, from: file), cache.version == hostedPostsCacheVersion else {
         return nil
     }
@@ -1155,53 +1220,35 @@ private func readSocialFile(root: URL, id: String) -> SocialCache? {
 
 private let hostedSocialFile = "social.json"
 
-/// Decode attempts of a posts file that exists, and which threads touched hosted files.
-enum HostedOfflineProbe {
-    static let log = HostedDiskLog()
-    static let queue = DispatchQueue(label: "mewo.hosted.disk", qos: .userInitiated)
+/// Disk queues, plus hooks tests set. Nil hooks do no work, so the app does not record every read.
+enum HostedDisk {
+    static let io = DispatchQueue(label: "mewo.hosted.disk", qos: .userInitiated)
+    static let scan = DispatchQueue(label: "mewo.hosted.scan", qos: .utility)
+    static var note: (@Sendable () -> Void)?
+    static var noteDecode: (@Sendable () -> Void)?
     static var beforeClaim: (@MainActor () async -> Void)?
-}
+    static var beforeScan: (@Sendable () -> Void)?
+    static var recordPublishes = false
+    private static let publishLock = NSLock()
+    private static var publishes = 0
 
-final class HostedDiskLog: @unchecked Sendable {
-    private let lock = NSLock()
-    private var flags: [Bool] = []
-    private var decodes = 0
-
-    func note() {
-        lock.lock()
-        flags.append(Thread.isMainThread)
-        lock.unlock()
+    static func notePublish() {
+        guard recordPublishes else { return }
+        publishLock.lock()
+        publishes += 1
+        publishLock.unlock()
     }
 
-    func noteDecode() {
-        lock.lock()
-        decodes += 1
-        lock.unlock()
+    static var publishCount: Int {
+        publishLock.lock()
+        defer { publishLock.unlock() }
+        return publishes
     }
 
-    func reset() {
-        lock.lock()
-        flags.removeAll()
-        decodes = 0
-        lock.unlock()
-    }
-
-    var decodeCount: Int {
-        lock.lock()
-        defer { lock.unlock() }
-        return decodes
-    }
-
-    var touchedMain: Bool {
-        lock.lock()
-        defer { lock.unlock() }
-        return flags.contains(true)
-    }
-
-    var touches: Int {
-        lock.lock()
-        defer { lock.unlock() }
-        return flags.count
+    static func resetPublishes() {
+        publishLock.lock()
+        publishes = 0
+        publishLock.unlock()
     }
 }
 
