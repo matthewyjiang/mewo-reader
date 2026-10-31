@@ -46,6 +46,7 @@ struct RootView: View {
             }
         }
         .onChange(of: scenePhase) { _, phase in
+            app.hostedLibrary.setForeground(phase == .active)
             if phase == .active {
                 Task { await app.catalog.refreshAccess() }
             }

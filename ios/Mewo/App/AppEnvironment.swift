@@ -59,6 +59,15 @@ final class AppEnvironment {
         return ReaderIdentity(name: localProfile.profile.displayName, handle: localProfile.profile.handle)
     }
 
+    /// Clears the outbox first when the reader confirmed, then signs out.
+    /// A 401 uses `hostedAuth.signOut()` directly and leaves the file in place.
+    func signOut(discardUnsent: Bool) async {
+        if discardUnsent {
+            await hostedLibrary.discardOutbox()
+        }
+        await hostedAuth.signOut()
+    }
+
     func commenterIdentity(_ comment: PostComment) -> ReaderIdentity {
         if backend.kind != .hosted {
             return readerIdentity

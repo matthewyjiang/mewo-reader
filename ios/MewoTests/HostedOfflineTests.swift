@@ -36,6 +36,8 @@ final class HostedOfflineTests: XCTestCase {
         }
         HostedDisk.beforeClaim = nil
         HostedDisk.beforeScan = nil
+        HostedDisk.beforeForget = nil
+        HostedDisk.beforeLaunch = nil
         HostedDisk.note = nil
         HostedDisk.noteDecode = nil
         HostedDisk.recordPublishes = false
@@ -342,6 +344,45 @@ final class HostedOfflineTests: XCTestCase {
             try await store.saveProgress(id: idA, index: index)
         }
         XCTAssertEqual(HostedDiskLog.shared.decodeCount, 0)
+        XCTAssertEqual(store.book(id: idA)?.progressIndex, 5)
+    }
+
+    func testSavingProgressOfflineUpdatesTheShelfRow() async throws {
+        writePosts(idA, "secret")
+        let store = try await open([book(idA, importedAt: 3)])
+        client.patchError = offlineError()
+        try await store.saveProgress(id: idA, index: 4)
+        XCTAssertEqual(store.book(id: idA)?.progressIndex, 4)
+        XCTAssertEqual(HostedDiskLog.shared.decodeCount, 0)
+    }
+
+    func testADroppedBookStaysClosedWhileTheShelfIsStillRefreshing() async throws {
+        writePosts(idA, "kept")
+        writePosts(idB, "dropped")
+        let store = try await open([book(idA, importedAt: 3), book(idB, importedAt: 2)])
+        let gate = QuietPark()
+        let entered = Flag()
+        HostedDisk.beforeForget = { @MainActor in
+            entered.set()
+            await gate.wait()
+        }
+        defer { HostedDisk.beforeForget = nil }
+        client.shelf = [book(idA, importedAt: 3)]
+        let loading = Task { try await store.load() }
+        try await waitUntil("forget did not start") { entered.isSet }
+        XCTAssertTrue(store.loadState.isRefreshing)
+        do {
+            _ = try await store.feed(id: idB)
+            XCTFail("dropped book opened during the shelf refresh")
+        } catch {
+            XCTAssertEqual(error.localizedDescription, "That book is not on your shelf.")
+        }
+        let kept = try await store.feed(id: idA)
+        XCTAssertEqual(kept.map(\.text), ["kept"])
+        gate.release()
+        try await loading.value
+        try await waitUntil("refresh did not finish") { !store.loadState.isRefreshing }
+        XCTAssertEqual(store.books.map(\.id), [idA])
     }
 
     func testLeavingTheCallerDoesNotCancelTheDownload() async throws {
@@ -675,26 +716,180 @@ final class HostedOfflineTests: XCTestCase {
         }
     }
 
-    func testToggleLikeIsStillThereOffline() async throws {
-        try JSONFiles.write(SocialCache(likes: []), to: bookDir(idA).appendingPathComponent("social.json"))
+    func testUnlikeUsesTheServerSetWhenTheCacheHasNoLikeSnapshot() async throws {
+        let store = try await open([book(idA, importedAt: 3)])
+        try JSONFiles.write(
+            SocialCache(index: CommentIndex(counts: ["q": 1])),
+            to: bookDir(idA).appendingPathComponent("social.json")
+        )
+        client.likes = ["p"]
+        let toggled = try await store.toggleLike(id: idA, postId: "p")
+        XCTAssertEqual(toggled, [])
+        try await waitUntil("the unlike did not send") { client.likeCalls.count == 1 }
+        XCTAssertEqual(client.likeCalls.map { "\($0.0)=\($0.1)" }, ["p=false"])
+    }
+
+    func testADownloadedLikeUnlikesOffline() async throws {
         let store = try await open([book(idA, importedAt: 3)])
         client.likes = ["p"]
+        await store.setDownloaded(id: idA, on: true)
+        XCTAssertEqual(try readSocial(idA).likes, ["p"])
+        client.likesError = offlineError()
+        client.setLikeError = offlineError()
+        let toggled = try await store.toggleLike(id: idA, postId: "p")
+        XCTAssertEqual(toggled, [])
+        try await waitUntil("the unlike did not send") { client.likeCalls.count == 1 }
+        XCTAssertEqual(client.likeCalls.map { "\($0.0)=\($0.1)" }, ["p=false"])
+    }
+
+    func testALikeFileWithoutTheFlagStillUnlikes() async throws {
+        let store = try await open([book(idA, importedAt: 3)])
+        try writeSocialRaw(idA, #"{"version":1,"likes":["p"],"index":{},"threads":{}}"#)
+        client.likesError = offlineError()
+        client.setLikeError = offlineError()
+        let toggled = try await store.toggleLike(id: idA, postId: "p")
+        XCTAssertEqual(toggled, [])
+        try await waitUntil("the unlike did not send") { client.likeCalls.count == 1 }
+        XCTAssertEqual(client.likeCalls.map { "\($0.0)=\($0.1)" }, ["p=false"])
+    }
+
+    func testAnIndexOnlyFileWithoutTheFlagStillLoadsLikes() async throws {
+        let store = try await open([book(idA, importedAt: 3)])
+        try writeSocialRaw(
+            idA,
+            #"{"version":1,"likes":[],"index":{"counts":{"q":1}},"threads":{}}"#
+        )
+        client.likes = ["p"]
+        let toggled = try await store.toggleLike(id: idA, postId: "p")
+        XCTAssertEqual(toggled, [])
+        try await waitUntil("the unlike did not send") { client.likeCalls.count == 1 }
+        XCTAssertEqual(client.likeCalls.map { "\($0.0)=\($0.1)" }, ["p=false"])
+    }
+
+    func testAnOfflineLikeWithNoSnapshotStillQueues() async throws {
+        let store = try await open([book(idA, importedAt: 3)])
+        client.likesError = offlineError()
+        client.setLikeError = offlineError()
+        let toggled = try await store.toggleLike(id: idA, postId: "p")
+        XCTAssertEqual(toggled, ["p"])
+        XCTAssertFalse(FileManager.default.fileExists(atPath: bookDir(idA).appendingPathComponent("social.json").path))
+    }
+
+    func testDeletingABookDropsItsUnsentReply() async throws {
+        let store = try await open([book(idA, importedAt: 3), book(idB, importedAt: 2)])
+        client.addCommentError = offlineError()
+        _ = try await store.addComment(id: idA, postId: "p", text: "hello")
+        XCTAssertEqual(store.unsentReplies, 1)
+        client.client.hooks.delete = { _, _ in }
+        try await store.delete(id: idA)
+        XCTAssertEqual(store.unsentReplies, 0)
+    }
+
+    func testABookThatLeavesTheShelfDropsItsUnsentReply() async throws {
+        let store = try await open([book(idA, importedAt: 3), book(idB, importedAt: 2)])
+        client.addCommentError = offlineError()
+        _ = try await store.addComment(id: idA, postId: "p", text: "hello")
+        XCTAssertEqual(store.unsentReplies, 1)
+        client.shelf = [book(idB, importedAt: 2)]
+        try await store.load()
+        try await waitUntil("the book stayed on the shelf") {
+            !store.books.contains { $0.id == idA } && !store.loadState.isRefreshing
+        }
+        XCTAssertEqual(store.unsentReplies, 0)
+    }
+
+    func testAMissingUsernameRejectsAReply() async throws {
+        let store = try await open([book(idA, importedAt: 3)])
+        sessions.setSignedIn(username: "", token: "token-a")
+        try await waitUntil("the shelf did not return") { store.books.contains { $0.id == idA } }
+        do {
+            _ = try await store.addComment(id: idA, postId: "p", text: "hello")
+            XCTFail("a reply without a username was queued")
+        } catch {
+            XCTAssertEqual(error.localizedDescription, hostedNotSignedIn)
+        }
+        XCTAssertEqual(store.unsentReplies, 0)
+    }
+
+    func testAShelfUpdateDoesNotWaitForPostsDecode() async throws {
+        let store = try await open([book(idA, importedAt: 3)])
+        writePosts(idA, "cached")
+        let gate = DispatchSemaphore(value: 0)
+        let decoding = Flag()
+        let ping = Flag()
+        HostedDisk.noteDecode = {
+            decoding.set()
+            gate.wait()
+        }
+        defer {
+            gate.signal()
+            HostedDisk.noteDecode = { HostedDiskLog.shared.noteDecode() }
+        }
+        let reading = Task { _ = try? await store.feed(id: idA) }
+        try await waitUntil("decode did not start") { decoding.isSet }
+        let save = Task { try? await store.saveProgress(id: idA, index: 4) }
+        let sawPing = Flag()
+        await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
+            Task.detached {
+                // Let the progress write reach setShelf. A ping queued after that
+                // runs only if the posts decode is not holding the shelf lock.
+                try? await Task.sleep(nanoseconds: 80_000_000)
+                DispatchQueue.main.async { ping.set() }
+                try? await Task.sleep(nanoseconds: 120_000_000)
+                if ping.isSet { sawPing.set() }
+                gate.signal()
+                cont.resume()
+            }
+        }
+        await save.value
+        await reading.value
+        XCTAssertTrue(sawPing.isSet, "the shelf update blocked the main thread inside the posts decode")
+        XCTAssertEqual(store.books.first { $0.id == idA }?.progressIndex, 4)
+    }
+
+    func testSharingDoesNotStoreQueuedProgressInTheShelfCache() async throws {
+        let store = try await open([book(idA, importedAt: 3)])
+        client.patchError = offlineError()
+        try await store.saveProgress(id: idA, index: 5)
+        XCTAssertEqual(store.books.first { $0.id == idA }?.progressIndex, 5)
+        XCTAssertEqual(shelfCache().read(serverUrl: server, username: "ada")?.first?.progressIndex, 0)
+        client.patchError = nil
+        try await store.setShared(id: idA, shared: true)
+        XCTAssertEqual(store.books.first { $0.id == idA }?.progressIndex, 5)
+        XCTAssertEqual(store.books.first { $0.id == idA }?.shared, true)
+        XCTAssertEqual(shelfCache().read(serverUrl: server, username: "ada")?.first?.progressIndex, 0)
+    }
+
+    func testToggleLikeIsStillThereOffline() async throws {
+        try JSONFiles.write(
+            SocialCache(likes: [], likesKnown: true),
+            to: bookDir(idA).appendingPathComponent("social.json")
+        )
+        let store = try await open([book(idA, importedAt: 3)])
+        client.setLikeError = offlineError()
         let toggled = try await store.toggleLike(id: idA, postId: "p")
         XCTAssertEqual(toggled, ["p"])
         client.likesError = offlineError()
         let offline = try await store.likes(id: idA)
         XCTAssertEqual(offline, ["p"])
+        XCTAssertEqual(try readSocial(idA).likes, [])
     }
 
     func testAReplyIsStillThereOffline() async throws {
         try JSONFiles.write(SocialCache(), to: bookDir(idA).appendingPathComponent("social.json"))
         let store = try await open([book(idA, importedAt: 3)])
+        client.addCommentError = offlineError()
         let thread = try await store.addComment(id: idA, postId: "p", text: "hello")
         XCTAssertEqual(thread.map(\.text), ["hello"])
+        XCTAssertEqual(thread.last?.status, .sending)
         client.commentsError = offlineError()
         let offline = try await store.comments(id: idA, postId: "p")
         XCTAssertEqual(offline.map(\.text), ["hello"])
-        XCTAssertEqual(try readSocial(idA).index.count("p"), 1)
+        client.indexError = offlineError()
+        let index = try await store.commentIndex(id: idA)
+        XCTAssertEqual(index.count("p"), 1)
+        XCTAssertTrue(index.commented("p"))
+        XCTAssertNil(try readSocial(idA).threads["p"])
     }
 
     func testADeletedReplyIsStillThereOffline() async throws {
@@ -873,7 +1068,13 @@ final class HostedOfflineTests: XCTestCase {
     }
 
     private func makeStore() -> HostedLibraryStore {
-        HostedLibraryStore(opener: EpubOpener(), sessions: sessions, client: client.client, files: root)
+        HostedLibraryStore(
+            opener: EpubOpener(),
+            sessions: sessions,
+            client: client.client,
+            files: root,
+            connectivity: false
+        )
     }
 
     private func settled(_ store: HostedLibraryStore, ids: Set<String>) -> Bool {
@@ -979,6 +1180,9 @@ private final class OfflineClient: @unchecked Sendable {
     var likesError: Error?
     var indexError: Error?
     var commentsError: Error?
+    var setLikeError: Error?
+    var addCommentError: Error?
+    var patchError: Error?
     var likes: Set<String> = ["p"]
     var index = CommentIndex(counts: ["p": 1])
     var thread = [PostComment(id: "c", username: "ada", text: "hi", createdAt: 1, mine: true)]
@@ -1002,6 +1206,7 @@ private final class OfflineClient: @unchecked Sendable {
     private var lingerCount = 0
     private var indexCount = 0
     private var likesCount = 0
+    private var likeLog: [(String, Bool)] = []
 
     init() {
         client.hooks.library = { [weak self] _ in
@@ -1043,13 +1248,16 @@ private final class OfflineClient: @unchecked Sendable {
             if let likesError = self.likesError { throw likesError }
             return self.likes
         }
-        client.hooks.toggleLike = { [weak self] _, _, _ in
+        client.hooks.setLike = { [weak self] _, _, postId, on in
             guard let self else { throw CancellationError() }
+            self.noteLike(postId, on)
+            if let setLikeError = self.setLikeError { throw setLikeError }
             return self.likes
         }
-        client.hooks.addComment = { [weak self] _, _, _, text in
+        client.hooks.addComment = { [weak self] _, _, _, text, commentId, _ in
             guard let self else { throw CancellationError() }
-            let thread = [PostComment(id: "n", username: "ada", text: text, createdAt: 2, mine: true)]
+            if let addCommentError = self.addCommentError { throw addCommentError }
+            let thread = [PostComment(id: commentId, username: "ada", text: text, createdAt: 2, mine: true)]
             self.thread = thread
             return thread
         }
@@ -1073,6 +1281,7 @@ private final class OfflineClient: @unchecked Sendable {
         }
         client.hooks.patch = { [weak self] _, id, body in
             guard let self else { throw CancellationError() }
+            if let patchError = self.patchError { throw patchError }
             guard var book = self.book(id) else { throw HostedException(message: "missing") }
             if let index = body.progressIndex { book.progressIndex = index }
             if let shared = body.shared { book.shared = shared }
@@ -1114,6 +1323,10 @@ private final class OfflineClient: @unchecked Sendable {
 
     var likesEntered: Int {
         lock.lock(); defer { lock.unlock() }; return likesCount
+    }
+
+    var likeCalls: [(String, Bool)] {
+        lock.lock(); defer { lock.unlock() }; return likeLog
     }
 
     func resetCalls() {
@@ -1164,6 +1377,12 @@ private final class OfflineClient: @unchecked Sendable {
         calls.append(id)
         enteredCount += 1
         peak = max(peak, enteredCount)
+        lock.unlock()
+    }
+
+    private func noteLike(_ postId: String, _ on: Bool) {
+        lock.lock()
+        likeLog.append((postId, on))
         lock.unlock()
     }
 

@@ -22,6 +22,8 @@ final class HostedLibraryStore: LibraryStore {
     private var shareConfirmed: [String: Bool] = [:]
     private var shareTails: [String: Task<Void, Never>] = [:]
     private var shareTokens: [String: UUID] = [:]
+    /// Server rows. `books` is this list plus queued and landed progress.
+    private var shelfRaw: [BookRecord] = []
     private(set) var books: [BookRecord] = []
     private(set) var loadState: LibraryLoad = .loading
     private(set) var offline: [String: OfflineState] = [:]
@@ -35,33 +37,103 @@ final class HostedLibraryStore: LibraryStore {
     private var feedTasks: [UUID: Task<[FeedPost], Error>] = [:]
     private var batch: DownloadJob?
     private var maintenance: Task<Void, Never>?
+    /// Bumps in `sessionChanged`. The launch task loads only when that has not happened since it was scheduled.
+    private var sessionGeneration = 0
     /// Token check and hosted-file writes share this lock with the sign-out wipe.
     private let files = HostedFileGate()
+    private let outbox: HostedOutbox
+    private let connectivity: HostedConnectivity?
 
     init(
         opener: EpubOpener,
         sessions: HostedSessionStore,
         client: HostedClient,
         files: URL,
-        refreshesOnInit: Bool = true
+        refreshesOnInit: Bool = true,
+        connectivity: Bool = true,
+        outboxWait: @escaping (UInt64) async -> Void = { try? await Task.sleep(nanoseconds: $0) }
     ) {
         self.opener = opener
         self.sessions = sessions
         self.client = client
         self.root = files.appendingPathComponent("hosted", isDirectory: true)
         self.shelfCache = ShelfCache(directory: files.appendingPathComponent("hosted-shelves", isDirectory: true))
+        let box = OutboxPublishBox()
+        let outbox = HostedOutbox(
+            file: files.appendingPathComponent("hosted-outbox.json"),
+            sessions: sessions,
+            client: client,
+            publish: { session, bookId, change in
+                await box.publish(session, bookId, change)
+            },
+            wait: outboxWait
+        )
+        self.outbox = outbox
+        if connectivity {
+            self.connectivity = HostedConnectivity { [weak outbox] in
+                outbox?.drain(bypassBackoff: true)
+            }
+        } else {
+            self.connectivity = nil
+        }
         try? FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         self.files.setToken(sessions.session.token)
         sessions.onSessionChange = { [weak self] previous, next in
             self?.sessionChanged(from: previous, to: next)
         }
+        box.publish = { [weak self] session, bookId, change in
+            await self?.deliver(session, bookId, change)
+        }
         restoreCachedShelf()
         // A local backend still builds this store. It must not hit the network until a hosted load.
+        // Attach before that load so a resumed queue is already in memory for the shelf overlay.
+        // A sign-in that lands while this task is still attaching owns the refresh. Loading again
+        // after that refresh finished would leave the shelf refreshing on a fetch nobody is waiting for.
+        let generation = sessionGeneration
         if refreshesOnInit {
-            Task { try? await self.load() }
-        } else if case .loaded(let cached, true) = loadState {
-            loadState = .loaded(books: cached, refreshing: false)
+            Task { @MainActor in
+                if let hold = HostedDisk.beforeLaunch {
+                    await hold()
+                }
+                await self.outbox.attach(self.sessions.session)
+                guard self.sessionGeneration == generation else { return }
+                if self.sessions.session.signedIn, !self.shelfRaw.isEmpty {
+                    await self.republishShelf()
+                }
+                guard self.sessionGeneration == generation else { return }
+                try? await self.load()
+            }
+        } else {
+            if case .loaded(let cached, true) = loadState {
+                loadState = .loaded(books: cached, refreshing: false)
+            }
+            Task { @MainActor in
+                await self.outbox.attach(self.sessions.session)
+                guard self.sessionGeneration == generation else { return }
+                if self.sessions.session.signedIn, !self.shelfRaw.isEmpty {
+                    await self.republishShelf()
+                }
+            }
         }
+    }
+
+    var unsentReplies: Int { outbox.unsentReplies }
+    var outboxRevision: Int { outbox.revision }
+
+    func retryReply(id: String) async {
+        await outbox.retry(replyId: id)
+    }
+
+    func discardReply(id: String) async {
+        await outbox.discard(replyId: id)
+    }
+
+    func discardOutbox() async {
+        await outbox.discardAll()
+    }
+
+    func setForeground(_ on: Bool) {
+        outbox.setForeground(on)
     }
 
     /// A pull during launch waits on the refresh already running for this token.
@@ -101,6 +173,7 @@ final class HostedLibraryStore: LibraryStore {
         // landed while this task was queued must not fetch with the new account's session.
         guard session.token == token else { return }
         if !session.signedIn {
+            shelfRaw = []
             books = []
             loadState = .loaded(books: [], refreshing: false)
             return
@@ -109,10 +182,11 @@ final class HostedLibraryStore: LibraryStore {
         let user = session.username ?? ""
         let cached = shelfCache.read(serverUrl: url, username: user)
         guard sessions.session.token == session.token else { return }
-        if let cached, books.isEmpty {
-            books = cached
+        if let cached, shelfRaw.isEmpty {
+            shelfRaw = cached
+            books = shelfRows(cached)
             files.setShelf(Set(cached.map(\.id)))
-            loadState = reduceLibraryLoad(loadState, .cached(cached))
+            loadState = reduceLibraryLoad(loadState, .cached(books))
         }
         loadState = reduceLibraryLoad(loadState, .refreshStarted)
         importedWhileRefreshing.removeAll()
@@ -120,6 +194,7 @@ final class HostedLibraryStore: LibraryStore {
         // A failed refresh must still mark books whose posts.json is already on disk.
         await rescan(books)
         let start = epoch
+        let started = outbox.refreshStarted()
         do {
             let remote = try await fetchLibrary(session)
             guard sessions.session.token == session.token else { return }
@@ -128,15 +203,18 @@ final class HostedLibraryStore: LibraryStore {
             if epoch == start {
                 merged = serverBooks
             } else {
-                let extras = books.filter { local in
+                let extras = shelfRaw.filter { local in
                     importedWhileRefreshing.contains(local.id)
                         && removedWhileRefreshing.contains(local.id) == false
                         && serverBooks.contains { $0.id == local.id } == false
                 }
                 merged = (serverBooks + extras).sorted { $0.importedAt > $1.importedAt }
             }
-            let shown = keepingInFlightShare(merged)
-            await publish(shown, .refreshSucceeded(shown), owner: session)
+            let raw = keepingInFlightShare(merged)
+            outbox.refreshFinished(started: started)
+            await publish(raw, .refreshSucceeded(raw), owner: session)
+            guard sessions.session.token == session.token else { return }
+            outbox.drain(bypassBackoff: true)
         } catch is CancellationError {
             throw CancellationError()
         } catch let url as URLError where url.code == .cancelled {
@@ -177,6 +255,7 @@ final class HostedLibraryStore: LibraryStore {
     /// File wipes wait until in-flight downloads and reader loads have stopped.
     /// A newer sign-in does not have its downloads cancelled or its files deleted by that wipe.
     private func sessionChanged(from previous: HostedSession, to next: HostedSession) {
+        sessionGeneration += 1
         let stamp = next.token
         files.setToken(stamp)
         let urlChanged = previous.normalizedUrl() != next.normalizedUrl()
@@ -186,6 +265,7 @@ final class HostedLibraryStore: LibraryStore {
         let reset = tokenChanged || (previous.signedIn && (urlChanged || userChanged))
         if reset {
             flight?.task.cancel()
+            shelfRaw = []
             books = []
             live.removeAll()
             onDisk.removeAll()
@@ -217,6 +297,12 @@ final class HostedLibraryStore: LibraryStore {
                 await self.clearSocialFiles(stamp: stamp)
             }
             guard self.sessions.session.token == stamp else { return }
+            await self.outbox.attach(self.sessions.session)
+            guard self.sessions.session.token == stamp else { return }
+            if self.sessions.session.signedIn, !self.shelfRaw.isEmpty {
+                await self.republishShelf()
+            }
+            guard self.sessions.session.token == stamp else { return }
             try? await self.load()
         }
         maintenance = task
@@ -229,12 +315,15 @@ final class HostedLibraryStore: LibraryStore {
             return
         }
         if let cached = shelfCache.read(serverUrl: url, username: user) {
+            shelfRaw = cached
             books = cached
             files.setShelf(Set(cached.map(\.id)))
             loadState = .loaded(books: cached, refreshing: true)
         } else {
+            shelfRaw = []
             books = []
-            files.setShelf([])
+            // Empty is not a published shelf. Saved posts stay readable until the first snapshot.
+            files.resetShelf()
             loadState = .loading
         }
     }
@@ -291,6 +380,7 @@ final class HostedLibraryStore: LibraryStore {
             await waitUntilDone(job.task)
         }
         try await expireOn401(session) { try await client.delete(session, id: safe) }
+        await outbox.drop(bookId: safe)
         let dir = bookDir(safe)
         await offMain { try? FileManager.default.removeItem(at: dir) }
         onDisk.remove(safe)
@@ -299,7 +389,7 @@ final class HostedLibraryStore: LibraryStore {
         publishOffline()
         epoch += 1
         removedWhileRefreshing.insert(safe)
-        let next = books.filter { $0.id != safe }
+        let next = shelfRaw.filter { $0.id != safe }
         await publish(next, .booksReplaced(next), owner: session)
     }
 
@@ -314,14 +404,17 @@ final class HostedLibraryStore: LibraryStore {
     func feed(id: String) async throws -> [FeedPost] {
         let session = try requireSession()
         let safe = try requireBookId(id)
-        guard savedTextAllowed(loadState, bookId: safe) else {
+        if let cached = await readCached(safe) { return cached }
+        // savedTextAllowed stays true for the whole refresh, including after publish
+        // has already dropped a book from the shelf set. The cache read above is
+        // locked to that set. A miss for an id the set no longer lists is the drop.
+        guard fetchAllowed(safe) else {
             throw NSError(
                 domain: "mewo",
                 code: 12,
                 userInfo: [NSLocalizedDescriptionKey: "That book is not on your shelf."]
             )
         }
-        if let cached = await readCached(safe) { return cached }
         let key = UUID()
         let task = Task { @MainActor () throws -> [FeedPost] in
             let posts = try await self.expireOn401(session) { try await self.client.posts(session, id: safe) }
@@ -341,10 +434,13 @@ final class HostedLibraryStore: LibraryStore {
     func setShared(id: String, shared: Bool) async throws {
         let session = try requireSession()
         let safe = try requireBookId(id)
-        guard let book = books.first(where: { $0.id == safe }) else { return }
+        guard let raw = shelfRaw.first(where: { $0.id == safe }) else { return }
+        let displayed = books.first(where: { $0.id == safe })?.shared ?? raw.shared
+        var book = raw
+        book.shared = displayed
         let pending = shareTails[safe] == nil ? nil : ShareToggle(
-            confirmed: shareConfirmed[safe] ?? book.shared,
-            displayed: book.shared
+            confirmed: shareConfirmed[safe] ?? displayed,
+            displayed: displayed
         )
         switch startShareToggle(book: book, requested: shared, pending: pending) {
         case .ignore:
@@ -359,8 +455,8 @@ final class HostedLibraryStore: LibraryStore {
             if shareConfirmed[safe] == nil {
                 shareConfirmed[safe] = toggle.confirmed
             }
-            if book.shared != toggle.displayed {
-                var next = book
+            if displayed != toggle.displayed {
+                var next = raw
                 next.shared = toggle.displayed
                 await replaceBook(next, owner: session)
             }
@@ -398,44 +494,63 @@ final class HostedLibraryStore: LibraryStore {
     func saveProgress(id: String, index: Int) async throws {
         let session = try requireSession()
         let safe = try requireBookId(id)
-        let updated = try await expireOn401(session) {
-            try await client.patch(session, id: safe, body: PatchBook(progressIndex: max(0, index)))
-        }
-        var record = updated
-        if shareTails[safe] != nil, let shown = books.first(where: { $0.id == safe })?.shared {
-            record.shared = shown
-        }
-        await replaceBook(record, owner: session)
+        try await outbox.enqueue(.progress(OutboxOp.Progress(bookId: safe, index: max(0, index))))
+        guard sessions.session.token == session.token else { return }
+        await republishShelf()
     }
 
     func likes(id: String) async throws -> Set<String> {
         let safe = try requireBookId(id)
         let session = try requireSession()
+        let base: Set<String>
         do {
             let likes = try await expireOn401(session) { try await client.likes(session, id: safe) }
             await updateSocial(safe, session: session) { cache in
                 var next = cache
                 next.likes = likes
+                next.likesKnown = true
                 return next
             }
-            return likes
+            base = likes
         } catch let error as URLError {
             if error.code == .cancelled { throw error }
-            if let cached = await readSocial(safe) { return cached.likes }
-            throw error
+            if let cached = await readSocial(safe), cached.likesKnown {
+                base = cached.likes
+            } else if outbox.queue.ops.contains(where: { op in
+                guard case .like(let like) = op else { return false }
+                return like.bookId == safe
+            }) {
+                base = []
+            } else {
+                throw error
+            }
         }
+        return outbox.queue.likes(over: base, bookId: safe)
     }
 
     func toggleLike(id: String, postId: String) async throws -> Set<String> {
         let session = try requireSession()
         let safe = try requireBookId(id)
-        let likes = try await expireOn401(session) { try await client.toggleLike(session, id: safe, postId: postId) }
-        await updateSocial(safe, session: session) { cache in
-            var next = cache
-            next.likes = likes
-            return next
+        let cached = await readSocial(safe)
+        let base: Set<String>
+        if cached?.likesKnown == true {
+            base = cached?.likes ?? []
+        } else {
+            do {
+                let likes = try await expireOn401(session) { try await client.likes(session, id: safe) }
+                await updateSocial(safe, session: session) { cache in
+                    var next = cache
+                    next.likes = likes
+                    next.likesKnown = true
+                    return next
+                }
+                base = likes
+            } catch let error as URLError {
+                if error.code == .cancelled { throw error }
+                base = []
+            }
         }
-        return likes
+        return try await outbox.toggleLike(bookId: safe, postId: postId, base: base)
     }
 
     func setRepost(id: String, postId: String, on: Bool) async throws -> RepostState {
@@ -449,38 +564,61 @@ final class HostedLibraryStore: LibraryStore {
     func commentIndex(id: String) async throws -> CommentIndex {
         let session = try requireSession()
         let safe = try requireBookId(id)
+        let index: CommentIndex
         do {
-            let index = try await expireOn401(session) { try await client.commentIndex(session, id: safe) }
+            let remote = try await expireOn401(session) { try await client.commentIndex(session, id: safe) }
             await updateSocial(safe, session: session) { cache in
                 var next = cache
-                next.index = index
+                next.index = remote
                 return next
             }
-            return index
+            index = remote
         } catch let error as URLError {
             if error.code == .cancelled { throw error }
-            if let cached = await readSocial(safe) { return cached.index }
-            throw error
+            let pending = outbox.queue.ops.contains { op in
+                guard case .reply(let reply) = op else { return false }
+                return reply.bookId == safe
+            }
+            if let cached = await readSocial(safe)?.index {
+                index = cached
+            } else if pending {
+                index = CommentIndex()
+            } else {
+                throw error
+            }
         }
+        let threads = await readSocial(safe)?.threads ?? [:]
+        return outbox.queue.index(over: index, bookId: safe, threads: threads)
     }
 
     func comments(id: String, postId: String) async throws -> [PostComment] {
         let session = try requireSession()
         let safe = try requireBookId(id)
+        let thread: [PostComment]
         do {
-            let thread = try await expireOn401(session) { try await client.comments(session, id: safe, postId: postId) }
+            let remote = try await expireOn401(session) { try await client.comments(session, id: safe, postId: postId) }
             await updateSocial(safe, session: session) { cache in
                 var next = cache
-                next.threads[postId] = thread
-                next.index = next.index.afterThread(postId: postId, comments: thread)
+                next.threads[postId] = remote
+                next.index = next.index.afterThread(postId: postId, comments: remote)
                 return next
             }
-            return thread
+            thread = remote
         } catch let error as URLError {
             if error.code == .cancelled { throw error }
-            if let thread = await readSocial(safe)?.threads[postId] { return thread }
-            throw NSError(domain: "mewo", code: 13, userInfo: [NSLocalizedDescriptionKey: "You're offline."])
+            let pending = outbox.queue.ops.contains { op in
+                guard case .reply(let reply) = op else { return false }
+                return reply.bookId == safe && reply.postId == postId
+            }
+            if let cached = await readSocial(safe)?.threads[postId] {
+                thread = cached
+            } else if pending {
+                thread = []
+            } else {
+                throw NSError(domain: "mewo", code: 13, userInfo: [NSLocalizedDescriptionKey: "You're offline."])
+            }
         }
+        return outbox.queue.thread(over: thread, bookId: safe, postId: postId, me: session.username ?? "")
     }
 
     func setDownloaded(id: String, on: Bool) async {
@@ -508,11 +646,28 @@ final class HostedLibraryStore: LibraryStore {
     func addComment(id: String, postId: String, text: String) async throws -> [PostComment] {
         let session = try requireSession()
         let safe = try requireBookId(id)
-        let thread = try await expireOn401(session) {
-            try await client.addComment(session, id: safe, postId: postId, text: text)
+        guard let record = book(id: safe) else {
+            throw NSError(domain: "mewo", code: 14, userInfo: [NSLocalizedDescriptionKey: "That book is gone."])
         }
-        await rememberThread(safe, postId: postId, thread: thread, session: session)
-        return thread
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.isEmpty {
+            throw NSError(domain: "mewo", code: 15, userInfo: [NSLocalizedDescriptionKey: "Write something first."])
+        }
+        if let budget = commentBudgetError(trimmed) {
+            throw NSError(domain: "mewo", code: 16, userInfo: [NSLocalizedDescriptionKey: budget])
+        }
+        let reply = OutboxOp.Reply(
+            bookId: safe,
+            postId: postId,
+            id: outboxReplyId(),
+            text: trimmed,
+            isPrivate: replyIsPrivate(record),
+            createdAt: Int64(Date().timeIntervalSince1970 * 1000),
+            failed: nil
+        )
+        try await outbox.enqueue(.reply(reply))
+        let cached = await readSocial(safe)?.threads[postId] ?? []
+        return outbox.queue.thread(over: cached, bookId: safe, postId: postId, me: session.username ?? "")
     }
 
     func deleteComment(id: String, postId: String, commentId: String) async throws -> [PostComment] {
@@ -522,7 +677,7 @@ final class HostedLibraryStore: LibraryStore {
             try await client.deleteComment(session, id: safe, postId: postId, commentId: commentId)
         }
         await rememberThread(safe, postId: postId, thread: thread, session: session)
-        return thread
+        return outbox.queue.thread(over: thread, bookId: safe, postId: postId, me: session.username ?? "")
     }
 
     private func rememberThread(_ id: String, postId: String, thread: [PostComment], session: HostedSession) async {
@@ -550,7 +705,8 @@ final class HostedLibraryStore: LibraryStore {
         if !session.signedIn { return [] }
         var hits: [PostHit] = []
         for book in books {
-            let ids = try await expireOn401(session) { try await client.likes(session, id: book.id) }
+            let fetched = try await expireOn401(session) { try await client.likes(session, id: book.id) }
+            let ids = outbox.queue.likes(over: fetched, bookId: book.id)
             if ids.isEmpty { continue }
             let posts = await readCached(book.id) ?? []
             hits.append(contentsOf: posts.filter { ids.contains($0.id) }.map { PostHit(book: book, post: $0) })
@@ -613,11 +769,60 @@ final class HostedLibraryStore: LibraryStore {
     private func readCached(_ id: String) async -> [FeedPost]? {
         guard let safe = safeBookId(id) else { return nil }
         let root = self.root
-        return await offMain { readHostedPosts(root: root, id: safe)?.posts }
+        let gate = files
+        return await offMain {
+            let data = gate.readIfListed(safe) { () -> Data? in
+                let url = root.appendingPathComponent(safe, isDirectory: true)
+                    .appendingPathComponent(hostedPostsCache)
+                return try? Data(contentsOf: url)
+            }
+            guard let data else { return nil }
+            HostedDisk.noteDecode?()
+            guard let cache = try? JSONFiles.decoder.decode(FeedCache.self, from: data),
+                  cache.version == hostedPostsCacheVersion else { return nil }
+            return cache.posts
+        }
+    }
+
+    /// Saved text may still be fetched while the shelf is catching up. Once publish
+    /// has written the shelf set, an id missing from it is gone, even while
+    /// `loadState` is still the previous refresh.
+    private func fetchAllowed(_ id: String) -> Bool {
+        guard savedTextAllowed(loadState, bookId: id) else { return false }
+        let listed = files.sync { _, shelf in shelf.contains(id) }
+        if listed { return true }
+        switch loadState {
+        case .loading, .failed(_, nil):
+            return true
+        default:
+            return false
+        }
+    }
+
+    private func shelfRows(_ raw: [BookRecord]) -> [BookRecord] {
+        outbox.queue.books(over: raw, landed: outbox.landedProgress)
+    }
+
+    private func republishShelf() async {
+        await publish(shelfRaw, .booksReplaced(shelfRaw), owner: sessions.session)
+    }
+
+    private func deliver(_ session: HostedSession, _ bookId: String, _ change: HostedOutbox.Landed) async {
+        switch change {
+        case .thread(let postId, let thread):
+            await rememberThread(bookId, postId: postId, thread: thread, session: session)
+        case .likes(let ids):
+            await updateSocial(bookId, session: session) { cache in
+                var next = cache
+                next.likes = ids
+                next.likesKnown = true
+                return next
+            }
+        }
     }
 
     private func finishShare(id: String, requested: Bool, server: BookRecord?, failed: Bool, owner: HostedSession) async {
-        guard let current = books.first(where: { $0.id == id }) else { return }
+        guard let current = shelfRaw.first(where: { $0.id == id }) else { return }
         if failed {
             if let confirmed = shareConfirmed[id],
                let rolled = applyShareFailure(book: current, requested: requested, confirmed: confirmed) {
@@ -656,23 +861,27 @@ final class HostedLibraryStore: LibraryStore {
         let owner = owner ?? sessions.session
         guard sessions.session.token == owner.token else { return }
         epoch += 1
-        if books.contains(where: { $0.id == record.id }) == false {
+        if shelfRaw.contains(where: { $0.id == record.id }) == false {
             importedWhileRefreshing.insert(record.id)
         }
-        let next = (books.filter { $0.id != record.id } + [record]).sorted { $0.importedAt > $1.importedAt }
+        let next = (shelfRaw.filter { $0.id != record.id } + [record]).sorted { $0.importedAt > $1.importedAt }
         await publish(next, .booksReplaced(next), owner: owner)
     }
 
     /// Updates the on-screen shelf only while `owner` is still signed in. A cache write failure stays a success.
-    private func publish(_ next: [BookRecord], _ event: LibraryEvent, owner: HostedSession) async {
+    /// `raw` is the server shelf. The screen gets queued progress on top. The cache keeps `raw`.
+    /// `loadState` moves last: reducing it before offline marks are published reopens the #45 failures.
+    private func publish(_ raw: [BookRecord], _ event: LibraryEvent, owner: HostedSession) async {
+        let shown = shelfRows(raw)
         let stillHere = sessions.session.token == owner.token
         var dropped: [String] = []
         if stillHere {
-            let previous = books
-            books = next
-            files.setShelf(Set(next.map(\.id)))
+            let previous = shelfRaw
+            shelfRaw = raw
+            books = shown
+            files.setShelf(Set(raw.map(\.id)))
             if case .refreshSucceeded = event {
-                let kept = Set(next.map(\.id))
+                let kept = Set(raw.map(\.id))
                 dropped = previous.compactMap { book in
                     guard kept.contains(book.id) == false else { return nil }
                     return safeBookId(book.id)
@@ -683,7 +892,7 @@ final class HostedLibraryStore: LibraryStore {
             switch event {
             case .booksReplaced, .refreshSucceeded:
                 let cache = shelfCache
-                let snapshot = next
+                let snapshot = raw
                 await offMain {
                     // A full disk must not turn a fetched shelf into an error.
                     try? cache.write(serverUrl: url, username: user, books: snapshot)
@@ -706,10 +915,29 @@ final class HostedLibraryStore: LibraryStore {
         // are published. A caller that sees a finished shelf can load again; joining
         // the scan that is still running would keep the shelf it already fetched.
         guard stillHere, sessions.session.token == owner.token else { return }
-        loadState = reduceLibraryLoad(loadState, event)
+        if case .refreshSucceeded = event {
+            await outbox.dropExcept(Set(raw.map(\.id)))
+        }
+        loadState = reduceLibraryLoad(loadState, shownEvent(event, shown))
+    }
+
+    private func shownEvent(_ event: LibraryEvent, _ shown: [BookRecord]) -> LibraryEvent {
+        switch event {
+        case .refreshSucceeded:
+            return .refreshSucceeded(shown)
+        case .booksReplaced:
+            return .booksReplaced(shown)
+        case .cached:
+            return .cached(shown)
+        default:
+            return event
+        }
     }
 
     private func forgetFiles(_ ids: [String]) async {
+        if let before = HostedDisk.beforeForget {
+            await before()
+        }
         let root = self.root
         let gate = files
         await offMain {
@@ -859,6 +1087,7 @@ final class HostedLibraryStore: LibraryStore {
             await updateSocial(id, session: session) { cache in
                 var next = cache
                 next.likes = likes
+                next.likesKnown = true
                 next.index = index
                 return next
             }
@@ -896,7 +1125,7 @@ final class HostedLibraryStore: LibraryStore {
         stalePosts.remove(id)
         if case .failed = live[id] { live[id] = nil }
         publishOffline()
-        if var record = books.first(where: { $0.id == id }), record.postCount != posts.count {
+        if var record = shelfRaw.first(where: { $0.id == id }), record.postCount != posts.count {
             record.postCount = posts.count
             await replaceBook(record, owner: session)
         }
@@ -1234,6 +1463,10 @@ enum HostedDisk {
     static var noteDecode: (@Sendable () -> Void)?
     static var beforeClaim: (@MainActor () async -> Void)?
     static var beforeScan: (@Sendable () -> Void)?
+    /// Parks at the top of `forgetFiles`, after `publish` has already updated the shelf set.
+    static var beforeForget: (@MainActor () async -> Void)?
+    /// Parks the launch task before it attaches, so a test can let a sign-in refresh finish first.
+    static var beforeLaunch: (@MainActor () async -> Void)?
     static var recordPublishes = false
     private static let publishLock = NSLock()
     private static var publishes = 0
@@ -1274,11 +1507,18 @@ enum HostedDisk {
     }
 }
 
+/// Holds the outbox publish hook until `HostedLibraryStore` has finished initializing.
+private final class OutboxPublishBox {
+    var publish: HostedOutbox.Publish = { _, _, _ in }
+}
+
 /// The session token and the shelf ids, read inside the same lock as a file write or wipe.
 final class HostedFileGate: @unchecked Sendable {
     private let lock = NSLock()
     private var token: String?
     private var shelf: Set<String> = []
+    /// False until `setShelf`. An empty set before that is "no snapshot yet", not "nothing is saved".
+    private var shelfKnown = false
 
     func setToken(_ token: String?) {
         lock.lock()
@@ -1289,7 +1529,24 @@ final class HostedFileGate: @unchecked Sendable {
     func setShelf(_ ids: Set<String>) {
         lock.lock()
         shelf = ids
+        shelfKnown = true
         lock.unlock()
+    }
+
+    func resetShelf() {
+        lock.lock()
+        shelf = []
+        shelfKnown = false
+        lock.unlock()
+    }
+
+    /// The shelf check and the byte read share this lock with `setShelf` and `forgetFiles`.
+    /// Decode happens after the lock is released, so a shelf update is not stuck behind it.
+    func readIfListed<T>(_ id: String, _ read: () -> T?) -> T? {
+        lock.lock()
+        defer { lock.unlock() }
+        guard !shelfKnown || shelf.contains(id) else { return nil }
+        return read()
     }
 
     func sync<T>(_ body: (String?, Set<String>) -> T) -> T {

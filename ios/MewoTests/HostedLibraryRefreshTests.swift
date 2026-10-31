@@ -9,6 +9,7 @@ final class HostedLibraryRefreshTests: XCTestCase {
     private var sessions: HostedSessionStore!
     private var client: GateClient!
     private var store: HostedLibraryStore!
+    private var launchHeld = false
 
     override func setUp() async throws {
         root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
@@ -18,10 +19,23 @@ final class HostedLibraryRefreshTests: XCTestCase {
         sessions = HostedSessionStore(defaults: defaults, persistToken: false)
         sessions.setBaseUrl(server)
         client = GateClient()
-        store = HostedLibraryStore(opener: EpubOpener(), sessions: sessions, client: client.client, files: root)
+        if name.contains("testADeleteDuringRefreshDoesNotRestoreTheBook") {
+            HostedDisk.beforeLaunch = { [weak self] in
+                self?.launchHeld = true
+                try? await Task.sleep(nanoseconds: 300_000_000)
+            }
+        }
+        store = HostedLibraryStore(
+            opener: EpubOpener(),
+            sessions: sessions,
+            client: client.client,
+            files: root,
+            connectivity: false
+        )
     }
 
     override func tearDown() async throws {
+        HostedDisk.beforeLaunch = nil
         client.failAll()
         sessions.signOut()
         store = nil
@@ -167,6 +181,11 @@ final class HostedLibraryRefreshTests: XCTestCase {
         try await store.delete(id: staleId)
         client.respond("token-a", books: [gone, kept])
         try await waitUntil("refresh did not finish") { !store.loadState.isRefreshing }
+        // The launch task was held past this refresh. It must not open a second fetch.
+        try await Task.sleep(nanoseconds: 400_000_000)
+        XCTAssertTrue(launchHeld)
+        XCTAssertEqual(client.libraryCalls, 1)
+        XCTAssertFalse(store.loadState.isRefreshing)
         XCTAssertEqual(store.books.map(\.id), [keptId])
         XCTAssertEqual(shelfCache().read(serverUrl: server, username: "ada")?.map(\.id), [keptId])
     }
@@ -188,7 +207,8 @@ final class HostedLibraryRefreshTests: XCTestCase {
             sessions: localSessions,
             client: localClient.client,
             files: files,
-            refreshesOnInit: false
+            refreshesOnInit: false,
+            connectivity: false
         )
         try await Task.sleep(nanoseconds: 200_000_000)
         XCTAssertEqual(localClient.libraryCalls, 0)

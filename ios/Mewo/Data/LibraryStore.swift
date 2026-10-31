@@ -22,6 +22,14 @@ protocol LibraryStore: AnyObject {
     func comments(id: String, postId: String) async throws -> [PostComment]
     func addComment(id: String, postId: String, text: String) async throws -> [PostComment]
     func deleteComment(id: String, postId: String, commentId: String) async throws -> [PostComment]
+    /// Hosted replies still in the outbox, including ones the server refused.
+    var unsentReplies: Int { get }
+    /// Bumps when a queued reply is added, sent, refused, retried, or dropped.
+    var outboxRevision: Int { get }
+    func retryReply(id: String) async
+    func discardReply(id: String) async
+    /// Explicit sign-out after the reader confirms.
+    func discardOutbox() async
     func search(query: String) async throws -> SearchResult
     func likedPosts() async throws -> [PostHit]
     func profileReplies(handle: String) async throws -> [ProfileReply]
@@ -38,6 +46,11 @@ protocol LibraryStore: AnyObject {
 }
 
 extension LibraryStore {
+    var unsentReplies: Int { 0 }
+    var outboxRevision: Int { 0 }
+    func retryReply(id: String) async {}
+    func discardReply(id: String) async {}
+    func discardOutbox() async {}
     var offline: [String: OfflineState] { [:] }
     var offlineSummary: OfflineSummary { OfflineSummary(downloaded: 0, total: 0, running: false) }
     func setDownloaded(id: String, on: Bool) async {}
@@ -88,6 +101,11 @@ final class SwitchingLibraryStore: LibraryStore {
     func deleteComment(id: String, postId: String, commentId: String) async throws -> [PostComment] {
         try await active.deleteComment(id: id, postId: postId, commentId: commentId)
     }
+    var unsentReplies: Int { active.unsentReplies }
+    var outboxRevision: Int { active.outboxRevision }
+    func retryReply(id: String) async { await active.retryReply(id: id) }
+    func discardReply(id: String) async { await active.discardReply(id: id) }
+    func discardOutbox() async { await active.discardOutbox() }
     func search(query: String) async throws -> SearchResult { try await active.search(query: query) }
     func likedPosts() async throws -> [PostHit] { try await active.likedPosts() }
     func profileReplies(handle: String) async throws -> [ProfileReply] {
