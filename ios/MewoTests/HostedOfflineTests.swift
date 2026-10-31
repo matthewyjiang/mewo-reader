@@ -36,6 +36,8 @@ final class HostedOfflineTests: XCTestCase {
         }
         HostedDisk.beforeClaim = nil
         HostedDisk.beforeScan = nil
+        HostedDisk.beforeForget = nil
+        HostedDisk.beforeLaunch = nil
         HostedDisk.note = nil
         HostedDisk.noteDecode = nil
         HostedDisk.recordPublishes = false
@@ -342,6 +344,45 @@ final class HostedOfflineTests: XCTestCase {
             try await store.saveProgress(id: idA, index: index)
         }
         XCTAssertEqual(HostedDiskLog.shared.decodeCount, 0)
+        XCTAssertEqual(store.book(id: idA)?.progressIndex, 5)
+    }
+
+    func testSavingProgressOfflineUpdatesTheShelfRow() async throws {
+        writePosts(idA, "secret")
+        let store = try await open([book(idA, importedAt: 3)])
+        client.patchError = offlineError()
+        try await store.saveProgress(id: idA, index: 4)
+        XCTAssertEqual(store.book(id: idA)?.progressIndex, 4)
+        XCTAssertEqual(HostedDiskLog.shared.decodeCount, 0)
+    }
+
+    func testADroppedBookStaysClosedWhileTheShelfIsStillRefreshing() async throws {
+        writePosts(idA, "kept")
+        writePosts(idB, "dropped")
+        let store = try await open([book(idA, importedAt: 3), book(idB, importedAt: 2)])
+        let gate = QuietPark()
+        let entered = Flag()
+        HostedDisk.beforeForget = { @MainActor in
+            entered.set()
+            await gate.wait()
+        }
+        defer { HostedDisk.beforeForget = nil }
+        client.shelf = [book(idA, importedAt: 3)]
+        let loading = Task { try await store.load() }
+        try await waitUntil("forget did not start") { entered.isSet }
+        XCTAssertTrue(store.loadState.isRefreshing)
+        do {
+            _ = try await store.feed(id: idB)
+            XCTFail("dropped book opened during the shelf refresh")
+        } catch {
+            XCTAssertEqual(error.localizedDescription, "That book is not on your shelf.")
+        }
+        let kept = try await store.feed(id: idA)
+        XCTAssertEqual(kept.map(\.text), ["kept"])
+        gate.release()
+        try await loading.value
+        try await waitUntil("refresh did not finish") { !store.loadState.isRefreshing }
+        XCTAssertEqual(store.books.map(\.id), [idA])
     }
 
     func testLeavingTheCallerDoesNotCancelTheDownload() async throws {
@@ -678,23 +719,30 @@ final class HostedOfflineTests: XCTestCase {
     func testToggleLikeIsStillThereOffline() async throws {
         try JSONFiles.write(SocialCache(likes: []), to: bookDir(idA).appendingPathComponent("social.json"))
         let store = try await open([book(idA, importedAt: 3)])
-        client.likes = ["p"]
+        client.setLikeError = offlineError()
         let toggled = try await store.toggleLike(id: idA, postId: "p")
         XCTAssertEqual(toggled, ["p"])
         client.likesError = offlineError()
         let offline = try await store.likes(id: idA)
         XCTAssertEqual(offline, ["p"])
+        XCTAssertEqual(try readSocial(idA).likes, [])
     }
 
     func testAReplyIsStillThereOffline() async throws {
         try JSONFiles.write(SocialCache(), to: bookDir(idA).appendingPathComponent("social.json"))
         let store = try await open([book(idA, importedAt: 3)])
+        client.addCommentError = offlineError()
         let thread = try await store.addComment(id: idA, postId: "p", text: "hello")
         XCTAssertEqual(thread.map(\.text), ["hello"])
+        XCTAssertEqual(thread.last?.status, .sending)
         client.commentsError = offlineError()
         let offline = try await store.comments(id: idA, postId: "p")
         XCTAssertEqual(offline.map(\.text), ["hello"])
-        XCTAssertEqual(try readSocial(idA).index.count("p"), 1)
+        client.indexError = offlineError()
+        let index = try await store.commentIndex(id: idA)
+        XCTAssertEqual(index.count("p"), 1)
+        XCTAssertTrue(index.commented("p"))
+        XCTAssertNil(try readSocial(idA).threads["p"])
     }
 
     func testADeletedReplyIsStillThereOffline() async throws {
@@ -873,7 +921,13 @@ final class HostedOfflineTests: XCTestCase {
     }
 
     private func makeStore() -> HostedLibraryStore {
-        HostedLibraryStore(opener: EpubOpener(), sessions: sessions, client: client.client, files: root)
+        HostedLibraryStore(
+            opener: EpubOpener(),
+            sessions: sessions,
+            client: client.client,
+            files: root,
+            connectivity: false
+        )
     }
 
     private func settled(_ store: HostedLibraryStore, ids: Set<String>) -> Bool {
@@ -979,6 +1033,9 @@ private final class OfflineClient: @unchecked Sendable {
     var likesError: Error?
     var indexError: Error?
     var commentsError: Error?
+    var setLikeError: Error?
+    var addCommentError: Error?
+    var patchError: Error?
     var likes: Set<String> = ["p"]
     var index = CommentIndex(counts: ["p": 1])
     var thread = [PostComment(id: "c", username: "ada", text: "hi", createdAt: 1, mine: true)]
@@ -1043,13 +1100,15 @@ private final class OfflineClient: @unchecked Sendable {
             if let likesError = self.likesError { throw likesError }
             return self.likes
         }
-        client.hooks.toggleLike = { [weak self] _, _, _ in
+        client.hooks.setLike = { [weak self] _, _, _, _ in
             guard let self else { throw CancellationError() }
+            if let setLikeError = self.setLikeError { throw setLikeError }
             return self.likes
         }
-        client.hooks.addComment = { [weak self] _, _, _, text in
+        client.hooks.addComment = { [weak self] _, _, _, text, commentId, _ in
             guard let self else { throw CancellationError() }
-            let thread = [PostComment(id: "n", username: "ada", text: text, createdAt: 2, mine: true)]
+            if let addCommentError = self.addCommentError { throw addCommentError }
+            let thread = [PostComment(id: commentId, username: "ada", text: text, createdAt: 2, mine: true)]
             self.thread = thread
             return thread
         }
@@ -1073,6 +1132,7 @@ private final class OfflineClient: @unchecked Sendable {
         }
         client.hooks.patch = { [weak self] _, id, body in
             guard let self else { throw CancellationError() }
+            if let patchError = self.patchError { throw patchError }
             guard var book = self.book(id) else { throw HostedException(message: "missing") }
             if let index = body.progressIndex { book.progressIndex = index }
             if let shared = body.shared { book.shared = shared }

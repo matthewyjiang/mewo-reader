@@ -38,18 +38,7 @@ struct CommentSheet: View {
                         connectDown: true
                     )
                     ForEach(comments) { comment in
-                        let identity = app.commenterIdentity(comment)
-                        ThreadPost(
-                            name: identity.name,
-                            handle: identity.handle,
-                            meta: relativeTime(createdAt: comment.createdAt),
-                            text: comment.text,
-                            heading: false,
-                            cover: nil,
-                            connectDown: true,
-                            onOpenProfile: onOpenProfile,
-                            onDelete: comment.mine ? { delete(comment) } : nil
-                        )
+                        replyRow(comment)
                     }
                     compose
                 }
@@ -57,6 +46,58 @@ struct CommentSheet: View {
         }
         .background(mewo.ground)
         .task(id: target.id) { await load() }
+        .onChange(of: replyRevision) { _, _ in
+            Task { await refreshThread() }
+        }
+    }
+
+    /// Hosted queue changes. Local replies are sent before this returns, so the revision stays put.
+    private var replyRevision: Int {
+        app.backend.kind == .hosted ? app.hostedLibrary.outboxRevision : 0
+    }
+
+    private func replyRow(_ comment: PostComment) -> some View {
+        let identity = app.commenterIdentity(comment)
+        return ThreadPost(
+            name: identity.name,
+            handle: identity.handle,
+            meta: replyMeta(comment),
+            text: comment.text,
+            heading: false,
+            cover: nil,
+            connectDown: true,
+            metaFailed: comment.status.isFailed,
+            onOpenProfile: onOpenProfile,
+            onRetry: retryAction(comment),
+            onDiscard: discardAction(comment),
+            onDelete: deleteAction(comment)
+        )
+    }
+
+    private func retryAction(_ comment: PostComment) -> (() -> Void)? {
+        guard comment.status.isFailed else { return nil }
+        return { self.retry(comment) }
+    }
+
+    private func discardAction(_ comment: PostComment) -> (() -> Void)? {
+        guard comment.status.isFailed else { return nil }
+        return { self.discard(comment) }
+    }
+
+    private func deleteAction(_ comment: PostComment) -> (() -> Void)? {
+        guard comment.mine, comment.status == .sent else { return nil }
+        return { self.delete(comment) }
+    }
+
+    private func replyMeta(_ comment: PostComment) -> String {
+        switch comment.status {
+        case .sent:
+            return relativeTime(createdAt: comment.createdAt)
+        case .sending:
+            return "Sending…"
+        case .failed:
+            return "Not sent"
+        }
     }
 
     private var composerBar: some View {
@@ -112,6 +153,10 @@ struct CommentSheet: View {
 
     private func load() async {
         error = nil
+        await refreshThread()
+    }
+
+    private func refreshThread() async {
         do {
             let next = try await app.library.comments(id: target.book.id, postId: target.post.id)
             comments = next
@@ -139,6 +184,20 @@ struct CommentSheet: View {
         }
     }
 
+    private func retry(_ comment: PostComment) {
+        Task {
+            await app.library.retryReply(id: comment.id)
+            await refreshThread()
+        }
+    }
+
+    private func discard(_ comment: PostComment) {
+        Task {
+            await app.library.discardReply(id: comment.id)
+            await refreshThread()
+        }
+    }
+
     private func delete(_ comment: PostComment) {
         Task {
             do {
@@ -162,8 +221,11 @@ struct ThreadPost: View {
     var heading: Bool
     var cover: URL?
     var connectDown: Bool
+    var metaFailed: Bool = false
     var onOpenProfile: ((String, String) -> Void)?
     var onOpen: (() -> Void)?
+    var onRetry: (() -> Void)?
+    var onDiscard: (() -> Void)?
     var onDelete: (() -> Void)?
     var trailing: CGFloat = 4
 
@@ -185,13 +247,21 @@ struct ThreadPost: View {
                         .onTapGesture { onOpenProfile?(handle, name) }
                     Text("@\(handle) · \(meta)")
                         .font(MewoFont.regular(13))
-                        .foregroundStyle(mewo.mute)
+                        .foregroundStyle(metaFailed ? mewo.like : mewo.mute)
                         .lineLimit(1)
                         .onTapGesture { onOpenProfile?(handle, name) }
-                    if onDelete != nil {
+                    if onDelete != nil || onRetry != nil || onDiscard != nil {
                         Spacer(minLength: 0)
                         Menu {
-                            Button("Delete", role: .destructive) { onDelete?() }
+                            if onRetry != nil {
+                                Button("Retry") { onRetry?() }
+                            }
+                            if onDiscard != nil {
+                                Button("Delete", role: .destructive) { onDiscard?() }
+                            }
+                            if onDelete != nil {
+                                Button("Delete", role: .destructive) { onDelete?() }
+                            }
                         } label: {
                             Image(systemName: "ellipsis")
                                 .foregroundStyle(mewo.mute)
@@ -280,5 +350,12 @@ struct ChapterSheet: View {
         .padding(.bottom, 28)
         .background(mewo.ground)
         .presentationDetents([.medium, .large])
+    }
+}
+
+private extension CommentStatus {
+    var isFailed: Bool {
+        if case .failed = self { return true }
+        return false
     }
 }

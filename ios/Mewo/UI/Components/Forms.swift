@@ -93,6 +93,7 @@ struct LibrarySettings: View {
     @State private var busy = false
     @State private var error: String?
     @State private var signups = InstanceSignupLoader()
+    @State private var discardCount = 0
 
     private var signupTaskID: String {
         "\(app.hostedSession.session.signedIn)|\(app.hostedSession.session.baseUrl)"
@@ -111,6 +112,16 @@ struct LibrarySettings: View {
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+        .alert(discardUnsentTitle(discardCount), isPresented: Binding(
+            get: { discardCount > 0 },
+            set: { if !$0 { discardCount = 0 } }
+        )) {
+            Button("Cancel", role: .cancel) { discardCount = 0 }
+            Button("Discard", role: .destructive) {
+                discardCount = 0
+                run { await app.signOut(discardUnsent: true) }
+            }
+        }
     }
 
     private func backendRow(_ title: String, selected: Bool, onSelect: @escaping () -> Void) -> some View {
@@ -143,7 +154,14 @@ struct LibrarySettings: View {
                 DownloadAllRow(summary: app.hostedLibrary.offlineSummary) {
                     Task { await app.library.downloadAll() }
                 }
-                Button { run { await app.hostedAuth.signOut() } } label: {
+                Button {
+                    let count = app.hostedLibrary.unsentReplies
+                    if count > 0 {
+                        discardCount = count
+                    } else {
+                        run { await app.signOut(discardUnsent: false) }
+                    }
+                } label: {
                     Text("Sign out")
                         .font(MewoFont.bold(17))
                         .foregroundStyle(mewo.accent)

@@ -167,12 +167,77 @@ extension CommentIndex: Codable {
     }
 }
 
+/// Where a reply is relative to the server. Server JSON never includes this.
+enum CommentStatus: Equatable, Hashable, Sendable {
+    case sent
+    case sending
+    case failed(String)
+}
+
 struct PostComment: Codable, Equatable, Hashable, Identifiable, Sendable {
     var id: String
     var username: String
     var text: String
     var createdAt: Int64
     var mine: Bool = false
+    /// Client-only. Kept out of equality, hashing, and JSON so a thread diff
+    /// against the server does not treat Sending or Failed as a different reply.
+    var status: CommentStatus = .sent
+
+    enum CodingKeys: String, CodingKey {
+        case id, username, text, createdAt, mine
+    }
+
+    init(
+        id: String,
+        username: String,
+        text: String,
+        createdAt: Int64,
+        mine: Bool = false,
+        status: CommentStatus = .sent
+    ) {
+        self.id = id
+        self.username = username
+        self.text = text
+        self.createdAt = createdAt
+        self.mine = mine
+        self.status = status
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(String.self, forKey: .id)
+        username = try container.decode(String.self, forKey: .username)
+        text = try container.decode(String.self, forKey: .text)
+        createdAt = try container.decode(Int64.self, forKey: .createdAt)
+        mine = try container.decodeIfPresent(Bool.self, forKey: .mine) ?? false
+        status = .sent
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(id, forKey: .id)
+        try container.encode(username, forKey: .username)
+        try container.encode(text, forKey: .text)
+        try container.encode(createdAt, forKey: .createdAt)
+        try container.encode(mine, forKey: .mine)
+    }
+
+    static func == (lhs: PostComment, rhs: PostComment) -> Bool {
+        lhs.id == rhs.id
+            && lhs.username == rhs.username
+            && lhs.text == rhs.text
+            && lhs.createdAt == rhs.createdAt
+            && lhs.mine == rhs.mine
+    }
+
+    func hash(into hasher: inout Hasher) {
+        hasher.combine(id)
+        hasher.combine(username)
+        hasher.combine(text)
+        hasher.combine(createdAt)
+        hasher.combine(mine)
+    }
 }
 
 struct CommentThread: Codable, Equatable, Sendable {
@@ -181,6 +246,15 @@ struct CommentThread: Codable, Equatable, Sendable {
 
 struct NewComment: Codable, Equatable, Sendable {
     var text: String
+    /// Lowercase client UUID. A replay with this id returns the same thread.
+    var id: String? = nil
+    /// Only ever raises privacy. The server ORs this with the insert trigger.
+    var isPrivate: Bool = false
+
+    enum CodingKeys: String, CodingKey {
+        case text, id
+        case isPrivate = "private"
+    }
 }
 
 /// Per-book offline availability. Downloaded and notDownloaded come from files.

@@ -14,8 +14,8 @@ final class HostedClientHooks: @unchecked Sendable {
     var likes: (@Sendable (HostedSession, String) async throws -> Set<String>)?
     var commentIndex: (@Sendable (HostedSession, String) async throws -> CommentIndex)?
     var comments: (@Sendable (HostedSession, String, String) async throws -> [PostComment])?
-    var toggleLike: (@Sendable (HostedSession, String, String) async throws -> Set<String>)?
-    var addComment: (@Sendable (HostedSession, String, String, String) async throws -> [PostComment])?
+    var setLike: (@Sendable (HostedSession, String, String, Bool) async throws -> Set<String>)?
+    var addComment: (@Sendable (HostedSession, String, String, String, String, Bool) async throws -> [PostComment])?
     var deleteComment: (@Sendable (HostedSession, String, String, String) async throws -> [PostComment])?
     var patch: (@Sendable (HostedSession, String, PatchBook) async throws -> BookRecord)?
     var downloadCover: (@Sendable (HostedSession, String, URL) async throws -> Bool)?
@@ -175,10 +175,11 @@ final class HostedClient: Sendable {
         return set.ids
     }
 
-    func toggleLike(_ hosted: HostedSession, id: String, postId: String) async throws -> Set<String> {
-        if let toggleLike = hooks.toggleLike { return try await toggleLike(hosted, id, postId) }
+    /// Idempotent like. PUT sets it, DELETE clears it. The server's toggle route stays for old builds.
+    func setLike(_ hosted: HostedSession, id: String, postId: String, on: Bool) async throws -> Set<String> {
+        if let setLike = hooks.setLike { return try await setLike(hosted, id, postId, on) }
         var request = try authorized(hosted, path: "/v1/books/\(id)/likes/\(postId)")
-        request.httpMethod = "POST"
+        request.httpMethod = on ? "PUT" : "DELETE"
         request.httpBody = Data()
         let set: LikeSet = try await decode(request)
         return set.ids
@@ -195,12 +196,23 @@ final class HostedClient: Sendable {
         return thread.comments
     }
 
-    func addComment(_ hosted: HostedSession, id: String, postId: String, text: String) async throws -> [PostComment] {
-        if let addComment = hooks.addComment { return try await addComment(hosted, id, postId, text) }
+    func addComment(
+        _ hosted: HostedSession,
+        id: String,
+        postId: String,
+        text: String,
+        commentId: String,
+        isPrivate: Bool
+    ) async throws -> [PostComment] {
+        if let addComment = hooks.addComment {
+            return try await addComment(hosted, id, postId, text, commentId, isPrivate)
+        }
         var request = try authorized(hosted, path: "/v1/books/\(id)/comments/\(postId)")
         request.httpMethod = "POST"
         request.setValue("application/json; charset=utf-8", forHTTPHeaderField: "Content-Type")
-        request.httpBody = try JSONFiles.encoder.encode(NewComment(text: text))
+        request.httpBody = try JSONFiles.encoder.encode(
+            NewComment(text: text, id: commentId, isPrivate: isPrivate)
+        )
         let thread: CommentThread = try await decode(request)
         return thread.comments
     }
@@ -372,11 +384,18 @@ final class HostedClient: Sendable {
     }
 
     private func decode<T: Decodable>(_ request: URLRequest) async throws -> T {
-        let data = try await expectOk(request)
+        let (data, response) = try await session.data(for: request)
+        let code = (response as? HTTPURLResponse)?.statusCode ?? 0
+        if !(200..<300).contains(code) {
+            let message = (try? JSONFiles.decoder.decode(HostedErrorBody.self, from: data).error)
+                .flatMap { $0.isEmpty ? nil : $0 }
+                ?? "Server returned \(code)"
+            throw HostedException(message: message, code: code)
+        }
         do {
             return try JSONFiles.decoder.decode(T.self, from: data)
         } catch {
-            throw HostedException(message: "Could not read the server response.")
+            throw HostedException(message: "Could not read the server response.", code: code)
         }
     }
 
