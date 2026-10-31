@@ -45,12 +45,12 @@ final class HostedOutboxTests: XCTestCase {
     func testDrainSkipsATerminalReplyAndSendsTheNext() async throws {
         script.commentError = HostedException(message: "That post is gone.", code: 404)
         let outbox = makeOutbox()
-        await outbox.enqueue(reply("a", "first"))
+        try await outbox.enqueue(reply("a", "first"))
         try await waitUntil("refusal did not stick") {
             refused(outbox, id: "a") == "That post is gone."
         }
         script.commentError = nil
-        await outbox.enqueue(reply("b", "second"))
+        try await outbox.enqueue(reply("b", "second"))
         try await waitUntil("the next reply did not send") {
             script.attempts == ["a", "b"] && replyIds(outbox) == ["a"]
         }
@@ -60,10 +60,10 @@ final class HostedOutboxTests: XCTestCase {
     func testA400ReplyStaysAndA409DoesNotBlockTheNextOp() async throws {
         script.commentError = HostedException(message: "Too long.", code: 400)
         let outbox = makeOutbox()
-        await outbox.enqueue(reply("a", "first", isPrivate: true))
+        try await outbox.enqueue(reply("a", "first", isPrivate: true))
         try await waitUntil("400 did not stick") { refused(outbox, id: "a") == "Too long." }
         script.commentError = HostedException(message: "Someone else used that id.", code: 409)
-        await outbox.enqueue(reply("b", "second"))
+        try await outbox.enqueue(reply("b", "second"))
         try await waitUntil("409 did not stick") { refused(outbox, id: "b") == "Someone else used that id." }
         XCTAssertEqual(script.attempts, ["a", "b"])
         guard case .reply(let kept) = outbox.queue.ops.first else {
@@ -79,7 +79,7 @@ final class HostedOutboxTests: XCTestCase {
     func testA401KeepsTheFileAndA403OnLikeDropsIt() async throws {
         script.likeError = HostedException(message: "nope", code: 401)
         let outbox = makeOutbox()
-        await outbox.enqueue(.like(.init(bookId: book, postId: "p", liked: true)))
+        try await outbox.enqueue(.like(.init(bookId: book, postId: "p", liked: true)))
         try await waitUntil("401 did not sign out") { !sessions.session.signedIn }
         let kept = try readFile()
         XCTAssertEqual(kept.account.username, "ada")
@@ -94,7 +94,7 @@ final class HostedOutboxTests: XCTestCase {
     func testServerErrorsDoubleTheWaitAndResetAfterSuccess() async throws {
         script.commentError = HostedException(message: "down", code: 503)
         let outbox = makeOutbox()
-        await outbox.enqueue(reply("a", "first"))
+        try await outbox.enqueue(reply("a", "first"))
         var expected = outboxRetryNanos
         for step in 0..<6 {
             try await waitUntil("backoff \(step) did not arm") { waits.delays.count >= step + 1 }
@@ -107,17 +107,17 @@ final class HostedOutboxTests: XCTestCase {
         waits.release()
         try await waitUntil("success did not clear the queue") { outbox.queue.ops.isEmpty }
         script.commentError = HostedException(message: "down", code: 500)
-        await outbox.enqueue(reply("b", "second"))
+        try await outbox.enqueue(reply("b", "second"))
         try await waitUntil("backoff did not reset") { waits.delays.last == outboxRetryNanos }
     }
 
     func testEnqueueDuringBackoffDoesNotHitTheServer() async throws {
         script.commentError = HostedException(message: "down", code: 500)
         let outbox = makeOutbox()
-        await outbox.enqueue(reply("a", "one"))
+        try await outbox.enqueue(reply("a", "one"))
         try await waitUntil("first send did not park") { script.attempts == ["a"] && waits.parked >= 1 }
-        await outbox.enqueue(reply("b", "two"))
-        await outbox.enqueue(reply("c", "three"))
+        try await outbox.enqueue(reply("b", "two"))
+        try await outbox.enqueue(reply("c", "three"))
         try await Task.sleep(nanoseconds: 50_000_000)
         XCTAssertEqual(script.attempts, ["a"])
         XCTAssertEqual(waits.delays, [outboxRetryNanos])
@@ -130,7 +130,7 @@ final class HostedOutboxTests: XCTestCase {
     func testBypassSendsWithoutWaitingOutTheBackoff() async throws {
         script.commentError = HostedException(message: "down", code: 500)
         let outbox = makeOutbox()
-        await outbox.enqueue(reply("a", "one"))
+        try await outbox.enqueue(reply("a", "one"))
         try await waitUntil("send did not park") { script.attempts.count == 1 && waits.parked >= 1 }
         outbox.drain(bypassBackoff: true)
         try await waitUntil("bypass did not send") { script.attempts.count == 2 }
@@ -139,7 +139,7 @@ final class HostedOutboxTests: XCTestCase {
     func testBackgroundCancelsTheRetryTimer() async throws {
         script.commentError = URLError(.notConnectedToInternet)
         let outbox = makeOutbox()
-        await outbox.enqueue(reply("a", "one"))
+        try await outbox.enqueue(reply("a", "one"))
         try await waitUntil("timer did not park") { waits.parked >= 1 }
         XCTAssertEqual(script.attempts.count, 1)
         outbox.setForeground(false)
@@ -155,7 +155,7 @@ final class HostedOutboxTests: XCTestCase {
     func testSignOutKeepsTheFileAndAnotherAccountDeletesIt() async throws {
         script.commentError = offlineError()
         let outbox = makeOutbox()
-        await outbox.enqueue(reply("c1", "offline note"))
+        try await outbox.enqueue(reply("c1", "offline note"))
         try await waitUntil("the reply was not saved") { fileExists() }
         XCTAssertFalse(outboxFile().path.contains("/hosted/"))
         sessions.signOut()
@@ -173,7 +173,7 @@ final class HostedOutboxTests: XCTestCase {
         }
 
         script.commentError = offlineError()
-        await outbox.enqueue(reply("c2", "second"))
+        try await outbox.enqueue(reply("c2", "second"))
         try await waitUntil("the second reply was not saved") { fileExists() }
         sessions.setSignedIn(username: "bea", token: "token-b")
         await outbox.attach(sessions.session)
@@ -182,17 +182,53 @@ final class HostedOutboxTests: XCTestCase {
         XCTAssertEqual(script.commentCalls, ["c1"])
     }
 
+    func testDiscardAllDuringTheLandedWriteDeletesTheReply() async throws {
+        let client = HostedClient()
+        script.install(on: client)
+        script.thread = [PostComment(id: "c1", username: "ada", text: "one", createdAt: 5, mine: true)]
+        let box = OutboxBox()
+        let outbox = HostedOutbox(
+            file: outboxFile(),
+            sessions: sessions,
+            client: client,
+            publish: { _, _, _ in
+                Task { await box.outbox?.discardAll() }
+            },
+            wait: { [waits] nanos in
+                await waits?.wait(nanos)
+            }
+        )
+        box.outbox = outbox
+        try await outbox.enqueue(reply("c1", "one"))
+        try await waitUntil("the landed reply was not deleted") { script.deleted == ["c1"] }
+        XCTAssertTrue(outbox.queue.ops.isEmpty)
+        XCTAssertFalse(fileExists())
+    }
+
+    func testUITestResetClearsTheOutboxFile() throws {
+        let docs = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: docs, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: docs) }
+        let file = docs.appendingPathComponent("hosted-outbox.json")
+        let bad = docs.appendingPathComponent("hosted-outbox.json.bad")
+        try Data("{}".utf8).write(to: file)
+        try Data("{}".utf8).write(to: bad)
+        UITestReset.wipe(docs: docs)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: file.path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: bad.path))
+    }
+
     func testDiscardAllDeletesAReplyThatLandsAndSendsNothingElse() async throws {
         script.holdComments = true
         let outbox = makeOutbox()
-        let sending = Task { await outbox.enqueue(reply("c1", "one")) }
+        let sending = Task { try await outbox.enqueue(reply("c1", "one")) }
         try await waitUntil("the reply did not reach the wire") { script.commentEntered >= 1 }
-        await outbox.enqueue(reply("c2", "two"))
+        try await outbox.enqueue(reply("c2", "two"))
         let discarding = Task { await outbox.discardAll() }
         try await Task.sleep(nanoseconds: 40_000_000)
         script.thread = [PostComment(id: "c1", username: "ada", text: "one", createdAt: 5, mine: true)]
         script.releaseComments()
-        await sending.value
+        try await sending.value
         await discarding.value
         XCTAssertEqual(script.commentCalls, ["c1"])
         XCTAssertEqual(script.deleted, ["c1"])
@@ -207,7 +243,7 @@ final class HostedOutboxTests: XCTestCase {
         let bad = outboxFile().appendingPathExtension("bad")
         XCTAssertEqual(try String(contentsOf: bad, encoding: .utf8), "{not json")
         XCTAssertFalse(fileExists())
-        await outbox.enqueue(reply("c1", "hi"))
+        try await outbox.enqueue(reply("c1", "hi"))
         try await waitUntil("enqueue after quarantine did not send") {
             script.commentCalls == ["c1"] && outbox.queue.ops.isEmpty
         }
@@ -231,7 +267,7 @@ final class HostedOutboxTests: XCTestCase {
     func testProgressThatLandsDuringARefreshSurvivesIt() async throws {
         let outbox = makeOutbox()
         let started = outbox.refreshStarted()
-        await outbox.enqueue(.progress(.init(bookId: book, index: 6)))
+        try await outbox.enqueue(.progress(.init(bookId: book, index: 6)))
         try await waitUntil("progress did not land") { outbox.queue.ops.isEmpty }
         outbox.refreshFinished(started: started)
         XCTAssertEqual(outbox.landedProgress[book], 6)
@@ -243,10 +279,10 @@ final class HostedOutboxTests: XCTestCase {
     func testTwoTapsRecordOppositeIntents() async throws {
         script.holdLikes = true
         let outbox = makeOutbox()
-        async let first = outbox.toggleLike(bookId: book, postId: "p", base: [])
-        async let second = outbox.toggleLike(bookId: book, postId: "p", base: [])
-        let liked = await first
-        let cleared = await second
+        async let first = try outbox.toggleLike(bookId: book, postId: "p", base: [])
+        async let second = try outbox.toggleLike(bookId: book, postId: "p", base: [])
+        let liked = try await first
+        let cleared = try await second
         XCTAssertEqual(liked, ["p"])
         XCTAssertEqual(cleared, [])
         guard case .like(let pending) = outbox.queue.ops.first else {
@@ -318,6 +354,10 @@ final class HostedOutboxTests: XCTestCase {
         }
         return nil
     }
+}
+
+private final class OutboxBox: @unchecked Sendable {
+    var outbox: HostedOutbox?
 }
 
 private let server = "https://mewo.example"

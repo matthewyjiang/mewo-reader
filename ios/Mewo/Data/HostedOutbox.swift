@@ -9,7 +9,7 @@ private let outboxLog = Logger(subsystem: "com.mewo.reader", category: "outbox")
 @MainActor
 @Observable
 final class HostedOutbox {
-    typealias Publish = (_ session: HostedSession, _ bookId: String, _ change: Landed) -> Void
+    typealias Publish = (_ session: HostedSession, _ bookId: String, _ change: Landed) async -> Void
 
     enum Landed {
         case thread(postId: String, [PostComment])
@@ -97,8 +97,10 @@ final class HostedOutbox {
     }
 
     /// Memory first, then the file, then a drain. A disk error is logged and the op stays.
-    func enqueue(_ op: OutboxOp) async {
-        guard !discardingAll, let acct = account() else { return }
+    /// A signed-in session with no username has no queue, so the call fails instead of dropping the op.
+    func enqueue(_ op: OutboxOp) async throws {
+        guard !discardingAll else { return }
+        guard let acct = account() else { throw notSignedIn() }
         if await prepare(acct) == false { return }
         guard !discardingAll, account() == acct else { return }
         var next = queue
@@ -111,8 +113,9 @@ final class HostedOutbox {
     /// Flips against the pending like, over the cached base. The flip happens
     /// before this method's first await once the queue is already loaded, so two
     /// taps cannot both record the same intent.
-    func toggleLike(bookId: String, postId: String, base: Set<String>) async -> Set<String> {
-        guard !discardingAll, let acct = account() else { return base }
+    func toggleLike(bookId: String, postId: String, base: Set<String>) async throws -> Set<String> {
+        guard !discardingAll else { return base }
+        guard let acct = account() else { throw notSignedIn() }
         if loadedFor != acct {
             if await prepare(acct) == false { return base }
         }
@@ -244,6 +247,16 @@ final class HostedOutbox {
         if let flight, flight.sent {
             await deleteSent(flight)
         }
+    }
+
+    /// Drops every op for a book that was deleted or left the shelf.
+    func drop(bookId: String) async {
+        await dropBooks { $0 == bookId }
+    }
+
+    /// Drops ops whose book is not in the shelf a refresh just published.
+    func dropExcept(_ kept: Set<String>) async {
+        await dropBooks { !kept.contains($0) }
     }
 
     /// Signed out keeps the file and clears memory. A different account deletes it.
@@ -410,16 +423,23 @@ final class HostedOutbox {
         running = false
     }
 
+    /// The cache write finishes before the op leaves the queue. A discard that
+    /// starts during either await still deletes a reply that already landed.
     private func applySuccess(_ acct: OutboxAccount, _ session: HostedSession, _ op: OutboxOp, _ sent: SendResult?) async {
+        let pass = epoch
         if case .reply(let reply) = op, case .thread(let comments) = sent {
             if awaitingDiscard.contains(reply.id) {
                 rememberLanded(op, sent: sent, acct: acct)
             } else if sessions.session.outboxAccount == acct {
-                publish(session, reply.bookId, .thread(postId: reply.postId, comments))
+                await publish(session, reply.bookId, .thread(postId: reply.postId, comments))
             }
         }
         if case .like = op, case .likes(let ids) = sent, sessions.session.outboxAccount == acct {
-            publish(session, op.bookId, .likes(ids))
+            await publish(session, op.bookId, .likes(ids))
+        }
+        if epoch != pass || account() != acct {
+            rememberLanded(op, sent: sent, acct: acct)
+            return
         }
         var progress = marks
         if case .progress(let mark) = op {
@@ -431,10 +451,21 @@ final class HostedOutbox {
             commit(next, progress: progress)
             await persist()
         }
+        if discarded(since: pass, op, acct) {
+            rememberLanded(op, sent: sent, acct: acct)
+            return
+        }
         retryNanos = outboxRetryNanos
         backoffUntil = nil
         retryTask?.cancel()
         retryTask = nil
+    }
+
+    /// True when sign-out replaced the queue, or this reply was discarded, during the write.
+    private func discarded(since pass: Int, _ op: OutboxOp, _ acct: OutboxAccount) -> Bool {
+        if epoch != pass || account() != acct { return true }
+        guard case .reply(let reply) = op else { return false }
+        return awaitingDiscard.contains(reply.id)
     }
 
     private func applyFailure(_ op: OutboxOp, _ error: Error) async -> Step {
@@ -493,7 +524,7 @@ final class HostedOutbox {
                 )
             }
             guard sessions.session.outboxAccount == flight.account else { return }
-            publish(session, flight.reply.bookId, .thread(postId: flight.reply.postId, thread))
+            await publish(session, flight.reply.bookId, .thread(postId: flight.reply.postId, thread))
         } catch {
             outboxLog.error("Could not delete a reply that landed after Discard.")
         }
@@ -551,6 +582,26 @@ final class HostedOutbox {
 
     private func account() -> OutboxAccount? {
         sessions.session.outboxAccount
+    }
+
+    private func notSignedIn() -> NSError {
+        NSError(domain: "mewo", code: 8, userInfo: [NSLocalizedDescriptionKey: hostedNotSignedIn])
+    }
+
+    /// Removes ops and landed progress for books that are gone. An in-flight send
+    /// of an op that is no longer queued does not put it back.
+    private func dropBooks(where gone: (String) -> Bool) async {
+        guard !discardingAll, let acct = account() else { return }
+        if loadedFor != acct {
+            if await prepare(acct) == false { return }
+        }
+        guard !discardingAll, account() == acct else { return }
+        var next = queue
+        next.dropBooks(where: gone)
+        let progress = marks.filter { !gone($0.key) }
+        guard next != queue || progress != marks else { return }
+        commit(next, progress: progress)
+        await persist()
     }
 
     private func commit(_ next: OutboxQueue, progress: [String: Mark]? = nil) {

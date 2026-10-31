@@ -14,11 +14,19 @@ enum UITestReset {
         }
         Keychain.deleteToken()
         let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+        wipe(docs: docs)
+        seedHostedShelf(docs: docs)
+        seedHostedFeed(docs: docs)
+    }
+
+    /// Cached shelves and the outbox. A queued op must not survive into the next launch.
+    static func wipe(docs: URL) {
         for name in ["books", "hosted", "hosted-shelves", "hosted-feeds"] {
             try? FileManager.default.removeItem(at: docs.appendingPathComponent(name, isDirectory: true))
         }
-        seedHostedShelf(docs: docs)
-        seedHostedFeed(docs: docs)
+        for name in ["hosted-outbox.json", "hosted-outbox.json.bad"] {
+            try? FileManager.default.removeItem(at: docs.appendingPathComponent(name))
+        }
     }
 
     /// Screenshot and UI-test launches pass `--hosted-url=` after `--uitesting`.

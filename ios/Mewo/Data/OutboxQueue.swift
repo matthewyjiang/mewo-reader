@@ -216,6 +216,11 @@ struct OutboxQueue: Equatable, Sendable {
         }
     }
 
+    /// The book left the shelf. Nothing queued for it can be sent or retried.
+    mutating func dropBooks(where shouldDrop: (String) -> Bool) {
+        ops.removeAll { shouldDrop($0.bookId) }
+    }
+
     func likes(over base: Set<String>, bookId: String) -> Set<String> {
         var next = base
         for op in ops {

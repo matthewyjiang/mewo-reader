@@ -279,6 +279,8 @@ let socialCacheVersion = 1
 struct SocialCache: Codable, Equatable, Sendable {
     var version: Int = socialCacheVersion
     var likes: Set<String> = []
+    /// False when `likes` is only the empty default. An index-only file has not loaded likes.
+    var likesKnown: Bool = false
     var index = CommentIndex()
     /// Threads opened for this book, by post id. Not prefetched.
     var threads: [String: [PostComment]] = [:]
@@ -286,23 +288,26 @@ struct SocialCache: Codable, Equatable, Sendable {
     init(
         version: Int = socialCacheVersion,
         likes: Set<String> = [],
+        likesKnown: Bool = false,
         index: CommentIndex = CommentIndex(),
         threads: [String: [PostComment]] = [:]
     ) {
         self.version = version
         self.likes = likes
+        self.likesKnown = likesKnown
         self.index = index
         self.threads = threads
     }
 
     enum CodingKeys: String, CodingKey {
-        case version, likes, index, threads
+        case version, likes, likesKnown, index, threads
     }
 
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         version = try container.decodeIfPresent(Int.self, forKey: .version) ?? socialCacheVersion
         likes = try container.decodeIfPresent(Set<String>.self, forKey: .likes) ?? []
+        likesKnown = try container.decodeIfPresent(Bool.self, forKey: .likesKnown) ?? false
         index = try container.decodeIfPresent(CommentIndex.self, forKey: .index) ?? CommentIndex()
         threads = try container.decodeIfPresent([String: [PostComment]].self, forKey: .threads) ?? [:]
     }
@@ -311,6 +316,7 @@ struct SocialCache: Codable, Equatable, Sendable {
         var container = encoder.container(keyedBy: CodingKeys.self)
         try container.encode(version, forKey: .version)
         try container.encode(likes, forKey: .likes)
+        try container.encode(likesKnown, forKey: .likesKnown)
         try container.encode(index, forKey: .index)
         try container.encode(threads, forKey: .threads)
     }
