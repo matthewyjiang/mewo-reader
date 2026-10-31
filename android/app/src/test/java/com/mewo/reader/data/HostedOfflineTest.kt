@@ -12,6 +12,7 @@ import kotlinx.coroutines.asCoroutineDispatcher
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
@@ -745,11 +746,11 @@ class HostedOfflineTest {
             }
         }
         val hosted = File(context.filesDir, "hosted")
-        val reading = scope.launch { store.feed(A) }
+        val reading = scope.async { store.feed(A) }
         withTimeout(5_000) {
             while (client.entered.get() < 1) {
-                // A feed that already failed never enters posts(), so join it instead of timing out.
-                if (reading.isCompleted) reading.join()
+                // await() rethrows a feed that already failed. join() would not, under this SupervisorJob.
+                if (reading.isCompleted) reading.await()
                 delay(10)
             }
         }
