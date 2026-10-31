@@ -12,6 +12,7 @@ import kotlinx.coroutines.asCoroutineDispatcher
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
@@ -734,13 +735,24 @@ class HostedOfflineTest {
         val store = HostedLibraryStore(context, EpubOpener(context), sessions, client, scope)
         client.shelf.add(book(A, importedAt = 3))
         sessions.setSignedIn("ada", "token-a")
+        val want = setOf(A)
         withTimeout(5_000) {
-            while (store.loadState.value !is LibraryLoaded || store.loadState.value.isRefreshing()) delay(20)
+            while (
+                store.library.value.books.map { it.id }.toSet() != want ||
+                store.loadState.value !is LibraryLoaded ||
+                store.loadState.value.isRefreshing()
+            ) {
+                delay(20)
+            }
         }
         val hosted = File(context.filesDir, "hosted")
-        val reading = scope.launch { store.feed(A) }
+        val reading = scope.async { store.feed(A) }
         withTimeout(5_000) {
-            while (client.entered.get() < 1) delay(10)
+            while (client.entered.get() < 1) {
+                // await() rethrows a feed that already failed. join() would not, under this SupervisorJob.
+                if (reading.isCompleted) reading.await()
+                delay(10)
+            }
         }
         val marker = File(hosted, "marker")
         marker.writeText("x")
