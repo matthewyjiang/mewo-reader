@@ -1087,6 +1087,7 @@ final class HostedLibraryStore: LibraryStore {
             await updateSocial(id, session: session) { cache in
                 var next = cache
                 next.likes = likes
+                next.likesKnown = true
                 next.index = index
                 return next
             }

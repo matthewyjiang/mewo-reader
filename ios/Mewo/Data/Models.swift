@@ -307,7 +307,14 @@ struct SocialCache: Codable, Equatable, Sendable {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         version = try container.decodeIfPresent(Int.self, forKey: .version) ?? socialCacheVersion
         likes = try container.decodeIfPresent(Set<String>.self, forKey: .likes) ?? []
-        likesKnown = try container.decodeIfPresent(Bool.self, forKey: .likesKnown) ?? false
+        if let known = try container.decodeIfPresent(Bool.self, forKey: .likesKnown) {
+            likesKnown = known
+        } else {
+            // Files from before the flag. A download or likes() call stored the
+            // ids it fetched. commentIndex stores an empty likes array and no
+            // flag, so that file is still not a snapshot.
+            likesKnown = !likes.isEmpty
+        }
         index = try container.decodeIfPresent(CommentIndex.self, forKey: .index) ?? CommentIndex()
         threads = try container.decodeIfPresent([String: [PostComment]].self, forKey: .threads) ?? [:]
     }

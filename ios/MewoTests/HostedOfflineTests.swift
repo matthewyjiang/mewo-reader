@@ -729,6 +729,43 @@ final class HostedOfflineTests: XCTestCase {
         XCTAssertEqual(client.likeCalls.map { "\($0.0)=\($0.1)" }, ["p=false"])
     }
 
+    func testADownloadedLikeUnlikesOffline() async throws {
+        let store = try await open([book(idA, importedAt: 3)])
+        client.likes = ["p"]
+        await store.setDownloaded(id: idA, on: true)
+        XCTAssertEqual(try readSocial(idA).likes, ["p"])
+        client.likesError = offlineError()
+        client.setLikeError = offlineError()
+        let toggled = try await store.toggleLike(id: idA, postId: "p")
+        XCTAssertEqual(toggled, [])
+        try await waitUntil("the unlike did not send") { client.likeCalls.count == 1 }
+        XCTAssertEqual(client.likeCalls.map { "\($0.0)=\($0.1)" }, ["p=false"])
+    }
+
+    func testALikeFileWithoutTheFlagStillUnlikes() async throws {
+        let store = try await open([book(idA, importedAt: 3)])
+        try writeSocialRaw(idA, #"{"version":1,"likes":["p"],"index":{},"threads":{}}"#)
+        client.likesError = offlineError()
+        client.setLikeError = offlineError()
+        let toggled = try await store.toggleLike(id: idA, postId: "p")
+        XCTAssertEqual(toggled, [])
+        try await waitUntil("the unlike did not send") { client.likeCalls.count == 1 }
+        XCTAssertEqual(client.likeCalls.map { "\($0.0)=\($0.1)" }, ["p=false"])
+    }
+
+    func testAnIndexOnlyFileWithoutTheFlagStillLoadsLikes() async throws {
+        let store = try await open([book(idA, importedAt: 3)])
+        try writeSocialRaw(
+            idA,
+            #"{"version":1,"likes":[],"index":{"counts":{"q":1}},"threads":{}}"#
+        )
+        client.likes = ["p"]
+        let toggled = try await store.toggleLike(id: idA, postId: "p")
+        XCTAssertEqual(toggled, [])
+        try await waitUntil("the unlike did not send") { client.likeCalls.count == 1 }
+        XCTAssertEqual(client.likeCalls.map { "\($0.0)=\($0.1)" }, ["p=false"])
+    }
+
     func testAnOfflineLikeWithNoSnapshotStillQueues() async throws {
         let store = try await open([book(idA, importedAt: 3)])
         client.likesError = offlineError()
