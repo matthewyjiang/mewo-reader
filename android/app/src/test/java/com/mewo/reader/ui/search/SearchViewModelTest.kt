@@ -465,6 +465,29 @@ class SearchViewModelTest {
     }
 
     @Test
+    fun aClearedQueryDropsTheTypedResponse() = runTest(main) {
+        val store = HostedFake(keepGoing = true)
+        val vm = SearchViewModel(store, now = { 5_000L })
+        vm.bindSession("t")
+        advanceTimeBy(0)
+        runCurrent()
+        store.finish("", SearchPage.Accounts(listOf(AccountHit("ada"))))
+        advanceUntilIdle()
+
+        vm.setQuery("bea")
+        advanceTimeBy(SEARCH_DEBOUNCE_MS)
+        runCurrent()
+        val typed = store.pages.getValue("bea")
+        vm.setQuery("")
+        assertEquals(listOf("ada"), accountsOf(vm))
+
+        typed.complete(SearchPage.Accounts(listOf(AccountHit("bea"))))
+        advanceUntilIdle()
+        assertEquals(listOf("ada"), accountsOf(vm))
+        assertEquals(listOf("", "bea"), store.calls.map { it.query })
+    }
+
+    @Test
     fun aNewSessionDropsTheBrowseMemo() = runTest(main) {
         val store = HostedFake(keepGoing = true)
         val vm = SearchViewModel(store)
@@ -607,27 +630,37 @@ class SearchViewModelTest {
         advanceTimeBy(0)
         runCurrent()
         assertEquals(2, store.calls.size)
-        assertEquals(listOf("likes b1", "comments b1", "likes b1"), store.requests)
+        assertEquals(listOf("likes b1", "comments b1"), store.requests)
     }
 
     @Test
-    fun aBlankQueryLoadsAnotherPage() = runTest(main) {
+    fun aFailedBlankPageRetriesThatCursor() = runTest(main) {
         val store = HostedFake()
-        val vm = SearchViewModel(store)
+        val vm = SearchViewModel(store, now = { 0L })
         vm.bindSession("t")
         advanceTimeBy(0)
         runCurrent()
         store.finish("", SearchPage.Accounts(listOf(AccountHit("ada")), nextCursor = "c2"))
         advanceUntilIdle()
+
         vm.loadMore()
         runCurrent()
         assertEquals(SearchCall("", SearchKind.Accounts, "c2"), store.calls.last())
+        store.fail("", IOException("timeout"))
+        advanceUntilIdle()
+        val failed = vm.state.value.search.phase as SearchPhase.Failed
+        assertEquals(listOf("ada"), (failed.previous as SearchPage.Accounts).items.map { it.username })
+
+        vm.retry()
+        advanceTimeBy(0)
+        runCurrent()
+        assertEquals(SearchCall("", SearchKind.Accounts, "c2"), store.calls.last())
+        val loading = vm.state.value.search.phase as SearchPhase.Loading
+        assertEquals(listOf("ada"), (loading.previous as SearchPage.Accounts).items.map { it.username })
         store.finish("", SearchPage.Accounts(listOf(AccountHit("bea"))))
         advanceUntilIdle()
-        val phase = vm.state.value.search.phase as SearchPhase.Loaded
-        val page = phase.page as SearchPage.Accounts
+        val page = (vm.state.value.search.phase as SearchPhase.Loaded).page as SearchPage.Accounts
         assertEquals(listOf("ada", "bea"), page.items.map { it.username })
-        assertFalse(phase.more)
     }
 
     @Test
@@ -720,6 +753,42 @@ class SearchViewModelTest {
         store.finish("ada", SearchPage.Accounts(listOf(AccountHit("ada"))))
         advanceUntilIdle()
         assertTrue(vm.state.value.search.phase is SearchPhase.Idle)
+        assertEquals(null, visiblePage(vm.state.value.search))
+    }
+
+    @Test
+    fun signOutClearsTheVisiblePageAndDropsLikesStillInFlight() = runTest(main) {
+        val store = HostedFake(keepGoing = true)
+        val vm = SearchViewModel(store, now = { 0L })
+        vm.bindSession("one")
+        vm.setKind(SearchKind.Posts)
+        advanceTimeBy(0)
+        runCurrent()
+        store.finish(
+            "",
+            SearchPage.Posts(
+                listOf(PostHitRecord(book(BOOK), FeedPost("p1", PostKind.Body, "line", "One"))),
+            ),
+        )
+        advanceUntilIdle()
+        runCurrent()
+        assertEquals(listOf("likes b1"), store.requests)
+
+        vm.bindSession(null)
+        assertTrue(vm.state.value.search.phase is SearchPhase.Idle)
+        assertEquals(null, visiblePage(vm.state.value.search))
+        assertEquals(SearchResult(), vm.state.value.result)
+        store.likes.getValue(BOOK).complete(setOf("p1"))
+        advanceUntilIdle()
+        assertTrue(vm.state.value.likes.isEmpty())
+        assertTrue(vm.state.value.comments.isEmpty())
+        assertEquals(listOf("likes b1"), store.requests)
+        assertEquals(null, visiblePage(vm.state.value.search))
+
+        vm.bindSession("two")
+        val loading = vm.state.value.search.phase as SearchPhase.Loading
+        assertEquals(null, loading.previous)
+        assertEquals(null, visiblePage(vm.state.value.search))
     }
 
     @Test

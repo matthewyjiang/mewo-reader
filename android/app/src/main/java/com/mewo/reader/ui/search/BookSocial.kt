@@ -65,6 +65,21 @@ internal class BookSocial(
     private var shown = emptySet<String>()
     private var likes = emptyMap<String, Set<String>>()
     private var comments = emptyMap<String, CommentIndex>()
+    private var generation = 0
+
+    /** Drops this session's likes and comments. A load already running must not put them back. */
+    fun clear() {
+        generation++
+        books.values.forEach { book ->
+            book.load?.cancel()
+            book.load = null
+            book.loadStarted = false
+        }
+        books.clear()
+        shown = emptySet()
+        likes = emptyMap()
+        comments = emptyMap()
+    }
 
     /** Loads what [ids] lack, in order, and drops queued loads for other books. */
     fun show(ids: List<String>) {
@@ -180,6 +195,7 @@ internal class BookSocial(
      */
     private suspend fun fetch(id: String, book: Book): Boolean {
         val epoch = book.epoch
+        val gen = generation
         var overlapped = false
         if (!book.likesFresh) {
             // A toggle that overlaps this load may land on the server before or
@@ -187,18 +203,21 @@ internal class BookSocial(
             val ticket = book.toggles
             val calm = book.togglesRunning == 0
             val loaded = attempt { store.likes(id) }
+            if (gen != generation) return false
             if (loaded != null && calm && ticket == book.toggles) {
                 book.likesFresh = epoch == book.epoch
                 likes = likes + (id to loaded)
                 onChange(likes, comments)
             }
         }
+        if (gen != generation) return false
         if (!book.commentsFresh) {
             book.edits.clear()
             // A repost that overlaps this load may land before or after it.
             val ticket = book.reposts
             val calm = book.repostsRunning == 0
             val loaded = attempt { store.commentIndex(id) }
+            if (gen != generation) return false
             if (loaded != null && calm && ticket == book.reposts) {
                 book.commentsFresh = epoch == book.epoch
                 val merged = book.edits.entries.fold(loaded) { index, (postId, thread) ->

@@ -101,13 +101,17 @@ fun SearchScreen(
     onOpenLibrary: () -> Unit,
     hideOnScroll: HideOnScrollState,
 ) {
-    val state by viewModel.state.collectAsStateWithLifecycle()
     val context = LocalContext.current
     val library = LocalLibraryStore.current
     val hosted = LocalBackend.current.kind == BackendKind.Hosted
     val token = LocalHostedAuth.current.session.token
     val sessionId = if (hosted) token else "local"
-    LaunchedEffect(sessionId) { viewModel.bindSession(sessionId) }
+    // The session can end while this screen is off the back stack. Bind before
+    // the read: a LaunchedEffect paints the previous account's rows for a frame.
+    if (viewModel.state.value.search.session != sessionId) {
+        viewModel.bindSession(sessionId)
+    }
+    val state by viewModel.state.collectAsStateWithLifecycle()
     var commentTarget by remember { mutableStateOf<CommentTarget?>(null) }
     val focus = remember { FocusRequester() }
     val focusManager = LocalFocusManager.current

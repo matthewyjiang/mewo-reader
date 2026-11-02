@@ -335,7 +335,15 @@ class SurfaceScreenshots {
     fun searchBooksBrowse() = shoot("search-books-browse") {
         SearchChrome("books", query = "") {
             SectionHeading(sectionTitle(SearchKind.Books))
-            shelfBook(sharedBook, offline = null)
+            BookPost(
+                book = sharedWithMe,
+                cover = null,
+                showOwner = true,
+                onOpen = {},
+                onDelete = null,
+                onShare = null,
+            )
+            HorizontalDivider(color = MaterialTheme.colorScheme.outline, thickness = 0.6.dp)
         }
     }
 

@@ -63,6 +63,7 @@ class SearchViewModel(
     private var generation = 0L
     private var session: String? = "local"
     private var pendingCursor: String? = null
+    private var shownPostBooks: Set<String> = emptySet()
 
     init {
         viewModelScope.launch {
@@ -181,10 +182,14 @@ class SearchViewModel(
         searchJob?.cancel()
         pendingCursor = null
         browseMemo.clear()
+        shownPostBooks = emptySet()
+        social.clear()
         _state.update {
             it.copy(
                 search = it.search.copy(session = id, phase = SearchPhase.Idle),
-                result = if (id == null) SearchResult() else it.result,
+                result = SearchResult(),
+                likes = emptyMap(),
+                comments = emptyMap(),
             )
         }
         if (id != null && store.hostedSocial &&
@@ -219,7 +224,9 @@ class SearchViewModel(
     fun retry() {
         val phase = _state.value.search.phase as? SearchPhase.Failed ?: return
         val id = session ?: return
-        if (_state.value.query.trim().isEmpty()) {
+        // The next page of a blank query still has a cursor. Browse again only
+        // when the failure was the first page, which has nothing to append.
+        if (_state.value.query.trim().isEmpty() && pendingCursor == null) {
             showBrowse()
             return
         }
@@ -272,7 +279,9 @@ class SearchViewModel(
             _state.update {
                 it.copy(search = it.search.copy(phase = SearchPhase.Loaded(hit, more = false)))
             }
-            if (hit is SearchPage.Posts) social.show(hit.items.map { it.book.id }.distinct())
+            if (hit is SearchPage.Posts) {
+                showPostBooks(hit.items.map { it.book.id }.distinct(), cached = true)
+            }
             if (browseMemo.stale(kind)) arm(gen, "", kind, null, quiet = true)
             return
         }
@@ -326,7 +335,7 @@ class SearchViewModel(
                 _state.update {
                     it.copy(search = it.search.copy(phase = SearchPhase.Loaded(merged, more = false)))
                 }
-                if (merged is SearchPage.Posts) social.show(merged.items.map { it.book.id }.distinct())
+                if (merged is SearchPage.Posts) showPostBooks(merged.items.map { it.book.id }.distinct())
             } else {
                 val hits = attempt { store.search(query) } ?: return
                 if (!current(gen, requestSession, query, kind)) return
@@ -338,7 +347,7 @@ class SearchViewModel(
                         ),
                     )
                 }
-                social.show(hits.posts.map { it.book.id }.distinct())
+                showPostBooks(hits.posts.map { it.book.id }.distinct())
             }
         } catch (error: CancellationException) {
             throw error
@@ -356,6 +365,17 @@ class SearchViewModel(
                 )
             }
         }
+    }
+
+    /**
+     * Loads likes for [ids]. A memo hit of the same posts ([cached]) must not ask
+     * again: [BookSocial.show] retries every failed field, so each tab switch would.
+     */
+    private fun showPostBooks(ids: List<String>, cached: Boolean = false) {
+        val key = ids.toSet()
+        if (cached && key == shownPostBooks) return
+        shownPostBooks = key
+        social.show(ids)
     }
 
     private fun current(gen: Long, requestSession: String, query: String, kind: SearchKind): Boolean {
