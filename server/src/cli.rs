@@ -287,7 +287,13 @@ async fn revoke_sessions(
     err: &mut dyn Write,
 ) -> Result<i32, io::Error> {
     let result = match &name {
-        Some(name) => crate::auth::session::revoke_username(pool, name).await,
+        Some(name) => match crate::auth::session::revoke_username(pool, name).await {
+            Err(ApiError::NotFound) => {
+                writeln!(err, "No account named {name}.")?;
+                return Ok(1);
+            }
+            other => other,
+        },
         None => crate::auth::session::revoke_everyone(pool).await,
     };
     match result {
@@ -790,7 +796,7 @@ mod tests {
         )
         .await;
         assert_eq!(code, 1, "{out}");
-        assert_eq!(err, "Not found.\n");
+        assert_eq!(err, "No account named nobody.\n");
 
         let (code, out, err) = cli(tmp.path(), AdminCommand::RevokeSessions(None), "").await;
         assert_eq!(code, 0, "{err}");

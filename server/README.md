@@ -110,7 +110,7 @@ ada
 
 `create` inserts an admin even when signups are off. The password comes from stdin, never from argv or the environment. On a terminal it prompts with no echo. A pipe reads one line.
 
-`sessions revoke <username>` deletes that account's sessions and prints `revoked <count>.` An unknown account exits 1 with `Not found.` `--all` deletes every session and prints the same line. Both run with the server stopped. A session left over from an older database is hashed first, then deleted.
+`sessions revoke <username>` deletes that account's sessions and prints `revoked <count>.` An unknown account exits 1 with `No account named <username>.` `--all` deletes every session and prints the same line. They run with the server stopped, and against a live server: the database is WAL, and a statement waits up to 10 seconds for the write lock. A session left over from an older database is hashed first, then deleted.
 
 ```bash
 kubectl -n mewo exec deploy/mewo-server -- mewo-server admin list
