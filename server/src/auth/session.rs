@@ -824,6 +824,87 @@ mod tests {
         assert_eq!(upgrade_legacy(&pool, T0 + 1).await.unwrap(), 0);
     }
 
+    /// 009 renames `sessions` and 010 adds the reparse columns. A new database
+    /// and one that stopped at 008 have never had 010. The runner applies 009,
+    /// then 010.
+    #[tokio::test]
+    async fn migration_009_runs_before_010_on_a_database_that_never_had_it() {
+        let migrator = sqlx::migrate!("./migrations");
+        let listed: Vec<(i64, &str)> = migrator
+            .iter()
+            .map(|migration| (migration.version, migration.description.as_ref()))
+            .collect();
+        assert!(listed.windows(2).all(|pair| pair[0].0 < pair[1].0));
+        let nine = listed.iter().position(|row| row.0 == 9).unwrap();
+        let ten = listed.iter().position(|row| row.0 == 10).unwrap();
+        assert!(nine < ten);
+        assert_eq!(listed[nine].1, "session hardening");
+        assert_eq!(listed[ten].1, "reparse");
+
+        let tmp = TempDir::new().unwrap();
+        let url = format!("sqlite://{}?mode=rwc", tmp.path().join("mewo.db").display());
+        let fresh = db::connect(&url, tmp.path()).await.unwrap();
+        assert_session_then_reparse(&fresh).await;
+
+        let tmp = TempDir::new().unwrap();
+        let stopped = wal_pool(tmp.path()).await;
+        apply_before_009(&stopped).await;
+        let applied: Vec<i64> =
+            sqlx::query_scalar("SELECT version FROM _sqlx_migrations ORDER BY version")
+                .fetch_all(&stopped)
+                .await
+                .unwrap();
+        assert_eq!(applied.last().copied(), Some(8));
+        assert!(!applied.contains(&9));
+        assert!(!applied.contains(&10));
+        sqlx::migrate!("./migrations").run(&stopped).await.unwrap();
+        assert_session_then_reparse(&stopped).await;
+    }
+
+    async fn assert_session_then_reparse(pool: &SqlitePool) {
+        let rows: Vec<(i64, String, i64)> = sqlx::query_as(
+            "SELECT version, description, success FROM _sqlx_migrations ORDER BY version",
+        )
+        .fetch_all(pool)
+        .await
+        .unwrap();
+        let nine = rows.iter().find(|row| row.0 == 9).expect("009 applied");
+        let ten = rows.iter().find(|row| row.0 == 10).expect("010 applied");
+        assert_eq!(nine.1, "session hardening");
+        assert_eq!(ten.1, "reparse");
+        assert_eq!(nine.2, 1);
+        assert_eq!(ten.2, 1);
+        assert!(rows.windows(2).all(|pair| pair[0].0 < pair[1].0));
+        assert!(table_exists(pool, "sessions_legacy").await);
+        let token_hash: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM pragma_table_info('sessions') WHERE name = 'token_hash'",
+        )
+        .fetch_one(pool)
+        .await
+        .unwrap();
+        assert_eq!(token_hash, 1);
+        let old_token: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM pragma_table_info('sessions') WHERE name = 'token'",
+        )
+        .fetch_one(pool)
+        .await
+        .unwrap();
+        assert_eq!(old_token, 0);
+        let parser_rev: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM pragma_table_info('books') WHERE name = 'parser_rev'",
+        )
+        .fetch_one(pool)
+        .await
+        .unwrap();
+        let feed_rev: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM pragma_table_info('books') WHERE name = 'feed_rev'",
+        )
+        .fetch_one(pool)
+        .await
+        .unwrap();
+        assert_eq!((parser_rev, feed_rev), (1, 1));
+    }
+
     async fn wal_pool(path: &Path) -> SqlitePool {
         wal_pool_timeout(path, db::BUSY_TIMEOUT).await
     }
