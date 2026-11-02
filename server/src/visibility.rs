@@ -23,6 +23,7 @@ pub(crate) const BOOK_SELECT: &str = "
 SELECT b.id, b.title, b.author, b.handle, b.imported_at, b.post_count,
        COALESCE(p.progress_index, 0) as progress_index,
        b.is_sample, b.shared, b.user_id as owner_id, owner.username as owner_username,
+       b.feed_rev,
        COALESCE(b.files_user_id, b.user_id) AS files_owner,
        EXISTS (
            SELECT 1 FROM book_requests holder

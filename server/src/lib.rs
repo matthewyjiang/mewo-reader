@@ -1,4 +1,5 @@
 pub mod admin;
+mod anchors;
 pub mod auth;
 pub mod cli;
 pub mod config;
@@ -11,6 +12,7 @@ pub mod health;
 mod library;
 pub mod models;
 pub mod parse_pool;
+mod reparse;
 pub mod requests;
 pub mod routes;
 mod search;

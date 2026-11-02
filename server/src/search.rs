@@ -164,7 +164,7 @@ async fn popular_books(
          SELECT b.id, b.title, b.author, b.handle, b.imported_at, b.post_count,
                 COALESCE(p.progress_index, 0) AS progress_index,
                 b.is_sample, b.shared, b.user_id AS owner_id,
-                owner.username AS owner_username,
+                owner.username AS owner_username, b.feed_rev,
                 EXISTS (
                     SELECT 1 FROM book_requests holder
                     WHERE holder.book_id = b.id AND holder.user_id = ?
@@ -238,7 +238,7 @@ async fn top_posts(pool: &SqlitePool, viewer: &Authed, now: i64) -> Result<Searc
          SELECT b.id, b.title, b.author, b.handle, b.imported_at, b.post_count,
                 COALESCE(p.progress_index, 0) AS progress_index,
                 b.is_sample, b.shared, b.user_id AS owner_id,
-                owner.username AS owner_username,
+                owner.username AS owner_username, b.feed_rev AS feed_rev,
                 posts.idx AS post_idx, posts.kind AS post_kind,
                 posts.chapter AS post_chapter, posts.text AS post_text,
                 CAST(ranked.score AS REAL) AS score
@@ -401,12 +401,12 @@ async fn books(
     let after = book_cursor(cursor)?;
     let sql = format!(
         "SELECT id, title, author, handle, imported_at, post_count, progress_index,
-                is_sample, shared, owner_id, owner_username, rank
+                is_sample, shared, owner_id, owner_username, feed_rev, rank
          FROM (
              SELECT b.id, b.title, b.author, b.handle, b.imported_at, b.post_count,
                     COALESCE(p.progress_index, 0) AS progress_index,
                     b.is_sample, b.shared, b.user_id AS owner_id,
-                    owner.username AS owner_username,
+                    owner.username AS owner_username, b.feed_rev AS feed_rev,
                     CASE WHEN b.title LIKE ? ESCAPE '\\' THEN 0 ELSE 1 END AS rank
              FROM books b
              JOIN users owner ON owner.id = b.user_id
@@ -487,14 +487,14 @@ async fn posts(
              WHERE {BOOK_VISIBLE_TO}
          )
          SELECT id, title, author, handle, imported_at, post_count, progress_index,
-                is_sample, shared, owner_id, owner_username,
+                is_sample, shared, owner_id, owner_username, feed_rev,
                 post_idx, post_kind, post_chapter, post_text, score
          FROM (
              SELECT b.id AS id, b.title AS title, b.author AS author, b.handle AS handle,
                     b.imported_at AS imported_at, b.post_count AS post_count,
                     COALESCE(p.progress_index, 0) AS progress_index,
                     b.is_sample AS is_sample, b.shared AS shared, b.user_id AS owner_id,
-                    owner.username AS owner_username,
+                    owner.username AS owner_username, b.feed_rev AS feed_rev,
                     posts.idx AS post_idx, posts.kind AS post_kind,
                     posts.chapter AS post_chapter, posts.text AS post_text,
                     bm25(post_fts) AS score
@@ -563,6 +563,7 @@ struct PostHitRow {
     shared: i64,
     owner_id: String,
     owner_username: String,
+    feed_rev: i64,
     post_idx: i64,
     post_kind: String,
     post_chapter: String,
@@ -586,6 +587,7 @@ impl PostHitRow {
             owner_username: self.owner_username,
             files_owner: None,
             holds: 0,
+            feed_rev: self.feed_rev,
         }
         .into_record(viewer);
         Ok(PostHitRecord {
@@ -814,6 +816,34 @@ fn bad_cursor() -> ApiError {
     ApiError::BadRequest("That page token is not valid.".into())
 }
 
+/// How a feed write updates `books`. Import and backfill use [`FeedUpdate::fresh`].
+/// A crash leftover `posts.json` uses [`FeedUpdate::leftover`] so it does not
+/// claim the current parser. Reparse passes the anchor remap and bumps `feed_rev`.
+pub(crate) struct FeedUpdate<'a> {
+    pub remap: Option<&'a crate::anchors::Remap>,
+    pub bump_feed_rev: bool,
+    pub parser_rev: i64,
+}
+
+impl FeedUpdate<'static> {
+    pub(crate) fn fresh() -> Self {
+        Self {
+            remap: None,
+            bump_feed_rev: false,
+            parser_rev: crate::feed::PARSER_REV,
+        }
+    }
+
+    /// The file was already on disk. This process did not parse it.
+    pub(crate) fn leftover() -> Self {
+        Self {
+            remap: None,
+            bump_feed_rev: false,
+            parser_rev: 0,
+        }
+    }
+}
+
 /// Writes the feed file and the search rows in one database transaction.
 /// The file is written before commit, so a crash leaves `posts_indexed` at 0
 /// and the next backfill retries. Returns the bytes stored in `posts.json`.
@@ -822,6 +852,16 @@ pub(crate) async fn store_feed(
     dir: &Path,
     book_id: &str,
     posts: &Posts,
+) -> Result<Vec<u8>, ApiError> {
+    store_feed_with(pool, dir, book_id, posts, FeedUpdate::fresh()).await
+}
+
+pub(crate) async fn store_feed_with(
+    pool: &SqlitePool,
+    dir: &Path,
+    book_id: &str,
+    posts: &Posts,
+    update: FeedUpdate<'_>,
 ) -> Result<Vec<u8>, ApiError> {
     let bytes = serde_json::to_vec(posts).map_err(|err| {
         tracing::error!(error = %err, "could not encode posts.json");
@@ -833,7 +873,7 @@ pub(crate) async fn store_feed(
     // finish, and try the same book again.
     let mut attempt = 0;
     loop {
-        match write_indexed(pool, dir, book_id, posts, &bytes).await {
+        match write_indexed(pool, dir, book_id, posts, &bytes, &update).await {
             Ok(()) => return Ok(bytes),
             Err(WriteFailure::Locked) if attempt + 1 < FEED_WRITE_ATTEMPTS => {
                 attempt += 1;
@@ -905,7 +945,7 @@ impl Drop for FillGuard {
     }
 }
 
-const BACKFILL_PAUSE: Duration = Duration::from_millis(75);
+pub(crate) const BACKFILL_PAUSE: Duration = Duration::from_millis(75);
 const FEED_WRITE_ATTEMPTS: usize = 40;
 const FEED_BUSY_MS: u64 = 250;
 
@@ -930,6 +970,7 @@ async fn write_indexed(
     book_id: &str,
     posts: &Posts,
     bytes: &[u8],
+    update: &FeedUpdate<'_>,
 ) -> Result<(), WriteFailure> {
     let mut conn = pool.acquire().await.map_err(WriteFailure::sqlx)?;
     // The pooled connection keeps this pragma. Put the normal timeout back
@@ -941,7 +982,7 @@ async fn write_indexed(
         // The pragma did not change. Nothing to put back.
         return Err(WriteFailure::sqlx(err));
     }
-    let outcome = write_tx(&mut conn, dir, book_id, posts, bytes).await;
+    let outcome = write_tx(&mut conn, dir, book_id, posts, bytes, update).await;
     let restore = format!(
         "PRAGMA busy_timeout = {}",
         crate::db::BUSY_TIMEOUT.as_millis()
@@ -958,16 +999,36 @@ async fn write_tx(
     book_id: &str,
     posts: &Posts,
     bytes: &[u8],
+    update: &FeedUpdate<'_>,
 ) -> Result<(), WriteFailure> {
-    let mut tx = conn.begin().await.map_err(WriteFailure::sqlx)?;
+    // Deferred is enough for a fresh import. A remap has to lock out a like
+    // that read the old index and would insert it after the ids move.
+    let mut tx = if update.remap.is_some() {
+        conn.begin_with("BEGIN IMMEDIATE")
+            .await
+            .map_err(WriteFailure::sqlx)?
+    } else {
+        conn.begin().await.map_err(WriteFailure::sqlx)?
+    };
     sqlx::query("DELETE FROM posts WHERE book_id = ?")
         .bind(book_id)
         .execute(&mut *tx)
         .await
         .map_err(WriteFailure::sqlx)?;
     insert_posts(&mut tx, book_id, &posts.posts).await?;
-    sqlx::query("UPDATE books SET posts_indexed = 1, post_count = ? WHERE id = ?")
+    if let Some(remap) = update.remap {
+        crate::anchors::apply(&mut tx, book_id, remap)
+            .await
+            .map_err(WriteFailure::Other)?;
+    }
+    let book_update = if update.bump_feed_rev {
+        "UPDATE books SET posts_indexed = 1, post_count = ?, parser_rev = ?, feed_rev = feed_rev + 1 WHERE id = ?"
+    } else {
+        "UPDATE books SET posts_indexed = 1, post_count = ?, parser_rev = ? WHERE id = ?"
+    };
+    sqlx::query(book_update)
         .bind(posts.posts.len() as i64)
+        .bind(update.parser_rev)
         .bind(book_id)
         .execute(&mut *tx)
         .await
@@ -1101,18 +1162,22 @@ async fn index_pending(
     let dir = crate::library::book_dir(&state.data_dir, files_owner, book_id);
     // A crash can leave posts.json on disk before posts_indexed commits. That
     // file needs no parse, so a full queue must not turn the retry into Busy.
-    let posts = match read_posts(&dir).await? {
-        Some(bytes) => serde_json::from_slice::<Posts>(&bytes).map_err(|err| {
-            tracing::error!(error = %err, book_id, "posts.json is not a feed");
-            ApiError::Internal
-        })?,
+    // It was not produced by this parser, so parser_rev stays 0.
+    let (posts, update) = match read_posts(&dir).await? {
+        Some(bytes) => (
+            serde_json::from_slice::<Posts>(&bytes).map_err(|err| {
+                tracing::error!(error = %err, book_id, "posts.json is not a feed");
+                ApiError::Internal
+            })?,
+            FeedUpdate::leftover(),
+        ),
         None => {
             // Non-waiting, and only on the EPUB path, so a full queue does not
             // keep a permit that this book is not going to use. The caller
             // sleeps after this returns, which drops the guard first.
             let permit = state.parsers.try_acquire()?;
             match posts_from_epub(state, dir.join("book.epub"), permit).await {
-                Ok(posts) => posts,
+                Ok(posts) => (posts, FeedUpdate::fresh()),
                 Err(err @ ApiError::BadRequest(_)) => {
                     tracing::error!(%book_id, error = %err, "search backfill skipped an unreadable EPUB");
                     sqlx::query(
@@ -1127,7 +1192,7 @@ async fn index_pending(
             }
         }
     };
-    store_feed(&state.pool, &dir, book_id, &posts).await?;
+    store_feed_with(&state.pool, &dir, book_id, &posts, update).await?;
     Ok(true)
 }
 
@@ -1289,5 +1354,13 @@ mod tests {
         assert_eq!(indexed, 1);
         assert_eq!(state.parsers.stats().busy, 0);
         assert_eq!(state.parsers.stats().parses, 0);
+        let rev: i64 = sqlx::query_scalar("SELECT parser_rev FROM books WHERE id = 'book'")
+            .fetch_one(&state.pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            rev, 0,
+            "a leftover posts.json was not parsed by this revision"
+        );
     }
 }

@@ -15,7 +15,7 @@ use sqlx::migrate::Migrate;
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use sqlx::SqlitePool;
 use std::net::{IpAddr, SocketAddr};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -6653,6 +6653,17 @@ async fn post_books_typed(
     (status, headers, value)
 }
 
+fn reparse_cmd(args: &[&str]) -> AdminCommand {
+    let words = ["admin", "reparse"]
+        .into_iter()
+        .chain(args.iter().copied())
+        .map(str::to_string);
+    match cli::parse(words) {
+        Ok(cli::Command::Admin(cmd)) => cmd,
+        other => panic!("{other:?}"),
+    }
+}
+
 async fn probe(
     app: &axum::Router,
     method: &str,
@@ -6758,6 +6769,579 @@ async fn ready_fails_when_data_dir_is_not_writable() {
     let (status, _, body) = probe(&app, "GET", "/v1/healthz/live").await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body, json!({"status": "ok"}));
+}
+
+#[derive(sqlx::FromRow, Clone)]
+struct StoredPost {
+    idx: i64,
+    kind: String,
+    chapter: String,
+    text: String,
+}
+
+async fn stored_posts(pool: &SqlitePool, book_id: &str) -> Vec<StoredPost> {
+    sqlx::query_as("SELECT idx, kind, chapter, text FROM posts WHERE book_id = ? ORDER BY idx ASC")
+        .bind(book_id)
+        .fetch_all(pool)
+        .await
+        .unwrap()
+}
+
+fn double_headings(posts: &[StoredPost]) -> Vec<StoredPost> {
+    let mut doubled = Vec::new();
+    for post in posts {
+        doubled.push(post.clone());
+        if post.kind == "Heading" {
+            doubled.push(post.clone());
+        }
+    }
+    for (index, post) in doubled.iter_mut().enumerate() {
+        post.idx = index as i64;
+    }
+    doubled
+}
+
+async fn write_posts(pool: &SqlitePool, dir: &Path, book_id: &str, posts: &[StoredPost]) {
+    let mut tx = pool.begin().await.unwrap();
+    sqlx::query("DELETE FROM posts WHERE book_id = ?")
+        .bind(book_id)
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+    for post in posts {
+        sqlx::query("INSERT INTO posts (book_id, idx, kind, chapter, text) VALUES (?, ?, ?, ?, ?)")
+            .bind(book_id)
+            .bind(post.idx)
+            .bind(&post.kind)
+            .bind(&post.chapter)
+            .bind(&post.text)
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+    }
+    sqlx::query(
+        "UPDATE books SET post_count = ?, parser_rev = 0, feed_rev = 0, posts_indexed = 1 WHERE id = ?",
+    )
+    .bind(posts.len() as i64)
+    .bind(book_id)
+    .execute(&mut *tx)
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
+    let body = json!({
+        "posts": posts.iter().map(|post| json!({
+            "id": post.idx.to_string(),
+            "kind": post.kind,
+            "text": post.text,
+            "chapter": post.chapter,
+        })).collect::<Vec<_>>()
+    });
+    tokio::fs::write(dir.join("posts.json"), serde_json::to_vec(&body).unwrap())
+        .await
+        .unwrap();
+}
+
+fn indexes_of<'a>(posts: &'a [StoredPost], text: &str) -> Vec<i64> {
+    posts
+        .iter()
+        .filter(|post| post.text == text)
+        .map(|post| post.idx)
+        .collect()
+}
+
+async fn book_dir_for(pool: &SqlitePool, data: &Path, book_id: &str) -> PathBuf {
+    let (user_id, files_owner): (String, Option<String>) =
+        sqlx::query_as("SELECT user_id, files_user_id FROM books WHERE id = ?")
+            .bind(book_id)
+            .fetch_one(pool)
+            .await
+            .unwrap();
+    data.join("books")
+        .join(files_owner.unwrap_or(user_id))
+        .join(book_id)
+}
+
+async fn post_text(pool: &SqlitePool, book_id: &str, post_id: &str) -> String {
+    sqlx::query_scalar(
+        "SELECT text FROM posts WHERE book_id = ? AND idx = CAST(? AS INTEGER) AND ? = CAST(idx AS TEXT)",
+    )
+    .bind(book_id)
+    .bind(post_id)
+    .bind(post_id)
+    .fetch_one(pool)
+    .await
+    .unwrap()
+}
+
+#[tokio::test]
+async fn reparse_removes_duplicate_headings_and_keeps_every_anchor_on_the_same_text() {
+    let (app, tmp) = app().await;
+    let matt = register(&app, "matt", "password1").await;
+    let _ada = register(&app, "ada", "password1").await;
+    let (status, simple) = upload(&app, &matt, "Simple", "Ada", &common::epub(), None, false).await;
+    assert_eq!(status, StatusCode::OK, "{simple}");
+    assert_eq!(simple["feedRev"], 0);
+    let simple_id = simple["id"].as_str().unwrap().to_string();
+
+    let epub = common::repeated_chapters(true);
+    let (status, book) = upload(
+        &app,
+        &matt,
+        "The Problem of Pain",
+        "C. S. Lewis",
+        &epub,
+        None,
+        false,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{book}");
+    let book_id = book["id"].as_str().unwrap().to_string();
+
+    let pool = open_db(tmp.path()).await;
+    let simple_dir = book_dir_for(&pool, tmp.path(), &simple_id).await;
+    let simple_posts = tokio::fs::read(simple_dir.join("posts.json"))
+        .await
+        .unwrap();
+    let simple_rev: i64 = sqlx::query_scalar("SELECT parser_rev FROM books WHERE id = ?")
+        .bind(&simple_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(simple_rev, 1);
+
+    let dir = book_dir_for(&pool, tmp.path(), &book_id).await;
+    let original = stored_posts(&pool, &book_id).await;
+    let fresh = mewo_server::epub::parse(std::io::Cursor::new(epub), MAX_COVER_BYTES).unwrap();
+    assert_eq!(original.len(), fresh.posts.len());
+    let doubled = double_headings(&original);
+    assert!(doubled.len() > original.len());
+    write_posts(&pool, &dir, &book_id, &doubled).await;
+
+    let intro = indexes_of(&doubled, "1. Introductory");
+    let heavens = indexes_of(&doubled, "Heaven");
+    let pain = indexes_of(&doubled, "Pain text.");
+    assert_eq!(
+        intro.len(),
+        2,
+        "the pre-v0.1.15 feed lists the chapter twice"
+    );
+    assert_eq!(heavens.len(), 2);
+    assert_eq!(pain.len(), 1);
+    let heading_dup = intro[1].to_string();
+    let pain_id = pain[0].to_string();
+    let matt_id: String = sqlx::query_scalar("SELECT id FROM users WHERE username = 'matt'")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    let ada_id: String = sqlx::query_scalar("SELECT id FROM users WHERE username = 'ada'")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+
+    for post_id in [&intro[0].to_string(), &heading_dup, &pain_id] {
+        sqlx::query("INSERT INTO likes (user_id, book_id, post_id) VALUES (?, ?, ?)")
+            .bind(&matt_id)
+            .bind(&book_id)
+            .bind(post_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+    sqlx::query(
+        "INSERT INTO comments (id, user_id, book_id, post_id, text, created_at)
+         VALUES ('11111111-1111-4111-8111-111111111111', ?, ?, ?, 'on the duplicate heading', 1)",
+    )
+    .bind(&matt_id)
+    .bind(&book_id)
+    .bind(&heading_dup)
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO comments (id, user_id, book_id, post_id, text, created_at)
+         VALUES ('22222222-2222-4222-8222-222222222222', ?, ?, ?, 'on the later paragraph', 2)",
+    )
+    .bind(&ada_id)
+    .bind(&book_id)
+    .bind(&pain_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query("INSERT INTO reposts (user_id, book_id, post_id, created_at) VALUES (?, ?, ?, 3)")
+        .bind(&ada_id)
+        .bind(&book_id)
+        .bind(&pain_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let private_before: i64 = sqlx::query_scalar(
+        "SELECT private FROM reposts WHERE user_id = ? AND book_id = ? AND post_id = ?",
+    )
+    .bind(&ada_id)
+    .bind(&book_id)
+    .bind(&pain_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        private_before, 1,
+        "ada's repost was written while the book was private"
+    );
+    sqlx::query("UPDATE books SET shared = 1 WHERE id = ?")
+        .bind(&book_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE book_progress SET progress_index = ? WHERE user_id = ? AND book_id = ?")
+        .bind(pain[0])
+        .bind(&matt_id)
+        .bind(&book_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO book_progress (user_id, book_id, progress_index) VALUES (?, ?, ?)")
+        .bind(&ada_id)
+        .bind(&book_id)
+        .bind(heavens[1])
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let before = tokio::fs::read(dir.join("posts.json")).await.unwrap();
+    let (code, out, err) = admin_cli(tmp.path(), reparse_cmd(&["--all", "--dry-run"]), "").await;
+    assert_eq!(code, 0, "{out}{err}");
+    assert!(out.contains(&book_id), "{out}");
+    assert!(out.contains("would change"), "{out}");
+    assert!(!out.contains(&simple_id), "{out}");
+    assert_eq!(
+        tokio::fs::read(dir.join("posts.json")).await.unwrap(),
+        before
+    );
+    assert_eq!(
+        tokio::fs::read(simple_dir.join("posts.json"))
+            .await
+            .unwrap(),
+        simple_posts
+    );
+    let rev: i64 = sqlx::query_scalar("SELECT parser_rev FROM books WHERE id = ?")
+        .bind(&book_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(rev, 0);
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM likes WHERE book_id = ?")
+            .bind(&book_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap(),
+        3
+    );
+
+    let (code, out, err) = admin_cli(tmp.path(), reparse_cmd(&["--all"]), "").await;
+    assert_eq!(code, 0, "{out}{err}");
+    assert!(out.contains("changed"), "{out}");
+    assert!(err.contains("posts were renumbered"), "{err}");
+    assert!(!out.contains(&simple_id), "{out}");
+    assert_eq!(
+        tokio::fs::read(simple_dir.join("posts.json"))
+            .await
+            .unwrap(),
+        simple_posts
+    );
+
+    let rows = stored_posts(&pool, &book_id).await;
+    let got: Vec<_> = rows
+        .iter()
+        .map(|post| {
+            (
+                post.kind.as_str(),
+                post.text.as_str(),
+                post.chapter.as_str(),
+            )
+        })
+        .collect();
+    let expect: Vec<_> = fresh
+        .posts
+        .iter()
+        .map(|post| {
+            let kind = match post.kind {
+                mewo_server::feed::PostKind::Heading => "Heading",
+                mewo_server::feed::PostKind::Body => "Body",
+            };
+            (kind, post.text.as_str(), post.chapter.as_str())
+        })
+        .collect();
+    assert_eq!(got, expect);
+    assert_eq!(indexes_of(&rows, "1. Introductory").len(), 1);
+    assert_eq!(indexes_of(&rows, "Heaven").len(), 1);
+
+    let file: Value =
+        serde_json::from_slice(&tokio::fs::read(dir.join("posts.json")).await.unwrap()).unwrap();
+    let file_posts = file["posts"].as_array().unwrap();
+    assert_eq!(file_posts.len(), rows.len());
+    for (row, file_post) in rows.iter().zip(file_posts) {
+        assert_eq!(file_post["id"], row.idx.to_string());
+        assert_eq!(file_post["kind"], row.kind);
+        assert_eq!(file_post["text"], row.text);
+    }
+
+    let heading_reply = post_text(
+        &pool,
+        &book_id,
+        &sqlx::query_scalar::<_, String>(
+            "SELECT post_id FROM comments WHERE text = 'on the duplicate heading'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap(),
+    )
+    .await;
+    assert_eq!(heading_reply, "1. Introductory");
+    let body_reply = post_text(
+        &pool,
+        &book_id,
+        &sqlx::query_scalar::<_, String>(
+            "SELECT post_id FROM comments WHERE text = 'on the later paragraph'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap(),
+    )
+    .await;
+    assert_eq!(body_reply, "Pain text.");
+
+    let like_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM likes WHERE book_id = ?")
+        .bind(&book_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        like_count, 2,
+        "the two likes on the doubled heading collapse"
+    );
+    let mut liked: Vec<String> = sqlx::query_scalar(
+        "SELECT posts.text FROM likes
+         JOIN posts ON posts.book_id = likes.book_id AND posts.idx = CAST(likes.post_id AS INTEGER)
+         WHERE likes.book_id = ?",
+    )
+    .bind(&book_id)
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    liked.sort();
+    assert_eq!(
+        liked,
+        vec!["1. Introductory".to_string(), "Pain text.".to_string()]
+    );
+
+    let (repost_text, private_flag): (String, i64) = sqlx::query_as(
+        "SELECT posts.text, reposts.private FROM reposts
+         JOIN posts ON posts.book_id = reposts.book_id AND posts.idx = CAST(reposts.post_id AS INTEGER)
+         WHERE reposts.book_id = ?",
+    )
+    .bind(&book_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(repost_text, "Pain text.");
+    assert_eq!(
+        private_flag, 1,
+        "sharing the book must not clear a private repost"
+    );
+
+    let matt_place: String = sqlx::query_scalar(
+        "SELECT posts.text FROM book_progress
+         JOIN posts ON posts.book_id = book_progress.book_id AND posts.idx = book_progress.progress_index
+         WHERE book_progress.user_id = ? AND book_progress.book_id = ?",
+    )
+    .bind(&matt_id)
+    .bind(&book_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(matt_place, "Pain text.");
+    let ada_place: String = sqlx::query_scalar(
+        "SELECT posts.text FROM book_progress
+         JOIN posts ON posts.book_id = book_progress.book_id AND posts.idx = book_progress.progress_index
+         WHERE book_progress.user_id = ? AND book_progress.book_id = ?",
+    )
+    .bind(&ada_id)
+    .bind(&book_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(ada_place, "Heaven");
+
+    let fts: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM post_fts
+         JOIN posts ON posts.rowid = post_fts.rowid
+         WHERE posts.book_id = ? AND post_fts MATCH '\"Pain\"'",
+    )
+    .bind(&book_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert!(fts >= 1, "the rebuilt feed is in the search index");
+
+    let (status, loaded) =
+        empty_req(&app, "GET", &format!("/v1/books/{book_id}"), Some(&matt)).await;
+    assert_eq!(status, StatusCode::OK, "{loaded}");
+    assert_eq!(loaded["id"], book_id);
+    assert_eq!(loaded["feedRev"], 1);
+    let parser_rev: i64 = sqlx::query_scalar("SELECT parser_rev FROM books WHERE id = ?")
+        .bind(&book_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(parser_rev, 1);
+
+    let (code, out, err) = admin_cli(tmp.path(), reparse_cmd(&["--all"]), "").await;
+    assert_eq!(code, 0, "{out}{err}");
+    assert_eq!(out, "");
+    let feed_rev: i64 = sqlx::query_scalar("SELECT feed_rev FROM books WHERE id = ?")
+        .bind(&book_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(feed_rev, 1);
+}
+
+#[tokio::test]
+async fn reparse_refuses_a_body_change_without_force() {
+    let (app, tmp) = app().await;
+    let matt = register(&app, "matt", "password1").await;
+    let epub = common::repeated_chapters(true);
+    let (status, book) = upload(&app, &matt, "Pain", "Lewis", &epub, None, false).await;
+    assert_eq!(status, StatusCode::OK, "{book}");
+    let book_id = book["id"].as_str().unwrap().to_string();
+    let pool = open_db(tmp.path()).await;
+    let dir = book_dir_for(&pool, tmp.path(), &book_id).await;
+    let mut posts = stored_posts(&pool, &book_id).await;
+    let mut changed = 0u32;
+    for post in &mut posts {
+        if post.kind == "Body" {
+            post.text = format!("CHANGED {}", post.idx);
+            changed += 1;
+        }
+    }
+    assert!(
+        changed > 5,
+        "the fixture has enough body posts to trip the guard"
+    );
+    write_posts(&pool, &dir, &book_id, &posts).await;
+    let before = tokio::fs::read(dir.join("posts.json")).await.unwrap();
+
+    let (code, out, err) = admin_cli(tmp.path(), reparse_cmd(&[&book_id, "--dry-run"]), "").await;
+    assert_eq!(code, 1, "{out}{err}");
+    assert!(out.contains("text changed, not just headings"), "{out}");
+    assert_eq!(
+        tokio::fs::read(dir.join("posts.json")).await.unwrap(),
+        before
+    );
+
+    let (code, out, err) = admin_cli(tmp.path(), reparse_cmd(&[&book_id]), "").await;
+    assert_eq!(code, 1, "{out}{err}");
+    assert!(out.contains("skipped"), "{out}");
+    let rev: i64 = sqlx::query_scalar("SELECT parser_rev FROM books WHERE id = ?")
+        .bind(&book_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(rev, 0);
+    assert_eq!(
+        tokio::fs::read(dir.join("posts.json")).await.unwrap(),
+        before
+    );
+
+    let (code, out, err) = admin_cli(tmp.path(), reparse_cmd(&[&book_id, "--force"]), "").await;
+    assert_eq!(code, 0, "{out}{err}");
+    assert!(out.contains("changed"), "{out}");
+    let rev: i64 = sqlx::query_scalar("SELECT parser_rev FROM books WHERE id = ?")
+        .bind(&book_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(rev, 1);
+    let text: String =
+        sqlx::query_scalar("SELECT text FROM posts WHERE book_id = ? AND text = 'Pain text.'")
+            .bind(&book_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(text, "Pain text.");
+}
+
+#[tokio::test]
+async fn reparse_continues_after_an_unreadable_epub() {
+    let (app, tmp) = app().await;
+    let matt = register(&app, "matt", "password1").await;
+    let epub = common::repeated_chapters(true);
+    let (status, book) = upload(&app, &matt, "Pain", "Lewis", &epub, None, false).await;
+    assert_eq!(status, StatusCode::OK, "{book}");
+    let book_id = book["id"].as_str().unwrap().to_string();
+    let pool = open_db(tmp.path()).await;
+    let matt_id: String = sqlx::query_scalar("SELECT id FROM users WHERE username = 'matt'")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    let dir = book_dir_for(&pool, tmp.path(), &book_id).await;
+    let doubled = double_headings(&stored_posts(&pool, &book_id).await);
+    write_posts(&pool, &dir, &book_id, &doubled).await;
+
+    let bad_dir = tmp.path().join("books").join(&matt_id).join("bad-book");
+    tokio::fs::create_dir_all(&bad_dir).await.unwrap();
+    tokio::fs::write(bad_dir.join("book.epub"), b"not an epub")
+        .await
+        .unwrap();
+    tokio::fs::write(bad_dir.join("posts.json"), b"{\"posts\":[]}")
+        .await
+        .unwrap();
+    sqlx::query(
+        "INSERT INTO books
+         (id, user_id, title, author, handle, imported_at, post_count, progress_index, is_sample, shared, posts_indexed, parser_rev)
+         VALUES ('bad-book', ?, 'Bad', 'Ada', 'ada', 1, 1, 0, 0, 0, 1, 0)",
+    )
+    .bind(&matt_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO posts (book_id, idx, kind, chapter, text) VALUES ('bad-book', 0, 'Body', 'I', 'leave me')",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let (code, out, err) = admin_cli(tmp.path(), reparse_cmd(&["--all"]), "").await;
+    assert_eq!(code, 1, "{out}{err}");
+    assert!(out.contains("failed"), "{out}");
+    assert!(out.contains(&book_id), "{out}");
+    assert!(out.contains("changed"), "{out}");
+    let left: String = sqlx::query_scalar("SELECT text FROM posts WHERE book_id = 'bad-book'")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(left, "leave me");
+    let bad_rev: i64 = sqlx::query_scalar("SELECT parser_rev FROM books WHERE id = 'bad-book'")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(bad_rev, 0);
+    let good_rev: i64 = sqlx::query_scalar("SELECT parser_rev FROM books WHERE id = ?")
+        .bind(&book_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(good_rev, 1);
+}
+
+#[tokio::test]
+async fn reparse_of_an_unknown_book_exits_1() {
+    let tmp = TempDir::new().unwrap();
+    let (code, out, err) = admin_cli(tmp.path(), reparse_cmd(&["missing-book"]), "").await;
+    assert_eq!(code, 1, "{out}{err}");
+    assert_eq!(err, "No book with id missing-book.\n");
 }
 
 async fn tmp_entries(data: &Path) -> Vec<String> {

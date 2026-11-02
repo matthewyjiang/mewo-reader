@@ -204,6 +204,7 @@ pub(crate) async fn import(
         shared: false,
         owner_username: owner.username.to_string(),
         held: false,
+        feed_rev: 0,
     })
 }
 

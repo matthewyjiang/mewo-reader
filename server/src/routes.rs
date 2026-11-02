@@ -771,7 +771,7 @@ pub async fn profile_posts(
         "SELECT b.id, b.title, b.author, b.handle, b.imported_at, b.post_count,
                 COALESCE(p.progress_index, 0) AS progress_index,
                 b.is_sample, b.shared, b.user_id AS owner_id,
-                owner.username AS owner_username,
+                owner.username AS owner_username, b.feed_rev AS feed_rev,
                 posts.idx AS post_idx, posts.kind AS post_kind,
                 posts.chapter AS post_chapter, posts.text AS post_text,
                 c.id AS comment_id, u.username AS comment_username,
@@ -835,7 +835,7 @@ pub async fn profile_reposts(
         "SELECT b.id, b.title, b.author, b.handle, b.imported_at, b.post_count,
                 COALESCE(p.progress_index, 0) AS progress_index,
                 b.is_sample, b.shared, b.user_id AS owner_id,
-                owner.username AS owner_username,
+                owner.username AS owner_username, b.feed_rev AS feed_rev,
                 posts.idx AS post_idx, posts.kind AS post_kind,
                 posts.chapter AS post_chapter, posts.text AS post_text,
                 r.created_at AS reposted_at, r.book_id AS repost_book_id,
@@ -922,7 +922,7 @@ pub async fn feed(
     // whole history before discarding it. The outer query merges those pages.
     let sql = format!(
         "SELECT kind, id, at, actor_username, book_id, title, author, handle, imported_at,
-                post_count, progress_index, is_sample, shared, owner_id, owner_username,
+                post_count, progress_index, is_sample, shared, owner_id, owner_username, feed_rev,
                 post_idx, post_kind, post_chapter, post_text, comment_id, comment_username,
                 comment_text, comment_created_at, comment_user_id
          FROM (
@@ -933,7 +933,7 @@ pub async fn feed(
                         b.imported_at AS imported_at, b.post_count AS post_count,
                         COALESCE(p.progress_index, 0) AS progress_index,
                         b.is_sample AS is_sample, b.shared AS shared, b.user_id AS owner_id,
-                        owner.username AS owner_username,
+                        owner.username AS owner_username, b.feed_rev AS feed_rev,
                         posts.idx AS post_idx, posts.kind AS post_kind,
                         posts.chapter AS post_chapter, posts.text AS post_text,
                         c.id AS comment_id, u.username AS comment_username,
@@ -964,7 +964,7 @@ pub async fn feed(
                         b.imported_at AS imported_at, b.post_count AS post_count,
                         COALESCE(p.progress_index, 0) AS progress_index,
                         b.is_sample AS is_sample, b.shared AS shared, b.user_id AS owner_id,
-                        owner.username AS owner_username,
+                        owner.username AS owner_username, b.feed_rev AS feed_rev,
                         posts.idx AS post_idx, posts.kind AS post_kind,
                         posts.chapter AS post_chapter, posts.text AS post_text,
                         CAST(NULL AS TEXT) AS comment_id,
@@ -1055,6 +1055,7 @@ struct ProfileRepostRow {
     shared: i64,
     owner_id: String,
     owner_username: String,
+    feed_rev: i64,
     post_idx: i64,
     post_kind: String,
     post_chapter: String,
@@ -1080,6 +1081,7 @@ impl ProfileRepostRow {
             owner_username: self.owner_username,
             files_owner: None,
             holds: 0,
+            feed_rev: self.feed_rev,
         }
         .into_record(viewer);
         Ok(ProfileRepostRecord {
@@ -1112,6 +1114,7 @@ struct FeedRow {
     shared: i64,
     owner_id: String,
     owner_username: String,
+    feed_rev: i64,
     post_idx: i64,
     post_kind: String,
     post_chapter: String,
@@ -1139,6 +1142,7 @@ impl FeedRow {
             owner_username: self.owner_username,
             files_owner: None,
             holds: 0,
+            feed_rev: self.feed_rev,
         }
         .into_record(viewer);
         let post = stored_post(
@@ -1212,6 +1216,7 @@ struct ProfilePostRow {
     shared: i64,
     owner_id: String,
     owner_username: String,
+    feed_rev: i64,
     post_idx: i64,
     post_kind: String,
     post_chapter: String,
@@ -1239,6 +1244,7 @@ impl ProfilePostRow {
             owner_username: self.owner_username,
             files_owner: None,
             holds: 0,
+            feed_rev: self.feed_rev,
         }
         .into_record(viewer);
         Ok(ProfilePostRecord {
