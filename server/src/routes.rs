@@ -116,11 +116,11 @@ pub async fn login(
         }
         Err(err) => return Err(err),
     };
-    let Some((id, username, _)) = row.filter(|_| ok) else {
+    let Some((id, username, password_hash)) = row.filter(|_| ok) else {
         return Err(ApiError::Unauthorized("Wrong username or password.".into()));
     };
+    let token = session::issue_for_login(&state.pool, &id, now_ms(), &password_hash).await?;
     attempt.succeeded();
-    let token = session::issue(&state.pool, &id, now_ms()).await?;
     Ok(Json(AuthResponse { token, username }))
 }
 

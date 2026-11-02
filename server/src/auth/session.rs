@@ -30,7 +30,45 @@ fn duration_ms(duration: Duration) -> i64 {
 /// Prune expired rows, enforce [`MAX_PER_USER`], insert. The raw token is
 /// returned once and is not stored.
 pub async fn issue(pool: &SqlitePool, user_id: &str, now: i64) -> Result<String, ApiError> {
-    let mut tx = pool.begin().await?;
+    issue_in(pool, user_id, now, None).await
+}
+
+/// Login. `password_hash` is the hash just verified. The insert and the
+/// re-check share one write transaction, so a password change that committed
+/// in between does not leave a session for the old password.
+pub async fn issue_for_login(
+    pool: &SqlitePool,
+    user_id: &str,
+    now: i64,
+    password_hash: &str,
+) -> Result<String, ApiError> {
+    issue_in(pool, user_id, now, Some(password_hash)).await
+}
+
+async fn issue_in(
+    pool: &SqlitePool,
+    user_id: &str,
+    now: i64,
+    password_hash: Option<&str>,
+) -> Result<String, ApiError> {
+    // IMMEDIATE when the hash is checked, so the read and the insert take the
+    // write lock together. A deferred read then an insert fails at once if a
+    // password change committed in between, and `busy_timeout` does not apply.
+    let mut tx = if password_hash.is_some() {
+        pool.begin_with("BEGIN IMMEDIATE").await?
+    } else {
+        pool.begin().await?
+    };
+    if let Some(expected) = password_hash {
+        let current: Option<String> =
+            sqlx::query_scalar("SELECT password_hash FROM users WHERE id = ?")
+                .bind(user_id)
+                .fetch_optional(&mut *tx)
+                .await?;
+        if current.as_deref() != Some(expected) {
+            return Err(ApiError::Unauthorized("Wrong username or password.".into()));
+        }
+    }
     delete_expired(&mut tx, now).await?;
     trim_user(&mut tx, user_id).await?;
     let token = super::new_token();
@@ -606,6 +644,60 @@ mod tests {
         assert!(resolve(&pool, &ada, T0 + 3).await.unwrap().is_none());
         assert!(resolve(&pool, &ada_again, T0 + 3).await.unwrap().is_none());
         assert_eq!(revoke_everyone(&pool).await.unwrap(), 0);
+    }
+
+    /// Login verifies, then a password change commits, then login inserts.
+    /// The insert has to see the new hash and refuse. Otherwise the old
+    /// password's session outlives the revoke.
+    #[tokio::test]
+    async fn a_login_verified_against_the_old_hash_issues_no_session_after_a_password_change() {
+        let (_tmp, pool) = fresh().await;
+        let passwords = crate::auth::Passwords::new(&crate::config::AuthConfig::default());
+        let old_hash = passwords.hash("password1").await.unwrap();
+        sqlx::query(
+            "INSERT INTO users (id, username, username_norm, password_hash, created_at)
+             VALUES ('user', 'matt', 'matt', ?, 1)",
+        )
+        .bind(&old_hash)
+        .execute(&pool)
+        .await
+        .unwrap();
+        let kept = issue(&pool, "user", T0).await.unwrap();
+        let kept_id = resolve(&pool, &kept, T0).await.unwrap().unwrap().session_id;
+
+        let ok = passwords
+            .verify_login("password1", Some(&old_hash))
+            .await
+            .unwrap();
+        assert!(ok);
+
+        let new_hash = passwords.hash("password2").await.unwrap();
+        let mut tx = pool.begin().await.unwrap();
+        sqlx::query("UPDATE users SET password_hash = ? WHERE id = 'user'")
+            .bind(&new_hash)
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+        let removed = revoke_all(&mut tx, "user", Some(&kept_id)).await.unwrap();
+        tx.commit().await.unwrap();
+        assert_eq!(removed, 0);
+
+        let err = issue_for_login(&pool, "user", T0 + 1, &old_hash)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, ApiError::Unauthorized(_)));
+        assert_eq!(err.to_string(), "Wrong username or password.");
+        let left: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM sessions")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(left, 1);
+        assert!(resolve(&pool, &kept, T0 + 1).await.unwrap().is_some());
+
+        let fresh = issue_for_login(&pool, "user", T0 + 1, &new_hash)
+            .await
+            .unwrap();
+        assert!(resolve(&pool, &fresh, T0 + 1).await.unwrap().is_some());
     }
 
     #[tokio::test]
