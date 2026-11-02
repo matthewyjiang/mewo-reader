@@ -10,6 +10,7 @@ use sqlx::SqlitePool;
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio::io::AsyncWriteExt;
@@ -65,6 +66,8 @@ where
 struct RealProbe {
     pool: SqlitePool,
     data_dir: PathBuf,
+    /// One unlink at a time. A hung data directory must not fill the blocking pool.
+    cleanup_pending: Arc<AtomicBool>,
 }
 
 impl Probe for RealProbe {
@@ -75,7 +78,10 @@ impl Probe for RealProbe {
             // returns inside a 3s kube timeout.
             let (db, data_dir) = tokio::join!(
                 db_ok(&self.pool),
-                within_timeout(PROBE_TIMEOUT, dir_writable(&self.data_dir))
+                within_timeout(
+                    PROBE_TIMEOUT,
+                    dir_writable(&self.data_dir, &self.cleanup_pending)
+                )
             );
             report(db, data_dir)
         })
@@ -114,7 +120,11 @@ pub struct Health {
 
 impl Health {
     pub fn new(pool: SqlitePool, data_dir: PathBuf) -> Self {
-        Self::from_probe(RealProbe { pool, data_dir })
+        Self::from_probe(RealProbe {
+            pool,
+            data_dir,
+            cleanup_pending: Arc::new(AtomicBool::new(false)),
+        })
     }
 
     /// Tests inject a probe. chmod is not a substitute: CI may be root.
@@ -179,31 +189,98 @@ async fn db_ok(pool: &SqlitePool) -> Check {
 /// Create `.healthz-<pid>-<uuid>`, write one byte, and remove it.
 /// The pid alone collides when two probes overlap before the cache fills,
 /// and `create_new` would then report a writable directory as down.
-/// [`ProbeFile`] unlinks the file if the readiness timeout drops this future
-/// after create and before `remove_file`.
-async fn dir_writable(dir: &Path) -> Check {
-    write_probe(dir, std::future::ready(())).await
+/// While a previous unlink is still running, this reports not-ready and does
+/// not start another probe.
+async fn dir_writable(dir: &Path, pending: &Arc<AtomicBool>) -> Check {
+    write_probe(dir, std::future::ready(()), pending, &default_remover()).await
 }
 
-/// Unlinks the probe file when the readiness timeout drops this future.
-/// `remove_file` is the last await, so cancellation skips it otherwise.
+type Remover = Arc<dyn Fn(&Path) -> std::io::Result<()> + Send + Sync>;
+
+fn default_remover() -> Remover {
+    Arc::new(|path| std::fs::remove_file(path))
+}
+
+/// Unlinks the probe file on the blocking pool. `Drop` only schedules that
+/// work, so a readiness timeout is not stuck behind `remove_file`.
 struct ProbeFile {
-    path: PathBuf,
+    path: Option<PathBuf>,
+    pending: Arc<AtomicBool>,
+    remover: Remover,
+}
+
+impl ProbeFile {
+    fn disarm(&mut self) {
+        self.path.take();
+    }
+
+    /// At most one cleanup. The single-flight lock already admits one probe;
+    /// this stops a hung unlink from stacking another blocking task.
+    fn schedule(&mut self) -> Option<tokio::sync::oneshot::Receiver<std::io::Result<()>>> {
+        let path = self.path.take()?;
+        if self
+            .pending
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            tracing::warn!("healthz skipped a second data dir cleanup");
+            return None;
+        }
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let pending = Arc::clone(&self.pending);
+        let remover = Arc::clone(&self.remover);
+        let Some(handle) = tokio::runtime::Handle::try_current().ok() else {
+            self.pending.store(false, Ordering::Release);
+            tracing::warn!("healthz has no runtime to unlink its probe file");
+            return None;
+        };
+        handle.spawn_blocking(move || {
+            let result = remover(&path);
+            pending.store(false, Ordering::Release);
+            let _ = tx.send(result);
+        });
+        Some(rx)
+    }
+
+    async fn finish(&mut self) -> std::io::Result<()> {
+        if self.path.is_none() {
+            return Ok(());
+        }
+        match self.schedule() {
+            Some(rx) => rx
+                .await
+                .unwrap_or_else(|_| Err(std::io::Error::other("probe cleanup dropped"))),
+            None => Err(std::io::Error::other("probe cleanup was not scheduled")),
+        }
+    }
 }
 
 impl Drop for ProbeFile {
     fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.path);
+        let _ = self.schedule();
     }
 }
 
-async fn write_probe(dir: &Path, after_write: impl Future<Output = ()>) -> Check {
+async fn write_probe(
+    dir: &Path,
+    after_write: impl Future<Output = ()>,
+    pending: &Arc<AtomicBool>,
+    remover: &Remover,
+) -> Check {
+    if pending.load(Ordering::Acquire) {
+        tracing::warn!("healthz data dir cleanup is still running");
+        return Check::Fail;
+    }
     let path = dir.join(format!(
         ".healthz-{}-{}",
         std::process::id(),
         Uuid::new_v4()
     ));
-    let _cleanup = ProbeFile { path: path.clone() };
+    let mut cleanup = ProbeFile {
+        path: Some(path.clone()),
+        pending: Arc::clone(pending),
+        remover: Arc::clone(remover),
+    };
     let wrote = match tokio::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -216,9 +293,12 @@ async fn write_probe(dir: &Path, after_write: impl Future<Output = ()>) -> Check
             after_write.await;
             wrote
         }
-        Err(err) => Err(err),
+        Err(err) => {
+            cleanup.disarm();
+            Err(err)
+        }
     };
-    let removed = tokio::fs::remove_file(&path).await;
+    let removed = cleanup.finish().await;
     match (wrote, removed) {
         (Ok(()), Ok(())) => Check::Ok,
         (Ok(()), Err(err)) => {
@@ -322,26 +402,109 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_stalled_delete_returns_and_releases_the_flight() {
+        let tmp = tempfile::tempdir().unwrap();
+        let pending = Arc::new(AtomicBool::new(false));
+        let calls = Arc::new(AtomicUsize::new(0));
+        let release = Arc::new(AtomicBool::new(false));
+        let remover: Remover = {
+            let calls = Arc::clone(&calls);
+            let release = Arc::clone(&release);
+            Arc::new(move |path| {
+                calls.fetch_add(1, Ordering::SeqCst);
+                while !release.load(Ordering::Acquire) {
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                std::fs::remove_file(path)
+            })
+        };
+        let dir = tmp.path().to_path_buf();
+        let health = Health::with_probe({
+            let pending = Arc::clone(&pending);
+            let remover = Arc::clone(&remover);
+            let dir = dir.clone();
+            move || {
+                let pending = Arc::clone(&pending);
+                let remover = Arc::clone(&remover);
+                let dir = dir.clone();
+                async move {
+                    let data_dir = within_timeout(
+                        Duration::from_millis(80),
+                        write_probe(&dir, std::future::ready(()), &pending, &remover),
+                    )
+                    .await;
+                    report(Check::Ok, data_dir)
+                }
+            }
+        });
+
+        let started = Instant::now();
+        let first = health.ready().await;
+        let elapsed = started.elapsed();
+        assert_eq!(first.status, Status::Fail);
+        assert_eq!(first.checks.data_dir, Check::Fail);
+        assert!(
+            elapsed < Duration::from_millis(400),
+            "readiness waited {elapsed:?} on a stalled delete"
+        );
+        assert!(
+            health.flight.try_lock().is_ok(),
+            "single-flight lock still held after readiness returned"
+        );
+        let started = Instant::now();
+        while calls.load(Ordering::SeqCst) == 0 && started.elapsed() < Duration::from_millis(500) {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+        *health.lock() = None;
+        let started = Instant::now();
+        let second = health.ready().await;
+        assert_eq!(second.checks.data_dir, Check::Fail);
+        assert!(started.elapsed() < Duration::from_millis(200));
+        assert!(health.flight.try_lock().is_ok());
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+        release.store(true, Ordering::Release);
+        let started = Instant::now();
+        while pending.load(Ordering::Acquire) && started.elapsed() < Duration::from_secs(2) {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        assert!(!pending.load(Ordering::Acquire));
+    }
+
+    #[tokio::test]
     async fn a_timed_out_dir_probe_leaves_no_file() {
         let tmp = tempfile::tempdir().unwrap();
+        let pending = Arc::new(AtomicBool::new(false));
+        let remover = default_remover();
         let check = within_timeout(Duration::from_millis(50), async {
-            write_probe(tmp.path(), std::future::pending::<()>()).await
+            write_probe(tmp.path(), std::future::pending::<()>(), &pending, &remover).await
         })
         .await;
         assert_eq!(check, Check::Fail);
-        let mut left = tokio::fs::read_dir(tmp.path()).await.unwrap();
-        let stray = left.next_entry().await.unwrap();
-        assert!(
-            stray.is_none(),
-            "timed-out probe left {}",
-            stray.unwrap().file_name().to_string_lossy()
-        );
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            let mut left = tokio::fs::read_dir(tmp.path()).await.unwrap();
+            let stray = left.next_entry().await.unwrap();
+            if stray.is_none() {
+                break;
+            }
+            let name = stray.unwrap().file_name();
+            assert!(
+                Instant::now() < deadline,
+                "timed-out probe left {}",
+                name.to_string_lossy()
+            );
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
     }
 
     #[tokio::test]
     async fn dir_probe_writes_one_byte_and_removes_the_file() {
         let tmp = tempfile::tempdir().unwrap();
-        assert_eq!(dir_writable(tmp.path()).await, Check::Ok);
+        let pending = Arc::new(AtomicBool::new(false));
+        assert_eq!(dir_writable(tmp.path(), &pending).await, Check::Ok);
         let mut left = tokio::fs::read_dir(tmp.path()).await.unwrap();
         assert!(left.next_entry().await.unwrap().is_none());
     }
@@ -349,6 +512,7 @@ mod tests {
     #[tokio::test]
     async fn dir_probe_fails_when_the_path_is_not_a_directory() {
         let tmp = tempfile::NamedTempFile::new().unwrap();
-        assert_eq!(dir_writable(tmp.path()).await, Check::Fail);
+        let pending = Arc::new(AtomicBool::new(false));
+        assert_eq!(dir_writable(tmp.path(), &pending).await, Check::Fail);
     }
 }
