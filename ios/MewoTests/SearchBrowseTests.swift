@@ -147,6 +147,61 @@ final class SearchBrowseTests: XCTestCase {
         XCTAssertEqual(model.visibleAccounts().map(\.username), ["ada"])
     }
 
+    /// Typing, clearing, then typing again must not show the first query's rows under the second.
+    func testTheNextQueryDoesNotShowRowsFromBeforeTheFieldWasCleared() async {
+        let (model, remote, _) = hosted(debounceNanos: 0)
+        model.select(.books)
+        await awaitCall(remote, 1)
+        remote.calls[0].continuation.resume(returning: bookPage("ada"))
+        await model.searchTask?.value
+
+        model.setQuery("dune")
+        await awaitCall(remote, 2)
+        remote.calls[1].continuation.resume(returning: bookPage("dune"))
+        await model.searchTask?.value
+        XCTAssertEqual(model.visibleBooks().map(\.id), ["dune"])
+
+        model.setQuery("")
+        XCTAssertEqual(model.visibleBooks().map(\.id), ["ada"])
+
+        model.setQuery("a")
+        XCTAssertTrue(model.searching)
+        XCTAssertFalse(model.browsing)
+        XCTAssertEqual(model.visibleBooks().map(\.id), ["ada"])
+        await awaitCall(remote, 3)
+        remote.calls[2].continuation.resume(throwing: URLError(.notConnectedToInternet))
+        await model.searchTask?.value
+        XCTAssertEqual(model.failure, "Couldn't reach the server. Check your connection.")
+        XCTAssertEqual(model.visibleBooks().map(\.id), ["ada"])
+    }
+
+    /// A typed page that arrives after the field is cleared must not replace the browse page.
+    func testATypedPageInFlightIsDroppedWhenTheFieldIsCleared() async {
+        let (model, remote, _) = hosted(debounceNanos: 0)
+        model.refresh()
+        await awaitCall(remote, 1)
+        remote.calls[0].continuation.resume(returning: accountPage("ada"))
+        await model.searchTask?.value
+
+        model.setQuery("dune")
+        await awaitCall(remote, 2)
+        let typed = model.searchTask
+        model.setQuery("")
+        XCTAssertEqual(model.visibleAccounts().map(\.username), ["ada"])
+        XCTAssertTrue(model.browsing)
+        remote.calls[1].continuation.resume(returning: accountPage("dune"))
+        await typed?.value
+
+        model.setQuery("a")
+        XCTAssertTrue(model.searching)
+        XCTAssertEqual(model.visibleAccounts().map(\.username), ["ada"])
+        await awaitCall(remote, 3)
+        XCTAssertEqual(remote.calls[2].query, "a")
+        remote.calls[2].continuation.resume(returning: accountPage("amy"))
+        await model.searchTask?.value
+        XCTAssertEqual(model.visibleAccounts().map(\.username), ["amy"])
+    }
+
     func testNewSessionDropsTheMemoAndIgnoresTheOldPage() async {
         let (model, remote, _) = hosted()
         model.refresh()

@@ -317,6 +317,8 @@ final class SearchViewModel {
     /// Blank hosted text. A fresh memo shows at once. A page older than 60s refreshes quietly.
     private func browse() {
         guard browsing else { return }
+        // A typed page must not sit under the next query. Browse rows stay in `browseSlices`.
+        slices = [:]
         searchTask?.cancel()
         generation += 1
         let token = generation
