@@ -67,7 +67,7 @@ internal class BookSocial(
     private var comments = emptyMap<String, CommentIndex>()
     private var generation = 0
 
-    /** Drops this session's likes and comments. A load already running must not put them back. */
+    /** Drops this session's likes and comments. A load or toggle already running must not put them back. */
     fun clear() {
         generation++
         books.values.forEach { book ->
@@ -107,9 +107,12 @@ internal class BookSocial(
         val book = book(id)
         val ticket = ++book.toggles
         book.togglesRunning++
+        val gen = generation
         scope.launch {
             try {
                 val next = attempt { store.toggleLike(id, postId) } ?: return@launch
+                // The request may finish after sign-out. Only this session may show it.
+                if (gen != generation) return@launch
                 // Responses can arrive out of order. Only a newer toggle may replace the shown one.
                 if (ticket > book.shownToggle) {
                     book.shownToggle = ticket
@@ -128,6 +131,7 @@ internal class BookSocial(
         val ticket = ++book.reposts
         book.repostsRunning++
         val before = comments[id] ?: CommentIndex()
+        val gen = generation
         scope.launch {
             try {
                 commitRepost(
@@ -136,6 +140,8 @@ internal class BookSocial(
                     { on -> store.setRepost(id, postId, on) },
                     { comments[id] ?: CommentIndex() },
                     { next ->
+                        // The request may finish after sign-out. Only this session may show it.
+                        if (gen != generation) return@commitRepost
                         if (ticket >= book.shownRepost) {
                             book.shownRepost = ticket
                             comments = comments + (id to next)
@@ -151,7 +157,9 @@ internal class BookSocial(
                 book.repostsRunning--
                 // The index answer is one post. A load skipped for this toggle still
                 // has to fetch the other posts' counts once the toggle has landed.
-                if (book.repostsRunning == 0 && !book.commentsFresh && id in shown) ensure(id)
+                if (gen == generation && book.repostsRunning == 0 && !book.commentsFresh && id in shown) {
+                    ensure(id)
+                }
             }
         }
     }

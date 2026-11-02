@@ -792,6 +792,28 @@ class SearchViewModelTest {
     }
 
     @Test
+    fun aToggleFromThePreviousSessionDoesNotLand() = runTest(main) {
+        val store = HostedFake(keepGoing = true)
+        val vm = SearchViewModel(store, now = { 0L })
+        vm.bindSession("one")
+        vm.toggleLike(BOOK, "p1")
+        runCurrent()
+        vm.toggleRepost(BOOK, "p1")
+
+        vm.bindSession(null)
+        vm.bindSession("two")
+        runCurrent()
+        assertTrue(vm.state.value.likes.isEmpty())
+        assertTrue(vm.state.value.comments.isEmpty())
+
+        store.toggles.getValue(BOOK).complete(setOf("p1"))
+        store.reposts.getValue(BOOK).complete(RepostState(1, true))
+        advanceUntilIdle()
+        assertTrue(vm.state.value.likes.isEmpty())
+        assertTrue(vm.state.value.comments.isEmpty())
+    }
+
+    @Test
     fun aNewerQueryDropsTheOlderPage() = runTest(main) {
         val store = HostedFake(keepGoing = true)
         val vm = SearchViewModel(store)
