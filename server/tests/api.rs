@@ -8,6 +8,7 @@ use mewo_server::config::{
     request_body_limit, AuthConfig, Config, LimitsConfig, Rate, MAX_COVER_BYTES, MIN_EPUB_BYTES,
 };
 use mewo_server::disk::DiskGuard;
+use mewo_server::health::{self, Check, Health, Status};
 use mewo_server::{prepare, router};
 use serde_json::{json, Value};
 use sqlx::migrate::Migrate;
@@ -6650,6 +6651,113 @@ async fn post_books_typed(
     let (status, headers, bytes) = call(app, builder.body(Body::from(body)).unwrap()).await;
     let value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
     (status, headers, value)
+}
+
+async fn probe(
+    app: &axum::Router,
+    method: &str,
+    path: &str,
+) -> (StatusCode, axum::http::HeaderMap, Value) {
+    let (status, headers, bytes) = call(
+        app,
+        Request::builder()
+            .method(method)
+            .uri(path)
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    let value = if bytes.is_empty() {
+        Value::Null
+    } else {
+        serde_json::from_slice(&bytes).unwrap_or(Value::Null)
+    };
+    (status, headers, value)
+}
+
+fn object_keys(value: &Value) -> Vec<&str> {
+    let mut keys: Vec<_> = value
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(String::as_str)
+        .collect();
+    keys.sort();
+    keys
+}
+
+#[tokio::test]
+async fn healthz_is_unauthenticated_and_ok() {
+    let (app, _tmp) = app().await;
+    let (status, headers, body) = probe(&app, "GET", "/v1/healthz").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(headers[header::CACHE_CONTROL], "no-store");
+    assert_eq!(
+        body,
+        json!({"status": "ok", "checks": {"db": "ok", "dataDir": "ok"}})
+    );
+    assert_eq!(object_keys(&body), ["checks", "status"]);
+    assert_eq!(object_keys(&body["checks"]), ["dataDir", "db"]);
+    assert!(!body.to_string().contains('/'));
+
+    let (status, headers, body) = probe(&app, "HEAD", "/v1/healthz").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(headers[header::CACHE_CONTROL], "no-store");
+    assert!(body.is_null());
+
+    let (status, _, _) = probe(&app, "GET", "/v1/health").await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn live_does_not_touch_the_db() {
+    let tmp = TempDir::new().unwrap();
+    let state = prepare(config_at(tmp.path(), true, MIN_EPUB_BYTES))
+        .await
+        .unwrap();
+    let pool = state.pool.clone();
+    let app = router(state);
+    pool.close().await;
+
+    let (status, headers, body) = probe(&app, "GET", "/v1/healthz/live").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(headers[header::CACHE_CONTROL], "no-store");
+    assert_eq!(body, json!({"status": "ok"}));
+    assert_eq!(object_keys(&body), ["status"]);
+
+    let (status, headers, body) = probe(&app, "GET", "/v1/healthz").await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(headers[header::CACHE_CONTROL], "no-store");
+    assert_eq!(body["status"], "fail");
+    assert_eq!(body["checks"]["db"], "fail");
+    assert_eq!(body["checks"]["dataDir"], "ok");
+}
+
+#[tokio::test]
+async fn ready_fails_when_data_dir_is_not_writable() {
+    let tmp = TempDir::new().unwrap();
+    let mut state = prepare(config_at(tmp.path(), true, MIN_EPUB_BYTES))
+        .await
+        .unwrap();
+    state.health = Health::with_probe(|| async {
+        health::Report {
+            status: Status::Fail,
+            checks: health::Checks {
+                db: Check::Ok,
+                data_dir: Check::Fail,
+            },
+        }
+    });
+    let app = router(state);
+    let (status, _, body) = probe(&app, "GET", "/v1/healthz").await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(
+        body,
+        json!({"status": "fail", "checks": {"db": "ok", "dataDir": "fail"}})
+    );
+    let (status, _, body) = probe(&app, "GET", "/v1/healthz/live").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body, json!({"status": "ok"}));
 }
 
 async fn tmp_entries(data: &Path) -> Vec<String> {
