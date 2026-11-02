@@ -33,6 +33,45 @@ pub async fn issue(pool: &SqlitePool, user_id: &str, now: i64) -> Result<String,
     issue_in(pool, user_id, now, None).await
 }
 
+/// Stores `new_hash` only when `verified_hash` is still the row and
+/// `session_id` still belongs to that user. The checks, the update, and the
+/// revoke share one `BEGIN IMMEDIATE`, so a password change or revoke that
+/// committed after verify is not overwritten.
+pub async fn commit_password_change(
+    pool: &SqlitePool,
+    user_id: &str,
+    session_id: &str,
+    verified_hash: &str,
+    new_hash: &str,
+) -> Result<(), ApiError> {
+    let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
+    let alive: Option<i64> =
+        sqlx::query_scalar("SELECT 1 FROM sessions WHERE id = ? AND user_id = ?")
+            .bind(session_id)
+            .bind(user_id)
+            .fetch_optional(&mut *tx)
+            .await?;
+    if alive.is_none() {
+        return Err(ApiError::Unauthorized("Sign in first.".into()));
+    }
+    let current: Option<String> =
+        sqlx::query_scalar("SELECT password_hash FROM users WHERE id = ?")
+            .bind(user_id)
+            .fetch_optional(&mut *tx)
+            .await?;
+    if current.as_deref() != Some(verified_hash) {
+        return Err(ApiError::Forbidden("Wrong password.".into()));
+    }
+    sqlx::query("UPDATE users SET password_hash = ? WHERE id = ?")
+        .bind(new_hash)
+        .bind(user_id)
+        .execute(&mut *tx)
+        .await?;
+    revoke_all(&mut tx, user_id, Some(session_id)).await?;
+    tx.commit().await?;
+    Ok(())
+}
+
 /// Login. `password_hash` is the hash just verified. The insert and the
 /// re-check share one write transaction, so a password change that committed
 /// in between does not leave a session for the old password.
@@ -730,6 +769,83 @@ mod tests {
             .await
             .unwrap();
         assert!(resolve(&pool, &fresh, T0 + 1).await.unwrap().is_some());
+    }
+
+    /// Password change verifies, then another change commits, then the first
+    /// change writes. The write has to see the new hash and the revoked
+    /// session and refuse. Otherwise the old password replaces the new one.
+    #[tokio::test]
+    async fn a_password_change_verified_against_the_old_hash_does_not_overwrite() {
+        let (_tmp, pool) = fresh().await;
+        let passwords = crate::auth::Passwords::new(&crate::config::AuthConfig::default());
+        let old_hash = passwords.hash("password1").await.unwrap();
+        sqlx::query(
+            "INSERT INTO users (id, username, username_norm, password_hash, created_at)
+             VALUES ('user', 'matt', 'matt', ?, 1)",
+        )
+        .bind(&old_hash)
+        .execute(&pool)
+        .await
+        .unwrap();
+        let victim = issue(&pool, "user", T0).await.unwrap();
+        let victim_id = resolve(&pool, &victim, T0)
+            .await
+            .unwrap()
+            .unwrap()
+            .session_id;
+        let attacker = issue(&pool, "user", T0).await.unwrap();
+        let attacker_id = resolve(&pool, &attacker, T0)
+            .await
+            .unwrap()
+            .unwrap()
+            .session_id;
+        let ok = passwords
+            .verify_login("password1", Some(&old_hash))
+            .await
+            .unwrap();
+        assert!(ok);
+
+        let victim_hash = passwords.hash("password2").await.unwrap();
+        let mut tx = pool.begin().await.unwrap();
+        sqlx::query("UPDATE users SET password_hash = ? WHERE id = 'user'")
+            .bind(&victim_hash)
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+        revoke_all(&mut tx, "user", Some(&victim_id)).await.unwrap();
+        tx.commit().await.unwrap();
+        assert!(resolve(&pool, &attacker, T0).await.unwrap().is_none());
+
+        let attacker_hash = passwords.hash("password3").await.unwrap();
+        let err = commit_password_change(&pool, "user", &attacker_id, &old_hash, &attacker_hash)
+            .await
+            .unwrap_err();
+        assert_eq!(err.to_string(), "Sign in first.");
+        let stored: String =
+            sqlx::query_scalar("SELECT password_hash FROM users WHERE id = 'user'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(stored, victim_hash);
+        assert!(resolve(&pool, &victim, T0).await.unwrap().is_some());
+        let left: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM sessions")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(left, 1);
+
+        let again = passwords.hash("password4").await.unwrap();
+        let err = commit_password_change(&pool, "user", &victim_id, &old_hash, &again)
+            .await
+            .unwrap_err();
+        assert_eq!(err.to_string(), "Wrong password.");
+        let stored: String =
+            sqlx::query_scalar("SELECT password_hash FROM users WHERE id = 'user'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(stored, victim_hash);
+        assert!(resolve(&pool, &victim, T0).await.unwrap().is_some());
     }
 
     #[tokio::test]

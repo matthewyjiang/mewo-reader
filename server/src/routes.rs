@@ -180,14 +180,14 @@ pub async fn change_password(
         }
         Err(err) => return Err(err),
     };
-    let mut tx = state.pool.begin().await?;
-    sqlx::query("UPDATE users SET password_hash = ? WHERE id = ?")
-        .bind(&new_hash)
-        .bind(&authed.user_id)
-        .execute(&mut *tx)
-        .await?;
-    session::revoke_all(&mut tx, &authed.user_id, Some(&authed.session_id)).await?;
-    tx.commit().await?;
+    session::commit_password_change(
+        &state.pool,
+        &authed.user_id,
+        &authed.session_id,
+        &hash,
+        &new_hash,
+    )
+    .await?;
     attempt.succeeded();
     Ok(axum::http::StatusCode::NO_CONTENT)
 }
