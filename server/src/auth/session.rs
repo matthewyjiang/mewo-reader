@@ -191,39 +191,76 @@ pub async fn prune(pool: &SqlitePool, now: i64) -> Result<u64, sqlx::Error> {
 }
 
 /// One-time: hash rows left in `sessions_legacy`, then drop that table.
-/// Idempotent. Returns 0 when the table is already gone. A legacy row whose
-/// user is gone is skipped. `secure_delete` and a truncating checkpoint keep
-/// the raw token out of the database file and the WAL.
+/// Idempotent. Returns 0 when the table is already gone and the WAL wipe has
+/// finished. A legacy row whose user is gone is skipped. `secure_delete` and
+/// a truncating checkpoint keep the raw token out of the database file and
+/// the WAL. A busy checkpoint is remembered in `sessions_legacy_wipe` and
+/// retried on the next call. It does not fail startup.
 pub async fn upgrade_legacy(pool: &SqlitePool, now: i64) -> Result<u64, sqlx::Error> {
     let mut conn = pool.acquire().await?;
-    // Already upgraded. Skip the write lock so a CLI command against a live
-    // server does not checkpoint or reserve the database on every call.
-    if !legacy_table(&mut conn).await? {
+    let legacy = legacy_table(&mut conn).await?;
+    let wipe = wipe_pending(&mut conn).await?;
+    // Nothing left to hash and the WAL wipe already finished. Skip the write
+    // lock so a CLI command against a live server does not checkpoint.
+    if !legacy && !wipe {
         return Ok(0);
     }
-    // Per connection, outside the transaction. On so DROP overwrites the
-    // legacy token pages. Off before this connection returns to the pool.
-    sqlx::query("PRAGMA secure_delete = ON")
-        .execute(&mut *conn)
-        .await?;
-    let result = upgrade_immediate(&mut conn, now).await;
-    let off = sqlx::query("PRAGMA secure_delete = OFF")
-        .execute(&mut *conn)
-        .await;
-    match (result, off) {
-        (Ok(count), Ok(_)) => Ok(count),
-        (Err(err), _) => Err(err),
-        (Ok(_), Err(err)) => Err(err),
+    let count = if legacy {
+        // Per connection, outside the transaction. On so DROP overwrites the
+        // legacy token pages. Off before this connection returns to the pool.
+        sqlx::query("PRAGMA secure_delete = ON")
+            .execute(&mut *conn)
+            .await?;
+        let result = upgrade_immediate(&mut conn, now).await;
+        let off = sqlx::query("PRAGMA secure_delete = OFF")
+            .execute(&mut *conn)
+            .await;
+        match (result, off) {
+            (Ok(count), Ok(_)) => count,
+            (Err(err), _) => return Err(err),
+            (Ok(_), Err(err)) => return Err(err),
+        }
+    } else {
+        0
+    };
+    if !checkpoint_truncate(&mut conn).await? {
+        tracing::warn!("wal checkpoint busy; legacy token wipe retries on the next start");
+        return Ok(count);
     }
+    if wipe_pending(&mut conn).await? {
+        sqlx::query("DROP TABLE sessions_legacy_wipe")
+            .execute(&mut *conn)
+            .await?;
+    }
+    Ok(count)
 }
 
 async fn legacy_table(conn: &mut SqliteConnection) -> Result<bool, sqlx::Error> {
-    let present: Option<i64> = sqlx::query_scalar(
-        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'sessions_legacy'",
-    )
-    .fetch_optional(&mut *conn)
-    .await?;
+    table_present(conn, "sessions_legacy").await
+}
+
+/// Created in the same transaction as `DROP TABLE sessions_legacy`. Present
+/// until `wal_checkpoint(TRUNCATE)` succeeds, so a busy checkpoint is retried.
+async fn wipe_pending(conn: &mut SqliteConnection) -> Result<bool, sqlx::Error> {
+    table_present(conn, "sessions_legacy_wipe").await
+}
+
+async fn table_present(conn: &mut SqliteConnection, name: &str) -> Result<bool, sqlx::Error> {
+    let present: Option<i64> =
+        sqlx::query_scalar("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?")
+            .bind(name)
+            .fetch_optional(&mut *conn)
+            .await?;
     Ok(present.is_some())
+}
+
+async fn checkpoint_truncate(conn: &mut SqliteConnection) -> Result<bool, sqlx::Error> {
+    // Checkpoint cannot run inside a transaction. TRUNCATE drops WAL frames
+    // that still hold the raw token. busy != 0 leaves those frames in place.
+    let (busy, _, _): (i64, i64, i64) = sqlx::query_as("PRAGMA wal_checkpoint(TRUNCATE)")
+        .fetch_one(&mut *conn)
+        .await?;
+    Ok(busy == 0)
 }
 
 async fn upgrade_immediate(conn: &mut SqliteConnection, now: i64) -> Result<u64, sqlx::Error> {
@@ -260,20 +297,15 @@ async fn upgrade_immediate(conn: &mut SqliteConnection, now: i64) -> Result<u64,
         .execute(&mut *tx)
         .await?;
     }
+    // Same transaction as the drop. A crash or a busy checkpoint leaves this
+    // table, and the next start retries the wipe instead of seeing no work.
+    sqlx::query("CREATE TABLE sessions_legacy_wipe (id INTEGER PRIMARY KEY)")
+        .execute(&mut *tx)
+        .await?;
     sqlx::query("DROP TABLE sessions_legacy")
         .execute(&mut *tx)
         .await?;
     tx.commit().await?;
-    // Checkpoint cannot run inside the transaction. TRUNCATE drops WAL frames
-    // that still hold the raw token. A busy result leaves those frames in place.
-    let (busy, _, _): (i64, i64, i64) = sqlx::query_as("PRAGMA wal_checkpoint(TRUNCATE)")
-        .fetch_one(&mut *conn)
-        .await?;
-    if busy != 0 {
-        return Err(sqlx::Error::Protocol(
-            "wal checkpoint busy after dropping sessions_legacy".into(),
-        ));
-    }
     if count > 0 {
         tracing::info!(count, "hashed legacy sessions");
     }
@@ -793,13 +825,17 @@ mod tests {
     }
 
     async fn wal_pool(path: &Path) -> SqlitePool {
+        wal_pool_timeout(path, db::BUSY_TIMEOUT).await
+    }
+
+    async fn wal_pool_timeout(path: &Path, busy: std::time::Duration) -> SqlitePool {
         let url = format!("sqlite://{}?mode=rwc", path.join("mewo.db").display());
         let options = SqliteConnectOptions::from_str(&url)
             .unwrap()
             .create_if_missing(true)
             .foreign_keys(true)
             .journal_mode(SqliteJournalMode::Wal)
-            .busy_timeout(db::BUSY_TIMEOUT);
+            .busy_timeout(busy);
         SqlitePoolOptions::new()
             .max_connections(1)
             .connect_with(options)
@@ -926,6 +962,58 @@ mod tests {
             !bytes_contain(&shm_path, TOKEN),
             "raw token still in {}",
             shm_path.display()
+        );
+    }
+
+    /// A reader blocks `wal_checkpoint(TRUNCATE)` after the legacy table is
+    /// dropped. The next start has to finish the wipe. A busy checkpoint must
+    /// not fail the call, or the process crash-loops with the token still in
+    /// the WAL.
+    #[tokio::test]
+    async fn a_busy_checkpoint_is_retried_until_the_raw_token_is_gone() {
+        let tmp = TempDir::new().unwrap();
+        let pool = wal_pool_timeout(tmp.path(), std::time::Duration::from_millis(50)).await;
+        apply_before_009(&pool).await;
+        user(&pool, "user", "matt").await;
+        const TOKEN: &str = "legacy-raw-token-busy-ckpt-7c1e9a04b6d258f3e0a1";
+        sqlx::query("INSERT INTO sessions (token, user_id, created_at) VALUES (?, 'user', 50)")
+            .bind(TOKEN)
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::migrate!("./migrations").run(&pool).await.unwrap();
+
+        let reader = wal_pool_timeout(tmp.path(), std::time::Duration::from_millis(50)).await;
+        let mut held = reader.begin().await.unwrap();
+        let _: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM sessions_legacy")
+            .fetch_one(&mut *held)
+            .await
+            .unwrap();
+
+        let first = upgrade_legacy(&pool, T0).await.unwrap();
+        assert_eq!(first, 1);
+        assert!(table_exists(&pool, "sessions_legacy_wipe").await);
+        let wal_path = tmp.path().join("mewo.db-wal");
+        assert!(
+            bytes_contain(&wal_path, TOKEN),
+            "the blocked checkpoint has to leave the token in the wal"
+        );
+
+        drop(held);
+        drop(reader);
+        assert_eq!(upgrade_legacy(&pool, T0 + 1).await.unwrap(), 0);
+        assert!(!table_exists(&pool, "sessions_legacy_wipe").await);
+        assert!(resolve(&pool, TOKEN, T0).await.unwrap().is_some());
+        drop(pool);
+
+        let db_path = tmp.path().join("mewo.db");
+        assert!(
+            !bytes_contain(&db_path, TOKEN),
+            "raw token still in the database"
+        );
+        assert!(
+            !bytes_contain(&wal_path, TOKEN),
+            "raw token still in the wal"
         );
     }
 
