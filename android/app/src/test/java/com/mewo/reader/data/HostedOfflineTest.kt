@@ -475,8 +475,7 @@ class HostedOfflineTest {
         client.indexHold.countDown()
         withTimeout(5_000) { reading.join() }
         downloading.join()
-        val files = hosted.walkTopDown().filter { it.isFile }.map { it.name }.toList()
-        assertEquals(emptyList<String>(), files)
+        assertEquals(emptyList<String>(), hostedFileNames())
     }
 
     @Test
@@ -714,7 +713,7 @@ class HostedOfflineTest {
                 while (
                     store.loadState.value !is LibraryLoaded ||
                     store.loadState.value.isRefreshing() ||
-                    File(context.filesDir, "hosted").walkTopDown().any { it.isFile }
+                    hostedFileNames().isNotEmpty()
                 ) {
                     delay(20)
                 }
@@ -763,8 +762,7 @@ class HostedOfflineTest {
         }
         client.hold.countDown()
         withTimeout(5_000) { reading.join() }
-        val files = hosted.walkTopDown().filter { it.isFile }.map { it.name }.toList()
-        assertEquals(emptyList<String>(), files)
+        assertEquals(emptyList<String>(), hostedFileNames())
     }
 
     @Test
@@ -832,6 +830,22 @@ class HostedOfflineTest {
             }
         }
         return store
+    }
+
+    /**
+     * Names of files still under the hosted cache. [File.walkTopDown] asserts that a
+     * directory stays a directory, and sign-out deletes that tree on another thread.
+     */
+    private fun hostedFileNames(): List<String> {
+        val names = mutableListOf<String>()
+        fun visit(dir: File) {
+            val children = dir.listFiles() ?: return
+            for (child in children) {
+                if (child.isFile) names.add(child.name) else visit(child)
+            }
+        }
+        visit(File(context.filesDir, "hosted"))
+        return names
     }
 
     private fun assertDiskOffMain() {
