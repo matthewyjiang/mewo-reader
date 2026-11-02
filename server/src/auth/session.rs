@@ -3,7 +3,7 @@
 
 use crate::error::ApiError;
 use sha2::{Digest, Sha256};
-use sqlx::{SqliteConnection, SqlitePool};
+use sqlx::{Connection, SqliteConnection, SqlitePool};
 use std::time::Duration;
 use uuid::Uuid;
 
@@ -147,27 +147,64 @@ pub async fn revoke_everyone(pool: &SqlitePool) -> Result<u64, ApiError> {
 }
 
 /// Deletes idle and absolutely expired rows.
-pub async fn prune(pool: &SqlitePool, now: i64) -> Result<u64, ApiError> {
+pub async fn prune(pool: &SqlitePool, now: i64) -> Result<u64, sqlx::Error> {
     let mut conn = pool.acquire().await?;
-    Ok(delete_expired(&mut conn, now).await?)
+    delete_expired(&mut conn, now).await
 }
 
 /// One-time: hash rows left in `sessions_legacy`, then drop that table.
-/// Idempotent. Returns 0 when the table is already gone.
+/// Idempotent. Returns 0 when the table is already gone. A legacy row whose
+/// user is gone is skipped. `secure_delete` and a truncating checkpoint keep
+/// the raw token out of the database file and the WAL.
 pub async fn upgrade_legacy(pool: &SqlitePool, now: i64) -> Result<u64, sqlx::Error> {
-    let mut tx = pool.begin().await?;
+    let mut conn = pool.acquire().await?;
+    // Already upgraded. Skip the write lock so a CLI command against a live
+    // server does not checkpoint or reserve the database on every call.
+    if !legacy_table(&mut conn).await? {
+        return Ok(0);
+    }
+    // Per connection, outside the transaction. On so DROP overwrites the
+    // legacy token pages. Off before this connection returns to the pool.
+    sqlx::query("PRAGMA secure_delete = ON")
+        .execute(&mut *conn)
+        .await?;
+    let result = upgrade_immediate(&mut conn, now).await;
+    let off = sqlx::query("PRAGMA secure_delete = OFF")
+        .execute(&mut *conn)
+        .await;
+    match (result, off) {
+        (Ok(count), Ok(_)) => Ok(count),
+        (Err(err), _) => Err(err),
+        (Ok(_), Err(err)) => Err(err),
+    }
+}
+
+async fn legacy_table(conn: &mut SqliteConnection) -> Result<bool, sqlx::Error> {
     let present: Option<i64> = sqlx::query_scalar(
         "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'sessions_legacy'",
     )
-    .fetch_optional(&mut *tx)
+    .fetch_optional(&mut *conn)
     .await?;
-    if present.is_none() {
+    Ok(present.is_some())
+}
+
+async fn upgrade_immediate(conn: &mut SqliteConnection, now: i64) -> Result<u64, sqlx::Error> {
+    // IMMEDIATE reserves the write lock before the read. A deferred
+    // transaction that already read `sqlite_master` gets "database is locked"
+    // at the insert, and `busy_timeout` does not apply to that failure.
+    let mut tx = conn.begin_with("BEGIN IMMEDIATE").await?;
+    if !legacy_table(&mut tx).await? {
         return Ok(0);
     }
-    let rows =
-        sqlx::query_as::<_, LegacyRow>("SELECT token, user_id, created_at FROM sessions_legacy")
-            .fetch_all(&mut *tx)
-            .await?;
+    // Orphans (a user deleted with foreign keys off) can never authenticate.
+    // Inserting them rolls this transaction back on every start.
+    let rows = sqlx::query_as::<_, LegacyRow>(
+        "SELECT l.token, l.user_id, l.created_at
+         FROM sessions_legacy l
+         JOIN users ON users.id = l.user_id",
+    )
+    .fetch_all(&mut *tx)
+    .await?;
     let count = u64::try_from(rows.len()).expect("session count fits in u64");
     let expires_at = now.saturating_add(duration_ms(ABSOLUTE));
     for row in rows {
@@ -189,6 +226,16 @@ pub async fn upgrade_legacy(pool: &SqlitePool, now: i64) -> Result<u64, sqlx::Er
         .execute(&mut *tx)
         .await?;
     tx.commit().await?;
+    // Checkpoint cannot run inside the transaction. TRUNCATE drops WAL frames
+    // that still hold the raw token. A busy result leaves those frames in place.
+    let (busy, _, _): (i64, i64, i64) = sqlx::query_as("PRAGMA wal_checkpoint(TRUNCATE)")
+        .fetch_one(&mut *conn)
+        .await?;
+    if busy != 0 {
+        return Err(sqlx::Error::Protocol(
+            "wal checkpoint busy after dropping sessions_legacy".into(),
+        ));
+    }
     if count > 0 {
         tracing::info!(count, "hashed legacy sessions");
     }
@@ -251,7 +298,7 @@ mod tests {
     use super::*;
     use crate::db;
     use sqlx::migrate::Migrate;
-    use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
+    use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions};
     use std::path::Path;
     use std::str::FromStr;
     use tempfile::TempDir;
@@ -651,5 +698,191 @@ mod tests {
         assert_eq!(upgrade_legacy(&pool, T0).await.unwrap(), 0);
         assert!(!table_exists(&pool, "sessions_legacy").await);
         assert_eq!(upgrade_legacy(&pool, T0 + 1).await.unwrap(), 0);
+    }
+
+    async fn wal_pool(path: &Path) -> SqlitePool {
+        let url = format!("sqlite://{}?mode=rwc", path.join("mewo.db").display());
+        let options = SqliteConnectOptions::from_str(&url)
+            .unwrap()
+            .create_if_missing(true)
+            .foreign_keys(true)
+            .journal_mode(SqliteJournalMode::Wal)
+            .busy_timeout(db::BUSY_TIMEOUT);
+        SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(options)
+            .await
+            .unwrap()
+    }
+
+    async fn apply_before_009(pool: &SqlitePool) {
+        let migrator = sqlx::migrate!("./migrations");
+        let mut conn = pool.acquire().await.unwrap();
+        Migrate::ensure_migrations_table(&mut *conn).await.unwrap();
+        for migration in migrator.iter() {
+            if migration.version < 9 {
+                Migrate::apply(&mut *conn, migration).await.unwrap();
+            }
+        }
+    }
+
+    /// A user deleted from the sqlite3 shell (foreign keys off) leaves a session
+    /// row. Copying that row fails the foreign key and rolls the upgrade back,
+    /// so the next start fails the same way.
+    #[tokio::test]
+    async fn upgrade_legacy_skips_an_orphaned_session() {
+        let tmp = TempDir::new().unwrap();
+        let pool = wal_pool(tmp.path()).await;
+        apply_before_009(&pool).await;
+        user(&pool, "user", "matt").await;
+        user(&pool, "ghost", "ghost").await;
+        sqlx::query(
+            "INSERT INTO sessions (token, user_id, created_at) VALUES ('kept-legacy', 'user', 50)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO sessions (token, user_id, created_at)
+             VALUES ('orphan-legacy', 'ghost', 51)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query("PRAGMA foreign_keys = OFF")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("DELETE FROM users WHERE id = 'ghost'")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("PRAGMA foreign_keys = ON")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let orphans: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM sessions WHERE user_id = 'ghost'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(orphans, 1, "the orphan row has to survive the delete");
+        sqlx::migrate!("./migrations").run(&pool).await.unwrap();
+
+        assert_eq!(upgrade_legacy(&pool, T0).await.unwrap(), 1);
+        assert!(!table_exists(&pool, "sessions_legacy").await);
+        assert!(resolve(&pool, "kept-legacy", T0).await.unwrap().is_some());
+        let ghost: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM sessions WHERE user_id = 'ghost'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(ghost, 0);
+        assert!(resolve(&pool, "orphan-legacy", T0).await.unwrap().is_none());
+        assert_eq!(upgrade_legacy(&pool, T0 + 1).await.unwrap(), 0);
+        drop(pool);
+        let db_path = tmp.path().join("mewo.db");
+        let wal_path = tmp.path().join("mewo.db-wal");
+        assert!(!bytes_contain(&db_path, "orphan-legacy"));
+        assert!(!bytes_contain(&wal_path, "orphan-legacy"));
+        assert!(!bytes_contain(&db_path, "kept-legacy"));
+        assert!(!bytes_contain(&wal_path, "kept-legacy"));
+    }
+
+    #[tokio::test]
+    async fn upgrade_legacy_erases_the_raw_token_from_the_database_and_wal() {
+        let tmp = TempDir::new().unwrap();
+        let pool = wal_pool(tmp.path()).await;
+        apply_before_009(&pool).await;
+        user(&pool, "user", "matt").await;
+        const TOKEN: &str = "legacy-raw-token-9f3c1a7e5b284d60a1c8e4f27b903d15";
+        sqlx::query("INSERT INTO sessions (token, user_id, created_at) VALUES (?, 'user', 50)")
+            .bind(TOKEN)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let mode: String = sqlx::query_scalar("PRAGMA journal_mode")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(mode.to_ascii_lowercase(), "wal");
+        sqlx::migrate!("./migrations").run(&pool).await.unwrap();
+
+        assert_eq!(upgrade_legacy(&pool, T0).await.unwrap(), 1);
+        assert!(resolve(&pool, TOKEN, T0).await.unwrap().is_some());
+        let secure: i64 = sqlx::query_scalar("PRAGMA secure_delete")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(secure, 0, "secure_delete must not stay on for the pool");
+        drop(pool);
+
+        let db_path = tmp.path().join("mewo.db");
+        let wal_path = tmp.path().join("mewo.db-wal");
+        let shm_path = tmp.path().join("mewo.db-shm");
+        assert!(
+            !bytes_contain(&db_path, TOKEN),
+            "raw token still in {}",
+            db_path.display()
+        );
+        assert!(
+            !bytes_contain(&wal_path, TOKEN),
+            "raw token still in {}",
+            wal_path.display()
+        );
+        assert!(
+            !bytes_contain(&shm_path, TOKEN),
+            "raw token still in {}",
+            shm_path.display()
+        );
+    }
+
+    fn bytes_contain(path: &Path, needle: &str) -> bool {
+        let Ok(bytes) = std::fs::read(path) else {
+            return false;
+        };
+        let needle = needle.as_bytes();
+        !needle.is_empty() && bytes.windows(needle.len()).any(|window| window == needle)
+    }
+
+    #[tokio::test]
+    async fn prepare_prunes_expired_sessions_at_startup() {
+        let tmp = TempDir::new().unwrap();
+        let config = crate::config::Config {
+            listen: "127.0.0.1:0".into(),
+            data_dir: tmp.path().to_path_buf(),
+            web_dir: None,
+            allow_signup: false,
+            max_epub_bytes: 1024 * 1024,
+            downloads_dir: None,
+            openlibrary_url: "https://openlibrary.org".into(),
+            auth: crate::config::AuthConfig::default(),
+            limits: crate::config::LimitsConfig {
+                min_free_bytes: 0,
+                ..crate::config::LimitsConfig::default()
+            },
+        };
+        let state = crate::prepare(config.clone()).await.unwrap();
+        user(&state.pool, "user", "matt").await;
+        let expired = issue(&state.pool, "user", T0).await.unwrap();
+        let live = issue(&state.pool, "user", db::now_ms()).await.unwrap();
+        // After both issues. `issue` itself deletes expired rows, so this
+        // update is what the next startup has to prune.
+        sqlx::query("UPDATE sessions SET expires_at = 1 WHERE token_hash = ?")
+            .bind(hash_token(&expired))
+            .execute(&state.pool)
+            .await
+            .unwrap();
+        drop(state);
+
+        let state = crate::prepare(config).await.unwrap();
+        let now = db::now_ms();
+        assert!(resolve(&state.pool, &expired, now).await.unwrap().is_none());
+        assert!(resolve(&state.pool, &live, now).await.unwrap().is_some());
+        let left: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM sessions")
+            .fetch_one(&state.pool)
+            .await
+            .unwrap();
+        assert_eq!(left, 1);
     }
 }

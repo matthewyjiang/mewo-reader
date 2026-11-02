@@ -166,6 +166,8 @@ pub async fn prepare(config: Config) -> Result<AppState, sqlx::Error> {
     let pool = db::connect(&config.database_url(), &data_dir).await?;
     // Hash rows the migration renamed to sessions_legacy. Idempotent.
     auth::session::upgrade_legacy(&pool, db::now_ms()).await?;
+    // Expired rows are otherwise deleted only on the next login.
+    auth::session::prune(&pool, db::now_ms()).await?;
     settings::seed(&pool, &config).await?;
     let upstream = requests::http::Upstream::new()
         .map_err(|message| sqlx::Error::Configuration(std::io::Error::other(message).into()))?;
