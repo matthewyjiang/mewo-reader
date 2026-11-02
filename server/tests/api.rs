@@ -6062,6 +6062,71 @@ async fn a_busy_password_change_does_not_spend_the_attempt() {
 }
 
 #[tokio::test]
+async fn a_busy_password_hash_does_not_spend_the_attempt() {
+    let mut auth = roomy_auth();
+    auth.login_ip = rate(1, 60);
+    auth.login_user = rate(1, 60);
+    let (state, app, _tmp) = auth_app(auth).await;
+    let hasher = Passwords::new(&roomy_auth());
+    let password_hash = hasher.hash("password1").await.unwrap();
+    sqlx::query(
+        "INSERT INTO users (id, username, username_norm, password_hash, created_at)
+         VALUES ('user', 'matt', 'matt', ?, 1)",
+    )
+    .bind(&password_hash)
+    .execute(&state.pool)
+    .await
+    .unwrap();
+    let token = session::issue(&state.pool, "user", mewo_server::db::now_ms())
+        .await
+        .unwrap();
+
+    // Verify succeeds. The next hash returns busy, which is the arm
+    // `max_concurrent = 0` never reaches.
+    state.passwords.fail_next_hash();
+    let (status, headers, bytes) = call(
+        &app,
+        with_ip(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/auth/password")
+                .header(header::CONTENT_TYPE, "application/json")
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .body(Body::from(
+                    json!({ "currentPassword": "password1", "newPassword": "password2" })
+                        .to_string(),
+                ))
+                .unwrap(),
+            "203.0.113.9",
+        ),
+    )
+    .await;
+    let body: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+    assert_eq!(body["error"], "Server is busy. Try again in a moment.");
+    assert_eq!(
+        headers.get(header::RETRY_AFTER).unwrap().to_str().unwrap(),
+        "1"
+    );
+    let stats = state.passwords.stats();
+    assert_eq!(stats.verifies, 1);
+    assert_eq!(stats.hashes, 0);
+    let (status, me) = empty_req(&app, "GET", "/v1/me", Some(&token)).await;
+    assert_eq!(status, StatusCode::OK, "{me}");
+
+    let (status, _, body) = post_auth(
+        &app,
+        "/v1/auth/login",
+        "203.0.113.9",
+        None,
+        "matt",
+        "password1",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+}
+
+#[tokio::test]
 async fn a_missing_user_still_verifies_and_a_taken_name_does_not_hash() {
     let (state, app, _tmp) = auth_app(roomy_auth()).await;
     let (status, _, body) = post_auth(

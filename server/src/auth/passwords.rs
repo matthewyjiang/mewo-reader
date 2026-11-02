@@ -3,7 +3,7 @@ use crate::error::ApiError;
 use argon2::password_hash::rand_core::{OsRng, RngCore};
 use argon2::password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString};
 use argon2::Argon2;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
@@ -34,6 +34,8 @@ struct Inner {
     dummy_verifies: AtomicU64,
     in_flight: AtomicUsize,
     peak_in_flight: AtomicUsize,
+    /// Tests. One shot. See [`Passwords::fail_next_hash`].
+    fail_next_hash: AtomicBool,
 }
 
 /// Decrements the in-flight count when the blocking task finishes, including
@@ -70,13 +72,25 @@ impl Passwords {
                 dummy_verifies: AtomicU64::new(0),
                 in_flight: AtomicUsize::new(0),
                 peak_in_flight: AtomicUsize::new(0),
+                fail_next_hash: AtomicBool::new(false),
             }),
         }
+    }
+
+    /// Tests. The next [`Self::hash`] returns [`ApiError::Busy`] before it
+    /// takes a permit, so a password change can pass verify and still hit the
+    /// busy hash arm. One shot. Production never calls this.
+    #[doc(hidden)]
+    pub fn fail_next_hash(&self) {
+        self.inner.fail_next_hash.store(true, Ordering::SeqCst);
     }
 
     /// New PHC string. Busy → [`ApiError::Busy`]. A panicked task or an
     /// argon2 error → [`ApiError::Internal`].
     pub async fn hash(&self, password: &str) -> Result<String, ApiError> {
+        if self.inner.fail_next_hash.swap(false, Ordering::SeqCst) {
+            return Err(ApiError::Busy);
+        }
         let permit = self.acquire().await?;
         let password = password.to_owned();
         let inner = Arc::clone(&self.inner);
