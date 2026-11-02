@@ -52,9 +52,9 @@ import com.mewo.reader.data.OfflineState
 import com.mewo.reader.data.OfflineSummary
 import com.mewo.reader.data.PostKind
 import com.mewo.reader.data.ProfileRecord
+import com.mewo.reader.data.SearchKind
 import com.mewo.reader.ui.catalog.CatalogEmpty
 import com.mewo.reader.ui.catalog.CatalogErrorRow
-import com.mewo.reader.ui.catalog.CatalogHeading
 import com.mewo.reader.ui.catalog.CatalogNotice
 import com.mewo.reader.ui.catalog.CatalogPhase
 import com.mewo.reader.ui.catalog.CatalogRow
@@ -65,9 +65,11 @@ import com.mewo.reader.ui.catalog.showTrendingHeader
 import com.mewo.reader.ui.components.AccountDrawer
 import com.mewo.reader.ui.components.AppTab
 import com.mewo.reader.ui.components.BrandMark
+import com.mewo.reader.ui.components.ErrorStatus
 import com.mewo.reader.ui.components.HomeTabBar
 import com.mewo.reader.ui.components.MewoAppBar
 import com.mewo.reader.ui.components.ProfileButton
+import com.mewo.reader.ui.components.SectionHeading
 import com.mewo.reader.ui.components.UnderlineTabs
 import com.mewo.reader.ui.feed.ActivityLine
 import com.mewo.reader.ui.profile.ProfileBar
@@ -76,7 +78,10 @@ import com.mewo.reader.ui.reader.CommentItem
 import com.mewo.reader.ui.reader.TimelinePost
 import com.mewo.reader.ui.reader.relativeTime
 import com.mewo.reader.ui.search.AccountHitRow
+import com.mewo.reader.ui.search.EmptyKind
 import com.mewo.reader.ui.search.SearchField
+import com.mewo.reader.ui.search.SearchSkeleton
+import com.mewo.reader.ui.search.sectionTitle
 import com.mewo.reader.ui.library.AddBookAnchor
 import com.mewo.reader.data.CommentStatus
 import com.mewo.reader.data.PostComment
@@ -277,7 +282,18 @@ class SurfaceScreenshots {
     fun likesEmpty() = shoot("likes-empty") { Surface { EmptyLikes() } }
 
     @Test
-    fun searchEmpty() = shoot("search-empty") { Surface { SearchEmpty() } }
+    fun searchEmpty() = shoot("search-empty") {
+        Surface {
+            SearchEmpty(
+                kind = SearchKind.Accounts,
+                empty = EmptyKind.NoMatches,
+                query = "ada",
+                canRequest = false,
+                onSearchCatalog = {},
+                onOpenLibrary = {},
+            )
+        }
+    }
 
     @Test
     fun postsEmpty() = shoot("posts-empty") { Surface { EmptyPosts() } }
@@ -302,6 +318,105 @@ class SurfaceScreenshots {
     fun searchPosts() = shoot("search-posts") {
         SearchChrome("posts") {
             passage(reposted = false, count = 0)
+        }
+    }
+
+    @Test
+    fun searchAccountsBrowse() = shoot("search-accounts-browse") {
+        SearchChrome("accounts", query = "") {
+            SectionHeading(sectionTitle(SearchKind.Accounts))
+            accountsMatching(SearchQuery, accountDirectory).forEach { account ->
+                AccountHitRow(account) {}
+            }
+        }
+    }
+
+    @Test
+    fun searchBooksBrowse() = shoot("search-books-browse") {
+        SearchChrome("books", query = "") {
+            SectionHeading(sectionTitle(SearchKind.Books))
+            shelfBook(sharedBook, offline = null)
+        }
+    }
+
+    @Test
+    fun searchPostsBrowse() = shoot("search-posts-browse") {
+        SearchChrome("posts", query = "") {
+            SectionHeading(sectionTitle(SearchKind.Posts))
+            passage(reposted = false, count = 0)
+        }
+    }
+
+    @Test
+    fun searchAccountsBrowseLoading() = shoot("search-accounts-browse-loading") {
+        SearchChrome("accounts", query = "") {
+            SectionHeading(sectionTitle(SearchKind.Accounts))
+            SearchSkeleton(SearchKind.Accounts)
+        }
+    }
+
+    @Test
+    fun searchBooksBrowseLoading() = shoot("search-books-browse-loading") {
+        SearchChrome("books", query = "") {
+            SectionHeading(sectionTitle(SearchKind.Books))
+            SearchSkeleton(SearchKind.Books)
+        }
+    }
+
+    @Test
+    fun searchPostsBrowseLoading() = shoot("search-posts-browse-loading") {
+        SearchChrome("posts", query = "") {
+            SectionHeading(sectionTitle(SearchKind.Posts))
+            SearchSkeleton(SearchKind.Posts)
+        }
+    }
+
+    @Test
+    fun searchAccountsNothingYet() = shoot("search-accounts-nothing-yet") {
+        SearchChrome("accounts", query = "") {
+            SectionHeading(sectionTitle(SearchKind.Accounts))
+            browseEmpty(SearchKind.Accounts, EmptyKind.NothingYet, canRequest = false)
+        }
+    }
+
+    @Test
+    fun searchBooksNothingYet() = shoot("search-books-nothing-yet") {
+        SearchChrome("books", query = "", tabs = searchTabs(hosted = true, canRequest = true)) {
+            SectionHeading(sectionTitle(SearchKind.Books))
+            browseEmpty(SearchKind.Books, EmptyKind.NothingYet, canRequest = true)
+        }
+    }
+
+    @Test
+    fun searchPostsNothingYet() = shoot("search-posts-nothing-yet") {
+        SearchChrome("posts", query = "") {
+            SectionHeading(sectionTitle(SearchKind.Posts))
+            browseEmpty(SearchKind.Posts, EmptyKind.NothingYet, canRequest = false)
+        }
+    }
+
+    @Test
+    fun searchBooksNoMatches() = shoot("search-books-no-matches") {
+        SearchChrome("books", query = "dune", tabs = searchTabs(hosted = true, canRequest = true)) {
+            SearchEmpty(
+                kind = SearchKind.Books,
+                empty = EmptyKind.NoMatches,
+                query = "dune",
+                canRequest = true,
+                onSearchCatalog = {},
+                onOpenLibrary = {},
+            )
+        }
+    }
+
+    @Test
+    fun searchBrowseError() = shoot("search-browse-error") {
+        SearchChrome("accounts", query = "") {
+            ErrorStatus(
+                message = "Couldn't reach the server. Check your connection.",
+                onRetry = {},
+            )
+            SectionHeading(sectionTitle(SearchKind.Accounts))
         }
     }
 
@@ -597,7 +712,7 @@ private fun trendingPhase() = CatalogPhase.Loaded(CatalogPage(items = listOf(dun
 @Composable
 private fun CatalogHeader(query: String, phase: CatalogPhase) {
     if (showTrendingHeader(query, phase)) {
-        CatalogHeading("Trending on Open Library")
+        SectionHeading("Trending on Open Library")
     }
 }
 
@@ -756,6 +871,18 @@ private val duneInfo = WorkInfo(
     hasAcceptedEdition = true,
     rating = Rating(average = 4.2, count = 1000),
 )
+
+@Composable
+private fun browseEmpty(kind: SearchKind, empty: EmptyKind, canRequest: Boolean) {
+    SearchEmpty(
+        kind = kind,
+        empty = empty,
+        query = "",
+        canRequest = canRequest,
+        onSearchCatalog = {},
+        onOpenLibrary = {},
+    )
+}
 
 @Composable
 private fun Surface(content: @Composable () -> Unit) {

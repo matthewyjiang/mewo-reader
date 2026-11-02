@@ -39,6 +39,7 @@ class SearchViewModel(
     private val store: LibraryStore,
     private val memory: SearchKindMemory = MemorySearchKind(),
     private val catalogStore: CatalogStore = DisabledCatalogStore(),
+    now: () -> Long = System::currentTimeMillis,
 ) : ViewModel() {
     private val initialKind = rememberKind(memory.read(), store.hostedSocial, catalogStore.access.value)
     private val _state = MutableStateFlow(
@@ -57,6 +58,7 @@ class SearchViewModel(
         _state.update { it.copy(likes = likes, comments = comments) }
     }
 
+    private val browseMemo = BrowseMemo(now)
     private var searchJob: Job? = null
     private var generation = 0L
     private var session: String? = "local"
@@ -90,8 +92,9 @@ class SearchViewModel(
     }
 
     /**
-     * Shows [query] right away. The request waits [SEARCH_DEBOUNCE_MS], and a
-     * newer keystroke or tab cancels it. A response for another session or
+     * Shows [query] right away. A typed request waits [SEARCH_DEBOUNCE_MS], and a
+     * newer keystroke or tab cancels it. A blank query on a hosted account loads
+     * that tab's browse page with no debounce. A response for another session or
      * query is dropped. The catalog tab never asks `/v1/search`.
      */
     fun actOnCatalog(work: CatalogWork, onOpenBook: (String) -> Unit) {
@@ -115,6 +118,11 @@ class SearchViewModel(
             _state.update { it.copy(search = it.search.copy(query = query)) }
             return
         }
+        if (trimmed.isEmpty() && session != null && store.hostedSocial) {
+            _state.update { it.copy(search = it.search.copy(query = query)) }
+            showBrowse()
+            return
+        }
         val gen = ++generation
         searchJob?.cancel()
         pendingCursor = null
@@ -136,15 +144,23 @@ class SearchViewModel(
         if (kind == SearchKind.Catalog && catalogStore.access.value != CatalogAccess.On) return
         if (kind == _state.value.search.kind) return
         memory.write(kind)
-        val gen = ++generation
-        searchJob?.cancel()
-        pendingCursor = null
         if (kind == SearchKind.Catalog) {
+            generation++
+            searchJob?.cancel()
+            pendingCursor = null
             catalog.show()
             _state.update { it.copy(search = it.search.copy(kind = kind, phase = SearchPhase.Idle)) }
             return
         }
         catalog.hide()
+        if (session != null && store.hostedSocial && _state.value.query.isBlank()) {
+            _state.update { it.copy(search = it.search.copy(kind = kind)) }
+            showBrowse()
+            return
+        }
+        val gen = ++generation
+        searchJob?.cancel()
+        pendingCursor = null
         val asking = _state.value.query.isNotBlank() && session != null
         _state.update {
             it.copy(
@@ -164,19 +180,50 @@ class SearchViewModel(
         generation++
         searchJob?.cancel()
         pendingCursor = null
+        browseMemo.clear()
         _state.update {
             it.copy(
                 search = it.search.copy(session = id, phase = SearchPhase.Idle),
                 result = if (id == null) SearchResult() else it.result,
             )
         }
+        if (id != null && store.hostedSocial &&
+            _state.value.query.isBlank() &&
+            _state.value.search.kind != SearchKind.Catalog
+        ) {
+            showBrowse()
+        }
+    }
+
+    /**
+     * Called when Search is opened. A failed or idle blank page is asked again.
+     * A browse page older than [BROWSE_REVALIDATE_MS] refreshes without a spinner.
+     */
+    fun refreshBrowse() {
+        if (!store.hostedSocial || session == null) return
+        val search = _state.value.search
+        if (search.kind == SearchKind.Catalog || search.query.isNotBlank()) return
+        when (search.phase) {
+            is SearchPhase.Loading -> return
+            SearchPhase.Idle, is SearchPhase.Failed -> showBrowse()
+            is SearchPhase.Loaded -> {
+                if (!browseMemo.stale(search.kind)) return
+                val gen = ++generation
+                searchJob?.cancel()
+                pendingCursor = null
+                arm(gen, "", search.kind, null, quiet = true)
+            }
+        }
     }
 
     fun retry() {
         val phase = _state.value.search.phase as? SearchPhase.Failed ?: return
-        val query = _state.value.query.trim()
         val id = session ?: return
-        if (query.isEmpty()) return
+        if (_state.value.query.trim().isEmpty()) {
+            showBrowse()
+            return
+        }
+        val query = _state.value.query.trim()
         val gen = ++generation
         searchJob?.cancel()
         _state.update {
@@ -192,9 +239,8 @@ class SearchViewModel(
         val phase = _state.value.search.phase as? SearchPhase.Loaded ?: return
         if (phase.more) return
         val cursor = phase.page.cursor() ?: return
-        val query = _state.value.query.trim()
         val id = session ?: return
-        if (query.isEmpty()) return
+        val query = _state.value.query.trim()
         val gen = ++generation
         searchJob?.cancel()
         pendingCursor = cursor
@@ -202,6 +248,38 @@ class SearchViewModel(
         searchJob = viewModelScope.launch {
             run(gen, id, query, _state.value.search.kind, cursor)
         }
+    }
+
+    /** The one place a blank hosted query means browse. */
+    private fun showBrowse() {
+        if (session == null) return
+        if (_state.value.search.kind == SearchKind.Catalog) return
+        if (!store.hostedSocial) {
+            _state.update {
+                it.copy(
+                    search = it.search.copy(phase = SearchPhase.Idle),
+                    result = SearchResult(),
+                )
+            }
+            return
+        }
+        val kind = _state.value.search.kind
+        val gen = ++generation
+        searchJob?.cancel()
+        pendingCursor = null
+        val hit = browseMemo.recall(kind)
+        if (hit != null) {
+            _state.update {
+                it.copy(search = it.search.copy(phase = SearchPhase.Loaded(hit, more = false)))
+            }
+            if (hit is SearchPage.Posts) social.show(hit.items.map { it.book.id }.distinct())
+            if (browseMemo.stale(kind)) arm(gen, "", kind, null, quiet = true)
+            return
+        }
+        _state.update {
+            it.copy(search = it.search.copy(phase = SearchPhase.Loading(previous = null)))
+        }
+        arm(gen, "", kind, null)
     }
 
     fun refreshSocial() = social.markStale()
@@ -213,12 +291,19 @@ class SearchViewModel(
 
     fun toggleRepost(bookId: String, postId: String) = social.toggleRepost(bookId, postId)
 
-    private fun arm(gen: Long, query: String, kind: SearchKind, cursor: String?) {
+    private fun arm(
+        gen: Long,
+        query: String,
+        kind: SearchKind,
+        cursor: String?,
+        quiet: Boolean = false,
+    ) {
         val requestSession = session ?: return
         pendingCursor = cursor
+        val wait = if (quiet || query.isEmpty()) 0L else SEARCH_DEBOUNCE_MS
         searchJob = viewModelScope.launch {
-            delay(SEARCH_DEBOUNCE_MS)
-            run(gen, requestSession, query, kind, cursor)
+            delay(wait)
+            run(gen, requestSession, query, kind, cursor, quiet)
         }
     }
 
@@ -228,6 +313,7 @@ class SearchViewModel(
         query: String,
         kind: SearchKind,
         cursor: String?,
+        quiet: Boolean = false,
     ) {
         if (!current(gen, requestSession, query, kind)) return
         try {
@@ -236,6 +322,7 @@ class SearchViewModel(
                 if (!current(gen, requestSession, query, kind)) return
                 if (page.kind() != kind) return
                 val merged = if (cursor != null) append(visiblePage(_state.value.search), page) else page
+                if (cursor == null && query.isEmpty()) browseMemo.remember(kind, merged)
                 _state.update {
                     it.copy(search = it.search.copy(phase = SearchPhase.Loaded(merged, more = false)))
                 }
@@ -257,11 +344,12 @@ class SearchViewModel(
             throw error
         } catch (error: Exception) {
             if (!current(gen, requestSession, query, kind)) return
+            if (quiet && visiblePage(_state.value.search) != null) return
             _state.update {
                 it.copy(
                     search = it.search.copy(
                         phase = SearchPhase.Failed(
-                            error.message ?: "Could not search.",
+                            searchErrorText(error),
                             visiblePage(it.search),
                         ),
                     ),

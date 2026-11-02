@@ -34,13 +34,13 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.RectangleShape
 import androidx.compose.ui.input.nestedscroll.nestedScroll
-import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.foundation.BorderStroke
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.mewo.reader.data.BookRequest
 import com.mewo.reader.data.CatalogWork
 import com.mewo.reader.ui.components.BindListTop
+import com.mewo.reader.ui.components.SectionHeading
 import com.mewo.reader.ui.components.HideOnScrollState
 import com.mewo.reader.ui.components.LoadWhenNearEnd
 import com.mewo.reader.ui.components.SpinnerStatus
@@ -85,7 +85,7 @@ fun CatalogResults(
         ) {
             val emptyPage = loaded != null && !loaded.more && page != null && page.items.isEmpty()
             if (showTrendingHeader(query, phase)) {
-                item(key = "trending") { CatalogHeading("Trending on Open Library") }
+                item(key = "trending") { SectionHeading("Trending on Open Library") }
             }
             if (failed != null) {
                 item(key = "error") { CatalogErrorRow(message = failed.message, onRetry = onRetry) }
@@ -138,27 +138,6 @@ fun CatalogResults(
                 onDismiss = onCloseSheet,
             )
         }
-    }
-}
-
-@Composable
-internal fun CatalogHeading(title: String) {
-    Column(Modifier.fillMaxWidth()) {
-        Box(
-            modifier = Modifier
-                .fillMaxWidth()
-                .height(44.dp)
-                .padding(horizontal = 16.dp),
-            contentAlignment = Alignment.CenterStart,
-        ) {
-            Text(
-                text = title,
-                style = MaterialTheme.typography.titleSmall,
-                fontWeight = FontWeight.Bold,
-                color = MaterialTheme.colorScheme.onBackground,
-            )
-        }
-        HorizontalDivider(color = MaterialTheme.colorScheme.outline, thickness = 0.6.dp)
     }
 }
 

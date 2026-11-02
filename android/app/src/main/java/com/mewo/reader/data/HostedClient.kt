@@ -249,10 +249,12 @@ open class HostedClient(
 
     fun search(session: HostedSession, query: String, kind: SearchKind, cursor: String?): SearchPage {
         if (kind == SearchKind.Catalog) error("Catalog does not use /v1/search.")
-        val q = android.net.Uri.encode(query)
         val type = android.net.Uri.encode(kind.wire)
+        val trimmed = query.trim()
+        // A blank query is browse. The server treats a missing `q` as empty.
+        val q = if (trimmed.isEmpty()) "" else "q=${android.net.Uri.encode(trimmed)}&"
         val cursorPart = if (cursor.isNullOrEmpty()) "" else "&cursor=${android.net.Uri.encode(cursor)}"
-        return get(session, "/v1/search?q=$q&type=$type$cursorPart")
+        return get(session, "/v1/search?${q}type=$type$cursorPart")
     }
 
     open fun me(session: HostedSession): Me = get(session, "/v1/me")

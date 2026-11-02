@@ -9,6 +9,7 @@ import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.collectIsFocusedAsState
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -29,6 +30,7 @@ import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -38,6 +40,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.SolidColor
@@ -75,6 +78,7 @@ import com.mewo.reader.ui.catalog.catalogQuery
 import com.mewo.reader.ui.components.Avatar
 import com.mewo.reader.ui.components.BindListTop
 import com.mewo.reader.ui.components.ErrorStatus
+import com.mewo.reader.ui.components.SectionHeading
 import com.mewo.reader.ui.components.HideOnScrollState
 import com.mewo.reader.ui.components.LoadWhenNearEnd
 import com.mewo.reader.ui.components.MewoAppBar
@@ -94,6 +98,7 @@ fun SearchScreen(
     onOpenPost: (bookId: String, postId: String) -> Unit,
     onOpenAccount: () -> Unit,
     onOpenProfile: (handle: String, name: String) -> Unit,
+    onOpenLibrary: () -> Unit,
     hideOnScroll: HideOnScrollState,
 ) {
     val state by viewModel.state.collectAsStateWithLifecycle()
@@ -109,7 +114,10 @@ fun SearchScreen(
     val keyboard = LocalSoftwareKeyboardController.current
     val view = LocalView.current
     LaunchedEffect(Unit) { focus.requestFocus() }
-    LaunchedEffect(Unit) { viewModel.refreshSocial() }
+    LaunchedEffect(Unit) {
+        viewModel.refreshSocial()
+        viewModel.refreshBrowse()
+    }
     DisposableEffect(Unit) {
         onDispose {
             focusManager.clearFocus(force = true)
@@ -163,8 +171,9 @@ fun SearchScreen(
                 catalogState.phase is CatalogPhase.Failed ||
                 (catalogState.phase as? CatalogPhase.Loaded)?.page?.items?.isEmpty() == true
             )
+        val browse = hosted && isBrowse(search) && search.session != null
         hideOnScroll.ShowWhenIdle(
-            if (onCatalog) catalogIdle else state.query.isBlank() || page == null || page.isBlank(),
+            if (onCatalog) catalogIdle else page == null || page.isBlank(),
         )
         if (onCatalog) {
             CatalogResults(
@@ -197,13 +206,17 @@ fun SearchScreen(
                 .fillMaxWidth()
                 .nestedScroll(hideOnScroll.connection),
         ) {
-            if (loading || more) {
-                item(key = "status-loading") { SpinnerStatus() }
-            }
             failed?.let { error ->
                 item(key = "status-error") {
                     ErrorStatus(message = error.error, onRetry = viewModel::retry)
                 }
+            }
+            if (browse) {
+                item(key = "heading") { SectionHeading(sectionTitle(search.kind)) }
+            }
+            when {
+                loading && page == null -> item(key = "skeleton") { SearchSkeleton(search.kind) }
+                loading || more -> item(key = "status-loading") { SpinnerStatus() }
             }
             when (page) {
                 is SearchPage.Accounts -> items(page.items, key = { "account-${it.username}" }) { account ->
@@ -238,8 +251,18 @@ fun SearchScreen(
                 }
                 null -> Unit
             }
-            if (showNoMatches(search)) {
-                item(key = "empty") { SearchEmpty() }
+            when (val empty = emptyKind(search)) {
+                EmptyKind.None -> Unit
+                else -> item(key = "empty") {
+                    SearchEmpty(
+                        kind = search.kind,
+                        empty = empty,
+                        query = search.query,
+                        canRequest = canRequest,
+                        onSearchCatalog = { viewModel.setKind(SearchKind.Catalog) },
+                        onOpenLibrary = onOpenLibrary,
+                    )
+                }
             }
         }
         commentTarget?.let { target ->
@@ -408,12 +431,53 @@ private fun SearchPost(
 }
 
 @Composable
-internal fun SearchEmpty() {
-    Text(
-        text = "No matches",
-        style = MaterialTheme.typography.headlineLarge,
-        modifier = Modifier.padding(horizontal = 28.dp, vertical = 48.dp),
-    )
+internal fun SearchEmpty(
+    kind: SearchKind,
+    empty: EmptyKind,
+    query: String,
+    canRequest: Boolean,
+    onSearchCatalog: () -> Unit,
+    onOpenLibrary: () -> Unit,
+) {
+    Column(Modifier.padding(horizontal = 28.dp, vertical = 48.dp)) {
+        Text(
+            text = emptyCopy(kind, empty, query),
+            style = MaterialTheme.typography.headlineLarge,
+        )
+        if (kind == SearchKind.Books && empty == EmptyKind.NoMatches && canRequest) {
+            Spacer(Modifier.height(20.dp))
+            TextButton(
+                onClick = onSearchCatalog,
+                modifier = Modifier
+                    .clip(RoundedCornerShape(999.dp))
+                    .background(MaterialTheme.colorScheme.primary)
+                    .padding(horizontal = 8.dp),
+            ) {
+                Text("Search the Catalog", color = MaterialTheme.colorScheme.onPrimary)
+            }
+        }
+        if (kind == SearchKind.Books && empty == EmptyKind.NothingYet && canRequest) {
+            Spacer(Modifier.height(20.dp))
+            TextButton(
+                onClick = onSearchCatalog,
+                contentPadding = PaddingValues(0.dp),
+            ) {
+                Text("Browse the Catalog", color = MaterialTheme.colorScheme.primary)
+            }
+        }
+        if (kind == SearchKind.Posts && empty == EmptyKind.NothingYet) {
+            Spacer(Modifier.height(20.dp))
+            TextButton(
+                onClick = onOpenLibrary,
+                modifier = Modifier
+                    .clip(RoundedCornerShape(999.dp))
+                    .background(MaterialTheme.colorScheme.primary)
+                    .padding(horizontal = 8.dp),
+            ) {
+                Text("Go to your books", color = MaterialTheme.colorScheme.onPrimary)
+            }
+        }
+    }
 }
 
 private fun quote(author: String?, title: String?, post: FeedPost): String {
