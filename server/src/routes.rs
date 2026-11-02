@@ -1,13 +1,14 @@
-use crate::auth::{check_password, new_token, normalize_username, Authed, ClientIp};
+use crate::auth::session;
+use crate::auth::{check_password, normalize_username, Authed, ClientIp};
 use crate::config::{request_body_limit, MAX_COVER_BYTES};
 use crate::db::now_ms;
 use crate::error::ApiError;
 use crate::feed::{slug, Post, Posts};
 use crate::library::{self, Staged};
 use crate::models::{
-    ActorRecord, AuthRequest, AuthResponse, BookRecord, BookRow, CommentIndex, CommentRecord,
-    CommentRow, CommentThread, FeedItem, FeedPage, InstanceInfo, LibrarySnapshot, LikeSet,
-    MeResponse, NewComment, PatchBook, ProfileBooks, ProfilePostRecord, ProfilePostsPage,
+    ActorRecord, AuthRequest, AuthResponse, BookRecord, BookRow, ChangePassword, CommentIndex,
+    CommentRecord, CommentRow, CommentThread, FeedItem, FeedPage, InstanceInfo, LibrarySnapshot,
+    LikeSet, MeResponse, NewComment, PatchBook, ProfileBooks, ProfilePostRecord, ProfilePostsPage,
     ProfileRecord, ProfileReplies, ProfileReplyRecord, ProfileReplyRow, ProfileRepostRecord,
     ProfileRepostsPage, RepostState, SearchKind, SearchPage, MAX_COMMENT_CHARS, MAX_POST_ID_CHARS,
 };
@@ -85,7 +86,7 @@ pub async fn register(
         }
         Err(err) => return Err(err.into()),
     }
-    let token = issue_session(&state, &id).await?;
+    let token = session::issue(&state.pool, &id, now_ms()).await?;
     Ok(Json(AuthResponse { token, username }))
 }
 
@@ -115,11 +116,11 @@ pub async fn login(
         }
         Err(err) => return Err(err),
     };
-    let Some((id, username, _)) = row.filter(|_| ok) else {
+    let Some((id, username, password_hash)) = row.filter(|_| ok) else {
         return Err(ApiError::Unauthorized("Wrong username or password.".into()));
     };
+    let token = session::issue_for_login(&state.pool, &id, now_ms(), &password_hash).await?;
     attempt.succeeded();
-    let token = issue_session(&state, &id).await?;
     Ok(Json(AuthResponse { token, username }))
 }
 
@@ -127,10 +128,67 @@ pub async fn logout(
     State(state): State<AppState>,
     authed: Authed,
 ) -> Result<axum::http::StatusCode, ApiError> {
-    sqlx::query("DELETE FROM sessions WHERE token = ?")
-        .bind(&authed.token)
-        .execute(&state.pool)
+    session::revoke(&state.pool, &authed.session_id).await?;
+    Ok(axum::http::StatusCode::NO_CONTENT)
+}
+
+pub async fn logout_all(
+    State(state): State<AppState>,
+    authed: Authed,
+) -> Result<axum::http::StatusCode, ApiError> {
+    let mut conn = state.pool.acquire().await?;
+    session::revoke_all(&mut conn, &authed.user_id, None).await?;
+    Ok(axum::http::StatusCode::NO_CONTENT)
+}
+
+pub async fn change_password(
+    State(state): State<AppState>,
+    authed: Authed,
+    ip: ClientIp,
+    Json(body): Json<ChangePassword>,
+) -> Result<axum::http::StatusCode, ApiError> {
+    check_password(&body.new_password)?;
+    let (_, norm) = normalize_username(&authed.username)?;
+    let attempt = state.throttle.login(ip, &norm)?;
+    let hash = sqlx::query_scalar::<_, String>("SELECT password_hash FROM users WHERE id = ?")
+        .bind(&authed.user_id)
+        .fetch_optional(&state.pool)
         .await?;
+    let Some(hash) = hash else {
+        return Err(ApiError::Unauthorized("Sign in first.".into()));
+    };
+    let ok = match state
+        .passwords
+        .verify_login(&body.current_password, Some(&hash))
+        .await
+    {
+        Ok(ok) => ok,
+        Err(ApiError::Busy) => {
+            attempt.abandon();
+            return Err(ApiError::Busy);
+        }
+        Err(err) => return Err(err),
+    };
+    if !ok {
+        return Err(ApiError::Forbidden("Wrong password.".into()));
+    }
+    let new_hash = match state.passwords.hash(&body.new_password).await {
+        Ok(hash) => hash,
+        Err(ApiError::Busy) => {
+            attempt.abandon();
+            return Err(ApiError::Busy);
+        }
+        Err(err) => return Err(err),
+    };
+    session::commit_password_change(
+        &state.pool,
+        &authed.user_id,
+        &authed.session_id,
+        &hash,
+        &new_hash,
+    )
+    .await?;
+    attempt.succeeded();
     Ok(axum::http::StatusCode::NO_CONTENT)
 }
 
@@ -1405,17 +1463,6 @@ pub async fn delete_comment(
     Ok(Json(
         thread_for(&state, &authed.user_id, &book.id, &post_id).await?,
     ))
-}
-
-async fn issue_session(state: &AppState, user_id: &str) -> Result<String, ApiError> {
-    let token = new_token();
-    sqlx::query("INSERT INTO sessions (token, user_id, created_at) VALUES (?, ?, ?)")
-        .bind(&token)
-        .bind(user_id)
-        .bind(now_ms())
-        .execute(&state.pool)
-        .await?;
-    Ok(token)
 }
 
 fn parse_book_id(id: &str) -> Result<Uuid, ApiError> {

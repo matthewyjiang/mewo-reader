@@ -72,11 +72,17 @@ Parsing reads at most `MAX_EPUB_TEXT_BYTES` (32 MiB) of inflated XML/XHTML per b
 
 ## Auth
 
-Username and password. Argon2 hashes. Opaque bearer tokens. A session lasts until logout.
+Username and password. Argon2 hashes. Opaque bearer tokens, 32 random bytes as hex. The database stores `sha256` of the token.
+
+A session goes idle 90 days after its last use, and it ends 365 days after it was issued. A request moves the last-use time at most once an hour. That does not extend the 365 days. Each account keeps at most 20 sessions. The next login drops the least recently used one past that.
 
 `POST /v1/auth/register` and `POST /v1/auth/login` take `{ "username", "password" }` and return `{ "token", "username" }`. Username is 3 to 32 characters, letters, digits, underscore, unique case-insensitively. Password is 8 to 256 characters.
 
-`GET /v1/version` and `GET /v1/instance` are public. Static web files are public. Every other `/v1` route needs `Authorization: Bearer <token>`, except `POST /v1/auth/register` and `POST /v1/auth/login`.
+`POST /v1/auth/logout` ends the caller's session. `POST /v1/auth/logout-all` ends every session for that account, including the caller's. Both return 204.
+
+`POST /v1/auth/password` takes `{ "currentPassword", "newPassword" }` and returns 204. The new password uses the same length rules. A wrong current password is 403 `Wrong password.` The caller's other sessions are revoked. This session stays signed in. Guesses use the login throttle. A busy password hasher (503) does not spend a guess.
+
+`GET /v1/version` and `GET /v1/instance` are public. Static web files are public. Every other `/v1` route needs `Authorization: Bearer <token>`, except `POST /v1/auth/register` and `POST /v1/auth/login`. An expired or unknown token is 401 `Sign in first.`
 
 ## Admin
 
@@ -89,6 +95,8 @@ mewo-server admin list
 mewo-server admin grant <username>
 mewo-server admin revoke <username>
 mewo-server admin create <username>
+mewo-server admin sessions revoke <username>
+mewo-server admin sessions revoke --all
 ```
 
 `grant` and `revoke` are idempotent and exit 0. `grant` prints `<username> is an admin.` `revoke` prints `<username> is not an admin.` An unknown account exits 1 with `No account named <username>.` A bad command prints usage on stderr and exits 2. A database error exits 2.
@@ -102,6 +110,8 @@ ada
 
 `create` inserts an admin even when signups are off. The password comes from stdin, never from argv or the environment. On a terminal it prompts with no echo. A pipe reads one line.
 
+`sessions revoke <username>` deletes that account's sessions and prints `revoked <count>.` An unknown account exits 1 with `No account named <username>.` `--all` deletes every session and prints the same line. They run with the server stopped, and against a live server: the database is WAL, and a statement waits up to 10 seconds for the write lock. A session left over from an older database is hashed first, then deleted.
+
 ```bash
 kubectl -n mewo exec deploy/mewo-server -- mewo-server admin list
 kubectl -n mewo exec deploy/mewo-server -- mewo-server admin grant matt
@@ -111,6 +121,8 @@ kubectl -n mewo exec -it deploy/mewo-server -- mewo-server admin create matt
 Migration `006_admin.sql` adds `users.is_admin` (default 0) and the `settings` table. Snapshot `/data` before deploying it. The previous binary ignores the extra column and table, but sqlx will not start on a database whose migration it does not know, so a rollback restores that snapshot.
 
 Migration `007_requests.sql` adds `book_requests` and `settings.secrets` (default `{}`). Snapshot `/data` before deploying it, same as 006.
+
+Migration `009_session_hardening.sql` replaces `sessions` with hashed tokens, a last-use time, and an absolute expiry. Startup hashes the old rows, so an existing sign-in keeps working and gets a new idle and absolute window. Snapshot `/data` before deploying it. The migration is one-way. A binary from before it will not open the database, and a rollback restores the snapshot.
 
 ## Requests
 
@@ -131,6 +143,8 @@ Prefix `/v1`.
 - `POST /auth/register`
 - `POST /auth/login`
 - `POST /auth/logout` → 204
+- `POST /auth/logout-all` → 204. Ends every session for this account, including this one
+- `POST /auth/password` `{ "currentPassword", "newPassword" }` → 204. A wrong current password is 403 `Wrong password.` A `newPassword` shorter than 8 characters is 400. Other sessions for this account are revoked
 - `GET /me` → `{ "username", "isAdmin", "canRequest" }`. `canRequest` is true when book requests are enabled
 - `GET /admin/settings` → `{ "allowSignup", "maxEpubBytes", "requestsEnabled", "prowlarrUrl", "sabnzbdUrl", "sabnzbdCategory", "downloadsDir", "secrets": { "prowlarrApiKey", "sabnzbdApiKey" } }`. The secret fields are booleans (set or not). `downloadsDir` is the `MEWO_DOWNLOADS_DIR` path, or null. Admin
 - `PATCH /admin/settings` JSON object of keys to change. Returns the full settings. An empty object is 200 and changes nothing. An unknown key, a wrong type, or an out-of-range value is 400 and names the key. `maxEpubBytes` must be 1 to 1024 MB (`maxEpubBytes must be 1 to 1024 MB.`). `prowlarrApiKey` and `sabnzbdApiKey` are a string or `null` and are not echoed back. `downloadsDir` is rejected

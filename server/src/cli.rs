@@ -34,6 +34,8 @@ Usage:
   mewo-server admin create <username>
   mewo-server admin reparse <book-id> [--dry-run] [--force]
   mewo-server admin reparse --all [--dry-run] [--force]
+  mewo-server admin sessions revoke <username>
+  mewo-server admin sessions revoke --all
 ";
 
 #[derive(Debug)]
@@ -50,6 +52,8 @@ pub enum AdminCommand {
     Revoke(String),
     Create(String),
     Reparse(ReparseArgs),
+    /// `None` is `--all`. A username cannot be `--all`.
+    RevokeSessions(Option<String>),
 }
 
 #[derive(Debug)]
@@ -84,6 +88,12 @@ fn parse_admin(args: &[String]) -> Result<Command, String> {
         [verb, name] if verb == "revoke" => AdminCommand::Revoke(name.clone()),
         [verb, name] if verb == "create" => AdminCommand::Create(name.clone()),
         [verb, rest @ ..] if verb == "reparse" => parse_reparse(rest)?,
+        [verb, action, flag] if verb == "sessions" && action == "revoke" && flag == "--all" => {
+            AdminCommand::RevokeSessions(None)
+        }
+        [verb, action, name] if verb == "sessions" && action == "revoke" => {
+            AdminCommand::RevokeSessions(Some(name.clone()))
+        }
         _ => return Err(USAGE.to_string()),
     };
     Ok(Command::Admin(command))
@@ -131,6 +141,12 @@ pub async fn run(
             return 2;
         }
     };
+    // Same upgrade as `prepare`, so revoke works before the server has started
+    // on this binary. A second call finds no legacy table and returns 0.
+    if let Err(error) = crate::auth::session::upgrade_legacy(&pool, crate::db::now_ms()).await {
+        let _ = writeln!(err, "{error}");
+        return 2;
+    }
     match dispatch(&pool, config, cmd, stdin, out, err).await {
         Ok(code) => code,
         Err(error) => {
@@ -154,6 +170,7 @@ async fn dispatch(
         AdminCommand::Revoke(name) => change(pool, &name, false, out, err).await,
         AdminCommand::Create(name) => create(pool, &name, stdin, out, err).await,
         AdminCommand::Reparse(args) => reparse(pool, config, args, out, err).await,
+        AdminCommand::RevokeSessions(name) => revoke_sessions(pool, name, out, err).await,
     }
 }
 
@@ -260,6 +277,31 @@ fn reparse_code(reports: &[Report]) -> i32 {
         1
     } else {
         0
+    }
+}
+
+async fn revoke_sessions(
+    pool: &SqlitePool,
+    name: Option<String>,
+    out: &mut dyn Write,
+    err: &mut dyn Write,
+) -> Result<i32, io::Error> {
+    let result = match &name {
+        Some(name) => match crate::auth::session::revoke_username(pool, name).await {
+            Err(ApiError::NotFound) => {
+                writeln!(err, "No account named {name}.")?;
+                return Ok(1);
+            }
+            other => other,
+        },
+        None => crate::auth::session::revoke_everyone(pool).await,
+    };
+    match result {
+        Ok(count) => {
+            writeln!(out, "revoked {count}.")?;
+            Ok(0)
+        }
+        Err(error) => Ok(user_or_db(error, err)),
     }
 }
 
@@ -442,6 +484,16 @@ mod tests {
             Ok(Command::Admin(AdminCommand::Create(name))) => assert_eq!(name, "matt"),
             other => panic!("{other:?}"),
         }
+        match parse(words(&["admin", "sessions", "revoke", "matt"])) {
+            Ok(Command::Admin(AdminCommand::RevokeSessions(Some(name)))) => {
+                assert_eq!(name, "matt")
+            }
+            other => panic!("{other:?}"),
+        }
+        assert!(matches!(
+            parse(words(&["admin", "sessions", "revoke", "--all"])),
+            Ok(Command::Admin(AdminCommand::RevokeSessions(None)))
+        ));
         assert!(parse(words(&["nope"])).is_err());
         assert!(parse(words(&["admin"])).is_err());
         assert!(parse(words(&["admin", "grant"])).is_err());
@@ -466,6 +518,10 @@ mod tests {
         assert!(parse(words(&["admin", "reparse", "--dry-run"])).is_err());
         assert!(parse(words(&["admin", "reparse", "--all", "book"])).is_err());
         assert!(parse(words(&["admin", "reparse", "book", "--nope"])).is_err());
+        assert!(parse(words(&["admin", "sessions"])).is_err());
+        assert!(parse(words(&["admin", "sessions", "revoke"])).is_err());
+        assert!(parse(words(&["admin", "sessions", "revoke", "matt", "extra"])).is_err());
+        assert!(parse(words(&["admin", "sessions", "revoke", "--all", "matt"])).is_err());
     }
 
     #[tokio::test]
@@ -688,5 +744,133 @@ mod tests {
         let bytes = response.into_body().collect().await.unwrap().to_bytes();
         let me: Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(me["isAdmin"], true);
+    }
+
+    #[tokio::test]
+    async fn sessions_revoke_counts_one_user_or_everyone() {
+        let tmp = TempDir::new().unwrap();
+        let mut open = config_at(tmp.path());
+        open.allow_signup = true;
+        let app = build(open).await.unwrap();
+        let (status, body) = post_json(
+            &app,
+            "/v1/auth/register",
+            json!({ "username": "matt", "password": "password1" }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let matt = body["token"].as_str().unwrap().to_string();
+        let (status, body) = post_json(
+            &app,
+            "/v1/auth/login",
+            json!({ "username": "matt", "password": "password1" }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let matt_again = body["token"].as_str().unwrap().to_string();
+        let (status, body) = post_json(
+            &app,
+            "/v1/auth/register",
+            json!({ "username": "ada", "password": "password1" }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let ada = body["token"].as_str().unwrap().to_string();
+
+        let (code, out, err) = cli(
+            tmp.path(),
+            AdminCommand::RevokeSessions(Some("matt".into())),
+            "",
+        )
+        .await;
+        assert_eq!(code, 0, "{err}");
+        assert_eq!(out, "revoked 2.\n");
+        assert_eq!(me_status(&app, &matt).await, StatusCode::UNAUTHORIZED);
+        assert_eq!(me_status(&app, &matt_again).await, StatusCode::UNAUTHORIZED);
+        assert_eq!(me_status(&app, &ada).await, StatusCode::OK);
+
+        let (code, out, err) = cli(
+            tmp.path(),
+            AdminCommand::RevokeSessions(Some("nobody".into())),
+            "",
+        )
+        .await;
+        assert_eq!(code, 1, "{out}");
+        assert_eq!(err, "No account named nobody.\n");
+
+        let (code, out, err) = cli(tmp.path(), AdminCommand::RevokeSessions(None), "").await;
+        assert_eq!(code, 0, "{err}");
+        assert_eq!(out, "revoked 1.\n");
+        assert_eq!(me_status(&app, &ada).await, StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn sessions_revoke_all_hashes_legacy_rows_before_deleting() {
+        let tmp = TempDir::new().unwrap();
+        let url = format!("sqlite://{}?mode=rwc", tmp.path().join("mewo.db").display());
+        let pool = sqlx::SqlitePool::connect(&url).await.unwrap();
+        let migrator = sqlx::migrate!("./migrations");
+        let mut conn = pool.acquire().await.unwrap();
+        sqlx::migrate::Migrate::ensure_migrations_table(&mut *conn)
+            .await
+            .unwrap();
+        for migration in migrator.iter() {
+            if migration.version < 9 {
+                sqlx::migrate::Migrate::apply(&mut *conn, migration)
+                    .await
+                    .unwrap();
+            }
+        }
+        drop(conn);
+        sqlx::query(
+            "INSERT INTO users (id, username, username_norm, password_hash, created_at)
+             VALUES ('user', 'matt', 'matt', 'x', 1)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO sessions (token, user_id, created_at) VALUES ('legacy-token', 'user', 50)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::migrate!("./migrations").run(&pool).await.unwrap();
+        drop(pool);
+
+        let (code, out, err) = cli(tmp.path(), AdminCommand::RevokeSessions(None), "").await;
+        assert_eq!(code, 0, "{err}");
+        assert_eq!(out, "revoked 1.\n");
+
+        let pool = crate::db::connect(&url, tmp.path()).await.unwrap();
+        let upgraded = crate::auth::session::upgrade_legacy(&pool, crate::db::now_ms())
+            .await
+            .unwrap();
+        assert_eq!(upgraded, 0);
+        let found = crate::auth::session::resolve(&pool, "legacy-token", crate::db::now_ms())
+            .await
+            .unwrap();
+        assert!(found.is_none());
+        let legacy: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'sessions_legacy'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(legacy, 0);
+    }
+
+    async fn me_status(app: &axum::Router, token: &str) -> StatusCode {
+        app.clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/me")
+                    .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+            .status()
     }
 }
