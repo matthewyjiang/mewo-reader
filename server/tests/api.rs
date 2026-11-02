@@ -2,6 +2,7 @@ use axum::body::{Body, Bytes};
 use axum::extract::ConnectInfo;
 use axum::http::{header, Request, StatusCode};
 use http_body_util::BodyExt;
+use mewo_server::auth::{session, Passwords};
 use mewo_server::build;
 use mewo_server::cli::{self, AdminCommand};
 use mewo_server::config::{
@@ -333,6 +334,151 @@ async fn register_login_me_logout() {
     assert_eq!(status, StatusCode::NO_CONTENT);
     let (status, _) = empty_req(&app, "GET", "/v1/me", Some(login_token)).await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
+    let (status, body) = empty_req(&app, "GET", "/v1/me", Some(&token)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["username"], "matt");
+}
+
+#[tokio::test]
+async fn sessions_expire_and_the_row_stores_only_the_hash() {
+    let (app, tmp) = app().await;
+    let token = register(&app, "matt", "password1").await;
+    let pool = open_db(tmp.path()).await;
+
+    let token_column: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM pragma_table_info('sessions') WHERE name = 'token'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(token_column, 0);
+    let raw: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM sessions WHERE token_hash = ?")
+        .bind(token.as_bytes())
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(raw, 0);
+    let hashed: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM sessions WHERE token_hash = ?")
+        .bind(session::hash_token(&token))
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(hashed, 1);
+
+    sqlx::query("UPDATE sessions SET expires_at = 1 WHERE token_hash = ?")
+        .bind(session::hash_token(&token))
+        .execute(&pool)
+        .await
+        .unwrap();
+    let (status, body) = empty_req(&app, "GET", "/v1/me", Some(&token)).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "{body}");
+    assert_eq!(body["error"], "Sign in first.");
+
+    let token = login(&app, "matt", "password1").await;
+    sqlx::query("UPDATE sessions SET last_seen_at = 1 WHERE token_hash = ?")
+        .bind(session::hash_token(&token))
+        .execute(&pool)
+        .await
+        .unwrap();
+    let (status, body) = empty_req(&app, "GET", "/v1/me", Some(&token)).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "{body}");
+    assert_eq!(body["error"], "Sign in first.");
+}
+
+#[tokio::test]
+async fn logout_all_revokes_every_session_for_that_account() {
+    let (app, _tmp) = app().await;
+    let (status, body) = empty_req(&app, "POST", "/v1/auth/logout-all", None).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "{body}");
+    assert_eq!(body["error"], "Sign in first.");
+    let (status, body) = json_req(
+        &app,
+        "POST",
+        "/v1/auth/password",
+        None,
+        json!({ "currentPassword": "password1", "newPassword": "password2" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "{body}");
+    assert_eq!(body["error"], "Sign in first.");
+
+    let matt = register(&app, "matt", "password1").await;
+    let matt_again = login(&app, "matt", "password1").await;
+    let ted = register(&app, "ted", "password1").await;
+    let (status, _) = empty_req(&app, "POST", "/v1/auth/logout-all", Some(&matt)).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let (status, body) = empty_req(&app, "GET", "/v1/me", Some(&matt)).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "{body}");
+    assert_eq!(body["error"], "Sign in first.");
+    let (status, _) = empty_req(&app, "GET", "/v1/me", Some(&matt_again)).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    let (status, body) = empty_req(&app, "GET", "/v1/me", Some(&ted)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["username"], "ted");
+}
+
+#[tokio::test]
+async fn password_change_keeps_this_session_and_revokes_the_others() {
+    let (app, _tmp) = app().await;
+    let matt = register(&app, "matt", "password1").await;
+    let other = login(&app, "matt", "password1").await;
+    let ted = register(&app, "ted", "password1").await;
+
+    let (status, body) = json_req(
+        &app,
+        "POST",
+        "/v1/auth/password",
+        Some(&matt),
+        json!({ "currentPassword": "wrongpass", "newPassword": "password2" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+    assert_eq!(body["error"], "Wrong password.");
+    let (status, body) = empty_req(&app, "GET", "/v1/me", Some(&matt)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    let (status, body) = json_req(
+        &app,
+        "POST",
+        "/v1/auth/password",
+        Some(&matt),
+        json!({ "currentPassword": "password1", "newPassword": "short" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert_eq!(body["error"], "Password must be at least 8 characters.");
+
+    let (status, _) = json_req(
+        &app,
+        "POST",
+        "/v1/auth/password",
+        Some(&matt),
+        json!({ "currentPassword": "password1", "newPassword": "password2" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let (status, body) = empty_req(&app, "GET", "/v1/me", Some(&matt)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["username"], "matt");
+    let (status, _) = empty_req(&app, "GET", "/v1/me", Some(&other)).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    let (status, body) = empty_req(&app, "GET", "/v1/me", Some(&ted)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["username"], "ted");
+
+    let fresh = login(&app, "matt", "password2").await;
+    let (status, body) = empty_req(&app, "GET", "/v1/me", Some(&fresh)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (status, body) = json_req(
+        &app,
+        "POST",
+        "/v1/auth/login",
+        None,
+        json!({ "username": "matt", "password": "password1" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "{body}");
+    assert_eq!(body["error"], "Wrong username or password.");
 }
 
 #[tokio::test]
@@ -2050,6 +2196,24 @@ fn db_options(path: &Path) -> SqliteConnectOptions {
         .busy_timeout(Duration::from_secs(5))
 }
 
+async fn insert_hashed_session(pool: &SqlitePool, id: &str, token: &str, user_id: &str) {
+    let now = mewo_server::db::now_ms();
+    let absolute = i64::try_from(session::ABSOLUTE.as_millis()).unwrap();
+    sqlx::query(
+        "INSERT INTO sessions (id, token_hash, user_id, created_at, last_seen_at, expires_at)
+         VALUES (?, ?, ?, ?, ?, ?)",
+    )
+    .bind(id)
+    .bind(session::hash_token(token))
+    .bind(user_id)
+    .bind(now)
+    .bind(now)
+    .bind(now.saturating_add(absolute))
+    .execute(pool)
+    .await
+    .unwrap();
+}
+
 async fn open_db(path: &Path) -> SqlitePool {
     SqlitePoolOptions::new()
         .max_connections(1)
@@ -3231,12 +3395,7 @@ async fn backfill_indexes_unindexed_books_once() {
     .execute(&pool)
     .await
     .unwrap();
-    sqlx::query(
-        "INSERT INTO sessions (token, user_id, created_at) VALUES ('backfill-token', 'owner', 1)",
-    )
-    .execute(&pool)
-    .await
-    .unwrap();
+    insert_hashed_session(&pool, "backfill", "backfill-token", "owner").await;
     sqlx::query(
         "INSERT INTO books
          (id, user_id, title, author, handle, imported_at, post_count, progress_index, is_sample, shared, posts_indexed)
@@ -4115,12 +4274,7 @@ async fn backfill_lets_writers_through() {
     .execute(&pool)
     .await
     .unwrap();
-    sqlx::query(
-        "INSERT INTO sessions (token, user_id, created_at) VALUES ('writer-token', 'owner', 1)",
-    )
-    .execute(&pool)
-    .await
-    .unwrap();
+    insert_hashed_session(&pool, "writer", "writer-token", "owner").await;
     sqlx::query(
         "INSERT INTO books
          (id, user_id, title, author, handle, imported_at, post_count, progress_index, is_sample, shared, posts_indexed)
@@ -5786,6 +5940,125 @@ async fn a_busy_password_service_does_not_spend_the_attempt() {
     let stats = state.passwords.stats();
     assert_eq!(stats.hashes, 0);
     assert_eq!(stats.verifies, 0);
+}
+
+#[tokio::test]
+async fn password_guesses_share_the_login_throttle() {
+    let mut auth = roomy_auth();
+    auth.login_user = rate(2, 60);
+    auth.login_ip = rate(100, 30);
+    let (_state, app, _tmp) = auth_app(auth).await;
+    let (status, _, body) = post_auth(
+        &app,
+        "/v1/auth/register",
+        "203.0.113.7",
+        None,
+        "matt",
+        "password1",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let token = body["token"].as_str().unwrap();
+
+    let (status, body) = json_req(
+        &app,
+        "POST",
+        "/v1/auth/password",
+        Some(token),
+        json!({ "currentPassword": "password1", "newPassword": "short" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert_eq!(body["error"], "Password must be at least 8 characters.");
+
+    for n in 0..2 {
+        let (status, body) = json_req(
+            &app,
+            "POST",
+            "/v1/auth/password",
+            Some(token),
+            json!({ "currentPassword": "wrongpass", "newPassword": "password2" }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{n} {body}");
+        assert_eq!(body["error"], "Wrong password.");
+    }
+    let (status, headers, bytes) = call(
+        &app,
+        with_ip(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/auth/password")
+                .header(header::CONTENT_TYPE, "application/json")
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .body(Body::from(
+                    json!({ "currentPassword": "wrongpass", "newPassword": "password2" })
+                        .to_string(),
+                ))
+                .unwrap(),
+            "1.1.1.1",
+        ),
+    )
+    .await;
+    let body: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+    assert_limited(status, &headers, &body);
+    let (status, me) = empty_req(&app, "GET", "/v1/me", Some(token)).await;
+    assert_eq!(status, StatusCode::OK, "{me}");
+}
+
+#[tokio::test]
+async fn a_busy_password_change_does_not_spend_the_attempt() {
+    let mut auth = roomy_auth();
+    auth.max_concurrent = 0;
+    auth.queue_wait = Duration::from_millis(1);
+    auth.login_ip = rate(1, 60);
+    auth.login_user = rate(1, 60);
+    let (state, app, _tmp) = auth_app(auth).await;
+    let hasher = Passwords::new(&roomy_auth());
+    let password_hash = hasher.hash("password1").await.unwrap();
+    sqlx::query(
+        "INSERT INTO users (id, username, username_norm, password_hash, created_at)
+         VALUES ('user', 'matt', 'matt', ?, 1)",
+    )
+    .bind(&password_hash)
+    .execute(&state.pool)
+    .await
+    .unwrap();
+    let token = session::issue(&state.pool, "user", mewo_server::db::now_ms())
+        .await
+        .unwrap();
+
+    for n in 0..3 {
+        let (status, headers, bytes) = call(
+            &app,
+            with_ip(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/auth/password")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                    .body(Body::from(
+                        json!({ "currentPassword": "password1", "newPassword": "password2" })
+                            .to_string(),
+                    ))
+                    .unwrap(),
+                "203.0.113.9",
+            ),
+        )
+        .await;
+        let body: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{n} {body}");
+        assert_eq!(body["error"], "Server is busy. Try again in a moment.");
+        assert_eq!(
+            headers.get(header::RETRY_AFTER).unwrap().to_str().unwrap(),
+            "1"
+        );
+    }
+    let stats = state.passwords.stats();
+    assert_eq!(stats.hashes, 0);
+    assert_eq!(stats.verifies, 0);
+    let (status, me) = empty_req(&app, "GET", "/v1/me", Some(&token)).await;
+    assert_eq!(status, StatusCode::OK, "{me}");
 }
 
 #[tokio::test]

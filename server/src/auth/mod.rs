@@ -1,4 +1,5 @@
 pub mod passwords;
+pub mod session;
 pub mod throttle;
 
 pub use passwords::{PasswordStats, Passwords};
@@ -15,11 +16,11 @@ use sqlx::FromRow;
 pub struct Authed {
     pub user_id: String,
     pub username: String,
-    pub token: String,
     pub is_admin: bool,
+    pub session_id: String,
 }
 
-pub fn new_token() -> String {
+pub(super) fn new_token() -> String {
     let mut bytes = [0u8; 32];
     rand::thread_rng().fill_bytes(&mut bytes);
     hex::encode(bytes)
@@ -71,16 +72,7 @@ impl FromRequestParts<AppState> for Authed {
         let token = header
             .strip_prefix("Bearer ")
             .ok_or_else(|| ApiError::Unauthorized("Sign in first.".into()))?;
-        let row = sqlx::query_as::<_, Authed>(
-            "SELECT users.id AS user_id, users.username, sessions.token AS token,
-                    users.is_admin AS is_admin
-             FROM sessions
-             JOIN users ON users.id = sessions.user_id
-             WHERE sessions.token = ?",
-        )
-        .bind(token)
-        .fetch_optional(&state.pool)
-        .await?;
+        let row = session::resolve(&state.pool, token, crate::db::now_ms()).await?;
         row.ok_or_else(|| ApiError::Unauthorized("Sign in first.".into()))
     }
 }

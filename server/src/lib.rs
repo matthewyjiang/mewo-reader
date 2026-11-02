@@ -80,6 +80,8 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/auth/register", post(routes::register))
         .route("/v1/auth/login", post(routes::login))
         .route("/v1/auth/logout", post(routes::logout))
+        .route("/v1/auth/logout-all", post(routes::logout_all))
+        .route("/v1/auth/password", post(routes::change_password))
         .route("/v1/me", get(routes::me))
         .route("/v1/library", get(routes::library))
         .route(
@@ -162,6 +164,8 @@ pub async fn prepare(config: Config) -> Result<AppState, sqlx::Error> {
         .map_err(sqlx::Error::Io)?;
     let data_dir = config.data_dir.canonicalize().map_err(sqlx::Error::Io)?;
     let pool = db::connect(&config.database_url(), &data_dir).await?;
+    // Hash rows the migration renamed to sessions_legacy. Idempotent.
+    auth::session::upgrade_legacy(&pool, db::now_ms()).await?;
     settings::seed(&pool, &config).await?;
     let upstream = requests::http::Upstream::new()
         .map_err(|message| sqlx::Error::Configuration(std::io::Error::other(message).into()))?;

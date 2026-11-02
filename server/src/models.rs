@@ -110,6 +110,13 @@ pub struct AuthResponse {
     pub username: String,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChangePassword {
+    pub current_password: String,
+    pub new_password: String,
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MeResponse {
