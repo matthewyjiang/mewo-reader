@@ -96,7 +96,8 @@ struct MewoNav: View {
                 onOpenPost: { book, post in push(.reader(bookId: book, postId: post)) },
                 onOpenAccount: { withAnimation(.easeInOut(duration: 0.22)) { drawerOpen = true } },
                 onOpenProfile: { handle, name in push(.profile(handle: handle, name: name)) },
-                focusOnAppear: focusSearchOnAppear
+                focusOnAppear: focusSearchOnAppear,
+                onOpenHome: { goTab(.home) }
             )
         case .likes:
             LikesScreen(

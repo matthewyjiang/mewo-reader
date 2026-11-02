@@ -175,7 +175,6 @@ struct HomeFeedPage: Codable, Equatable, Sendable {
 
 let missingAccountCopy = "This account doesn't exist"
 let emptyFeedCopy = "Nothing here yet"
-let noMatchesCopy = "No matches"
 let searchDebounceNanos: UInt64 = 250_000_000
 
 func optimisticRepost(_ mark: RepostMark) -> RepostMark {

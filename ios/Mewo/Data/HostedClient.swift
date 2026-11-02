@@ -278,10 +278,12 @@ final class HostedClient: Sendable {
         if SearchTab(rawValue: type) == .catalog {
             throw CatalogError(reason: .notSearch, message: "Catalog is not a library search.")
         }
-        var items = [
-            URLQueryItem(name: "q", value: query),
-            URLQueryItem(name: "type", value: type),
-        ]
+        var items: [URLQueryItem] = []
+        let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !trimmed.isEmpty {
+            items.append(URLQueryItem(name: "q", value: trimmed))
+        }
+        items.append(URLQueryItem(name: "type", value: type))
         if let cursor, !cursor.isEmpty {
             items.append(URLQueryItem(name: "cursor", value: cursor))
         }
