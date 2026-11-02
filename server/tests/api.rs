@@ -6790,10 +6790,15 @@ async fn stored_posts(pool: &SqlitePool, book_id: &str) -> Vec<StoredPost> {
 fn double_headings(posts: &[StoredPost]) -> Vec<StoredPost> {
     let mut doubled = Vec::new();
     for post in posts {
-        doubled.push(post.clone());
         if post.kind == "Heading" {
-            doubled.push(post.clone());
+            // The pre-v0.1.15 duplicates are not the same string as the
+            // survivor ("HUMAN PAIN" beside "Human Pain"). The copy comes first
+            // so a reply on it has to snap forward, not onto the previous paragraph.
+            let mut extra = post.clone();
+            extra.text = extra.text.to_uppercase();
+            doubled.push(extra);
         }
+        doubled.push(post.clone());
     }
     for (index, post) in doubled.iter_mut().enumerate() {
         post.idx = index as i64;
@@ -6918,16 +6923,20 @@ async fn reparse_removes_duplicate_headings_and_keeps_every_anchor_on_the_same_t
     write_posts(&pool, &dir, &book_id, &doubled).await;
 
     let intro = indexes_of(&doubled, "1. Introductory");
+    let intro_dup = indexes_of(&doubled, "1. INTRODUCTORY");
     let heavens = indexes_of(&doubled, "Heaven");
+    let heaven_dups = indexes_of(&doubled, "HEAVEN");
     let pain = indexes_of(&doubled, "Pain text.");
+    assert_eq!(intro.len(), 1);
     assert_eq!(
-        intro.len(),
-        2,
-        "the pre-v0.1.15 feed lists the chapter twice"
+        intro_dup.len(),
+        1,
+        "the duplicate heading is a different string from the survivor"
     );
-    assert_eq!(heavens.len(), 2);
+    assert_eq!(heavens.len(), 1);
+    assert_eq!(heaven_dups.len(), 1);
     assert_eq!(pain.len(), 1);
-    let heading_dup = intro[1].to_string();
+    let heading_dup = intro_dup[0].to_string();
     let pain_id = pain[0].to_string();
     let matt_id: String = sqlx::query_scalar("SELECT id FROM users WHERE username = 'matt'")
         .fetch_one(&pool)
@@ -7002,7 +7011,7 @@ async fn reparse_removes_duplicate_headings_and_keeps_every_anchor_on_the_same_t
     sqlx::query("INSERT INTO book_progress (user_id, book_id, progress_index) VALUES (?, ?, ?)")
         .bind(&ada_id)
         .bind(&book_id)
-        .bind(heavens[1])
+        .bind(heaven_dups[0])
         .execute(&pool)
         .await
         .unwrap();
@@ -7012,6 +7021,7 @@ async fn reparse_removes_duplicate_headings_and_keeps_every_anchor_on_the_same_t
     assert_eq!(code, 0, "{out}{err}");
     assert!(out.contains(&book_id), "{out}");
     assert!(out.contains("would change"), "{out}");
+    assert!(out.contains("snapped "), "{out}");
     assert!(!out.contains(&simple_id), "{out}");
     assert_eq!(
         tokio::fs::read(dir.join("posts.json")).await.unwrap(),
@@ -7342,6 +7352,151 @@ async fn reparse_of_an_unknown_book_exits_1() {
     let (code, out, err) = admin_cli(tmp.path(), reparse_cmd(&["missing-book"]), "").await;
     assert_eq!(code, 1, "{out}{err}");
     assert_eq!(err, "No book with id missing-book.\n");
+}
+
+#[tokio::test]
+async fn reparse_all_reports_a_broken_book_and_continues() {
+    let (app, tmp) = app().await;
+    let matt = register(&app, "matt", "password1").await;
+    let epub = common::repeated_chapters(true);
+    let (status, book) = upload(&app, &matt, "Pain", "Lewis", &epub, None, false).await;
+    assert_eq!(status, StatusCode::OK, "{book}");
+    let book_id = book["id"].as_str().unwrap().to_string();
+    let pool = open_db(tmp.path()).await;
+    let matt_id: String = sqlx::query_scalar("SELECT id FROM users WHERE username = 'matt'")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    let dir = book_dir_for(&pool, tmp.path(), &book_id).await;
+    write_posts(
+        &pool,
+        &dir,
+        &book_id,
+        &double_headings(&stored_posts(&pool, &book_id).await),
+    )
+    .await;
+    sqlx::query(
+        "INSERT INTO books
+         (id, user_id, title, author, handle, imported_at, post_count, progress_index, is_sample, shared, posts_indexed, parser_rev)
+         VALUES ('bad-gap', ?, 'Gap', 'Ada', 'ada', 1, 2, 0, 0, 0, 1, 0)",
+    )
+    .bind(&matt_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO posts (book_id, idx, kind, chapter, text) VALUES ('bad-gap', 0, 'Body', 'I', 'first')",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO posts (book_id, idx, kind, chapter, text) VALUES ('bad-gap', 2, 'Body', 'I', 'skipped one')",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let (code, out, err) = admin_cli(tmp.path(), reparse_cmd(&["--all"]), "").await;
+    assert_eq!(code, 1, "{out}{err}");
+    assert!(
+        out.find("bad-gap").unwrap() < out.find(&book_id).unwrap(),
+        "the broken book is reported before the run moves on\n{out}"
+    );
+    assert!(out.contains("failed"), "{out}");
+    assert!(out.contains("changed"), "{out}");
+    let left: String =
+        sqlx::query_scalar("SELECT text FROM posts WHERE book_id = 'bad-gap' AND idx = 2")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(left, "skipped one");
+    let rev: i64 = sqlx::query_scalar("SELECT parser_rev FROM books WHERE id = ?")
+        .bind(&book_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(rev, 1);
+}
+
+#[tokio::test]
+async fn reparse_rewrites_a_chapter_only_change() {
+    let (app, tmp) = app().await;
+    let matt = register(&app, "matt", "password1").await;
+    let epub = common::epub();
+    let (status, book) = upload(&app, &matt, "Simple", "Ada", &epub, None, false).await;
+    assert_eq!(status, StatusCode::OK, "{book}");
+    let book_id = book["id"].as_str().unwrap().to_string();
+    let pool = open_db(tmp.path()).await;
+    sqlx::query("UPDATE posts SET chapter = 'WRONG' WHERE book_id = ?")
+        .bind(&book_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE books SET parser_rev = 0 WHERE id = ?")
+        .bind(&book_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let fresh = mewo_server::epub::parse(std::io::Cursor::new(epub), MAX_COVER_BYTES).unwrap();
+
+    let (code, out, err) = admin_cli(tmp.path(), reparse_cmd(&[&book_id]), "").await;
+    assert_eq!(code, 0, "{out}{err}");
+    assert!(out.contains("changed"), "{out}");
+    let chapter: String =
+        sqlx::query_scalar("SELECT chapter FROM posts WHERE book_id = ? AND idx = 0")
+            .bind(&book_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(chapter, fresh.posts[0].chapter);
+    assert_ne!(chapter, "WRONG");
+    let parser_rev: i64 = sqlx::query_scalar("SELECT parser_rev FROM books WHERE id = ?")
+        .bind(&book_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(parser_rev, 1);
+}
+
+#[tokio::test]
+async fn reparse_rewrites_a_stale_posts_json_without_moving_posts() {
+    let (app, tmp) = app().await;
+    let matt = register(&app, "matt", "password1").await;
+    let epub = common::epub();
+    let (status, book) = upload(&app, &matt, "Simple", "Ada", &epub, None, false).await;
+    assert_eq!(status, StatusCode::OK, "{book}");
+    let book_id = book["id"].as_str().unwrap().to_string();
+    let pool = open_db(tmp.path()).await;
+    let dir = book_dir_for(&pool, tmp.path(), &book_id).await;
+    let text: String = sqlx::query_scalar("SELECT text FROM posts WHERE book_id = ? AND idx = 0")
+        .bind(&book_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    tokio::fs::write(dir.join("posts.json"), b"{\"posts\":[]}")
+        .await
+        .unwrap();
+
+    let (code, out, err) = admin_cli(tmp.path(), reparse_cmd(&[&book_id]), "").await;
+    assert_eq!(code, 0, "{out}{err}");
+    assert!(out.contains("unchanged"), "{out}");
+    let file = tokio::fs::read(dir.join("posts.json")).await.unwrap();
+    let file = String::from_utf8(file).unwrap();
+    assert_ne!(file, "{\"posts\":[]}");
+    assert!(file.contains(&text), "{file}");
+    let still: String = sqlx::query_scalar("SELECT text FROM posts WHERE book_id = ? AND idx = 0")
+        .bind(&book_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(still, text);
+    let revs: (i64, i64) = sqlx::query_as("SELECT feed_rev, parser_rev FROM books WHERE id = ?")
+        .bind(&book_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(revs, (0, 1));
 }
 
 async fn tmp_entries(data: &Path) -> Vec<String> {

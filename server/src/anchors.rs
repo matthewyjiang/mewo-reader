@@ -87,11 +87,13 @@ impl Remap {
 
 /// Myers diff over [`PostKey`] slices.
 ///
-/// Equal runs map 1:1. In a `Replace` hunk with equal-length sides, `old[i]`
-/// maps to `new[i]` (a relabelled heading). Anything still unmatched snaps to
-/// the surviving post with the same key when one exists — a diff may keep
-/// either copy of a repeated heading — and otherwise to the new index of the
-/// nearest preceding matched post, or 0 when the post is the first.
+/// Equal runs map 1:1. A `Replace` hunk maps positionally, clamped into the
+/// hunk's new side, so a relabelled heading lands on the heading that
+/// replaced it even when the hunk dropped a duplicate. Anything still
+/// unmatched snaps to the surviving post with the same key when one exists.
+/// An unmatched heading whose next old post maps to a new heading snaps
+/// forward to that heading. Otherwise it snaps to the nearest preceding
+/// matched post, or 0 when the post is the first.
 pub(crate) fn align(old: &[PostKey], new: &[PostKey]) -> Remap {
     let ops = capture_diff_slices(Algorithm::Myers, old, new);
     let mut assigned: Vec<Option<u32>> = vec![None; old.len()];
@@ -115,9 +117,10 @@ pub(crate) fn align(old: &[PostKey], new: &[PostKey]) -> Remap {
                 old_len,
                 new_index,
                 new_len,
-            } if old_len == new_len => {
+            } if new_len > 0 => {
                 for offset in 0..old_len {
-                    assigned[old_index + offset] = Some((new_index + offset) as u32);
+                    assigned[old_index + offset] =
+                        Some((new_index + offset.min(new_len - 1)) as u32);
                 }
             }
             _ => {}
@@ -140,7 +143,19 @@ pub(crate) fn align(old: &[PostKey], new: &[PostKey]) -> Remap {
         } else {
             None
         };
-        let snap = twin.unwrap_or_else(|| previous.unwrap_or(0));
+        let forward = if old[index].kind == PostKind::Heading {
+            assigned
+                .get(index + 1)
+                .copied()
+                .flatten()
+                .filter(|new_index| {
+                    new.get(*new_index as usize)
+                        .is_some_and(|post| post.kind == PostKind::Heading)
+                })
+        } else {
+            None
+        };
+        let snap = twin.or(forward).unwrap_or_else(|| previous.unwrap_or(0));
         let snap = if new.is_empty() { 0 } else { snap.min(last) };
         new_of.push(snap);
     }
@@ -408,6 +423,47 @@ mod tests {
         assert_eq!(remap.matched, 2);
         assert_eq!(remap.snapped, 0);
         assert_eq!(remap.heading_delta(&old, &new), (1, 1));
+    }
+
+    #[test]
+    fn different_case_duplicate_before_its_survivor_stays_on_that_heading() {
+        // Myers deletes the first copy. It must snap forward onto the heading,
+        // not back onto the previous chapter's last paragraph.
+        let old = [
+            heading("3. The Fall"),
+            body("Opening."),
+            heading("HUMAN PAIN"),
+            heading("Human Pain"),
+            body("Pain text."),
+        ];
+        let new = [
+            heading("3. The Fall"),
+            body("Opening."),
+            heading("Human Pain"),
+            body("Pain text."),
+        ];
+        let remap = align(&old, &new);
+        assert_eq!(remap.new_of, vec![0, 1, 2, 2, 3]);
+        assert_eq!(new[remap.new_of[2] as usize].text, "Human Pain");
+    }
+
+    #[test]
+    fn different_case_duplicate_in_a_shorter_replace_stays_on_that_heading() {
+        let old = [
+            body("prev chapter last paragraph"),
+            heading("1. INTRODUCTORY"),
+            heading("INTRODUCTORY"),
+            body("The problem of pain."),
+        ];
+        let new = [
+            body("prev chapter last paragraph"),
+            heading("1. Introductory"),
+            body("The problem of pain."),
+        ];
+        let remap = align(&old, &new);
+        assert_eq!(remap.new_of, vec![0, 1, 1, 2]);
+        assert_eq!(new[remap.new_of[1] as usize].text, "1. Introductory");
+        assert_eq!(new[remap.new_of[2] as usize].text, "1. Introductory");
     }
 
     #[test]

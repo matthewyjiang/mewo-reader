@@ -177,27 +177,43 @@ async fn reparse(
     } else {
         Mode::Apply
     };
-    let reports = match args.target {
+    match args.target {
         ReparseTarget::One(id) => match reparser.one(&id, mode, args.force).await {
-            Ok(report) => vec![report],
-            Err(error) => return Ok(explain_reparse(&id, error, err)),
+            Ok(report) => {
+                write_report(out, err, &report)?;
+                Ok(reparse_code(&[report]))
+            }
+            Err(error) => Ok(explain_reparse(&id, error, err)),
         },
-        ReparseTarget::All => match reparser.all(mode, args.force).await {
-            Ok(reports) => reports,
-            Err(error) => return Ok(user_or_db(error, err)),
-        },
-    };
-    for report in &reports {
-        writeln!(out, "{}", format_reparse(report))?;
-        if matches!(report.outcome, Outcome::Changed) {
-            writeln!(
-                err,
-                "{}: posts were renumbered. Reload the book. A phone with an offline copy still has the old post ids.",
-                report.book_id
-            )?;
+        ReparseTarget::All => {
+            let mut code = 0;
+            match reparser
+                .all(mode, args.force, |report| {
+                    write_report(out, err, report)?;
+                    if matches!(report.outcome, Outcome::Failed(_) | Outcome::Skipped(_)) {
+                        code = 1;
+                    }
+                    Ok(())
+                })
+                .await
+            {
+                Ok(()) => Ok(code),
+                Err(error) => Ok(user_or_db(error, err)),
+            }
         }
     }
-    Ok(reparse_code(&reports))
+}
+
+fn write_report(out: &mut dyn Write, err: &mut dyn Write, report: &Report) -> io::Result<()> {
+    writeln!(out, "{}", format_reparse(report))?;
+    if matches!(report.outcome, Outcome::Changed) {
+        writeln!(
+            err,
+            "{}: posts were renumbered. Reload the book. A phone with an offline copy still has the old post ids.",
+            report.book_id
+        )?;
+    }
+    Ok(())
 }
 
 fn explain_reparse(id: &str, error: ApiError, err: &mut dyn Write) -> i32 {
@@ -212,7 +228,7 @@ fn explain_reparse(id: &str, error: ApiError, err: &mut dyn Write) -> i32 {
 
 fn format_reparse(report: &Report) -> String {
     format!(
-        "{id}  {title}  {owner}  {old}->{new} posts  headings -{removed}/+{added}  anchors {anchors}  {outcome}",
+        "{id}  {title}  {owner}  {old}->{new} posts  headings -{removed}/+{added}  snapped {snapped}  anchors {anchors}  {outcome}",
         id = report.book_id,
         title = report.title,
         owner = report.owner,
@@ -220,6 +236,7 @@ fn format_reparse(report: &Report) -> String {
         new = report.new_posts,
         removed = report.headings_removed,
         added = report.headings_added,
+        snapped = report.snapped,
         anchors = report.anchors_moved.total(),
         outcome = outcome_label(&report.outcome),
     )

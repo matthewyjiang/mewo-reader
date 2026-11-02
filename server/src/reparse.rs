@@ -84,14 +84,20 @@ struct BookRef {
     owner: String,
     files_owner: String,
     posts_indexed: i64,
-    parser_rev: i64,
 }
 
 impl Reparser<'_> {
     /// Books with `parser_rev < PARSER_REV`, oldest first. `--force` includes
     /// a current revision. One book at a time, with [`search::BACKFILL_PAUSE`]
-    /// between them so a live server can take the write lock.
-    pub(crate) async fn all(&self, mode: Mode, force: bool) -> Result<Vec<Report>, ApiError> {
+    /// between them so a live server can take the write lock. Each report is
+    /// handed to `emit` as the book finishes. A per-book error is a `Failed`
+    /// report; the rest of the run continues.
+    pub(crate) async fn all(
+        &self,
+        mode: Mode,
+        force: bool,
+        mut emit: impl FnMut(&Report) -> std::io::Result<()>,
+    ) -> Result<(), ApiError> {
         let ids: Vec<String> = sqlx::query_scalar(
             "SELECT id FROM books
              WHERE posts_indexed = 1 AND (? = 1 OR parser_rev < ?)
@@ -101,14 +107,23 @@ impl Reparser<'_> {
         .bind(PARSER_REV)
         .fetch_all(self.pool)
         .await?;
-        let mut reports = Vec::with_capacity(ids.len());
         for (offset, id) in ids.iter().enumerate() {
-            reports.push(self.one(id, mode, force).await?);
+            let report = match self.one(id, mode, force).await {
+                Ok(report) => report,
+                Err(error) => {
+                    tracing::warn!(book_id = %id, error = %error, "reparse failed for a book");
+                    Report::failed(id, error.to_string())
+                }
+            };
+            emit(&report).map_err(|err| {
+                tracing::error!(error = %err, "could not print a reparse report");
+                ApiError::Internal
+            })?;
             if offset + 1 != ids.len() {
                 tokio::time::sleep(search::BACKFILL_PAUSE).await;
             }
         }
-        Ok(reports)
+        Ok(())
     }
 
     pub(crate) async fn one(
@@ -127,7 +142,7 @@ impl Reparser<'_> {
         if book.posts_indexed != 1 {
             return Ok(self.skipped(&book, 0, "not indexed"));
         }
-        let old_posts = load_posts(self.pool, &book.id).await?;
+        let (old_posts, seen_feed, seen_parser) = load_seen(self.pool, &book.id).await?;
         let path = book_dir(self.data_dir, &book.files_owner, &book.id).join("book.epub");
         let permit = self.parsers.acquire().await?;
         let parsed = match self.parsers.parse_owned(path, permit).await {
@@ -142,12 +157,17 @@ impl Reparser<'_> {
         let remap = anchors::align(&old_keys, &new_keys);
         let (headings_removed, headings_added) = remap.heading_delta(&old_keys, &new_keys);
         let changed = body_changed(&old_keys, &new_keys, &remap);
-        if old_keys == new_keys {
-            if matches!(mode, Mode::Apply) && book.parser_rev != PARSER_REV {
-                sqlx::query("UPDATE books SET parser_rev = ? WHERE id = ?")
-                    .bind(PARSER_REV)
-                    .bind(&book.id)
-                    .execute(self.pool)
+        if same_posts(&old_posts, &parsed.posts) {
+            if matches!(mode, Mode::Apply) {
+                let bytes = serde_json::to_vec(&Posts {
+                    posts: parsed.posts.clone(),
+                })
+                .map_err(|err| {
+                    tracing::error!(error = %err, "could not encode posts.json");
+                    ApiError::Internal
+                })?;
+                let dir = book_dir(self.data_dir, &book.files_owner, &book.id);
+                search::note_unchanged(self.pool, &dir, &book.id, &bytes, seen_feed, seen_parser)
                     .await?;
             }
             return Ok(Report {
@@ -201,6 +221,7 @@ impl Reparser<'_> {
                     remap: Some(&remap),
                     bump_feed_rev: true,
                     parser_rev: PARSER_REV,
+                    seen: Some((seen_feed, seen_parser)),
                 },
             )
             .await?;
@@ -226,7 +247,7 @@ impl Reparser<'_> {
         let row = sqlx::query_as::<_, BookRow>(
             "SELECT b.id, b.title, owner.username AS owner,
                     COALESCE(b.files_user_id, b.user_id) AS files_owner,
-                    b.posts_indexed, b.parser_rev
+                    b.posts_indexed
              FROM books b
              JOIN users owner ON owner.id = b.user_id
              WHERE b.id = ?",
@@ -240,7 +261,6 @@ impl Reparser<'_> {
             owner: row.owner,
             files_owner: row.files_owner,
             posts_indexed: row.posts_indexed,
-            parser_rev: row.parser_rev,
         }))
     }
 
@@ -279,6 +299,25 @@ impl Reparser<'_> {
     }
 }
 
+impl Report {
+    pub(crate) fn failed(book_id: &str, message: String) -> Self {
+        Self {
+            book_id: book_id.to_owned(),
+            title: String::new(),
+            owner: String::new(),
+            old_posts: 0,
+            new_posts: 0,
+            headings_removed: 0,
+            headings_added: 0,
+            matched: 0,
+            snapped: 0,
+            body_changed: 0,
+            anchors_moved: AnchorCounts::zero(),
+            outcome: Outcome::Failed(message),
+        }
+    }
+}
+
 #[derive(sqlx::FromRow)]
 struct BookRow {
     id: String,
@@ -286,7 +325,6 @@ struct BookRow {
     owner: String,
     files_owner: String,
     posts_indexed: i64,
-    parser_rev: i64,
 }
 
 #[derive(sqlx::FromRow)]
@@ -297,13 +335,22 @@ struct StoredPost {
     chapter: String,
 }
 
-async fn load_posts(pool: &SqlitePool, book_id: &str) -> Result<Vec<Post>, ApiError> {
+/// Posts and the book revisions, from one snapshot. The write later matches
+/// those revisions, so a second reparse built on the same rows refuses.
+async fn load_seen(pool: &SqlitePool, book_id: &str) -> Result<(Vec<Post>, i64, i64), ApiError> {
+    let mut tx = pool.begin().await?;
+    let (feed_rev, parser_rev): (i64, i64) =
+        sqlx::query_as("SELECT feed_rev, parser_rev FROM books WHERE id = ?")
+            .bind(book_id)
+            .fetch_one(&mut *tx)
+            .await?;
     let rows = sqlx::query_as::<_, StoredPost>(
         "SELECT idx, kind, text, chapter FROM posts WHERE book_id = ? ORDER BY idx ASC",
     )
     .bind(book_id)
-    .fetch_all(pool)
+    .fetch_all(&mut *tx)
     .await?;
+    tx.commit().await?;
     let mut posts = Vec::with_capacity(rows.len());
     for (expected, row) in rows.into_iter().enumerate() {
         if row.idx != expected as i64 {
@@ -317,7 +364,16 @@ async fn load_posts(pool: &SqlitePool, book_id: &str) -> Result<Vec<Post>, ApiEr
             chapter: row.chapter,
         });
     }
-    Ok(posts)
+    Ok((posts, feed_rev, parser_rev))
+}
+
+/// Kind, text, and chapter. Alignment still ignores chapter; this is only
+/// the "nothing to rewrite" check, so a chapter-only revision is not skipped.
+fn same_posts(old: &[Post], new: &[Post]) -> bool {
+    old.len() == new.len()
+        && old.iter().zip(new).all(|(left, right)| {
+            left.kind == right.kind && left.text == right.text && left.chapter == right.chapter
+        })
 }
 
 fn body_changed(old: &[PostKey], new: &[PostKey], remap: &Remap) -> u32 {
@@ -410,6 +466,20 @@ fn progress_moves(remap: &Remap, index: i64) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn chapter_only_is_not_the_same_feed() {
+        let post = Post {
+            id: "0".to_owned(),
+            kind: crate::feed::PostKind::Body,
+            text: "Hi".to_owned(),
+            chapter: "I".to_owned(),
+        };
+        let mut retitled = post.clone();
+        retitled.chapter = "II".to_owned();
+        assert!(same_posts(&[post.clone()], &[post.clone()]));
+        assert!(!same_posts(&[post], &[retitled]));
+    }
 
     #[test]
     fn body_guard_allows_five_and_refuses_the_sixth() {
