@@ -70,11 +70,25 @@ struct RealProbe {
 impl Probe for RealProbe {
     fn run(&self) -> Pin<Box<dyn Future<Output = Report> + Send + '_>> {
         Box::pin(async move {
-            // Together, so a hung check still finishes inside PROBE_TIMEOUT.
-            // A readiness probe that waits out both budgets blows a 3s kube timeout.
-            let (db, data_dir) = tokio::join!(db_ok(&self.pool), dir_writable(&self.data_dir));
+            // Each check is capped at PROBE_TIMEOUT, and they run together, so
+            // the handler waits out one budget. A stuck data directory still
+            // returns inside a 3s kube timeout.
+            let (db, data_dir) = tokio::join!(
+                db_ok(&self.pool),
+                within_timeout(PROBE_TIMEOUT, dir_writable(&self.data_dir))
+            );
             report(db, data_dir)
         })
+    }
+}
+
+async fn within_timeout(timeout: Duration, check: impl Future<Output = Check>) -> Check {
+    match tokio::time::timeout(timeout, check).await {
+        Ok(check) => check,
+        Err(_) => {
+            tracing::warn!("healthz data dir check timed out");
+            Check::Fail
+        }
     }
 }
 
@@ -93,6 +107,8 @@ fn report(db: Check, data_dir: Check) -> Report {
 #[derive(Clone)]
 pub struct Health {
     cached: Arc<Mutex<Option<(Instant, Report)>>>,
+    /// Held across a refresh so concurrent callers share one probe.
+    flight: Arc<tokio::sync::Mutex<()>>,
     probe: Arc<dyn Probe>,
 }
 
@@ -113,21 +129,32 @@ impl Health {
     fn from_probe(probe: impl Probe + 'static) -> Self {
         Self {
             cached: Arc::new(Mutex::new(None)),
+            flight: Arc::new(tokio::sync::Mutex::new(())),
             probe: Arc::new(probe),
         }
     }
 
     /// Cached for [`CACHE_FOR`] so an unauthenticated caller cannot turn each
-    /// hit into a database round-trip and a file create.
+    /// hit into a database round-trip and a file create. A refresh is one
+    /// flight: the lock is held across the probe, and the cache is checked
+    /// again after the lock so waiters reuse that result.
     pub async fn ready(&self) -> Report {
-        if let Some((at, report)) = self.lock().as_ref() {
-            if at.elapsed() < CACHE_FOR {
-                return report.clone();
-            }
+        if let Some(report) = self.fresh() {
+            return report;
+        }
+        let _flight = self.flight.lock().await;
+        if let Some(report) = self.fresh() {
+            return report;
         }
         let report = self.probe.run().await;
         *self.lock() = Some((Instant::now(), report.clone()));
         report
+    }
+
+    fn fresh(&self) -> Option<Report> {
+        self.lock()
+            .as_ref()
+            .and_then(|(at, report)| (at.elapsed() < CACHE_FOR).then(|| report.clone()))
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, Option<(Instant, Report)>> {
@@ -225,6 +252,40 @@ mod tests {
         assert_eq!(first, ok_report());
         assert_eq!(second, first);
         assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn ready_refresh_is_single_flight() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let seen = Arc::clone(&calls);
+        let health = Health::with_probe(move || {
+            seen.fetch_add(1, Ordering::SeqCst);
+            async {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+                ok_report()
+            }
+        });
+        let mut tasks = Vec::new();
+        for _ in 0..32 {
+            let health = health.clone();
+            tasks.push(tokio::spawn(async move { health.ready().await }));
+        }
+        for task in tasks {
+            assert_eq!(task.await.unwrap(), ok_report());
+        }
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn a_stalled_dir_probe_fails_inside_its_budget() {
+        let started = Instant::now();
+        let check = within_timeout(Duration::from_millis(30), async {
+            tokio::time::sleep(Duration::from_secs(30)).await;
+            Check::Ok
+        })
+        .await;
+        assert_eq!(check, Check::Fail);
+        assert!(started.elapsed() < Duration::from_secs(2));
     }
 
     #[tokio::test]
