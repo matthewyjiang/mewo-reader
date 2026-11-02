@@ -875,4 +875,50 @@ mod tests {
             .enumerate()
             .all(|(i, p)| p.id == i.to_string()));
     }
+
+    #[test]
+    fn parser_rev_tracks_golden_output() {
+        use sha2::{Digest, Sha256};
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
+        let mut files: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap_or_else(|err| panic!("read {}: {err}", dir.display()))
+            .map(|entry| entry.expect("fixture entry").path())
+            .filter(|path| path.extension().and_then(|ext| ext.to_str()) == Some("epub"))
+            .collect();
+        files.sort();
+        assert!(
+            !files.is_empty(),
+            "tests/fixtures/*.epub is empty; the parser revision has nothing to track"
+        );
+        let mut hasher = Sha256::new();
+        for path in &files {
+            let name = path.file_name().and_then(|name| name.to_str()).unwrap();
+            let book = parse_file(path, crate::config::MAX_COVER_BYTES)
+                .unwrap_or_else(|err| panic!("{name}: {err}"));
+            hasher.update(name.as_bytes());
+            hasher.update(b"\n");
+            for post in &book.posts {
+                hasher.update(post.id.as_bytes());
+                hasher.update([0]);
+                let kind = match post.kind {
+                    PostKind::Heading => b"H".as_slice(),
+                    PostKind::Body => b"B".as_slice(),
+                };
+                hasher.update(kind);
+                hasher.update([0]);
+                hasher.update(post.text.as_bytes());
+                hasher.update([0]);
+                hasher.update(post.chapter.as_bytes());
+                hasher.update(b"\n");
+            }
+            hasher.update(b"\n");
+        }
+        let hash = hex::encode(hasher.finalize());
+        assert_eq!(
+            hash,
+            crate::feed::FIXTURE_POSTS_SHA256,
+            "parser output changed under PARSER_REV {}. bump PARSER_REV and FIXTURE_POSTS_SHA256 together. hash={hash}",
+            crate::feed::PARSER_REV
+        );
+    }
 }

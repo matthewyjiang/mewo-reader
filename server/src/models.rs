@@ -25,6 +25,10 @@ pub struct BookRecord {
     /// Set whether or not the book is shared, so they can drop their own copy.
     #[serde(default)]
     pub held: bool,
+    /// Bumped when a reparse renumbers posts. Clients drop a cached feed when
+    /// it changes. Absent on a server that predates revisions.
+    #[serde(default)]
+    pub feed_rev: i64,
 }
 
 #[derive(Debug, FromRow)]
@@ -47,6 +51,9 @@ pub struct BookRow {
     /// Selects that never needed it leave the column out.
     #[sqlx(default)]
     pub holds: i64,
+    /// Missing from a select that does not return the book to a client.
+    #[sqlx(default)]
+    pub feed_rev: i64,
 }
 
 impl BookRow {
@@ -81,6 +88,7 @@ impl BookRow {
                 self.owner_username
             },
             held,
+            feed_rev: self.feed_rev,
         }
     }
 }

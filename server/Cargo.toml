@@ -15,6 +15,7 @@ roxmltree = "=0.20.0"
 scraper = { version = "=0.23.1", default-features = false }
 ego-tree = "=0.10.0"
 serde = { version = "1", features = ["derive"] }
+similar = "2.7"
 serde_json = "1"
 sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite", "migrate"] }
 libsqlite3-sys = { version = "0.30", features = ["bundled"] }
@@ -31,5 +32,6 @@ zip = { version = "9.0.5", default-features = false, features = ["deflate"] }
 
 [dev-dependencies]
 http-body-util = "0.1"
+sha2 = "0.10"
 tempfile = "3"
 tower = { version = "0.5", features = ["util"] }

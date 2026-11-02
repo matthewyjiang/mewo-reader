@@ -1,6 +1,8 @@
 use crate::admin::{self, AdminChange};
 use crate::config::Config;
 use crate::error::ApiError;
+use crate::parse_pool::ParsePool;
+use crate::reparse::{self, Mode, Outcome, Report};
 use sqlx::SqlitePool;
 use std::io::{self, BufRead, BufReader, Cursor, IsTerminal, Write};
 
@@ -30,6 +32,8 @@ Usage:
   mewo-server admin grant <username>
   mewo-server admin revoke <username>
   mewo-server admin create <username>
+  mewo-server admin reparse <book-id> [--dry-run] [--force]
+  mewo-server admin reparse --all [--dry-run] [--force]
 ";
 
 #[derive(Debug)]
@@ -45,6 +49,20 @@ pub enum AdminCommand {
     Grant(String),
     Revoke(String),
     Create(String),
+    Reparse(ReparseArgs),
+}
+
+#[derive(Debug)]
+pub struct ReparseArgs {
+    pub target: ReparseTarget,
+    pub dry_run: bool,
+    pub force: bool,
+}
+
+#[derive(Debug)]
+pub enum ReparseTarget {
+    One(String),
+    All,
 }
 
 /// `argv[1..]`. No args → [`Command::Serve`]. A bad command returns usage text;
@@ -65,9 +83,35 @@ fn parse_admin(args: &[String]) -> Result<Command, String> {
         [verb, name] if verb == "grant" => AdminCommand::Grant(name.clone()),
         [verb, name] if verb == "revoke" => AdminCommand::Revoke(name.clone()),
         [verb, name] if verb == "create" => AdminCommand::Create(name.clone()),
+        [verb, rest @ ..] if verb == "reparse" => parse_reparse(rest)?,
         _ => return Err(USAGE.to_string()),
     };
     Ok(Command::Admin(command))
+}
+
+fn parse_reparse(args: &[String]) -> Result<AdminCommand, String> {
+    let mut target = None;
+    let mut dry_run = false;
+    let mut force = false;
+    for arg in args {
+        match arg.as_str() {
+            "--dry-run" => dry_run = true,
+            "--force" => force = true,
+            "--all" if target.is_none() => target = Some(ReparseTarget::All),
+            id if !id.starts_with('-') && target.is_none() => {
+                target = Some(ReparseTarget::One(id.to_owned()))
+            }
+            _ => return Err(USAGE.to_string()),
+        }
+    }
+    let Some(target) = target else {
+        return Err(USAGE.to_string());
+    };
+    Ok(AdminCommand::Reparse(ReparseArgs {
+        target,
+        dry_run,
+        force,
+    }))
 }
 
 /// Connects with [`crate::db::connect`], which also runs migrations. Exit 0 on
@@ -87,7 +131,7 @@ pub async fn run(
             return 2;
         }
     };
-    match dispatch(&pool, cmd, stdin, out, err).await {
+    match dispatch(&pool, config, cmd, stdin, out, err).await {
         Ok(code) => code,
         Err(error) => {
             let _ = writeln!(err, "{error}");
@@ -98,6 +142,7 @@ pub async fn run(
 
 async fn dispatch(
     pool: &SqlitePool,
+    config: &Config,
     cmd: AdminCommand,
     stdin: &mut dyn LineIn,
     out: &mut dyn Write,
@@ -108,6 +153,113 @@ async fn dispatch(
         AdminCommand::Grant(name) => change(pool, &name, true, out, err).await,
         AdminCommand::Revoke(name) => change(pool, &name, false, out, err).await,
         AdminCommand::Create(name) => create(pool, &name, stdin, out, err).await,
+        AdminCommand::Reparse(args) => reparse(pool, config, args, out, err).await,
+    }
+}
+
+async fn reparse(
+    pool: &SqlitePool,
+    config: &Config,
+    args: ReparseArgs,
+    out: &mut dyn Write,
+    err: &mut dyn Write,
+) -> Result<i32, io::Error> {
+    let data_dir = tokio::fs::canonicalize(&config.data_dir).await?;
+    let parsers = ParsePool::new(&config.limits);
+    let reparser = reparse::Reparser {
+        pool,
+        data_dir: &data_dir,
+        parsers: &parsers,
+        locks: None,
+    };
+    let mode = if args.dry_run {
+        Mode::DryRun
+    } else {
+        Mode::Apply
+    };
+    match args.target {
+        ReparseTarget::One(id) => match reparser.one(&id, mode, args.force).await {
+            Ok(report) => {
+                write_report(out, err, &report)?;
+                Ok(reparse_code(&[report]))
+            }
+            Err(error) => Ok(explain_reparse(&id, error, err)),
+        },
+        ReparseTarget::All => {
+            let mut code = 0;
+            match reparser
+                .all(mode, args.force, |report| {
+                    write_report(out, err, report)?;
+                    if matches!(report.outcome, Outcome::Failed(_) | Outcome::Skipped(_)) {
+                        code = 1;
+                    }
+                    Ok(())
+                })
+                .await
+            {
+                Ok(()) => Ok(code),
+                Err(error) => Ok(user_or_db(error, err)),
+            }
+        }
+    }
+}
+
+fn write_report(out: &mut dyn Write, err: &mut dyn Write, report: &Report) -> io::Result<()> {
+    writeln!(out, "{}", format_reparse(report))?;
+    if matches!(report.outcome, Outcome::Changed) {
+        writeln!(
+            err,
+            "{}: posts were renumbered. Reload the book. A phone with an offline copy still has the old post ids.",
+            report.book_id
+        )?;
+    }
+    Ok(())
+}
+
+fn explain_reparse(id: &str, error: ApiError, err: &mut dyn Write) -> i32 {
+    match error {
+        ApiError::NotFound => {
+            let _ = writeln!(err, "No book with id {id}.");
+            1
+        }
+        other => user_or_db(other, err),
+    }
+}
+
+fn format_reparse(report: &Report) -> String {
+    format!(
+        "{id}  {title}  {owner}  {old}->{new} posts  headings -{removed}/+{added}  snapped {snapped}  anchors {anchors}  {outcome}",
+        id = report.book_id,
+        title = report.title,
+        owner = report.owner,
+        old = report.old_posts,
+        new = report.new_posts,
+        removed = report.headings_removed,
+        added = report.headings_added,
+        snapped = report.snapped,
+        anchors = report.anchors_moved.total(),
+        outcome = outcome_label(&report.outcome),
+    )
+}
+
+fn outcome_label(outcome: &Outcome) -> String {
+    match outcome {
+        Outcome::Unchanged => "unchanged".to_owned(),
+        Outcome::WouldChange => "would change".to_owned(),
+        Outcome::Changed => "changed".to_owned(),
+        Outcome::Skipped(reason) => format!("skipped: {reason}"),
+        Outcome::Failed(message) => format!("failed: {message}"),
+    }
+}
+
+fn reparse_code(reports: &[Report]) -> i32 {
+    if reports
+        .iter()
+        .any(|report| matches!(report.outcome, Outcome::Failed(_) | Outcome::Skipped(_)))
+    {
+        1
+    } else {
+        0
     }
 }
 
@@ -294,6 +446,26 @@ mod tests {
         assert!(parse(words(&["admin"])).is_err());
         assert!(parse(words(&["admin", "grant"])).is_err());
         assert!(parse(words(&["admin", "grant", "matt", "extra"])).is_err());
+        match parse(words(&["admin", "reparse", "book", "--dry-run", "--force"])) {
+            Ok(Command::Admin(AdminCommand::Reparse(args))) => {
+                assert!(matches!(args.target, ReparseTarget::One(id) if id == "book"));
+                assert!(args.dry_run);
+                assert!(args.force);
+            }
+            other => panic!("{other:?}"),
+        }
+        match parse(words(&["admin", "reparse", "--all", "--dry-run"])) {
+            Ok(Command::Admin(AdminCommand::Reparse(args))) => {
+                assert!(matches!(args.target, ReparseTarget::All));
+                assert!(args.dry_run);
+                assert!(!args.force);
+            }
+            other => panic!("{other:?}"),
+        }
+        assert!(parse(words(&["admin", "reparse"])).is_err());
+        assert!(parse(words(&["admin", "reparse", "--dry-run"])).is_err());
+        assert!(parse(words(&["admin", "reparse", "--all", "book"])).is_err());
+        assert!(parse(words(&["admin", "reparse", "book", "--nope"])).is_err());
     }
 
     #[tokio::test]

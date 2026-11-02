@@ -1,4 +1,5 @@
 pub mod admin;
+mod anchors;
 pub mod auth;
 pub mod cli;
 pub mod config;
@@ -7,9 +8,11 @@ pub mod disk;
 pub mod epub;
 pub mod error;
 pub mod feed;
+pub mod health;
 mod library;
 pub mod models;
 pub mod parse_pool;
+mod reparse;
 pub mod requests;
 pub mod routes;
 mod search;
@@ -55,6 +58,8 @@ pub struct AppState {
     pub parsers: parse_pool::ParsePool,
     /// Free-disk floor. `min_free_bytes == 0` allows every write.
     pub disk: disk::DiskGuard,
+    /// Readiness. Liveness does not use it.
+    pub health: health::Health,
     /// Open Library work context, 24h, keyed by work key. Not durable.
     pub(crate) work_cache: Arc<requests::WorkCache>,
     /// Weekly trending. Fresh 6h, stale up to 48h. Not durable.
@@ -68,6 +73,8 @@ pub fn router(state: AppState) -> Router {
     let api = Router::new()
         .route("/v1/version", get(routes::version))
         .route("/v1/instance", get(routes::instance))
+        .route("/v1/healthz/live", get(health::live))
+        .route("/v1/healthz", get(health::ready))
         .merge(admin::router())
         .merge(requests::router())
         .route("/v1/auth/register", post(routes::register))
@@ -160,6 +167,7 @@ pub async fn prepare(config: Config) -> Result<AppState, sqlx::Error> {
         .map_err(|message| sqlx::Error::Configuration(std::io::Error::other(message).into()))?;
     let passwords = auth::Passwords::new(&config.auth);
     let throttle = auth::Throttle::new(&config.auth);
+    let health = health::Health::new(pool.clone(), data_dir.clone());
     Ok(AppState {
         pool,
         data_dir,
@@ -174,6 +182,7 @@ pub async fn prepare(config: Config) -> Result<AppState, sqlx::Error> {
         throttle,
         parsers: parse_pool::ParsePool::new(&config.limits),
         disk: disk::DiskGuard::new(config.limits.min_free_bytes),
+        health,
         work_cache: Arc::new(requests::WorkCache::new()),
         trending: Arc::new(requests::TrendingCache::new()),
         info_cache: Arc::new(requests::InfoCache::new()),
