@@ -15,12 +15,15 @@ final class SearchViewModel {
     var loadingMore = false
     var failure: String?
     private var slices: [SearchTab: SearchSlice] = [:]
+    /// One browse page per tab for this signed-in session. Typed pages stay in `slices`.
+    private var browseSlices: [SearchTab: SearchSlice] = [:]
     private var socials: [String: BookSocial] = [:]
     private let library: LibraryStore
     private var remote: RemoteSearch?
     private let defaults: UserDefaults?
     let catalog: CatalogFeed
     private let debounceNanos: UInt64
+    private let now: () -> Date
     private var sessionSeen: String?
     /// Saved Catalog tab, applied once `/v1/me` says requests are on.
     private var pendingCatalog = false
@@ -38,12 +41,14 @@ final class SearchViewModel {
         defaults: UserDefaults? = nil,
         catalog: CatalogFeed? = nil,
         canRequest: Bool = false,
-        debounceNanos: UInt64 = searchDebounceNanos
+        debounceNanos: UInt64 = searchDebounceNanos,
+        now: @escaping () -> Date = Date.init
     ) {
         self.library = library
         self.remote = remote
         self.defaults = defaults
         self.debounceNanos = debounceNanos
+        self.now = now
         self.sessionSeen = remote?.token
         let feed = catalog ?? CatalogFeed(service: OffCatalogService())
         self.catalog = feed
@@ -65,24 +70,50 @@ final class SearchViewModel {
         }
     }
 
+    private var trimmedQuery: String {
+        query.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// Hosted, signed in, blank text. Local mode and a signed-out session stay empty.
+    var browsing: Bool {
+        hosted && !(remote?.token ?? "").isEmpty && trimmedQuery.isEmpty
+    }
+
     func visibleAccounts() -> [AccountRecord] {
-        slices[.accounts]?.accounts ?? []
+        slice(.accounts)?.accounts ?? []
     }
 
     func visibleBooks() -> [BookRecord] {
-        hosted ? (slices[.books]?.books ?? []) : (tab == .books ? result.books : [])
+        hosted ? (slice(.books)?.books ?? []) : (tab == .books ? result.books : [])
     }
 
     func visiblePosts() -> [PostHit] {
-        hosted ? (slices[.posts]?.posts ?? []) : (tab == .posts ? result.posts : [])
+        hosted ? (slice(.posts)?.posts ?? []) : (tab == .posts ? result.posts : [])
+    }
+
+    /// Browse shows its own page. A typed search keeps that page until its own page lands.
+    private func slice(_ tab: SearchTab) -> SearchSlice? {
+        if browsing { return browseSlices[tab] }
+        return slices[tab] ?? browseSlices[tab]
     }
 
     func showNoMatches() -> Bool {
-        let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
-        if trimmed.isEmpty || searching || failure != nil { return false }
+        if trimmedQuery.isEmpty || searching || failure != nil { return false }
         if hosted {
-            guard slices[tab]?.answeredQuery == trimmed else { return false }
+            guard slices[tab]?.answeredQuery == trimmedQuery else { return false }
         }
+        switch tab {
+        case .accounts: return visibleAccounts().isEmpty
+        case .books: return visibleBooks().isEmpty
+        case .posts: return visiblePosts().isEmpty
+        case .catalog: return false
+        }
+    }
+
+    /// A finished empty browse page. Typed misses stay on `showNoMatches`.
+    func showNothingYet() -> Bool {
+        guard browsing, !searching, failure == nil else { return false }
+        guard browseSlices[tab]?.answeredQuery == "" else { return false }
         switch tab {
         case .accounts: return visibleAccounts().isEmpty
         case .books: return visibleBooks().isEmpty
@@ -113,6 +144,7 @@ final class SearchViewModel {
         searchTask?.cancel()
         generation += 1
         slices = [:]
+        browseSlices = [:]
         searching = false
         loadingMore = false
         failure = nil
@@ -133,11 +165,12 @@ final class SearchViewModel {
         searchTask?.cancel()
         generation += 1
         slices = [:]
+        browseSlices = [:]
         socials = [:]
         searching = false
         loadingMore = false
         failure = nil
-        if token == nil || query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { return }
+        if token == nil { return }
         schedule(append: false)
     }
 
@@ -248,23 +281,20 @@ final class SearchViewModel {
         }
     }
 
-    private func schedule(append: Bool) {
+    private func schedule(append: Bool, quiet: Bool = false) {
         if tab == .catalog { return }
+        let trimmed = trimmedQuery
+        if trimmed.isEmpty {
+            if append { return }
+            browse()
+            return
+        }
         searchTask?.cancel()
         generation += 1
         let token = generation
         let query = self.query
         let tab = self.tab
         let cursor = append ? slices[tab]?.nextCursor : nil
-        let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
-        if !append && trimmed.isEmpty {
-            searchTask = nil
-            slices = [:]
-            searching = false
-            loadingMore = false
-            failure = nil
-            return
-        }
         let session = remote?.token
         if append {
             loadingMore = true
@@ -272,8 +302,80 @@ final class SearchViewModel {
             searching = true
             failure = nil
         }
-        searchTask = Task {
-            if !append {
+        searchTask = fetch(
+            token: token,
+            session: session,
+            rawQuery: query,
+            trimmed: trimmed,
+            tab: tab,
+            cursor: cursor,
+            append: append,
+            quiet: quiet
+        )
+    }
+
+    /// Blank hosted text. A fresh memo shows at once. A page older than 60s refreshes quietly.
+    private func browse() {
+        guard browsing else { return }
+        // A typed page must not sit under the next query. Browse rows stay in `browseSlices`.
+        slices = [:]
+        searchTask?.cancel()
+        generation += 1
+        let token = generation
+        let query = self.query
+        let tab = self.tab
+        let session = remote?.token
+        if let hit = browseSlices[tab] {
+            searching = false
+            loadingMore = false
+            failure = nil
+            if tab == .posts {
+                for row in hit.posts { social(row.book.id).load() }
+            }
+            let at = hit.answeredAt ?? .distantPast
+            guard now().timeIntervalSince(at) > browseRevalidateSeconds else {
+                searchTask = nil
+                return
+            }
+            searchTask = fetch(
+                token: token,
+                session: session,
+                rawQuery: query,
+                trimmed: "",
+                tab: tab,
+                cursor: nil,
+                append: false,
+                quiet: true
+            )
+            return
+        }
+        searching = true
+        loadingMore = false
+        failure = nil
+        searchTask = fetch(
+            token: token,
+            session: session,
+            rawQuery: query,
+            trimmed: "",
+            tab: tab,
+            cursor: nil,
+            append: false,
+            quiet: false
+        )
+    }
+
+    private func fetch(
+        token: Int,
+        session: String?,
+        rawQuery: String,
+        trimmed: String,
+        tab: SearchTab,
+        cursor: String?,
+        append: Bool,
+        quiet: Bool
+    ) -> Task<Void, Never> {
+        Task {
+            if !append && !quiet && !trimmed.isEmpty {
                 do {
                     try await Task.sleep(nanoseconds: debounceNanos)
                 } catch {
@@ -291,7 +393,7 @@ final class SearchViewModel {
             }
             do {
                 let page = try await remote.search(query: trimmed, type: tab, cursor: cursor)
-                guard token == generation, remote.token == session, self.query == query, self.tab == tab else {
+                guard token == generation, remote.token == session, self.query == rawQuery, self.tab == tab else {
                     if token == generation {
                         searching = false
                         loadingMore = false
@@ -305,13 +407,16 @@ final class SearchViewModel {
                 guard token == generation, remote.token == session else { return }
                 searching = false
                 loadingMore = false
-                self.failure = error.localizedDescription
+                if quiet { return }
+                self.failure = searchErrorText(error)
             }
         }
     }
 
     private func apply(_ page: SearchPage, append: Bool, query: String, tab: SearchTab) {
-        var slice = append ? (slices[tab] ?? SearchSlice()) : SearchSlice()
+        let intoBrowse = query.isEmpty
+        let stored = intoBrowse ? browseSlices[tab] : slices[tab]
+        var slice = append ? (stored ?? SearchSlice()) : SearchSlice()
         switch tab {
         case .accounts:
             slice.accounts = append ? appendingNew(slice.accounts, page.accounts) : page.accounts
@@ -326,7 +431,12 @@ final class SearchViewModel {
         }
         slice.nextCursor = page.nextCursor
         slice.answeredQuery = query
-        slices[tab] = slice
+        if intoBrowse {
+            slice.answeredAt = now()
+            browseSlices[tab] = slice
+        } else {
+            slices[tab] = slice
+        }
         searching = false
         loadingMore = false
         failure = nil
@@ -361,6 +471,8 @@ private struct SearchSlice {
     var posts: [PostHit] = []
     var nextCursor: String?
     var answeredQuery: String?
+    /// When this browse page was stored. Typed pages leave it nil.
+    var answeredAt: Date?
 }
 
 @MainActor
@@ -521,19 +633,21 @@ struct SearchScreen: View {
     var onOpenAccount: () -> Void
     var onOpenProfile: (String, String) -> Void
     var focusOnAppear: Bool
+    var onOpenHome: () -> Void
     @State private var model: SearchViewModel
     @State private var commentTarget: CommentTarget?
     @State private var shareText: String?
     @State private var lastOffset: CGFloat = 0
     @FocusState private var focused: Bool
 
-    init(env: AppEnvironment, chrome: HideOnScrollState, onOpenBook: @escaping (String) -> Void, onOpenPost: @escaping (String, String) -> Void, onOpenAccount: @escaping () -> Void, onOpenProfile: @escaping (String, String) -> Void, focusOnAppear: Bool = true) {
+    init(env: AppEnvironment, chrome: HideOnScrollState, onOpenBook: @escaping (String) -> Void, onOpenPost: @escaping (String, String) -> Void, onOpenAccount: @escaping () -> Void, onOpenProfile: @escaping (String, String) -> Void, focusOnAppear: Bool = true, onOpenHome: @escaping () -> Void = {}) {
         self.chrome = chrome
         self.onOpenBook = onOpenBook
         self.onOpenPost = onOpenPost
         self.onOpenAccount = onOpenAccount
         self.onOpenProfile = onOpenProfile
         self.focusOnAppear = focusOnAppear
+        self.onOpenHome = onOpenHome
         let remote: RemoteSearch? = env.backend.kind == .hosted
             ? HostedRemoteSearch(sessions: env.hostedSession, client: env.client)
             : nil
@@ -618,8 +732,8 @@ struct SearchScreen: View {
         .onChange(of: app.catalog.access) { _, access in
             model.noteCatalogAccess(access)
         }
-        .onChange(of: model.query) { _, q in
-            chrome.showWhenIdle(q.isEmpty || model.showNoMatches())
+        .onChange(of: chromeIdle) { _, idle in
+            chrome.showWhenIdle(idle)
         }
         .sheet(item: $commentTarget) { target in
             CommentSheet(
@@ -652,28 +766,25 @@ struct SearchScreen: View {
         }
     }
 
+    /// Blank local search, and a signed-out hosted session, stay empty.
+    private var blankIdle: Bool {
+        model.query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && !model.browsing && model.tab != .catalog
+    }
+
+    /// Hide-on-scroll stays off while there is nothing to scroll. Catalog keeps its own rule.
+    private var chromeIdle: Bool {
+        if model.tab == .catalog {
+            return model.query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || model.showNoMatches()
+        }
+        return currentRowsEmpty
+    }
+
     @ViewBuilder
     private var results: some View {
         if model.tab == .catalog {
             CatalogResults(feed: model.catalog, onOpenBook: onOpenBook)
-        } else if model.query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+        } else if blankIdle {
             Color.clear
-        } else if model.showNoMatches() {
-            Text(noMatchesCopy)
-                .font(MewoFont.bold(22))
-                .foregroundStyle(mewo.ink)
-                .padding(.horizontal, 28)
-                .padding(.vertical, 48)
-                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-        } else if model.searching && currentRowsEmpty && model.failure == nil {
-            ProgressView()
-                .tint(mewo.accent)
-                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-                .padding(.top, 24)
-                .accessibilityIdentifier("search-loading")
-        } else if currentRowsEmpty, let failure = model.failure {
-            failureRow(failure)
-                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         } else {
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 0) {
@@ -681,26 +792,89 @@ struct SearchScreen: View {
                         Color.clear.preference(key: ScrollOffsetKey.self, value: -geo.frame(in: .named("search")).minY)
                     }
                     .frame(height: 0)
-                    if model.searching {
+                    if let failure = model.failure {
+                        failureRow(failure)
+                    }
+                    if model.browsing, let title = searchHeading(model.tab) {
+                        SectionHeading(title: title)
+                    }
+                    if showSkeleton {
+                        SearchSkeleton(tab: model.tab)
+                    }
+                    if model.searching && !currentRowsEmpty {
                         ProgressView()
                             .tint(mewo.accent)
                             .frame(maxWidth: .infinity)
                             .padding(.vertical, 12)
                             .accessibilityIdentifier("search-loading")
                     }
-                    if let failure = model.failure {
-                        failureRow(failure)
-                    }
                     rows
+                    if model.showNoMatches() || model.showNothingYet() {
+                        emptyView
+                    }
                 }
             }
             .coordinateSpace(name: "search")
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
             .onPreferenceChange(ScrollOffsetKey.self) { offset in
                 chrome.ingest(delta: offset - lastOffset)
                 lastOffset = offset
                 chrome.bindTop(offset)
             }
         }
+    }
+
+    private var emptyView: some View {
+        let kind: SearchEmptyKind = model.showNothingYet() ? .nothingYet : .noMatches
+        let canRequest = app.catalog.access == .on
+        return VStack(alignment: .leading, spacing: 0) {
+            Text(searchEmptyCopy(model.tab, kind, query: model.query))
+                .font(MewoFont.bold(22))
+                .foregroundStyle(mewo.ink)
+                .fixedSize(horizontal: false, vertical: true)
+            if model.tab == .books && kind == .noMatches && canRequest {
+                accentPill("Search the Catalog", id: "search-catalog") {
+                    model.select(.catalog)
+                }
+            }
+            if model.tab == .books && kind == .nothingYet && canRequest {
+                Button("Browse the Catalog") { model.select(.catalog) }
+                    .font(MewoFont.regular(15))
+                    .foregroundStyle(mewo.accent)
+                    .buttonStyle(.plain)
+                    .padding(.top, 8)
+                    .accessibilityIdentifier("search-browse-catalog")
+            }
+            if model.tab == .posts && kind == .nothingYet {
+                accentPill("Go to your books", id: "search-open-home", action: onOpenHome)
+            }
+        }
+        .padding(.horizontal, 28)
+        .padding(.vertical, 48)
+        .frame(maxWidth: .infinity, alignment: .topLeading)
+        .accessibilityIdentifier("search-empty")
+    }
+
+    private func accentPill(_ title: String, id: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Text(title)
+                .font(MewoFont.bold(14))
+                .foregroundStyle(mewo.onAccent)
+                .padding(.horizontal, 16)
+                .padding(.vertical, 8)
+                .background(mewo.accent, in: Capsule())
+        }
+        .buttonStyle(.plain)
+        .padding(.top, 20)
+        .accessibilityIdentifier(id)
+    }
+
+    /// First load, typed or browse. A browse frame before `refresh` also waits here,
+    /// so the heading does not flash over a hole. A finished empty page does not.
+    private var showSkeleton: Bool {
+        guard currentRowsEmpty, model.failure == nil, !model.showNothingYet() else { return false }
+        if model.searching { return true }
+        return model.browsing
     }
 
     private var currentRowsEmpty: Bool {
@@ -713,18 +887,25 @@ struct SearchScreen: View {
     }
 
     private func failureRow(_ message: String) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
+        HStack(alignment: .center, spacing: 12) {
             Text(message)
                 .font(MewoFont.regular(15))
-                .foregroundStyle(mewo.mute)
-            Button("Try again") { model.retry() }
-                .font(MewoFont.regular(15))
-                .foregroundStyle(mewo.accent)
-                .buttonStyle(.plain)
-                .accessibilityIdentifier("search-retry")
+                .foregroundStyle(mewo.like)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .accessibilityIdentifier("search-error")
+            Button { model.retry() } label: {
+                Text("Try again")
+                    .font(MewoFont.bold(15))
+                    .foregroundStyle(mewo.accent)
+                    .frame(minHeight: 40)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityIdentifier("search-retry")
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 12)
+        .frame(minHeight: 48, alignment: .center)
     }
 
     @ViewBuilder
@@ -754,20 +935,15 @@ struct SearchScreen: View {
             }
         case .books:
             ForEach(model.visibleBooks()) { book in
-                Button { onOpenBook(book.id) } label: {
-                    HStack(spacing: 12) {
-                        Avatar(name: book.author, cover: app.library.coverFile(id: book.id), size: 40)
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text(book.title).font(MewoFont.bold(15)).foregroundStyle(mewo.ink)
-                            Text("@\(book.handle)").font(MewoFont.regular(13)).foregroundStyle(mewo.mute)
-                        }
-                        Spacer(minLength: 0)
-                    }
-                    .padding(.horizontal, 16)
-                    .padding(.vertical, 12)
-                    .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
+                ShelfBookRow(
+                    book: book,
+                    cover: app.library.coverFile(id: book.id),
+                    offline: nil,
+                    onOpen: { onOpenBook(book.id) },
+                    onDownload: nil,
+                    onShare: nil,
+                    onDelete: nil
+                )
                 .onAppear { if book.id == model.visibleBooks().last?.id { model.loadMore() } }
                 Hairline()
             }

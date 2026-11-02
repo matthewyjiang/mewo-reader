@@ -17,6 +17,8 @@ lock = threading.Lock()
 released = threading.Event()
 feed_requests = 0
 fail_search = False
+# rows | empty | fail. Screenshot tests flip this. Typed and browse search both honor it.
+library_mode = "rows"
 next_request = 0
 
 BOOK = {
@@ -31,6 +33,21 @@ BOOK = {
     "mine": True,
     "shared": True,
     "ownerUsername": "ada",
+}
+
+# Shown only on a blank Books browse, so a typed query still matches BOOK alone.
+SHARED_BOOK = {
+    "id": "55555555-5555-5555-5555-555555555555",
+    "title": "Emma",
+    "author": "Austen",
+    "handle": "austen",
+    "importedAt": 2,
+    "postCount": 4,
+    "progressIndex": 0,
+    "isSample": False,
+    "mine": False,
+    "shared": True,
+    "ownerUsername": "bea",
 }
 
 POST = {"id": "1", "kind": "Body", "text": "The first sentence is the one you remember.", "chapter": "One"}
@@ -239,6 +256,7 @@ class Handler(BaseHTTPRequestHandler):
                     "released": released.is_set(),
                     "feed_requests": feed_requests,
                     "fail_search": fail_search,
+                    "library_mode": library_mode,
                 }
             self.json_ok(body)
         else:
@@ -255,6 +273,8 @@ class Handler(BaseHTTPRequestHandler):
             self.json_ok({"released": True})
         elif path == "/control/fail-search":
             self.toggle_fail_search()
+        elif path == "/control/library-search":
+            self.set_library_mode(body.get("mode", "rows"))
         elif path == "/v1/requests":
             self.new_request(body)
         elif path.startswith("/v1/requests/") and path.endswith("/retry"):
@@ -311,7 +331,25 @@ class Handler(BaseHTTPRequestHandler):
         })
 
     def search(self, kind, query):
-        needle = query.lower()
+        # A missing q arrives as "". That is browse, same as a blank q.
+        with lock:
+            mode = library_mode
+        if mode == "fail":
+            self.json_status(500, {"error": "Search failed."})
+            return
+        if mode == "empty":
+            self.json_ok({"type": kind, "items": [], "nextCursor": None})
+            return
+        needle = query.strip().lower()
+        if needle == "":
+            if kind == "books":
+                items = [BOOK, SHARED_BOOK]
+            elif kind == "posts":
+                items = [{"book": BOOK, "post": POST}]
+            else:
+                items = [{"username": "ada", "mine": True}, {"username": "bea", "mine": False}]
+            self.json_ok({"type": kind, "items": items, "nextCursor": None})
+            return
         if kind == "books":
             haystack = " ".join([
                 BOOK["title"], BOOK["author"], BOOK["handle"], BOOK["ownerUsername"],
@@ -346,6 +384,14 @@ class Handler(BaseHTTPRequestHandler):
             fail_search = not fail_search
             state = fail_search
         self.json_ok({"failSearch": state})
+
+    def set_library_mode(self, mode):
+        global library_mode
+        if mode not in ("rows", "empty", "fail"):
+            mode = "rows"
+        with lock:
+            library_mode = mode
+        self.json_ok({"mode": mode})
 
     def new_request(self, body):
         global next_request
