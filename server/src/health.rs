@@ -179,19 +179,43 @@ async fn db_ok(pool: &SqlitePool) -> Check {
 /// Create `.healthz-<pid>-<uuid>`, write one byte, and remove it.
 /// The pid alone collides when two probes overlap before the cache fills,
 /// and `create_new` would then report a writable directory as down.
+/// [`ProbeFile`] unlinks the file if the readiness timeout drops this future
+/// after create and before `remove_file`.
 async fn dir_writable(dir: &Path) -> Check {
+    write_probe(dir, std::future::ready(())).await
+}
+
+/// Unlinks the probe file when the readiness timeout drops this future.
+/// `remove_file` is the last await, so cancellation skips it otherwise.
+struct ProbeFile {
+    path: PathBuf,
+}
+
+impl Drop for ProbeFile {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
+
+async fn write_probe(dir: &Path, after_write: impl Future<Output = ()>) -> Check {
     let path = dir.join(format!(
         ".healthz-{}-{}",
         std::process::id(),
         Uuid::new_v4()
     ));
+    let _cleanup = ProbeFile { path: path.clone() };
     let wrote = match tokio::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
         .open(&path)
         .await
     {
-        Ok(mut file) => file.write_all(b"x").await,
+        Ok(mut file) => {
+            let wrote = file.write_all(b"x").await;
+            drop(file);
+            after_write.await;
+            wrote
+        }
         Err(err) => Err(err),
     };
     let removed = tokio::fs::remove_file(&path).await;
@@ -295,6 +319,23 @@ mod tests {
         assert_eq!(report.status, Status::Fail);
         assert_eq!(report.checks.db, Check::Ok);
         assert_eq!(report.checks.data_dir, Check::Fail);
+    }
+
+    #[tokio::test]
+    async fn a_timed_out_dir_probe_leaves_no_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let check = within_timeout(Duration::from_millis(50), async {
+            write_probe(tmp.path(), std::future::pending::<()>()).await
+        })
+        .await;
+        assert_eq!(check, Check::Fail);
+        let mut left = tokio::fs::read_dir(tmp.path()).await.unwrap();
+        let stray = left.next_entry().await.unwrap();
+        assert!(
+            stray.is_none(),
+            "timed-out probe left {}",
+            stray.unwrap().file_name().to_string_lossy()
+        );
     }
 
     #[tokio::test]
