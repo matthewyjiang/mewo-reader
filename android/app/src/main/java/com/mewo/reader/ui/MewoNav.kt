@@ -234,6 +234,7 @@ fun MewoNav() {
                         onOpenPost = { bookId, postId -> openBook(bookId, postId) },
                         onOpenAccount = openAccount,
                         onOpenProfile = ::openProfile,
+                        onOpenLibrary = { goTab(AppTab.Home) },
                         hideOnScroll = chrome,
                     )
                 }
