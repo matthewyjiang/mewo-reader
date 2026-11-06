@@ -7,6 +7,7 @@ const info = {
   comments: 4,
   reposts: 1,
   storageBytes: 40_500_000,
+  invites: 1,
 };
 
 function freshState() {
@@ -96,6 +97,7 @@ async function answer(
   }
   if (path === '/v1/admin/settings') return json(state.settings);
   if (path === '/v1/admin/server') return json(info);
+  if (path === '/v1/admin/invites' && method === 'GET') return json({ items: [] });
   if (path === '/v1/admin/users' && method === 'GET') return json({ items: [state.ada, state.byron] });
   if (path.startsWith('/v1/admin/users/') && method === 'PATCH') {
     const username = decodeURIComponent(path.slice('/v1/admin/users/'.length));

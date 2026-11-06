@@ -1,3 +1,4 @@
+pub mod invite;
 pub mod passwords;
 pub mod session;
 pub mod throttle;

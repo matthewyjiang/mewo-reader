@@ -1,7 +1,10 @@
+use crate::auth::invite;
 use crate::auth::{check_password, normalize_username, Authed, Passwords};
 use crate::db::now_ms;
 use crate::error::ApiError;
-use crate::models::{AdminUser, AdminUsers, PatchUser, ServerInfo};
+use crate::models::{
+    AdminInvites, AdminUser, AdminUsers, CreatedInvite, NewInvite, PatchUser, ServerInfo,
+};
 use crate::settings::{self, AdminSettings};
 use crate::AppState;
 use axum::extract::{Extension, FromRequestParts, Path, Request, State};
@@ -42,6 +45,15 @@ pub(crate) fn router() -> Router<AppState> {
         .route("/v1/admin/server", get(server_info))
         .route("/v1/admin/requests/test", post(test_requests))
         .route_layer(middleware::from_fn(require_admin))
+        .merge(invite_router())
+}
+
+fn invite_router() -> Router<AppState> {
+    Router::new()
+        .route("/v1/admin/invites", get(list_invites).post(create_invite))
+        .route("/v1/admin/invites/{id}/revoke", post(revoke_invite))
+        .route_layer(middleware::from_fn(require_admin))
+        .route_layer(middleware::from_fn(crate::routes::no_store))
 }
 
 /// Runs `Authed`: missing or bad token → 401. Not an admin → 403 "Admins only.".
@@ -162,7 +174,38 @@ async fn server_info(State(state): State<AppState>) -> Result<Json<ServerInfo>, 
         comments: counts.comments,
         reposts: counts.reposts,
         storage_bytes,
+        invites: invite::active_count(&state.pool, now_ms()).await?,
     }))
+}
+
+async fn list_invites(State(state): State<AppState>) -> Result<Json<AdminInvites>, ApiError> {
+    Ok(Json(AdminInvites {
+        items: invite::list(&state.pool, now_ms()).await?,
+    }))
+}
+
+async fn create_invite(
+    State(state): State<AppState>,
+    Extension(admin): Extension<Admin>,
+    body: Result<Json<NewInvite>, axum::extract::rejection::JsonRejection>,
+) -> Result<Json<CreatedInvite>, ApiError> {
+    let body = crate::routes::json_body(body, "Invite must be a JSON object.")?;
+    let (invite, token) = invite::create(
+        &state.pool,
+        Some(&admin.user_id),
+        body.note.as_deref(),
+        body.days,
+        now_ms(),
+    )
+    .await?;
+    Ok(Json(CreatedInvite { invite, token }))
+}
+
+async fn revoke_invite(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<invite::AdminInvite>, ApiError> {
+    Ok(Json(invite::revoke(&state.pool, &id, now_ms()).await?))
 }
 
 /// The only writer of `users.is_admin`. Used by `patch_user` and the CLI.

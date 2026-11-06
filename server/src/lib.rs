@@ -26,6 +26,7 @@ mod test_epub;
 
 use crate::config::{request_body_limit, Config, JSON_BODY_LIMIT, MAX_EPUB_BYTES_CEILING};
 use axum::extract::DefaultBodyLimit;
+use axum::middleware;
 use axum::routing::{any, get, post, put};
 use axum::{Extension, Router};
 use sqlx::SqlitePool;
@@ -73,6 +74,10 @@ pub fn router(state: AppState) -> Router {
     let api = Router::new()
         .route("/v1/version", get(routes::version))
         .route("/v1/instance", get(routes::instance))
+        .route(
+            "/v1/invites/check",
+            post(routes::check_invite).layer(middleware::from_fn(routes::no_store)),
+        )
         .route("/v1/healthz/live", get(health::live))
         .route("/v1/healthz", get(health::ready))
         .merge(admin::router())

@@ -95,6 +95,17 @@ impl Throttle {
         self.begin(ip, norm, true)
     }
 
+    /// Charges the login IP bucket only. A non-routable address is not limited.
+    /// A public invite check does not spend a registration attempt.
+    pub fn check_invite(&self, ip: ClientIp) -> Result<(), ApiError> {
+        let now = Instant::now();
+        let mut ips = lock(&self.inner.login_ip);
+        match client_key(ip) {
+            Some(key) => ips.take(key, now).map_err(too_many),
+            None => Ok(()),
+        }
+    }
+
     fn begin(
         &self,
         ip: ClientIp,
@@ -461,6 +472,23 @@ mod tests {
                 every,
             },
             ..AuthConfig::default()
+        }
+    }
+
+    #[test]
+    fn check_invite_charges_login_ip_only() {
+        let throttle = Throttle::new(&auth_cfg(2, 2));
+        let public = ClientIp::Addr(ip("203.0.113.7"));
+        assert!(throttle.check_invite(public).is_ok());
+        assert!(throttle.check_invite(public).is_ok());
+        assert!(matches!(
+            throttle.check_invite(public),
+            Err(ApiError::TooManyRequests { .. })
+        ));
+        assert!(throttle.register(public, "ada").is_ok());
+        let loopback = ClientIp::Addr(ip("127.0.0.1"));
+        for _ in 0..5 {
+            assert!(throttle.check_invite(loopback).is_ok());
         }
     }
 

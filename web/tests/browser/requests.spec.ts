@@ -160,7 +160,9 @@ async function answer(route: Route, state: ReturnType<typeof freshState>) {
   }
   if (path === '/v1/admin/settings') return json(state.settings);
   if (path === '/v1/admin/server') {
-    return json({ users: 2, books: 3, comments: 4, reposts: 1, storageBytes: 40_500_000 });
+    return json({
+      users: 2, books: 3, comments: 4, reposts: 1, storageBytes: 40_500_000, invites: 0,
+    });
   }
   if (path === '/v1/admin/requests/test' && method === 'POST') {
     return json({

@@ -6,7 +6,8 @@ use mewo_server::auth::{session, Passwords};
 use mewo_server::build;
 use mewo_server::cli::{self, AdminCommand};
 use mewo_server::config::{
-    request_body_limit, AuthConfig, Config, LimitsConfig, Rate, MAX_COVER_BYTES, MIN_EPUB_BYTES,
+    request_body_limit, AuthConfig, Config, LimitsConfig, Rate, JSON_BODY_LIMIT, MAX_COVER_BYTES,
+    MIN_EPUB_BYTES,
 };
 use mewo_server::disk::DiskGuard;
 use mewo_server::health::{self, Check, Health, Status};
@@ -4778,6 +4779,11 @@ async fn admin_routes_require_admin() {
     let matt = register(&app, "matt", "password1").await;
     let ada = register(&app, "ada", "password1").await;
     grant(tmp.path(), "matt").await;
+    let (status, created) =
+        json_req(&app, "POST", "/v1/admin/invites", Some(&matt), json!({})).await;
+    assert_eq!(status, StatusCode::OK, "{created}");
+    let invite_id = created["invite"]["id"].as_str().unwrap().to_string();
+    let revoke_path = format!("/v1/admin/invites/{invite_id}/revoke");
 
     let cases = [
         ("GET", "/v1/admin/settings", None),
@@ -4790,6 +4796,9 @@ async fn admin_routes_require_admin() {
         ),
         ("GET", "/v1/admin/server", None),
         ("POST", "/v1/admin/requests/test", None),
+        ("GET", "/v1/admin/invites", None),
+        ("POST", "/v1/admin/invites", Some(json!({}))),
+        ("POST", revoke_path.as_str(), None),
     ];
     for (method, path, body) in cases {
         let (status, response) = match &body {
@@ -5234,6 +5243,7 @@ async fn server_info_counts() {
     assert_eq!(info["books"], 1);
     assert_eq!(info["comments"], 1);
     assert_eq!(info["reposts"], 1);
+    assert_eq!(info["invites"], 0);
     assert!(info["storageBytes"].as_u64().unwrap() > 0, "{info}");
 }
 
@@ -7849,4 +7859,539 @@ async fn tmp_entries(data: &Path) -> Vec<String> {
         names.push(entry.file_name().to_string_lossy().into_owned());
     }
     names
+}
+
+const INVITE_DAY_MS: i64 = 86_400_000;
+
+async fn user_rows(path: &Path) -> i64 {
+    let pool = open_db(path).await;
+    sqlx::query_scalar("SELECT COUNT(*) FROM users")
+        .fetch_one(&pool)
+        .await
+        .unwrap()
+}
+
+fn assert_no_store(headers: &axum::http::HeaderMap) {
+    assert_eq!(
+        headers
+            .get(header::CACHE_CONTROL)
+            .and_then(|value| value.to_str().ok()),
+        Some("no-store")
+    );
+}
+
+async fn admin_and_closed_signups() -> (axum::Router, TempDir, String) {
+    let (app, tmp) = app().await;
+    let token = register(&app, "matt", "password1").await;
+    grant(tmp.path(), "matt").await;
+    let (status, body) = json_req(
+        &app,
+        "PATCH",
+        "/v1/admin/settings",
+        Some(&token),
+        json!({ "allowSignup": false }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    (app, tmp, token)
+}
+
+async fn mint(app: &axum::Router, token: &str, body: Value) -> Value {
+    let req = Request::builder()
+        .method("POST")
+        .uri("/v1/admin/invites")
+        .header(header::AUTHORIZATION, format!("Bearer {token}"))
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(body.to_string()))
+        .unwrap();
+    let (status, headers, bytes) = call(app, req).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_no_store(&headers);
+    serde_json::from_slice(&bytes).unwrap()
+}
+
+#[tokio::test]
+async fn invite_signs_up_when_signups_are_off() {
+    let (app, tmp, admin) = admin_and_closed_signups().await;
+    for body in [
+        json!({ "username": "ada", "password": "password1", "invite": "  " }),
+        json!({ "username": "ada", "password": "password1", "invite": null }),
+        json!({ "username": "ada", "password": "password1" }),
+    ] {
+        let (status, response) = json_req(&app, "POST", "/v1/auth/register", None, body).await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{response}");
+        assert_eq!(response["error"], "Signups are off.");
+    }
+
+    let created = mint(&app, &admin, json!({})).await;
+    let link = created["token"].as_str().unwrap().to_string();
+    assert_eq!(link.len(), 64);
+    let span = created["invite"]["expiresAt"].as_i64().unwrap()
+        - created["invite"]["createdAt"].as_i64().unwrap();
+    assert_eq!(span, 7 * INVITE_DAY_MS);
+    assert_eq!(created["invite"]["state"], "active");
+    assert_eq!(created["invite"]["createdBy"], "matt");
+
+    let before = user_rows(tmp.path()).await;
+    let (status, body) = json_req(
+        &app,
+        "POST",
+        "/v1/auth/register",
+        None,
+        json!({ "username": "ada", "password": "password1", "invite": link }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["username"], "ada");
+    let ada = body["token"].as_str().unwrap();
+    let (status, me) = empty_req(&app, "GET", "/v1/me", Some(ada)).await;
+    assert_eq!(status, StatusCode::OK, "{me}");
+    assert_eq!(me["username"], "ada");
+    assert_eq!(me["isAdmin"], false);
+    assert_eq!(user_rows(tmp.path()).await, before + 1);
+
+    let (status, headers, bytes) = call(
+        &app,
+        Request::builder()
+            .uri("/v1/admin/invites")
+            .header(header::AUTHORIZATION, format!("Bearer {admin}"))
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_no_store(&headers);
+    let listed: Value = serde_json::from_slice(&bytes).unwrap();
+    assert!(!listed.to_string().contains(&link));
+    assert_eq!(listed["items"][0]["state"], "used");
+    assert_eq!(listed["items"][0]["usedBy"], "ada");
+}
+
+#[tokio::test]
+async fn invite_is_single_use() {
+    let (app, _tmp, admin) = admin_and_closed_signups().await;
+    let created = mint(&app, &admin, json!({ "note": " for ada ", "days": 14 })).await;
+    assert_eq!(created["invite"]["note"], "for ada");
+    let span = created["invite"]["expiresAt"].as_i64().unwrap()
+        - created["invite"]["createdAt"].as_i64().unwrap();
+    assert_eq!(span, 14 * INVITE_DAY_MS);
+    let link = created["token"].as_str().unwrap();
+    let (status, _) = json_req(
+        &app,
+        "POST",
+        "/v1/auth/register",
+        None,
+        json!({ "username": "ada", "password": "password1", "invite": link }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, body) = json_req(
+        &app,
+        "POST",
+        "/v1/auth/register",
+        None,
+        json!({ "username": "bea", "password": "password1", "invite": link }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+    assert_eq!(body["error"], "This invite was already used.");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn concurrent_invite_redeem() {
+    let (app, tmp, admin) = admin_and_closed_signups().await;
+    let created = mint(&app, &admin, json!({})).await;
+    let link = created["token"].as_str().unwrap().to_string();
+    let before = user_rows(tmp.path()).await;
+    let first = json_req(
+        &app,
+        "POST",
+        "/v1/auth/register",
+        None,
+        json!({ "username": "ada", "password": "password1", "invite": link }),
+    );
+    let second = json_req(
+        &app,
+        "POST",
+        "/v1/auth/register",
+        None,
+        json!({ "username": "bea", "password": "password1", "invite": link }),
+    );
+    let ((left_status, left), (right_status, right)) = tokio::join!(first, second);
+    let statuses = [left_status, right_status];
+    assert_eq!(
+        statuses
+            .iter()
+            .filter(|status| **status == StatusCode::OK)
+            .count(),
+        1,
+        "{left} {right}"
+    );
+    let denied = if left_status == StatusCode::FORBIDDEN {
+        left
+    } else {
+        right
+    };
+    assert_eq!(denied["error"], "This invite was already used.");
+    assert_eq!(user_rows(tmp.path()).await, before + 1);
+}
+
+#[tokio::test]
+async fn a_bad_invite_is_refused_even_when_signups_are_open() {
+    let (state, app, tmp) = auth_app(roomy_auth()).await;
+    let (status, body) = json_req(
+        &app,
+        "POST",
+        "/v1/auth/register",
+        None,
+        json!({ "username": "ada", "password": "password1", "invite": "zz" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+    assert_eq!(body["error"], "This invite link isn't valid.");
+    assert_eq!(state.passwords.stats().hashes, 0);
+    assert_eq!(user_rows(tmp.path()).await, 0);
+
+    let token = register(&app, "matt", "password1").await;
+    grant(tmp.path(), "matt").await;
+    let created = mint(&app, &token, json!({})).await;
+    let id = created["invite"]["id"].as_str().unwrap();
+    let link = created["token"].as_str().unwrap().to_string();
+    let pool = open_db(tmp.path()).await;
+    sqlx::query("UPDATE invites SET expires_at = 1 WHERE id = ?")
+        .bind(id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    drop(pool);
+    let before = user_rows(tmp.path()).await;
+    let (status, body) = json_req(
+        &app,
+        "POST",
+        "/v1/auth/register",
+        None,
+        json!({ "username": "ada", "password": "password1", "invite": link }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+    assert_eq!(body["error"], "This invite has expired.");
+    assert_eq!(user_rows(tmp.path()).await, before);
+
+    let created = mint(&app, &token, json!({})).await;
+    let id = created["invite"]["id"].as_str().unwrap();
+    let link = created["token"].as_str().unwrap();
+    let (status, revoked) = empty_req(
+        &app,
+        "POST",
+        &format!("/v1/admin/invites/{id}/revoke"),
+        Some(&token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{revoked}");
+    assert_eq!(revoked["state"], "revoked");
+    assert!(!revoked.to_string().contains(link));
+    let (status, body) = json_req(
+        &app,
+        "POST",
+        "/v1/auth/register",
+        None,
+        json!({ "username": "bea", "password": "password1", "invite": link }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+    assert_eq!(body["error"], "This invite link isn't valid.");
+
+    let (status, body) = json_req(
+        &app,
+        "POST",
+        "/v1/auth/register",
+        None,
+        json!({ "username": "bea", "password": "password1", "invite": "not-a-token" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+    assert_eq!(body["error"], "This invite link isn't valid.");
+    let (status, _) = json_req(
+        &app,
+        "POST",
+        "/v1/auth/register",
+        None,
+        json!({ "username": "bea", "password": "password1" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+}
+
+#[tokio::test]
+async fn a_taken_username_does_not_consume_the_invite() {
+    let (app, tmp) = app().await;
+    let admin = register(&app, "matt", "password1").await;
+    register(&app, "ada", "password1").await;
+    grant(tmp.path(), "matt").await;
+    let created = mint(&app, &admin, json!({})).await;
+    let id = created["invite"]["id"].as_str().unwrap();
+    let link = created["token"].as_str().unwrap();
+    let (status, body) = json_req(
+        &app,
+        "POST",
+        "/v1/auth/register",
+        None,
+        json!({ "username": "ada", "password": "password1", "invite": link }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_eq!(body["error"], "That username is taken.");
+    let (status, listed) = empty_req(&app, "GET", "/v1/admin/invites", Some(&admin)).await;
+    assert_eq!(status, StatusCode::OK, "{listed}");
+    let row = listed["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["id"] == id)
+        .unwrap();
+    assert_eq!(row["state"], "active");
+    assert!(row["usedAt"].is_null());
+}
+
+#[tokio::test]
+async fn invite_check_is_public_exact_and_throttled() {
+    let (app, tmp, admin) = admin_and_closed_signups().await;
+    let valid = mint(&app, &admin, json!({})).await;
+    let valid_token = valid["token"].as_str().unwrap().to_string();
+    let used = mint(&app, &admin, json!({})).await;
+    let used_token = used["token"].as_str().unwrap().to_string();
+    register_with(&app, "ada", &used_token).await;
+    let expired = mint(&app, &admin, json!({})).await;
+    let expired_id = expired["invite"]["id"].as_str().unwrap();
+    let expired_token = expired["token"].as_str().unwrap().to_string();
+    let pool = open_db(tmp.path()).await;
+    sqlx::query("UPDATE invites SET expires_at = 1 WHERE id = ?")
+        .bind(expired_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    drop(pool);
+    let revoked = mint(&app, &admin, json!({})).await;
+    let revoked_id = revoked["invite"]["id"].as_str().unwrap();
+    let revoked_token = revoked["token"].as_str().unwrap().to_string();
+    let (status, _) = empty_req(
+        &app,
+        "POST",
+        &format!("/v1/admin/invites/{revoked_id}/revoke"),
+        Some(&admin),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    for (token, expected) in [
+        (valid_token.as_str(), "valid"),
+        (used_token.as_str(), "used"),
+        (expired_token.as_str(), "expired"),
+        (revoked_token.as_str(), "invalid"),
+        ("zz", "invalid"),
+        ("", "invalid"),
+    ] {
+        let (status, headers, bytes) = call(
+            &app,
+            Request::builder()
+                .method("POST")
+                .uri("/v1/invites/check")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(json!({ "token": token }).to_string()))
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{token}");
+        assert_no_store(&headers);
+        let body: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body.as_object().unwrap().len(), 1);
+        assert_eq!(body["status"], expected);
+    }
+
+    let (status, headers, bytes) = call(
+        &app,
+        Request::builder()
+            .method("POST")
+            .uri("/v1/invites/check")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from("{}"))
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_no_store(&headers);
+    let body: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(
+        body["error"],
+        "Invite check must be a JSON object with a token."
+    );
+
+    let huge = format!("{{\"token\":\"{}\"}}", "a".repeat(JSON_BODY_LIMIT));
+    let (status, bytes) = send(
+        &app,
+        Request::builder()
+            .method("POST")
+            .uri("/v1/invites/check")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(huge))
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
+    let body: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(body["error"], "Request body is too large.");
+
+    let mut auth = roomy_auth();
+    auth.login_ip = rate(2, 600);
+    let (_state, limited, _tmp) = auth_app(auth).await;
+    for _ in 0..2 {
+        let (status, _, body) = post_check(&limited, "203.0.113.7", "zz").await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["status"], "invalid");
+    }
+    let (status, headers, body) = post_check(&limited, "203.0.113.7", "zz").await;
+    assert_limited(status, &headers, &body);
+    assert_no_store(&headers);
+    let (status, registered) = json_req(
+        &limited,
+        "POST",
+        "/v1/auth/register",
+        None,
+        json!({ "username": "ada", "password": "password1" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{registered}");
+}
+
+#[tokio::test]
+async fn admin_invites_validate_revoke_and_count_only_active() {
+    let (app, tmp, admin) = admin_and_closed_signups().await;
+    let (status, body) = json_req(
+        &app,
+        "POST",
+        "/v1/admin/invites",
+        Some(&admin),
+        json!({ "days": 0 }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert_eq!(body["error"], "Expiry must be 1 to 90 days.");
+    let (status, body) = json_req(
+        &app,
+        "POST",
+        "/v1/admin/invites",
+        Some(&admin),
+        json!({ "note": "a".repeat(201) }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert_eq!(body["error"], "Note must be 200 characters or fewer.");
+    let (status, headers, bytes) = call(
+        &app,
+        Request::builder()
+            .method("POST")
+            .uri("/v1/admin/invites")
+            .header(header::AUTHORIZATION, format!("Bearer {admin}"))
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(r#"{"days":7,"extra":1}"#))
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_no_store(&headers);
+    let body: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(body["error"], "Invite must be a JSON object.");
+
+    let mut links = Vec::new();
+    for _ in 0..3 {
+        let created = mint(&app, &admin, json!({})).await;
+        links.push((
+            created["invite"]["id"].as_str().unwrap().to_string(),
+            created["token"].as_str().unwrap().to_string(),
+        ));
+    }
+    register_with(&app, "ada", &links[0].1).await;
+    let (status, revoked) = empty_req(
+        &app,
+        "POST",
+        &format!("/v1/admin/invites/{}/revoke", links[1].0),
+        Some(&admin),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{revoked}");
+    assert_eq!(revoked["state"], "revoked");
+    assert!(!revoked.to_string().contains(&links[1].1));
+    let (status, info) = empty_req(&app, "GET", "/v1/admin/server", Some(&admin)).await;
+    assert_eq!(status, StatusCode::OK, "{info}");
+    assert_eq!(info["invites"], 1);
+
+    let (status, body) = empty_req(
+        &app,
+        "POST",
+        &format!("/v1/admin/invites/{}/revoke", links[0].0),
+        Some(&admin),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_eq!(body["error"], "This invite was already used.");
+    let (status, body) = empty_req(
+        &app,
+        "POST",
+        "/v1/admin/invites/missing/revoke",
+        Some(&admin),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert_eq!(body["error"], "Not found.");
+
+    let pool = open_db(tmp.path()).await;
+    for (_, raw) in &links {
+        let raw_hits: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM invites WHERE token_hash = ?")
+            .bind(raw.as_bytes())
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(raw_hits, 0);
+        let hash_hits: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM invites WHERE token_hash = ?")
+                .bind(session::hash_token(raw))
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(hash_hits, 1);
+    }
+    let (status, listed) = empty_req(&app, "GET", "/v1/admin/invites", Some(&admin)).await;
+    assert_eq!(status, StatusCode::OK, "{listed}");
+    let text = listed.to_string();
+    for (_, raw) in &links {
+        assert!(!text.contains(raw));
+    }
+}
+
+async fn register_with(app: &axum::Router, username: &str, invite: &str) {
+    let (status, body) = json_req(
+        app,
+        "POST",
+        "/v1/auth/register",
+        None,
+        json!({ "username": username, "password": "password1", "invite": invite }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+}
+
+async fn post_check(
+    app: &axum::Router,
+    ip: &str,
+    token: &str,
+) -> (StatusCode, axum::http::HeaderMap, Value) {
+    let req = Request::builder()
+        .method("POST")
+        .uri("/v1/invites/check")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(json!({ "token": token }).to_string()))
+        .unwrap();
+    let (status, headers, bytes) = call(app, with_ip(req, ip)).await;
+    let body = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+    (status, headers, body)
 }

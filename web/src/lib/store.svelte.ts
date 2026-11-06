@@ -134,8 +134,13 @@ class HostedStore {
     this.notice = notice;
   }
 
-  async signIn(mode: 'login' | 'register', username: string, password: string): Promise<void> {
-    const session = await this.api.auth(mode, username.trim(), password);
+  async signIn(
+    mode: 'login' | 'register',
+    username: string,
+    password: string,
+    invite?: string,
+  ): Promise<void> {
+    const session = await this.api.auth(mode, username.trim(), password, invite);
     this.clear();
     this.session = session;
     writeStored('mewo.session', session);
