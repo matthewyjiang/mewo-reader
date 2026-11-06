@@ -104,6 +104,16 @@ pub struct AuthRequest {
     pub password: String,
 }
 
+/// `POST /v1/auth/register`. Login keeps [`AuthRequest`]. A missing or blank
+/// `invite` is the ordinary signup path.
+#[derive(Debug, Deserialize)]
+pub struct RegisterRequest {
+    pub username: String,
+    pub password: String,
+    #[serde(default)]
+    pub invite: Option<String>,
+}
+
 #[derive(Debug, Serialize)]
 pub struct AuthResponse {
     pub token: String,
@@ -162,6 +172,42 @@ pub struct ServerInfo {
     pub comments: i64,
     pub reposts: i64,
     pub storage_bytes: u64,
+    /// Active invites: unused, unrevoked, and not yet expired.
+    pub invites: i64,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct InviteCheckRequest {
+    pub token: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct InviteCheck {
+    pub status: crate::auth::invite::CheckStatus,
+}
+
+fn default_invite_days() -> u32 {
+    crate::auth::invite::DEFAULT_DAYS
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct NewInvite {
+    #[serde(default)]
+    pub note: Option<String>,
+    #[serde(default = "default_invite_days")]
+    pub days: u32,
+}
+
+#[derive(Debug, Serialize)]
+pub struct CreatedInvite {
+    pub invite: crate::auth::invite::AdminInvite,
+    pub token: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct AdminInvites {
+    pub items: Vec<crate::auth::invite::AdminInvite>,
 }
 
 #[derive(Debug, Deserialize)]

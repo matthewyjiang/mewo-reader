@@ -1,6 +1,10 @@
 <script lang="ts">
+  import { checkHeading, type CheckStatus } from '../lib/invites';
+  import { router } from '../lib/router.svelte';
   import { store, message } from '../lib/store.svelte';
   import Icon from './Icon.svelte';
+
+  let { invite = null }: { invite: string | null } = $props();
 
   const usernameRule = '3–32 characters: letters, digits, underscore.';
   const passwordRule = 'At least 8 characters.';
@@ -10,12 +14,19 @@
   let password = $state('');
   let busy = $state(false);
   let error = $state('');
+  let ignoreInvite = $state(false);
+  let check = $state<'idle' | 'checking' | 'failed' | CheckStatus>('idle');
   let usernameValue = $derived(username.trim());
   let usernameOk = $derived(/^[A-Za-z0-9_]{3,32}$/.test(usernameValue));
   let passwordOk = $derived(password.length >= 8);
   let valid = $derived(usernameOk && passwordOk);
   let usernameError = $derived(usernameValue && !usernameOk ? usernameRule : '');
   let passwordError = $derived(password && !passwordOk ? passwordRule : '');
+  let activeInvite = $derived(ignoreInvite ? null : invite);
+  let checking = $derived(activeInvite !== null && check === 'checking');
+  let dead = $derived(
+    activeInvite && (check === 'used' || check === 'expired' || check === 'invalid') ? check : null,
+  );
   // null while the instance call is in flight or failed: keep today's link.
   let allowSignup = $state<boolean | null>(null);
 
@@ -42,16 +53,41 @@
   });
 
   $effect(() => {
+    if (activeInvite) return;
     if (allowSignup === false && mode === 'register') mode = 'login';
+  });
+
+  $effect(() => {
+    const token = invite;
+    ignoreInvite = false;
+    if (!token) {
+      check = 'idle';
+      return;
+    }
+    const controller = new AbortController();
+    check = 'checking';
+    mode = 'register';
+    void store.api.checkInvite(token, controller.signal)
+      .then((status) => {
+        if (!controller.signal.aborted) check = status;
+      })
+      .catch((err: unknown) => {
+        if (controller.signal.aborted) return;
+        if (err instanceof DOMException && err.name === 'AbortError') return;
+        check = 'failed';
+      });
+    return () => controller.abort();
   });
 
   async function submit(event: SubmitEvent): Promise<void> {
     event.preventDefault();
-    if (!valid || busy) return;
+    if (!valid || busy || checking) return;
     busy = true;
     error = '';
+    const token = mode === 'register' ? activeInvite ?? undefined : undefined;
     try {
-      await store.signIn(mode, username, password);
+      await store.signIn(mode, username, password, token);
+      if (token) router.go('/', true);
     } catch (err) {
       error = message(err);
     } finally {
@@ -64,6 +100,22 @@
     error = '';
     store.notice = '';
   }
+
+  function signInInstead(): void {
+    ignoreInvite = true;
+    mode = 'login';
+    error = '';
+    store.notice = '';
+  }
+
+  // Clearing the query leaves this component mounted, so registration mode has to
+  // be dropped here. The signup setting only forces login when signups are closed.
+  function dismissInvite(): void {
+    mode = 'login';
+    error = '';
+    store.notice = '';
+    router.go('/', true);
+  }
 </script>
 
 <div class="auth-page">
@@ -71,6 +123,14 @@
     <Icon name="book" size={28} />
     <span class="sr-only">Mewo</span>
   </header>
+  {#if dead}
+    <div class="auth-form">
+      <h1>{checkHeading(dead)}</h1>
+      <button type="button" class="pill auth-submit" onclick={dismissInvite}>
+        Sign in
+      </button>
+    </div>
+  {:else}
   <form class="auth-form" onsubmit={submit}>
     <h1>{mode === 'register' ? 'Create account' : 'Sign in'}</h1>
     <label for="username">Username</label>
@@ -85,7 +145,7 @@
       maxlength="32"
       required
       bind:value={username}
-      disabled={busy}
+      disabled={busy || checking}
       aria-invalid={usernameError ? 'true' : undefined}
       aria-describedby={usernameError ? 'username-error' : undefined}
     />
@@ -101,7 +161,7 @@
       minlength="8"
       required
       bind:value={password}
-      disabled={busy}
+      disabled={busy || checking}
       aria-invalid={passwordError ? 'true' : undefined}
       aria-describedby={passwordError ? 'password-error' : undefined}
     />
@@ -111,11 +171,16 @@
     {#if error || store.notice}
       <p class="error" role="alert">{error || store.notice}</p>
     {/if}
-    <button type="submit" class="pill auth-submit" disabled={!valid || busy}>
+    <button type="submit" class="pill auth-submit" disabled={!valid || busy || checking}>
       {busy ? 'Connecting…' : mode === 'login' ? 'Sign in' : 'Create account'}
     </button>
     {#if mode === 'register'}
-      <button type="button" class="text-button" disabled={busy} onclick={switchMode}>
+      <button
+        type="button"
+        class="text-button"
+        disabled={busy}
+        onclick={activeInvite ? signInInstead : switchMode}
+      >
         Sign in instead
       </button>
     {:else if allowSignup !== false}
@@ -124,6 +189,7 @@
       </button>
     {/if}
   </form>
+  {/if}
 </div>
 
 <style>

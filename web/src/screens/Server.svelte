@@ -406,6 +406,13 @@
       onchange={(event) => setSignup(event.currentTarget.checked)}
     />
   </label>
+  <button class="settings-row" onclick={() => router.go('/settings/server/invites')}>
+    <span>Invites</span>
+    <span class="row-trail">
+      <span class="count">{info.invites}</span>
+      <Icon name="chevron" />
+    </span>
+  </button>
   <label class="settings-row">
     <span>Max EPUB size</span>
     <span class="epub-field">

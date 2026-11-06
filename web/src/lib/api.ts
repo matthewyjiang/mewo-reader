@@ -1,8 +1,9 @@
+import type { CheckStatus } from './invites';
 import type {
-  AdminUser, AuthResponse, BookRecord, BookRequest, CatalogWork, CommentIndex, FeedPost,
-  HomeFeedPage, Me, PostComment, ProfileBooks, ProfilePostsPage, ProfileRecord,
-  ProfileRepostsPage, RepostState, SearchKind, SearchPage, ServerInfo, ServerSettings,
-  SettingsPatch, WorkDetail,
+  AdminInvite, AdminUser, AuthResponse, BookRecord, BookRequest, CatalogWork, CommentIndex,
+  CreatedInvite, FeedPost, HomeFeedPage, Me, PostComment, ProfileBooks, ProfilePostsPage,
+  ProfileRecord, ProfileRepostsPage, RepostState, SearchKind, SearchPage, ServerInfo,
+  ServerSettings, SettingsPatch, WorkDetail,
 } from './models';
 
 export class ApiError extends Error {
@@ -61,8 +62,35 @@ export class HostedClient {
     }
   }
 
-  auth(mode: 'login' | 'register', username: string, password: string): Promise<AuthResponse> {
-    return this.json(`/auth/${mode}`, 'POST', { username, password });
+  auth(
+    mode: 'login' | 'register',
+    username: string,
+    password: string,
+    invite?: string,
+  ): Promise<AuthResponse> {
+    const body: { username: string; password: string; invite?: string } = { username, password };
+    if (mode === 'register' && invite) body.invite = invite;
+    return this.json(`/auth/${mode}`, 'POST', body);
+  }
+
+  async checkInvite(token: string, signal?: AbortSignal): Promise<CheckStatus> {
+    const body = await this.json<{ status: CheckStatus }>('/invites/check', 'POST', { token }, signal);
+    return body.status;
+  }
+
+  async adminInvites(): Promise<AdminInvite[]> {
+    return (await this.json<{ items: AdminInvite[] }>('/admin/invites')).items;
+  }
+
+  createInvite(note: string, days: number): Promise<CreatedInvite> {
+    const trimmed = note.trim();
+    const body: { note?: string; days: number } = { days };
+    if (trimmed) body.note = trimmed;
+    return this.json('/admin/invites', 'POST', body);
+  }
+
+  revokeInvite(id: string): Promise<AdminInvite> {
+    return this.json(`/admin/invites/${encodeURIComponent(id)}/revoke`, 'POST');
   }
 
   async logout(): Promise<void> {

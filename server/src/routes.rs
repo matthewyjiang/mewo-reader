@@ -1,3 +1,4 @@
+use crate::auth::invite;
 use crate::auth::session;
 use crate::auth::{check_password, normalize_username, Authed, ClientIp};
 use crate::config::{request_body_limit, MAX_COVER_BYTES};
@@ -7,18 +8,21 @@ use crate::feed::{slug, Post, Posts};
 use crate::library::{self, Staged};
 use crate::models::{
     ActorRecord, AuthRequest, AuthResponse, BookRecord, BookRow, ChangePassword, CommentIndex,
-    CommentRecord, CommentRow, CommentThread, FeedItem, FeedPage, InstanceInfo, LibrarySnapshot,
-    LikeSet, MeResponse, NewComment, PatchBook, ProfileBooks, ProfilePostRecord, ProfilePostsPage,
-    ProfileRecord, ProfileReplies, ProfileReplyRecord, ProfileReplyRow, ProfileRepostRecord,
-    ProfileRepostsPage, RepostState, SearchKind, SearchPage, MAX_COMMENT_CHARS, MAX_POST_ID_CHARS,
+    CommentRecord, CommentRow, CommentThread, FeedItem, FeedPage, InstanceInfo, InviteCheck,
+    InviteCheckRequest, LibrarySnapshot, LikeSet, MeResponse, NewComment, PatchBook, ProfileBooks,
+    ProfilePostRecord, ProfilePostsPage, ProfileRecord, ProfileReplies, ProfileReplyRecord,
+    ProfileReplyRow, ProfileRepostRecord, ProfileRepostsPage, RegisterRequest, RepostState,
+    SearchKind, SearchPage, MAX_COMMENT_CHARS, MAX_POST_ID_CHARS,
 };
 use crate::search::{self, PROFILE_POSTS_LIMIT};
 use crate::version::VersionInfo;
 use crate::visibility::{social_visible, BOOK_SELECT, BOOK_VISIBLE_TO};
 use crate::AppState;
+use axum::extract::rejection::JsonRejection;
 use axum::extract::{Multipart, Path, Query, State};
 use axum::http::header::{CONTENT_DISPOSITION, CONTENT_LENGTH, CONTENT_TYPE};
 use axum::http::{HeaderMap, HeaderValue};
+use axum::middleware::Next;
 use axum::response::IntoResponse;
 use axum::Json;
 use serde::Deserialize;
@@ -41,14 +45,25 @@ pub async fn instance(State(state): State<AppState>) -> Result<Json<InstanceInfo
 pub async fn register(
     State(state): State<AppState>,
     ip: ClientIp,
-    Json(body): Json<AuthRequest>,
+    Json(body): Json<RegisterRequest>,
 ) -> Result<Json<AuthResponse>, ApiError> {
     let (username, norm) = normalize_username(&body.username)?;
     check_password(&body.password)?;
     let attempt = state.throttle.register(ip, &norm)?;
-    let settings = crate::settings::load(&state.pool).await?;
-    if !settings.allow_signup {
-        return Err(ApiError::Forbidden("Signups are off.".into()));
+    let supplied = body
+        .invite
+        .as_deref()
+        .map(str::trim)
+        .filter(|token| !token.is_empty());
+    if let Some(token) = supplied {
+        // A present token has to be valid even when signups are open. The
+        // locked update inside `invite::register` is what consumes it.
+        invite::admit(&state.pool, token, now_ms()).await?;
+    } else {
+        let settings = crate::settings::load(&state.pool).await?;
+        if !settings.allow_signup {
+            return Err(ApiError::Forbidden("Signups are off.".into()));
+        }
     }
     // A taken name is rejected before Argon2. The UNIQUE index still decides a race.
     let taken = sqlx::query("SELECT id FROM users WHERE username_norm = ?")
@@ -66,28 +81,80 @@ pub async fn register(
         }
         Err(err) => return Err(err),
     };
-    let id = Uuid::new_v4().to_string();
-    let created_at = now_ms();
-    let inserted = sqlx::query(
-        "INSERT INTO users (id, username, username_norm, password_hash, created_at)
-         VALUES (?, ?, ?, ?, ?)",
-    )
-    .bind(&id)
-    .bind(&username)
-    .bind(&norm)
-    .bind(&password_hash)
-    .bind(created_at)
-    .execute(&state.pool)
-    .await;
-    match inserted {
-        Ok(_) => {}
-        Err(sqlx::Error::Database(err)) if err.is_unique_violation() => {
-            return Err(ApiError::Conflict("That username is taken.".into()));
+    let id = if let Some(token) = supplied {
+        invite::register(
+            &state.pool,
+            token,
+            invite::NewAccount {
+                username: &username,
+                username_norm: &norm,
+                password_hash: &password_hash,
+            },
+            now_ms,
+        )
+        .await?
+    } else {
+        let id = Uuid::new_v4().to_string();
+        let created_at = now_ms();
+        let inserted = sqlx::query(
+            "INSERT INTO users (id, username, username_norm, password_hash, created_at)
+             VALUES (?, ?, ?, ?, ?)",
+        )
+        .bind(&id)
+        .bind(&username)
+        .bind(&norm)
+        .bind(&password_hash)
+        .bind(created_at)
+        .execute(&state.pool)
+        .await;
+        match inserted {
+            Ok(_) => {}
+            Err(sqlx::Error::Database(err)) if err.is_unique_violation() => {
+                return Err(ApiError::Conflict("That username is taken.".into()));
+            }
+            Err(err) => return Err(err.into()),
         }
-        Err(err) => return Err(err.into()),
-    }
+        id
+    };
     let token = session::issue(&state.pool, &id, now_ms()).await?;
     Ok(Json(AuthResponse { token, username }))
+}
+
+pub async fn check_invite(
+    State(state): State<AppState>,
+    ip: ClientIp,
+    body: Result<Json<InviteCheckRequest>, JsonRejection>,
+) -> Result<Json<InviteCheck>, ApiError> {
+    let body = json_body(body, "Invite check must be a JSON object with a token.")?;
+    state.throttle.check_invite(ip)?;
+    let status = invite::check(&state.pool, &body.token, now_ms()).await?;
+    Ok(Json(InviteCheck { status }))
+}
+
+/// Maps a JSON rejection to `invalid`, except an oversized body, which stays 413.
+pub(crate) fn json_body<T>(
+    body: Result<Json<T>, JsonRejection>,
+    invalid: &str,
+) -> Result<T, ApiError> {
+    match body {
+        Ok(Json(value)) => Ok(value),
+        Err(rejection) if rejection.status() == axum::http::StatusCode::PAYLOAD_TOO_LARGE => {
+            Err(ApiError::RequestTooLarge)
+        }
+        Err(_) => Err(ApiError::BadRequest(invalid.into())),
+    }
+}
+
+pub(crate) async fn no_store(
+    request: axum::extract::Request,
+    next: Next,
+) -> axum::response::Response {
+    let mut response = next.run(request).await;
+    response.headers_mut().insert(
+        axum::http::header::CACHE_CONTROL,
+        HeaderValue::from_static("no-store"),
+    );
+    response
 }
 
 pub async fn login(

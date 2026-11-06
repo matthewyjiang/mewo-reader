@@ -1,4 +1,6 @@
 /** Hosted wire types match the phone models; the server owns EPUB parsing. */
+import type { InviteState } from './invites';
+
 export interface BookRecord {
   id: string;
   title: string;
@@ -268,6 +270,25 @@ export interface ServerInfo {
   comments: number;
   reposts: number;
   storageBytes: number;
+  /** Active invites: unused, unrevoked, and not yet expired. */
+  invites: number;
+}
+
+export interface AdminInvite {
+  id: string;
+  note: string | null;
+  createdBy: string | null;
+  createdAt: number;
+  expiresAt: number;
+  usedAt: number | null;
+  usedBy: string | null;
+  revokedAt: number | null;
+  state: InviteState;
+}
+
+export interface CreatedInvite {
+  invite: AdminInvite;
+  token: string;
 }
 
 export interface PostHit {

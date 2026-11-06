@@ -1,4 +1,5 @@
 use crate::admin::{self, AdminChange};
+use crate::auth::invite::{self, AdminInvite, InviteState};
 use crate::config::Config;
 use crate::error::ApiError;
 use crate::parse_pool::ParsePool;
@@ -32,6 +33,9 @@ Usage:
   mewo-server admin grant <username>
   mewo-server admin revoke <username>
   mewo-server admin create <username>
+  mewo-server admin invites create [--days <n>] [--note <text>]
+  mewo-server admin invites list
+  mewo-server admin invites revoke <id>
   mewo-server admin reparse <book-id> [--dry-run] [--force]
   mewo-server admin reparse --all [--dry-run] [--force]
   mewo-server admin sessions revoke <username>
@@ -51,9 +55,17 @@ pub enum AdminCommand {
     Grant(String),
     Revoke(String),
     Create(String),
+    Invites(InviteCommand),
     Reparse(ReparseArgs),
     /// `None` is `--all`. A username cannot be `--all`.
     RevokeSessions(Option<String>),
+}
+
+#[derive(Debug)]
+pub enum InviteCommand {
+    Create { days: u32, note: Option<String> },
+    List,
+    Revoke(String),
 }
 
 #[derive(Debug)]
@@ -87,6 +99,7 @@ fn parse_admin(args: &[String]) -> Result<Command, String> {
         [verb, name] if verb == "grant" => AdminCommand::Grant(name.clone()),
         [verb, name] if verb == "revoke" => AdminCommand::Revoke(name.clone()),
         [verb, name] if verb == "create" => AdminCommand::Create(name.clone()),
+        [verb, rest @ ..] if verb == "invites" => parse_invites(rest)?,
         [verb, rest @ ..] if verb == "reparse" => parse_reparse(rest)?,
         [verb, action, flag] if verb == "sessions" && action == "revoke" && flag == "--all" => {
             AdminCommand::RevokeSessions(None)
@@ -97,6 +110,64 @@ fn parse_admin(args: &[String]) -> Result<Command, String> {
         _ => return Err(USAGE.to_string()),
     };
     Ok(Command::Admin(command))
+}
+
+fn parse_invites(args: &[String]) -> Result<AdminCommand, String> {
+    match args {
+        [verb] if verb == "list" => Ok(AdminCommand::Invites(InviteCommand::List)),
+        [verb, id] if verb == "revoke" && !id.starts_with('-') => {
+            Ok(AdminCommand::Invites(InviteCommand::Revoke(id.clone())))
+        }
+        [verb, rest @ ..] if verb == "create" => {
+            let mut days = None;
+            let mut note = None;
+            let mut index = 0;
+            while index < rest.len() {
+                match rest[index].as_str() {
+                    "--days" => {
+                        if days.is_some() {
+                            return Err(USAGE.to_string());
+                        }
+                        let Some(value) = rest.get(index + 1) else {
+                            return Err(USAGE.to_string());
+                        };
+                        days = Some(parse_days(value)?);
+                        index += 2;
+                    }
+                    "--note" => {
+                        if note.is_some() {
+                            return Err(USAGE.to_string());
+                        }
+                        let Some(value) = rest.get(index + 1) else {
+                            return Err(USAGE.to_string());
+                        };
+                        if value.starts_with('-') {
+                            return Err(USAGE.to_string());
+                        }
+                        note = Some(value.clone());
+                        index += 2;
+                    }
+                    _ => return Err(USAGE.to_string()),
+                }
+            }
+            Ok(AdminCommand::Invites(InviteCommand::Create {
+                days: days.unwrap_or(invite::DEFAULT_DAYS),
+                note,
+            }))
+        }
+        _ => Err(USAGE.to_string()),
+    }
+}
+
+fn parse_days(raw: &str) -> Result<u32, String> {
+    if raw.is_empty() || !raw.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Err(USAGE.to_string());
+    }
+    let days: u32 = raw.parse().map_err(|_| USAGE.to_string())?;
+    if !(1..=invite::MAX_DAYS).contains(&days) {
+        return Err(USAGE.to_string());
+    }
+    Ok(days)
 }
 
 fn parse_reparse(args: &[String]) -> Result<AdminCommand, String> {
@@ -169,6 +240,7 @@ async fn dispatch(
         AdminCommand::Grant(name) => change(pool, &name, true, out, err).await,
         AdminCommand::Revoke(name) => change(pool, &name, false, out, err).await,
         AdminCommand::Create(name) => create(pool, &name, stdin, out, err).await,
+        AdminCommand::Invites(command) => invites(pool, command, out, err).await,
         AdminCommand::Reparse(args) => reparse(pool, config, args, out, err).await,
         AdminCommand::RevokeSessions(name) => revoke_sessions(pool, name, out, err).await,
     }
@@ -366,6 +438,79 @@ async fn create(
     }
 }
 
+async fn invites(
+    pool: &SqlitePool,
+    command: InviteCommand,
+    out: &mut dyn Write,
+    err: &mut dyn Write,
+) -> Result<i32, io::Error> {
+    let now = crate::db::now_ms();
+    match command {
+        InviteCommand::Create { days, note } => {
+            match invite::create(pool, None, note.as_deref(), days, now).await {
+                Ok((invite, token)) => {
+                    writeln!(out, "id {}", invite.id)?;
+                    writeln!(out, "expires_at {}", invite.expires_at)?;
+                    writeln!(out, "Link: <your server>/signup?invite={token}")?;
+                    Ok(0)
+                }
+                Err(error) => Ok(user_or_db(error, err)),
+            }
+        }
+        InviteCommand::List => match invite::list(pool, now).await {
+            Ok(items) => {
+                for invite in items {
+                    writeln!(out, "{}", invite_line(&invite))?;
+                }
+                Ok(0)
+            }
+            Err(error) => Ok(user_or_db(error, err)),
+        },
+        InviteCommand::Revoke(id) => match invite::revoke(pool, &id, now).await {
+            Ok(_) => Ok(0),
+            Err(ApiError::NotFound) => {
+                writeln!(err, "No invite with id {id}.")?;
+                Ok(1)
+            }
+            Err(error) => Ok(user_or_db(error, err)),
+        },
+    }
+}
+
+fn invite_line(invite: &AdminInvite) -> String {
+    let note = invite
+        .note
+        .as_deref()
+        .map(one_line)
+        .unwrap_or_else(|| "-".to_owned());
+    let used_by = invite.used_by.as_deref().unwrap_or("-");
+    format!(
+        "{}  {}  {}  {}  {}",
+        invite.id,
+        invite_state(invite.state),
+        invite.expires_at,
+        note,
+        used_by
+    )
+}
+
+fn invite_state(state: InviteState) -> &'static str {
+    match state {
+        InviteState::Active => "active",
+        InviteState::Used => "used",
+        InviteState::Expired => "expired",
+        InviteState::Revoked => "revoked",
+    }
+}
+
+fn one_line(value: &str) -> String {
+    value
+        .replace('\\', "\\\\")
+        .replace('\n', "\\n")
+        .replace('\r', "\\r")
+        .replace('\t', "\\t")
+}
+
 fn user_or_db(error: ApiError, err: &mut dyn Write) -> i32 {
     match error {
         ApiError::Internal => {
@@ -522,6 +667,58 @@ mod tests {
         assert!(parse(words(&["admin", "sessions", "revoke"])).is_err());
         assert!(parse(words(&["admin", "sessions", "revoke", "matt", "extra"])).is_err());
         assert!(parse(words(&["admin", "sessions", "revoke", "--all", "matt"])).is_err());
+        match parse(words(&["admin", "invites", "create"])) {
+            Ok(Command::Admin(AdminCommand::Invites(InviteCommand::Create { days, note }))) => {
+                assert_eq!(days, 7);
+                assert!(note.is_none());
+            }
+            other => panic!("{other:?}"),
+        }
+        match parse(words(&[
+            "admin", "invites", "create", "--days", "3", "--note", "for ada",
+        ])) {
+            Ok(Command::Admin(AdminCommand::Invites(InviteCommand::Create { days, note }))) => {
+                assert_eq!(days, 3);
+                assert_eq!(note.as_deref(), Some("for ada"));
+            }
+            other => panic!("{other:?}"),
+        }
+        match parse(words(&[
+            "admin", "invites", "create", "--note", "for ada", "--days", "14",
+        ])) {
+            Ok(Command::Admin(AdminCommand::Invites(InviteCommand::Create { days, note }))) => {
+                assert_eq!(days, 14);
+                assert_eq!(note.as_deref(), Some("for ada"));
+            }
+            other => panic!("{other:?}"),
+        }
+        assert!(matches!(
+            parse(words(&["admin", "invites", "list"])),
+            Ok(Command::Admin(AdminCommand::Invites(InviteCommand::List)))
+        ));
+        match parse(words(&["admin", "invites", "revoke", "abc"])) {
+            Ok(Command::Admin(AdminCommand::Invites(InviteCommand::Revoke(id)))) => {
+                assert_eq!(id, "abc")
+            }
+            other => panic!("{other:?}"),
+        }
+        for bad in [
+            ["admin", "invites"].as_slice(),
+            ["admin", "invites", "create", "extra"].as_slice(),
+            ["admin", "invites", "create", "--days", "x"].as_slice(),
+            ["admin", "invites", "create", "--days", "0"].as_slice(),
+            ["admin", "invites", "create", "--days", "91"].as_slice(),
+            ["admin", "invites", "create", "--days"].as_slice(),
+            ["admin", "invites", "create", "--days", "3", "--days", "4"].as_slice(),
+            ["admin", "invites", "create", "--note"].as_slice(),
+            ["admin", "invites", "create", "--note", "--days"].as_slice(),
+            ["admin", "invites", "create", "--nope"].as_slice(),
+            ["admin", "invites", "list", "extra"].as_slice(),
+            ["admin", "invites", "revoke"].as_slice(),
+            ["admin", "invites", "revoke", "abc", "extra"].as_slice(),
+        ] {
+            assert!(parse(words(bad)).is_err(), "{bad:?}");
+        }
     }
 
     #[tokio::test]
@@ -858,6 +1055,91 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(legacy, 0);
+    }
+
+    #[tokio::test]
+    async fn invites_create_list_revoke_and_a_link_can_sign_up() {
+        let tmp = TempDir::new().unwrap();
+        let (code, out, err) = cli(
+            tmp.path(),
+            AdminCommand::Invites(InviteCommand::Create {
+                days: 7,
+                note: Some("a\nb\tc".into()),
+            }),
+            "",
+        )
+        .await;
+        assert_eq!(code, 0, "{err}");
+        let lines: Vec<_> = out.lines().collect();
+        assert_eq!(lines.len(), 3, "{out}");
+        let id = lines[0].strip_prefix("id ").unwrap();
+        assert_eq!(id.len(), 36);
+        let expires = lines[1].strip_prefix("expires_at ").unwrap();
+        assert!(expires.chars().all(|ch| ch.is_ascii_digit()));
+        let link = lines[2];
+        let token = link
+            .strip_prefix("Link: <your server>/signup?invite=")
+            .unwrap();
+        assert_eq!(token.len(), 64);
+        assert!(token
+            .chars()
+            .all(|ch| ch.is_ascii_hexdigit() && !ch.is_ascii_uppercase()));
+        assert_eq!(out.matches(token).count(), 1);
+        assert!(!err.contains(token));
+
+        let (code, listed, err) =
+            cli(tmp.path(), AdminCommand::Invites(InviteCommand::List), "").await;
+        assert_eq!(code, 0, "{err}");
+        assert_eq!(listed.lines().count(), 1, "{listed}");
+        assert!(listed.contains(id));
+        assert!(listed.contains("active"));
+        assert!(listed.contains("a\\nb\\tc"));
+        assert!(!listed.contains(token));
+
+        let (code, out, err) = cli(
+            tmp.path(),
+            AdminCommand::Invites(InviteCommand::Revoke("missing".into())),
+            "",
+        )
+        .await;
+        assert_eq!(code, 1, "{out}");
+        assert_eq!(err, "No invite with id missing.\n");
+
+        let url = format!("sqlite://{}?mode=rwc", tmp.path().join("mewo.db").display());
+        let pool = sqlx::SqlitePool::connect(&url).await.unwrap();
+        let created_by: Option<String> =
+            sqlx::query_scalar("SELECT created_by FROM invites WHERE id = ?")
+                .bind(id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert!(created_by.is_none());
+        drop(pool);
+
+        let app = build(config_at(tmp.path())).await.unwrap();
+        let (status, body) = post_json(
+            &app,
+            "/v1/auth/register",
+            json!({ "username": "ada", "password": "password1", "invite": token }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let session = body["token"].as_str().unwrap();
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/me")
+                    .header(header::AUTHORIZATION, format!("Bearer {session}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        let me: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(me["isAdmin"], false);
+        assert_eq!(me["username"], "ada");
     }
 
     async fn me_status(app: &axum::Router, token: &str) -> StatusCode {

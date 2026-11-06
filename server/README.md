@@ -76,13 +76,13 @@ Username and password. Argon2 hashes. Opaque bearer tokens, 32 random bytes as h
 
 A session goes idle 90 days after its last use, and it ends 365 days after it was issued. A request moves the last-use time at most once an hour. That does not extend the 365 days. Each account keeps at most 20 sessions. The next login drops the least recently used one past that.
 
-`POST /v1/auth/register` and `POST /v1/auth/login` take `{ "username", "password" }` and return `{ "token", "username" }`. Username is 3 to 32 characters, letters, digits, underscore, unique case-insensitively. Password is 8 to 256 characters.
+`POST /v1/auth/register` takes `{ "username", "password", "invite"? }` and `POST /v1/auth/login` takes `{ "username", "password" }`. Both return `{ "token", "username" }`. Username is 3 to 32 characters, letters, digits, underscore, unique case-insensitively. Password is 8 to 256 characters. A missing, null, or blank `invite` is an ordinary signup. A present invite has to be valid even when signups are open. A used invite is 403 `This invite was already used.` An expired one is 403 `This invite has expired.` Anything else is 403 `This invite link isn't valid.` A taken username is 409 and leaves the invite unused.
 
 `POST /v1/auth/logout` ends the caller's session. `POST /v1/auth/logout-all` ends every session for that account, including the caller's. Both return 204.
 
 `POST /v1/auth/password` takes `{ "currentPassword", "newPassword" }` and returns 204. The new password uses the same length rules. A wrong current password is 403 `Wrong password.` The caller's other sessions are revoked. This session stays signed in. Guesses use the login throttle. A busy password hasher (503) does not spend a guess.
 
-`GET /v1/version` and `GET /v1/instance` are public. Static web files are public. Every other `/v1` route needs `Authorization: Bearer <token>`, except `POST /v1/auth/register` and `POST /v1/auth/login`. An expired or unknown token is 401 `Sign in first.`
+`GET /v1/version`, `GET /v1/instance`, and `POST /v1/invites/check` are public. Static web files are public. Every other `/v1` route needs `Authorization: Bearer <token>`, except `POST /v1/auth/register` and `POST /v1/auth/login`. An expired or unknown token is 401 `Sign in first.`
 
 ## Admin
 
@@ -95,6 +95,9 @@ mewo-server admin list
 mewo-server admin grant <username>
 mewo-server admin revoke <username>
 mewo-server admin create <username>
+mewo-server admin invites create [--days <n>] [--note <text>]
+mewo-server admin invites list
+mewo-server admin invites revoke <id>
 mewo-server admin sessions revoke <username>
 mewo-server admin sessions revoke --all
 ```
@@ -109,6 +112,10 @@ ada
 ```
 
 `create` inserts an admin even when signups are off. The password comes from stdin, never from argv or the environment. On a terminal it prompts with no echo. A pipe reads one line.
+
+`invites create` prints the id, the expiry in epoch milliseconds, and one `Link: <your server>/signup?invite=<token>` line. `<your server>` is literal: the CLI has no public origin. `--days` is 1 to 90 and defaults to 7. A bad value is usage, exit 2. `invites list` prints one line per invite and never a token. A note's tabs and newlines are escaped so the line stays one line. `invites revoke` of an unknown id exits 1 with `No invite with id <id>.`
+
+An invite link signs up one account even when signups are off. It expires after 7 days by default. The server stores only a hash, so a lost link can't be shown again: revoke it and make a new one.
 
 `sessions revoke <username>` deletes that account's sessions and prints `revoked <count>.` An unknown account exits 1 with `No account named <username>.` `--all` deletes every session and prints the same line. They run with the server stopped, and against a live server: the database is WAL, and a statement waits up to 10 seconds for the write lock. A session left over from an older database is hashed first, then deleted.
 
@@ -140,7 +147,8 @@ Prefix `/v1`.
 
 - `GET /version` → `{ "version", "commit" }`. `commit` is a string or null. Public
 - `GET /instance` → `{ "allowSignup" }`. Public. Read live from the settings row. A future `name` is one more field
-- `POST /auth/register`
+- `POST /invites/check` `{ "token" }` → `{ "status" }`. `status` is `valid`, `used`, `expired`, or `invalid`. Public. Unknown, malformed, and revoked are `invalid`. A body that is not a JSON object with `token` is 400 `Invite check must be a JSON object with a token.` A body over 1 MiB is 413. The check is limited per IP on the login IP bucket. `Cache-Control` is `no-store`
+- `POST /auth/register` `{ "username", "password", "invite"? }`
 - `POST /auth/login`
 - `POST /auth/logout` → 204
 - `POST /auth/logout-all` → 204. Ends every session for this account, including this one
@@ -159,7 +167,10 @@ A book request is `{ "id", "workKey", "title", "author", "year", "coverId", "sta
 
 - `GET /admin/users` → `{ "items": [ { "username", "joinedAt", "isAdmin", "books", "mine" } ] }`. Ordered by `created_at`. `mine` is true only on the caller. Admin
 - `PATCH /admin/users/{username}` `{ "isAdmin" }` → that row. Unknown username is 404. Your own username is 409 `You can't change your own admin access.` A body that is not a JSON object (wrong type, unknown field, or non-JSON) is 400 `User patch must be a JSON object.` Idempotent. Admin
-- `GET /admin/server` → `{ "users", "books", "comments", "reposts", "storageBytes" }`. `storageBytes` is `mewo.db`, `mewo.db-wal`, and `books/`. Admin
+- `GET /admin/server` → `{ "users", "books", "comments", "reposts", "storageBytes", "invites" }`. `invites` counts links that are unused, unrevoked, and not yet expired. `storageBytes` is `mewo.db`, `mewo.db-wal`, and `books/`. Admin
+- `GET /admin/invites` → `{ "items" }`. Newest first, then by id. Each item is `{ "id", "note", "createdBy", "createdAt", "expiresAt", "usedAt", "usedBy", "revokedAt", "state" }`. `createdBy` and `usedBy` are usernames. `state` is `active`, `used`, `expired`, or `revoked`. Admin
+- `POST /admin/invites` `{ "note"?, "days"? }` → `{ "invite", "token" }`. `days` defaults to 7 and must be 1 to 90 (`Expiry must be 1 to 90 days.`). `note` is trimmed, blank becomes null, and longer than 200 characters is 400 `Note must be 200 characters or fewer.` An unknown field or a non-object is 400 `Invite must be a JSON object.` The raw token is only in this response. Admin
+- `POST /admin/invites/{id}/revoke` → that invite. Unknown id is 404. A used invite is 409 `This invite was already used.` Revoking an invite that is already revoked returns the same row. Admin
 
 Every `/admin` route is 401 without a token and 403 `Admins only.` for a signed-in account that is not an admin. A revoke applies on the next request.
 - `GET /search?q=&type=accounts|books|posts&cursor=` → a page of 20. `q` is trimmed; empty is 400 `Enter a search.` More than 100 characters is 400 and names the limit and the asked length. `cursor` is the previous `nextCursor`. A bad cursor is 400

@@ -12,6 +12,7 @@
   import UnderlineTabs from './components/UnderlineTabs.svelte';
   import Feed from './screens/Feed.svelte';
   import Home from './screens/Home.svelte';
+  import Invites from './screens/Invites.svelte';
   import Likes from './screens/Likes.svelte';
   import Profile from './screens/Profile.svelte';
   import Reader from './screens/Reader.svelte';
@@ -20,6 +21,7 @@
   import Server from './screens/Server.svelte';
   import Settings from './screens/Settings.svelte';
   import { chrome } from './lib/chrome.svelte';
+  import { inviteToken } from './lib/invites';
   import type { BookRecord, FeedPost, PostHit } from './lib/models';
   import {
     display, bodySizes, bodyLines, headingSizes, headingLines,
@@ -72,6 +74,7 @@
       '/settings/display': 'Display', '/settings/account': 'Account',
       '/settings/library': 'Library', '/settings/about': 'About',
       '/settings/server': 'Server', '/settings/server/users': 'Users',
+      '/settings/server/invites': 'Invites',
       '/settings/requests': 'Requests',
     };
     return titles[path] ?? 'Mewo';
@@ -109,6 +112,12 @@
     shelfPromise = undefined;
     void store.load();
   }
+
+  // A confirmed session on an invite link goes home. The stored token is not
+  // enough: /v1/me has to succeed first, or a dead session drops the invite.
+  $effect.pre(() => {
+    if (path === '/signup' && store.session && store.me) router.go('/', true);
+  });
 
   // Only navigation/session changes mount destinations, never progress or social updates.
   $effect(() => {
@@ -317,7 +326,7 @@
 </script>
 
 {#if !store.session}
-  <SignIn />
+  <SignIn invite={inviteToken(router.url)} />
 {:else}
   <div class="app-shell">
     <Navigation rail onaccount={() => drawer = true} />
@@ -410,6 +419,8 @@
                 onprofile={openProfile}
                 oncount={(count) => profileCount = count}
               />
+            {:else if path === '/settings/server/invites'}
+              <Invites scroller={main} />
             {:else if path === '/settings/server' || path === '/settings/server/users'}
               <Server {path} scroller={main} onprofile={openProfile} />
             {:else if path === '/settings/requests'}
