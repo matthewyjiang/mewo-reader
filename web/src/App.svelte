@@ -113,9 +113,10 @@
     void store.load();
   }
 
-  // A signed-in visit to an invite link goes home. The link is not checked or consumed.
+  // A confirmed session on an invite link goes home. The stored token is not
+  // enough: /v1/me has to succeed first, or a dead session drops the invite.
   $effect.pre(() => {
-    if (store.session && path === '/signup') router.go('/', true);
+    if (path === '/signup' && store.session && store.me) router.go('/', true);
   });
 
   // Only navigation/session changes mount destinations, never progress or social updates.

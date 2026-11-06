@@ -219,6 +219,33 @@ test('a signed-in visit to an invite link goes home without checking it', async 
   expect(checks).toBe(0);
 });
 
+test('a stale session keeps the invite and shows the signup form', async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.addInitScript(() => {
+    localStorage.setItem('mewo.session', JSON.stringify({ token: 'stale', username: 'ada' }));
+    localStorage.setItem('mewo.display', JSON.stringify({
+      theme: 'x_light', step: 2, mewo: false, keepBars: true,
+    }));
+  });
+  await page.route('**/v1/**', async (route) => {
+    const path = new URL(route.request().url()).pathname;
+    const method = route.request().method();
+    const json = (body: unknown, status = 200) => route.fulfill({
+      status,
+      contentType: 'application/json',
+      body: JSON.stringify(body),
+    });
+    if (path === '/v1/me') return json({ error: 'Sign in first.' }, 401);
+    if (path === '/v1/instance') return json({ allowSignup: false });
+    if (path === '/v1/invites/check' && method === 'POST') return json({ status: 'valid' });
+    return json({ error: 'Sign in first.' }, 401);
+  });
+  await page.goto('/signup?invite=abc');
+  await expect(page).toHaveURL(/\/signup\?invite=abc$/);
+  await expect(page.getByRole('heading', { name: 'Create account' })).toBeVisible();
+  await expect(page.getByLabel('Username')).toBeVisible();
+});
+
 function installAdmin(
   page: Page,
   options: { admin?: boolean; theme?: 'x_light' | 'x_lights_out'; clipboard?: 'ok' | 'fail' } = {},
