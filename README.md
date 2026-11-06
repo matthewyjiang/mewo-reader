@@ -2,6 +2,16 @@
 
 An EPUB reader that turns a book into a timeline. One paragraph is one post. Like a line, comment on it, quote it, or share it.
 
+## Install
+
+<p align="center">
+  <a href="https://apps.obtainium.imranr.dev/redirect?r=obtainium://app/%7B%22id%22%3A%22com.mewo.reader%22%2C%22url%22%3A%22https%3A%2F%2Fgithub.com%2Fmatthewyjiang%2Fmewo-reader%22%2C%22author%22%3A%22matthewyjiang%22%2C%22name%22%3A%22Mewo%22%2C%22additionalSettings%22%3A%22%7B%5C%22apkFilterRegEx%5C%22%3A%5C%22mewo-.*%5C%5C%5C%5C.apk%5C%22%7D%22%7D"><img src="docs/assets/badge_obtainium.png" width="161" height="48" alt="Get it on Obtainium"></a>
+  <br>
+  <a href="https://github.com/matthewyjiang/mewo-reader/releases/latest">Download the APK</a>
+  <br>
+  Obtainium keeps the app updated automatically.
+</p>
+
 ## Layout
 
 ```
