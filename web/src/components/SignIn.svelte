@@ -107,6 +107,15 @@
     error = '';
     store.notice = '';
   }
+
+  // Clearing the query leaves this component mounted, so registration mode has to
+  // be dropped here. The signup setting only forces login when signups are closed.
+  function dismissInvite(): void {
+    mode = 'login';
+    error = '';
+    store.notice = '';
+    router.go('/', true);
+  }
 </script>
 
 <div class="auth-page">
@@ -117,7 +126,7 @@
   {#if dead}
     <div class="auth-form">
       <h1>{checkHeading(dead)}</h1>
-      <button type="button" class="pill auth-submit" onclick={() => router.go('/', true)}>
+      <button type="button" class="pill auth-submit" onclick={dismissInvite}>
         Sign in
       </button>
     </div>

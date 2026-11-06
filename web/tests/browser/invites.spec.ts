@@ -135,19 +135,29 @@ test('Sign in instead does not send the invite', async ({ page }) => {
 });
 
 for (const status of ['used', 'expired', 'invalid'] as const) {
-  test(`a ${status} invite shows only the Sign in pill`, async ({ page }) => {
-    await page.setViewportSize({ width: 390, height: 844 });
-    await signedOut(page, { check: status });
-    await page.goto('/signup?invite=abc');
-    const heading = status === 'used'
-      ? 'Invite already used'
-      : status === 'expired' ? 'Invite expired' : 'Invite not valid';
-    await expect(page.getByRole('heading', { name: heading })).toBeVisible();
-    await expect(page.getByLabel('Username')).toHaveCount(0);
-    await page.getByRole('button', { name: 'Sign in', exact: true }).click();
-    await expect(page).toHaveURL(/\/$/);
-    await expect(page.getByRole('heading', { name: 'Sign in' })).toBeVisible();
-  });
+  for (const open of [true, false]) {
+    test(`a ${status} invite dismisses to login when signups are ${open ? 'open' : 'closed'}`, async ({ page }) => {
+      await page.setViewportSize({ width: 390, height: 844 });
+      await signedOut(page, { allowSignup: open, check: status });
+      await page.goto('/signup?invite=abc');
+      const heading = status === 'used'
+        ? 'Invite already used'
+        : status === 'expired' ? 'Invite expired' : 'Invite not valid';
+      await expect(page.getByRole('heading', { name: heading })).toBeVisible();
+      await expect(page.getByLabel('Username')).toHaveCount(0);
+      await page.getByRole('button', { name: 'Sign in', exact: true }).click();
+      await expect(page).toHaveURL(/\/$/);
+      await expect(page).not.toHaveURL(/invite=/);
+      await expect(page.getByRole('heading', { name: 'Sign in' })).toBeVisible();
+      const posted = page.waitForRequest((request) =>
+        request.method() === 'POST' && request.url().includes('/v1/auth/login'));
+      await fillAccount(page);
+      await page.getByRole('button', { name: 'Sign in', exact: true }).click();
+      const request = await posted;
+      expect(new URL(request.url()).pathname).toBe('/v1/auth/login');
+      expect(request.postDataJSON()).toEqual({ username: 'ada', password: 'password1' });
+    });
+  }
 }
 
 test('a failed invite check keeps the form and lets submit decide', async ({ page }) => {
