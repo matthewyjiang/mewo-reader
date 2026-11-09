@@ -8,6 +8,7 @@ mod matching;
 mod openlibrary;
 mod pick;
 mod prowlarr;
+pub(crate) mod reopen;
 mod sabnzbd;
 pub mod worker;
 

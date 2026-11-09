@@ -29,6 +29,12 @@ pub struct BookRecord {
     /// it changes. Absent on a server that predates revisions.
     #[serde(default)]
     pub feed_rev: i64,
+    /// The imported file still has a release the owner can report.
+    #[serde(default)]
+    pub has_release: bool,
+    /// The viewer added this book and it still has a reportable release.
+    #[serde(default)]
+    pub reportable: bool,
 }
 
 #[derive(Debug, FromRow)]
@@ -54,6 +60,9 @@ pub struct BookRow {
     /// Missing from a select that does not return the book to a client.
     #[sqlx(default)]
     pub feed_rev: i64,
+    /// 1 when this copy still has the release it was grabbed from.
+    #[sqlx(default)]
+    pub has_release: i64,
 }
 
 impl BookRow {
@@ -89,6 +98,8 @@ impl BookRow {
             },
             held,
             feed_rev: self.feed_rev,
+            has_release: self.has_release != 0,
+            reportable: mine && self.has_release != 0,
         }
     }
 }
@@ -174,6 +185,8 @@ pub struct ServerInfo {
     pub storage_bytes: u64,
     /// Active invites: unused, unrevoked, and not yet expired.
     pub invites: i64,
+    /// Releases a reader reported as the wrong file.
+    pub blocked: i64,
 }
 
 #[derive(Debug, Deserialize)]

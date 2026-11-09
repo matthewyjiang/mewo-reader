@@ -2,7 +2,10 @@
 //! [`super::matching`].
 
 use super::matching::{Matcher, Verdict};
+use crate::error::ApiError;
 use serde::Deserialize;
+use sqlx::SqlitePool;
+use std::collections::HashSet;
 use std::path::PathBuf;
 
 pub(crate) struct Wanted<'a> {
@@ -79,19 +82,64 @@ pub(crate) struct Choice<'a> {
     pub closest: Option<String>,
 }
 
-/// Best release not in `tried`. `closest` is the sibling that beat the nearest
-/// miss, for the error text.
+/// Releases a reader already rejected. A guid match or the same normalized
+/// title and size is enough: indexers rename the guid and keep the file.
+pub(crate) struct Blocklist {
+    guids: HashSet<String>,
+    shapes: HashSet<(String, i64)>,
+}
+
+impl Blocklist {
+    pub(crate) fn empty() -> Self {
+        Self {
+            guids: HashSet::new(),
+            shapes: HashSet::new(),
+        }
+    }
+
+    pub(crate) async fn load(pool: &SqlitePool) -> Result<Self, ApiError> {
+        let rows: Vec<(String, String, i64)> =
+            sqlx::query_as("SELECT guid, title_norm, size FROM release_blocklist")
+                .fetch_all(pool)
+                .await?;
+        let mut blocked = Self::empty();
+        for (guid, title, size) in rows {
+            blocked.guids.insert(guid);
+            blocked.shapes.insert((title, size));
+        }
+        Ok(blocked)
+    }
+
+    pub(crate) fn hits(&self, release: &Release) -> bool {
+        if self.guids.contains(&release.guid) {
+            return true;
+        }
+        let Ok(size) = i64::try_from(release.size) else {
+            return false;
+        };
+        self.shapes.contains(&(title_norm(&release.title), size))
+    }
+}
+
+/// Folded words, joined by one space. The blocklist stores this beside `size`.
+pub(crate) fn title_norm(value: &str) -> String {
+    tokens(value).join(" ")
+}
+
+/// Best release not in `tried` and not on `blocked`. `closest` is the sibling
+/// that beat the nearest miss, for the error text.
 pub(crate) fn pick<'r>(
     matcher: &Matcher,
     releases: &'r [Release],
     tried: &[String],
+    blocked: &Blocklist,
     max_bytes: u64,
     languages: &[String],
 ) -> Choice<'r> {
     let mut best: Option<Rank<'r>> = None;
     let mut closest: Option<(f32, String)> = None;
     for release in releases {
-        if tried.iter().any(|guid| guid == &release.guid) {
+        if tried.iter().any(|guid| guid == &release.guid) || blocked.hits(release) {
             continue;
         }
         let tokens = tokens(&release.title);
@@ -351,7 +399,15 @@ mod tests {
         tried: &[String],
         max: u64,
     ) -> Option<&'a Release> {
-        pick(&matcher_for(w), releases, tried, max, &codes(&["en"])).release
+        pick(
+            &matcher_for(w),
+            releases,
+            tried,
+            &Blocklist::empty(),
+            max,
+            &codes(&["en"]),
+        )
+        .release
     }
 
     fn release(guid: &str, title: &str, size: u64, grabs: i64, categories: &[i64]) -> Release {
@@ -440,7 +496,14 @@ mod tests {
             &[7020],
         );
         let releases = [chapterhouse];
-        let choice = pick(&matcher, &releases, &[], max, &codes(&["en"]));
+        let choice = pick(
+            &matcher,
+            &releases,
+            &[],
+            &Blocklist::empty(),
+            max,
+            &codes(&["en"]),
+        );
         assert!(choice.release.is_none());
         assert_eq!(choice.closest.as_deref(), Some("Chapterhouse Dune"));
 
@@ -509,6 +572,7 @@ mod tests {
                 &matcher,
                 &[german.clone(), english.clone()],
                 &[],
+                &Blocklist::empty(),
                 max,
                 &both
             )
@@ -519,10 +583,17 @@ mod tests {
         );
         let only = codes(&["en"]);
         assert_eq!(
-            pick(&matcher, &[german, english], &[], max, &only)
-                .release
-                .unwrap()
-                .guid,
+            pick(
+                &matcher,
+                &[german, english],
+                &[],
+                &Blocklist::empty(),
+                max,
+                &only
+            )
+            .release
+            .unwrap()
+            .guid,
             "en"
         );
     }
@@ -555,6 +626,7 @@ mod tests {
                 &matcher,
                 &[unlabeled.clone(), german.clone()],
                 &[],
+                &Blocklist::empty(),
                 max,
                 &only_de
             )
@@ -565,10 +637,17 @@ mod tests {
         );
         let only_en = codes(&["en"]);
         assert_eq!(
-            pick(&matcher, &[unlabeled, german], &[], max, &only_en)
-                .release
-                .unwrap()
-                .guid,
+            pick(
+                &matcher,
+                &[unlabeled, german],
+                &[],
+                &Blocklist::empty(),
+                max,
+                &only_en
+            )
+            .release
+            .unwrap()
+            .guid,
             "plain"
         );
     }
@@ -599,6 +678,7 @@ mod tests {
                 &matcher_for(&wanted),
                 &[book, german],
                 &[],
+                &Blocklist::empty(),
                 max,
                 &codes(&["en"])
             )
@@ -835,5 +915,55 @@ mod tests {
         assert!(listed
             .iter()
             .all(|(path, _)| !path.ends_with("secret.epub")));
+    }
+
+    #[test]
+    fn a_blocked_guid_or_the_same_title_and_size_is_skipped() {
+        let wanted = Wanted {
+            title: "Dune",
+            author: "Frank Herbert",
+        };
+        let max = 64 * 1024 * 1024;
+        let first = release(
+            "g1",
+            "Frank.Herbert.Dune.1965.RETAIL.EPUB",
+            80_000,
+            10,
+            &[7020],
+        );
+        let second = release("g2", "Frank.Herbert.Dune.1965.EPUB", 90_000, 1, &[7020]);
+        let mut blocked = Blocklist::empty();
+        blocked.guids.insert("g1".into());
+        assert!(blocked.hits(&first));
+        assert!(!blocked.hits(&second));
+        assert_eq!(
+            pick_blocked(&wanted, &[first.clone(), second.clone()], &blocked).guid,
+            "g2"
+        );
+        let mut shaped = Blocklist::empty();
+        shaped
+            .shapes
+            .insert((title_norm(&second.title), second.size as i64));
+        assert!(shaped.hits(&second));
+        assert!(!shaped.hits(&first));
+        assert_eq!(pick_blocked(&wanted, &[first, second], &shaped).guid, "g1");
+        let _ = max;
+    }
+
+    fn pick_blocked<'a>(
+        wanted: &Wanted,
+        releases: &'a [Release],
+        blocked: &Blocklist,
+    ) -> &'a Release {
+        pick(
+            &matcher_for(wanted),
+            releases,
+            &[],
+            blocked,
+            64 * 1024 * 1024,
+            &codes(&["en"]),
+        )
+        .release
+        .unwrap()
     }
 }

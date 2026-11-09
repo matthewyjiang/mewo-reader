@@ -410,6 +410,26 @@ pub async fn patch_book(
     Ok(Json(book_record(&state, &authed.user_id, &row.id).await?))
 }
 
+pub async fn wrong_file(
+    State(state): State<AppState>,
+    authed: Authed,
+    Path(id): Path<String>,
+    body: Result<Json<serde_json::Value>, axum::extract::rejection::JsonRejection>,
+) -> Result<(axum::http::StatusCode, Json<crate::requests::BookRequest>), ApiError> {
+    let body = json_body(body, "Wrong file report must be a JSON object.")?;
+    let confirm = body
+        .get("confirm")
+        .and_then(|value| value.as_bool())
+        .ok_or_else(|| ApiError::BadRequest("Wrong file report must be a JSON object.".into()))?;
+    if !confirm {
+        return Err(ApiError::BadRequest(
+            "Confirm to report a wrong file.".into(),
+        ));
+    }
+    let request = crate::requests::reopen::wrong_file(&state, &authed, &id).await?;
+    Ok((axum::http::StatusCode::ACCEPTED, Json(request)))
+}
+
 pub async fn download_epub(
     State(state): State<AppState>,
     authed: Authed,
@@ -1207,6 +1227,7 @@ impl ProfileRepostRow {
             files_owner: None,
             holds: 0,
             feed_rev: self.feed_rev,
+            has_release: 0,
         }
         .into_record(viewer);
         Ok(ProfileRepostRecord {
@@ -1268,6 +1289,7 @@ impl FeedRow {
             files_owner: None,
             holds: 0,
             feed_rev: self.feed_rev,
+            has_release: 0,
         }
         .into_record(viewer);
         let post = stored_post(
@@ -1370,6 +1392,7 @@ impl ProfilePostRow {
             files_owner: None,
             holds: 0,
             feed_rev: self.feed_rev,
+            has_release: 0,
         }
         .into_record(viewer);
         Ok(ProfilePostRecord {

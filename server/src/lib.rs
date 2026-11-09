@@ -105,6 +105,7 @@ pub fn router(state: AppState) -> Router {
                 .patch(routes::patch_book),
         )
         .route("/v1/books/{id}/epub", get(routes::download_epub))
+        .route("/v1/books/{id}/wrong-file", post(routes::wrong_file))
         .route("/v1/books/{id}/posts", get(routes::get_posts))
         .route("/v1/books/{id}/cover", get(routes::download_cover))
         .route("/v1/books/{id}/likes", get(routes::list_likes))

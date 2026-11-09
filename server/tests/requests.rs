@@ -5225,6 +5225,279 @@ async fn aliases_dry_run_prints_the_plan_and_merge_keeps_one_copy() {
     assert_eq!(dup, "canceled");
 }
 
+fn dune_releases(origin: &str) -> Vec<Value> {
+    vec![
+        release(origin, "g1", "Frank.Herbert.Dune.1965.RETAIL.EPUB", 10),
+        release(origin, "g2", "Frank.Herbert.Dune.1965.EPUB", 1),
+    ]
+}
+
+async fn imported_pair(world: &World) -> (String, Account) {
+    {
+        let mut prowl = world.prowlarr.lock().await;
+        prowl.releases = dune_releases(&prowl.origin);
+    }
+    let book_id = bring_in(world, "/works/OL893414W").await;
+    let ada = account(world, "ada").await;
+    let (status, body) = post_work(world, &ada.token, "/works/OL893414W").await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    assert_eq!(body["bookId"], book_id);
+    (book_id, ada)
+}
+
+async fn share_book(world: &World, book_id: &str) {
+    let (status, body) = json_req(
+        &world.app,
+        "PATCH",
+        &format!("/v1/books/{book_id}"),
+        Some(&world.token),
+        json!({ "shared": true }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["shared"], true);
+    assert_eq!(body["reportable"], true);
+    assert_eq!(body["hasRelease"], true);
+}
+
+async fn report_wrong(
+    world: &World,
+    token: &str,
+    book_id: &str,
+    confirm: bool,
+) -> (StatusCode, Value) {
+    json_req(
+        &world.app,
+        "POST",
+        &format!("/v1/books/{book_id}/wrong-file"),
+        Some(token),
+        json!({ "confirm": confirm }),
+    )
+    .await
+}
+
+#[tokio::test]
+async fn wrong_file_blocks_the_release_and_keeps_sharing() {
+    let world = world().await;
+    let (book_id, ada) = imported_pair(&world).await;
+    share_book(&world, &book_id).await;
+    let (status, held) = empty_req(
+        &world.app,
+        "GET",
+        &format!("/v1/books/{book_id}"),
+        Some(&ada.token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{held}");
+    assert_eq!(held["reportable"], false);
+    assert_eq!(held["hasRelease"], true);
+    let books = book_count(&world.state.pool).await;
+    let adds = world.sab.lock().await.adds.len();
+
+    let (status, body) = report_wrong(&world, &world.token, &book_id, true).await;
+    assert_eq!(status, StatusCode::ACCEPTED, "{body}");
+    assert_eq!(body["state"], "requested");
+    assert!(body["bookId"].is_null());
+    let leader = body["id"].as_str().unwrap().to_string();
+    assert_ne!(leader, book_id);
+    let want: i64 = sqlx::query_scalar("SELECT want_shared FROM book_requests WHERE id = ?")
+        .bind(&leader)
+        .fetch_one(&world.state.pool)
+        .await
+        .unwrap();
+    assert_eq!(want, 1);
+    let ada_follow: Option<String> = sqlx::query_scalar(
+        "SELECT follows FROM book_requests
+         WHERE user_id = ? AND state = 'requested'",
+    )
+    .bind(&ada.id)
+    .fetch_one(&world.state.pool)
+    .await
+    .unwrap();
+    assert_eq!(ada_follow.as_deref(), Some(leader.as_str()));
+    assert_eq!(book_count(&world.state.pool).await, books - 1);
+    assert!(!epub_file(&world, &world.user_id, &book_id).exists());
+    let (status, missing) = empty_req(
+        &world.app,
+        "GET",
+        &format!("/v1/books/{book_id}"),
+        Some(&world.token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{missing}");
+
+    let (status, page) =
+        empty_req(&world.app, "GET", "/v1/admin/blocklist", Some(&world.token)).await;
+    assert_eq!(status, StatusCode::OK, "{page}");
+    assert_eq!(page["items"].as_array().unwrap().len(), 1);
+    assert_eq!(page["items"][0]["guid"], "g1");
+    assert_eq!(page["items"][0]["bookTitle"], "Dune");
+    let (status, info) = empty_req(&world.app, "GET", "/v1/admin/server", Some(&world.token)).await;
+    assert_eq!(status, StatusCode::OK, "{info}");
+    assert_eq!(info["blocked"], 1);
+    let (status, denied) =
+        empty_req(&world.app, "GET", "/v1/admin/blocklist", Some(&ada.token)).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{denied}");
+
+    let bea = account(&world, "bea").await;
+    let (status, followed) = post_work(&world, &bea.token, "/works/OL893414W").await;
+    assert_eq!(status, StatusCode::CREATED, "{followed}");
+    assert_eq!(
+        follows_of(&world.state.pool, followed["id"].as_str().unwrap())
+            .await
+            .as_deref(),
+        Some(leader.as_str())
+    );
+
+    let now = body["createdAt"].as_i64().unwrap();
+    worker::tick_at(&world.state, now).await.unwrap();
+    let sab = world.sab.lock().await;
+    assert_eq!(sab.adds.len(), adds + 1);
+    let grabbed = sab.adds.last().unwrap().name.clone();
+    assert!(grabbed.contains("/nzb/g2"), "{grabbed}");
+    drop(sab);
+
+    let (status, _) = empty_req(
+        &world.app,
+        "DELETE",
+        &format!(
+            "/v1/admin/blocklist/{}",
+            page["items"][0]["id"].as_str().unwrap()
+        ),
+        Some(&world.token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let (status, missing) = empty_req(
+        &world.app,
+        "DELETE",
+        "/v1/admin/blocklist/missing",
+        Some(&world.token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{missing}");
+    let blocked: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM release_blocklist")
+        .fetch_one(&world.state.pool)
+        .await
+        .unwrap();
+    assert_eq!(blocked, 0);
+}
+
+#[tokio::test]
+async fn unblocking_lets_the_worker_grab_that_release() {
+    let world = world().await;
+    let (book_id, _) = imported_pair(&world).await;
+    let (status, body) = report_wrong(&world, &world.token, &book_id, true).await;
+    assert_eq!(status, StatusCode::ACCEPTED, "{body}");
+    let (status, page) =
+        empty_req(&world.app, "GET", "/v1/admin/blocklist", Some(&world.token)).await;
+    assert_eq!(status, StatusCode::OK, "{page}");
+    let id = page["items"][0]["id"].as_str().unwrap();
+    let (status, _) = empty_req(
+        &world.app,
+        "DELETE",
+        &format!("/v1/admin/blocklist/{id}"),
+        Some(&world.token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let adds = world.sab.lock().await.adds.len();
+    let now = body["createdAt"].as_i64().unwrap();
+    worker::tick_at(&world.state, now).await.unwrap();
+    let sab = world.sab.lock().await;
+    assert_eq!(sab.adds.len(), adds + 1);
+    let grabbed = sab.adds.last().unwrap().name.clone();
+    assert!(grabbed.contains("/nzb/g1"), "{grabbed}");
+}
+
+#[tokio::test]
+async fn wrong_file_after_the_book_is_passed_on() {
+    let world = world().await;
+    let (book_id, ada) = imported_pair(&world).await;
+    let (status, _) = empty_req(
+        &world.app,
+        "DELETE",
+        &format!("/v1/books/{book_id}"),
+        Some(&world.token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let owner: String = sqlx::query_scalar("SELECT user_id FROM books WHERE id = ?")
+        .bind(&book_id)
+        .fetch_one(&world.state.pool)
+        .await
+        .unwrap();
+    assert_eq!(owner, ada.id);
+    let (status, body) = report_wrong(&world, &ada.token, &book_id, true).await;
+    assert_eq!(status, StatusCode::ACCEPTED, "{body}");
+    let kept: i64 = sqlx::query_scalar("SELECT want_shared FROM book_requests WHERE id = ?")
+        .bind(body["id"].as_str().unwrap())
+        .fetch_one(&world.state.pool)
+        .await
+        .unwrap();
+    assert_eq!(kept, 0);
+    assert_eq!(book_count(&world.state.pool).await, 0);
+    let blocked: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM release_blocklist")
+        .fetch_one(&world.state.pool)
+        .await
+        .unwrap();
+    assert_eq!(blocked, 1);
+}
+
+#[tokio::test]
+async fn wrong_file_is_owner_or_admin_and_refuses_leave_the_book() {
+    let world = world().await;
+    let (book_id, ada) = imported_pair(&world).await;
+    share_book(&world, &book_id).await;
+    let books = book_count(&world.state.pool).await;
+    let (status, body) = report_wrong(&world, &ada.token, &book_id, true).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+    assert_eq!(book_count(&world.state.pool).await, books);
+    let (status, body) = report_wrong(&world, &world.token, &book_id, false).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert_eq!(book_count(&world.state.pool).await, books);
+    let (status, _) = json_req(
+        &world.app,
+        "PATCH",
+        "/v1/admin/settings",
+        Some(&world.token),
+        json!({ "requestsEnabled": false }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, body) = report_wrong(&world, &world.token, &book_id, true).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+    assert_eq!(body["error"], "Requests are off.");
+    assert_eq!(book_count(&world.state.pool).await, books);
+    assert!(epub_file(&world, &world.user_id, &book_id).is_file());
+
+    let (status, _) = json_req(
+        &world.app,
+        "PATCH",
+        "/v1/admin/settings",
+        Some(&world.token),
+        json!({ "requestsEnabled": true }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    sqlx::query("UPDATE users SET is_admin = 1 WHERE id = ?")
+        .bind(&ada.id)
+        .execute(&world.state.pool)
+        .await
+        .unwrap();
+    let (status, body) = report_wrong(&world, &ada.token, &book_id, true).await;
+    assert_eq!(status, StatusCode::ACCEPTED, "{body}");
+    assert_eq!(book_count(&world.state.pool).await, books - 1);
+    let private_copy: i64 =
+        sqlx::query_scalar("SELECT want_shared FROM book_requests WHERE id = ?")
+            .bind(body["id"].as_str().unwrap())
+            .fetch_one(&world.state.pool)
+            .await
+            .unwrap();
+    // share_book set it shared, then we turned requests off and back on. Still shared.
+    assert_eq!(private_copy, 1);
+}
+
 async fn detail_phase(world: &World) -> String {
     let (status, body) = empty_req(
         &world.app,

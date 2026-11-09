@@ -165,6 +165,10 @@ async fn popular_books(
                 COALESCE(p.progress_index, 0) AS progress_index,
                 b.is_sample, b.shared, b.user_id AS owner_id,
                 owner.username AS owner_username, b.feed_rev,
+                (b.replaced_at IS NULL AND EXISTS (
+                    SELECT 1 FROM book_requests lr
+                    WHERE lr.id = b.id AND lr.release_title IS NOT NULL
+                )) AS has_release,
                 EXISTS (
                     SELECT 1 FROM book_requests holder
                     WHERE holder.book_id = b.id AND holder.user_id = ?
@@ -588,6 +592,7 @@ impl PostHitRow {
             files_owner: None,
             holds: 0,
             feed_rev: self.feed_rev,
+            has_release: 0,
         }
         .into_record(viewer);
         Ok(PostHitRecord {

@@ -24,6 +24,10 @@ SELECT b.id, b.title, b.author, b.handle, b.imported_at, b.post_count,
        COALESCE(p.progress_index, 0) as progress_index,
        b.is_sample, b.shared, b.user_id as owner_id, owner.username as owner_username,
        b.feed_rev,
+       (b.replaced_at IS NULL AND EXISTS (
+           SELECT 1 FROM book_requests lr
+           WHERE lr.id = b.id AND lr.release_title IS NOT NULL
+       )) AS has_release,
        COALESCE(b.files_user_id, b.user_id) AS files_owner,
        EXISTS (
            SELECT 1 FROM book_requests holder

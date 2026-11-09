@@ -1,6 +1,6 @@
 import type { CheckStatus } from './invites';
 import type {
-  AdminInvite, AdminUser, AuthResponse, BookRecord, BookRequest, CatalogWork, CommentIndex,
+  AdminInvite, AdminUser, AuthResponse, BlockedRelease, BookRecord, BookRequest, CatalogWork, CommentIndex,
   CreatedInvite, FeedPost, HomeFeedPage, Me, PostComment, ProfileBooks, ProfilePostsPage,
   ProfileRecord, ProfileRepostsPage, RepostState, SearchKind, SearchPage, ServerInfo,
   ServerSettings, SettingsPatch, WorkDetail,
@@ -119,6 +119,18 @@ export class HostedClient {
 
   serverInfo(): Promise<ServerInfo> {
     return this.json('/admin/server');
+  }
+
+  async blocklist(): Promise<BlockedRelease[]> {
+    return (await this.json<{ items: BlockedRelease[] }>('/admin/blocklist')).items;
+  }
+
+  async unblock(id: string): Promise<void> {
+    await this.response(`/admin/blocklist/${encodeURIComponent(id)}`, { method: 'DELETE' });
+  }
+
+  reportWrongFile(id: string): Promise<BookRequest> {
+    return this.json(this.bookPath(id, '/wrong-file'), 'POST', { confirm: true });
   }
 
   async library(): Promise<BookRecord[]> {

@@ -614,6 +614,13 @@
       <Icon name="chevron" />
     </span>
   </button>
+  <button class="settings-row" onclick={() => router.go('/settings/server/blocklist')}>
+    <span>Blocked releases</span>
+    <span class="row-trail">
+      <span class="count">{info.blocked ?? 0}</span>
+      <Icon name="chevron" />
+    </span>
+  </button>
   <button class="settings-row" onclick={() => router.go('/settings/server/users')}>
     <span>Users</span>
     <span class="row-trail">

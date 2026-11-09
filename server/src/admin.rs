@@ -13,6 +13,7 @@ use axum::response::Response;
 use axum::routing::{get, patch, post};
 use axum::Json;
 use axum::Router;
+use serde::Serialize;
 use serde_json::Value;
 use sqlx::{FromRow, SqlitePool};
 use std::path::Path as FsPath;
@@ -43,6 +44,8 @@ pub(crate) fn router() -> Router<AppState> {
         .route("/v1/admin/users", get(list_users))
         .route("/v1/admin/users/{username}", patch(patch_user))
         .route("/v1/admin/server", get(server_info))
+        .route("/v1/admin/blocklist", get(list_blocklist))
+        .route("/v1/admin/blocklist/{id}", axum::routing::delete(unblock))
         .route("/v1/admin/requests/test", post(test_requests))
         .route_layer(middleware::from_fn(require_admin))
         .merge(invite_router())
@@ -175,7 +178,59 @@ async fn server_info(State(state): State<AppState>) -> Result<Json<ServerInfo>, 
         reposts: counts.reposts,
         storage_bytes,
         invites: invite::active_count(&state.pool, now_ms()).await?,
+        blocked: blocked_count(&state.pool).await?,
     }))
+}
+
+#[derive(Debug, Serialize, FromRow)]
+#[serde(rename_all = "camelCase")]
+struct BlockedRelease {
+    id: String,
+    guid: String,
+    indexer: String,
+    title: String,
+    size: i64,
+    work_key: Option<String>,
+    book_title: Option<String>,
+    book_author: Option<String>,
+    created_at: i64,
+}
+
+#[derive(Serialize)]
+struct BlocklistPage {
+    items: Vec<BlockedRelease>,
+}
+
+async fn blocked_count(pool: &SqlitePool) -> Result<i64, ApiError> {
+    Ok(sqlx::query_scalar("SELECT COUNT(*) FROM release_blocklist")
+        .fetch_one(pool)
+        .await?)
+}
+
+async fn list_blocklist(State(state): State<AppState>) -> Result<Json<BlocklistPage>, ApiError> {
+    let items = sqlx::query_as::<_, BlockedRelease>(
+        "SELECT id, guid, indexer, title, size, work_key, book_title, book_author, created_at
+         FROM release_blocklist
+         ORDER BY created_at DESC, id ASC",
+    )
+    .fetch_all(&state.pool)
+    .await?;
+    Ok(Json(BlocklistPage { items }))
+}
+
+async fn unblock(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<axum::http::StatusCode, ApiError> {
+    let deleted = sqlx::query("DELETE FROM release_blocklist WHERE id = ?")
+        .bind(&id)
+        .execute(&state.pool)
+        .await?
+        .rows_affected();
+    if deleted == 0 {
+        return Err(ApiError::NotFound);
+    }
+    Ok(axum::http::StatusCode::NO_CONTENT)
 }
 
 async fn list_invites(State(state): State<AppState>) -> Result<Json<AdminInvites>, ApiError> {
