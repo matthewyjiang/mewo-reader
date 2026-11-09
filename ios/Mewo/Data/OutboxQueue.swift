@@ -13,6 +13,30 @@ extension HostedSession {
         guard let username, !username.isEmpty else { return nil }
         return OutboxAccount(url: url, username: username)
     }
+
+    /// Who the shelf, downloads, and home feed belong to. Expired is not signed in.
+    var filesOwner: OutboxAccount? { outboxAccount ?? expired }
+}
+
+enum SessionChange: Equatable {
+    case keep
+    case expired
+    case otherUser(OutboxAccount)
+    case wipe(OutboxAccount)
+}
+
+/// A 401 on the current account is `.expired` and leaves files in place.
+/// Sign-out, a server change, and an expiry with no username wipe them.
+func sessionChange(from previous: HostedSession, to next: HostedSession) -> SessionChange {
+    guard let old = previous.filesOwner else { return .keep }
+    let new = next.filesOwner
+    if new == old {
+        return previous.signedIn && !next.signedIn ? .expired : .keep
+    }
+    if new == nil || new?.url != old.url {
+        return .wipe(old)
+    }
+    return .otherUser(old)
 }
 
 enum OutboxOp: Equatable, Sendable {

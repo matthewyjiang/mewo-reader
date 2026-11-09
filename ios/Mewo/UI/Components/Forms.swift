@@ -236,7 +236,9 @@ struct LibrarySettings: View {
                 }
             }
         }
-        .onAppear { username = app.hostedSession.session.username ?? "" }
+        .onAppear {
+            username = app.hostedSession.session.username ?? app.hostedSession.session.expired?.username ?? ""
+        }
         .task(id: signupTaskID) {
             guard !app.hostedSession.session.signedIn else {
                 signups.cancel()

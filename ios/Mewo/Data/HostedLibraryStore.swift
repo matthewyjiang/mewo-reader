@@ -244,7 +244,7 @@ final class HostedLibraryStore: LibraryStore {
             return remote
         } catch let err as HostedException where err.code == 401 {
             if sessions.session.token == session.token {
-                sessions.signOut()
+                sessions.expire()
             }
             throw err
         }
@@ -252,7 +252,8 @@ final class HostedLibraryStore: LibraryStore {
 
     /// Any token change drops the shelf that was on screen before the next load paints.
     /// Signing in with nothing saved stays `.loading`, so the empty copy does not flash first.
-    /// File wipes wait until in-flight downloads and reader loads have stopped.
+    /// A 401 expires the session and keeps the files. Sign-out and a server change wipe them
+    /// after in-flight downloads and reader loads have stopped.
     /// A newer sign-in does not have its downloads cancelled or its files deleted by that wipe.
     private func sessionChanged(from previous: HostedSession, to next: HostedSession) {
         sessionGeneration += 1
@@ -260,7 +261,6 @@ final class HostedLibraryStore: LibraryStore {
         files.setToken(stamp)
         let urlChanged = previous.normalizedUrl() != next.normalizedUrl()
         let userChanged = previous.username != next.username
-        let signedOut = previous.signedIn && !next.signedIn
         let tokenChanged = previous.token != next.token
         let reset = tokenChanged || (previous.signedIn && (urlChanged || userChanged))
         if reset {
@@ -278,23 +278,27 @@ final class HostedLibraryStore: LibraryStore {
                 files.setShelf([])
             }
         }
-        let dropShelf = previous.signedIn && (signedOut || urlChanged || userChanged)
-        let wipe = signedOut || (previous.signedIn && urlChanged)
-        let clearSocial = previous.signedIn && userChanged && !wipe
+        let change = sessionChange(from: previous, to: next)
         // Cancel what is running for this session now, before a newer sign-in can start its own.
-        let watched = (wipe || clearSocial) ? detachCancelledTransfers() : nil
+        let watched = change == .keep ? nil : detachCancelledTransfers()
         let prior = maintenance
         let task = Task { @MainActor in
             await prior?.value
-            if dropShelf {
-                await self.clearShelf(previous)
+            switch change {
+            case .otherUser(let old), .wipe(let old):
+                await self.clearShelf(old)
+            case .keep, .expired:
+                break
             }
             if let watched { await watched.value }
             guard self.sessions.session.token == stamp else { return }
-            if wipe {
+            switch change {
+            case .wipe:
                 await self.wipeHostedFiles(stamp: stamp)
-            } else if clearSocial {
+            case .otherUser:
                 await self.clearSocialFiles(stamp: stamp)
+            case .keep, .expired:
+                break
             }
             guard self.sessions.session.token == stamp else { return }
             await self.outbox.attach(self.sessions.session)
@@ -328,10 +332,9 @@ final class HostedLibraryStore: LibraryStore {
         }
     }
 
-    private func clearShelf(_ session: HostedSession) async {
-        guard let url = session.normalizedUrl(), let user = session.username else { return }
+    private func clearShelf(_ account: OutboxAccount) async {
         let cache = shelfCache
-        await offMain { cache.clear(serverUrl: url, username: user) }
+        await offMain { cache.clear(serverUrl: account.url, username: account.username) }
     }
 
     private func wipeHostedFiles(stamp: String?) async {
@@ -1678,7 +1681,7 @@ func expireOn401<T>(
         return try await operation()
     } catch let err as HostedException where err.code == 401 {
         if sessions.session.token == session.token {
-            sessions.signOut()
+            sessions.expire()
         }
         throw err
     }

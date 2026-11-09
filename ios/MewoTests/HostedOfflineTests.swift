@@ -1057,6 +1057,88 @@ final class HostedOfflineTests: XCTestCase {
         XCTAssertEqual(try XCTUnwrap(store.offline[idA]), .downloaded)
     }
 
+    func testA401KeepsDownloadsForTheSameAccount() async throws {
+        let store = try await open([book(idA, importedAt: 3)])
+        await store.setDownloaded(id: idA, on: true)
+        let postsBefore = client.postsCalls.count
+        XCTAssertEqual(try XCTUnwrap(store.offline[idA]), .downloaded)
+        XCTAssertEqual(shelfCache().read(serverUrl: server, username: "ada")?.map(\.id), [idA])
+        let replyId = try await queueOfflineReply(store)
+
+        try await expireLibrary()
+        XCTAssertTrue(postsExist(idA))
+        XCTAssertEqual(shelfCache().read(serverUrl: server, username: "ada")?.map(\.id), [idA])
+        XCTAssertEqual(sessions.session.expired, OutboxAccount(url: server, username: "ada"))
+        XCTAssertEqual(try readOutbox().ops.count, 1)
+        XCTAssertTrue(client.commentIds.isEmpty)
+
+        client.libraryError = nil
+        client.addCommentError = nil
+        sessions.setSignedIn(username: "ada", token: "token-b")
+        try await waitUntil("the reply was not sent once") {
+            client.commentIds == [replyId]
+                && !outboxExists()
+                && settled(store, ids: [idA])
+        }
+        XCTAssertEqual(try XCTUnwrap(store.offline[idA]), .downloaded)
+        XCTAssertEqual(client.postsCalls.count, postsBefore)
+        XCTAssertTrue(postsExist(idA))
+        XCTAssertEqual(client.commentIds, [replyId])
+    }
+
+    func testA401ThenAnotherAccountDropsSocialAndTheOutbox() async throws {
+        let store = try await open([book(idA, importedAt: 3)])
+        await store.setDownloaded(id: idA, on: true)
+        _ = try await store.likes(id: idA)
+        XCTAssertTrue(socialExists(idA))
+        _ = try await queueOfflineReply(store)
+
+        try await expireLibrary()
+        XCTAssertTrue(postsExist(idA))
+        XCTAssertTrue(socialExists(idA))
+        XCTAssertTrue(outboxExists())
+
+        client.libraryError = nil
+        client.addCommentError = nil
+        client.shelf = [book(idB, importedAt: 1)]
+        sessions.setSignedIn(username: "bea", token: "token-b")
+        try await waitUntil("Bea's shelf did not drop Ada's social cache") {
+            settled(store, ids: [idB]) && !socialExists(idA) && !outboxExists()
+        }
+        XCTAssertNil(shelfCache().read(serverUrl: server, username: "ada"))
+        XCTAssertTrue(postsExist(idA))
+        XCTAssertTrue(client.commentIds.isEmpty)
+        do {
+            _ = try await store.feed(id: idA)
+            XCTFail("Ada's download must not open on Bea's shelf")
+        } catch {
+            XCTAssertEqual(error.localizedDescription, "That book is not on your shelf.")
+        }
+    }
+
+    func testA401ThenAnotherServerWipesDownloads() async throws {
+        let store = try await open([book(idA, importedAt: 3)])
+        await store.setDownloaded(id: idA, on: true)
+        _ = try await queueOfflineReply(store)
+        try await expireLibrary()
+        XCTAssertTrue(postsExist(idA))
+
+        let other = "https://other.example"
+        sessions.setBaseUrl(other)
+        XCTAssertTrue(postsExist(idA))
+        XCTAssertEqual(shelfCache().read(serverUrl: server, username: "ada")?.map(\.id), [idA])
+        XCTAssertTrue(outboxExists())
+
+        client.libraryError = nil
+        client.shelf = [book(idA, importedAt: 3)]
+        sessions.setSignedIn(username: "ada", token: "token-c")
+        try await waitUntil("the other server did not wipe downloads") {
+            !postsExist(idA) && settled(store, ids: [idA]) && !outboxExists()
+        }
+        XCTAssertNil(shelfCache().read(serverUrl: server, username: "ada"))
+        XCTAssertTrue(client.commentIds.isEmpty)
+    }
+
     private func open(_ books: [BookRecord]) async throws -> HostedLibraryStore {
         client.shelf = books
         let store = makeStore()
@@ -1146,6 +1228,46 @@ final class HostedOfflineTests: XCTestCase {
         ShelfCache(directory: root.appendingPathComponent("hosted-shelves", isDirectory: true))
     }
 
+    private func outboxFile() -> URL {
+        root.appendingPathComponent("hosted-outbox.json")
+    }
+
+    private func outboxExists() -> Bool {
+        FileManager.default.fileExists(atPath: outboxFile().path)
+    }
+
+    private func readOutbox() throws -> OutboxFile {
+        let data = try Data(contentsOf: outboxFile())
+        return try JSONFiles.decoder.decode(OutboxFile.self, from: data)
+    }
+
+    /// Queues a reply while offline and returns its lowercase id. The 401 task clears memory after it decides what to keep.
+    private func queueOfflineReply(_ store: HostedLibraryStore) async throws -> String {
+        client.addCommentError = offlineError()
+        _ = try await store.addComment(id: idA, postId: "p", text: "queued")
+        try await waitUntil("the reply was not queued") { store.unsentReplies == 1 && outboxExists() }
+        guard case .reply(let reply) = try readOutbox().ops.first else {
+            XCTFail("reply was not saved")
+            throw CancellationError()
+        }
+        XCTAssertEqual(reply.id, reply.id.lowercased())
+        XCTAssertNotNil(UUID(uuidString: reply.id))
+        return reply.id
+    }
+
+    private func expireLibrary() async throws {
+        client.libraryError = HostedException(message: "Sign in again.", code: 401)
+        do {
+            try await store?.load()
+            XCTFail("401 should fail the refresh")
+        } catch let err as HostedException {
+            XCTAssertEqual(err.code, 401)
+        }
+        try await waitUntil("expiry did not finish") {
+            !sessions.session.signedIn && store?.unsentReplies == 0
+        }
+    }
+
     private func book(_ id: String, importedAt: Int64) -> BookRecord {
         BookRecord(
             id: id,
@@ -1207,6 +1329,7 @@ private final class OfflineClient: @unchecked Sendable {
     private var indexCount = 0
     private var likesCount = 0
     private var likeLog: [(String, Bool)] = []
+    private var commentLog: [String] = []
 
     init() {
         client.hooks.library = { [weak self] _ in
@@ -1257,6 +1380,7 @@ private final class OfflineClient: @unchecked Sendable {
         client.hooks.addComment = { [weak self] _, _, _, text, commentId, _ in
             guard let self else { throw CancellationError() }
             if let addCommentError = self.addCommentError { throw addCommentError }
+            self.noteComment(commentId)
             let thread = [PostComment(id: commentId, username: "ada", text: text, createdAt: 2, mine: true)]
             self.thread = thread
             return thread
@@ -1329,6 +1453,10 @@ private final class OfflineClient: @unchecked Sendable {
         lock.lock(); defer { lock.unlock() }; return likeLog
     }
 
+    var commentIds: [String] {
+        lock.lock(); defer { lock.unlock() }; return commentLog
+    }
+
     func resetCalls() {
         lock.lock()
         calls.removeAll()
@@ -1383,6 +1511,12 @@ private final class OfflineClient: @unchecked Sendable {
     private func noteLike(_ postId: String, _ on: Bool) {
         lock.lock()
         likeLog.append((postId, on))
+        lock.unlock()
+    }
+
+    private func noteComment(_ id: String) {
+        lock.lock()
+        commentLog.append(id)
         lock.unlock()
     }
 

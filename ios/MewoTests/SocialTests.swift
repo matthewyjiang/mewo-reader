@@ -565,6 +565,31 @@ final class HomeFeedStoreTests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: feedFile(user: "bea").path))
     }
 
+    func testA401KeepsTheCacheAndAnotherAccountDeletesIt() async throws {
+        sessions.setSignedIn(username: "ada", token: "token-a")
+        try await gate.waitForCalls(1)
+        gate.respond("token-a", page: HomeFeedPage(items: [feedItem("ada secret")], nextCursor: nil))
+        try await waitUntil {
+            store.loadState.items.map(\.post.text) == ["ada secret"] && !store.loadState.isRefreshing
+        }
+        XCTAssertTrue(FileManager.default.fileExists(atPath: feedFile(user: "ada").path))
+
+        Task { await store.load() }
+        try await gate.waitForCalls(2)
+        gate.fail("token-a", HostedException(message: "Sign in again.", code: 401))
+        try await waitUntil { !sessions.session.signedIn && store.loadState == .signedOut }
+        XCTAssertTrue(FileManager.default.fileExists(atPath: feedFile(user: "ada").path))
+        XCTAssertEqual(sessions.session.expired, OutboxAccount(url: "https://mewo.example", username: "ada"))
+
+        sessions.setSignedIn(username: "ada", token: "token-b")
+        XCTAssertEqual(store.loadState.items.map(\.post.text), ["ada secret"])
+        XCTAssertTrue(FileManager.default.fileExists(atPath: feedFile(user: "ada").path))
+
+        sessions.setSignedIn(username: "bea", token: "token-c")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: feedFile(user: "ada").path))
+        XCTAssertFalse(store.loadState.items.contains { $0.post.text == "ada secret" })
+    }
+
     func testARefreshDropsTheLoadMoreThatStartedBeforeIt() async throws {
         sessions.setSignedIn(username: "ada", token: "token-a")
         try await gate.waitForCalls(1)
@@ -797,6 +822,15 @@ private final class FeedGate: @unchecked Sendable {
         gates[token] = queue
         lock.unlock()
         cont?.resume(returning: page)
+    }
+
+    func fail(_ token: String, _ error: Error) {
+        lock.lock()
+        var queue = gates[token] ?? []
+        let cont = queue.isEmpty ? nil : queue.removeFirst()
+        gates[token] = queue
+        lock.unlock()
+        cont?.resume(throwing: error)
     }
 
     func failAll() {

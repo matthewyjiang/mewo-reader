@@ -125,7 +125,7 @@ final class HomeFeedStore {
             return try await client.feed(session, cursor: cursor)
         } catch let err as HostedException where err.code == 401 {
             if sessions.session.token == session.token {
-                sessions.signOut()
+                sessions.expire()
             }
             throw err
         }
@@ -134,7 +134,6 @@ final class HomeFeedStore {
     private func sessionChanged(from previous: HostedSession, to next: HostedSession) {
         let urlChanged = previous.normalizedUrl() != next.normalizedUrl()
         let userChanged = previous.username != next.username
-        let signedOut = previous.signedIn && !next.signedIn
         let tokenChanged = previous.token != next.token
         guard tokenChanged || (previous.signedIn && (urlChanged || userChanged)) else { return }
         epoch += 1
@@ -143,8 +142,11 @@ final class HomeFeedStore {
         flight = nil
         more?.task.cancel()
         more = nil
-        if previous.signedIn && (signedOut || urlChanged || userChanged) {
-            clear(previous)
+        switch sessionChange(from: previous, to: next) {
+        case .otherUser(let old), .wipe(let old):
+            clear(old)
+        case .keep, .expired:
+            break
         }
         if next.signedIn {
             restore()
@@ -167,9 +169,8 @@ final class HomeFeedStore {
         }
     }
 
-    private func clear(_ session: HostedSession) {
-        guard let url = session.normalizedUrl(), let user = session.username else { return }
-        try? FileManager.default.removeItem(at: feedFile(url, user))
+    private func clear(_ account: OutboxAccount) {
+        try? FileManager.default.removeItem(at: feedFile(account.url, account.username))
     }
 
     private func writeFeed(url: String, username: String, page: HomeFeedPage) {

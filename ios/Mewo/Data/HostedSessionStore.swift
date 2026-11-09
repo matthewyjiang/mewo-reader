@@ -5,6 +5,8 @@ struct HostedSession: Equatable, Sendable {
     var baseUrl: String = ""
     var username: String?
     var token: String?
+    /// Set by a 401. Sign-in and sign-out clear it. The outbox never reads it.
+    var expired: OutboxAccount? = nil
 
     var signedIn: Bool {
         !(token ?? "").isEmpty && normalizedUrl() != nil
@@ -57,10 +59,15 @@ final class HostedSessionStore {
         // The keychain is the real token. UI tests also leave a copy in defaults
         // because a write during app launch does not stick in an unsigned simulator.
         let seeded = uitesting ? defaults.string(forKey: "token").flatMap { $0.isEmpty ? nil : $0 } : nil
+        let expiredUrl = defaults.string(forKey: "expired_url") ?? ""
+        let expiredUser = defaults.string(forKey: "expired_user") ?? ""
         session = HostedSession(
             baseUrl: defaults.string(forKey: "base_url") ?? "",
             username: defaults.string(forKey: "username"),
-            token: (persistToken ? Keychain.readToken() : nil) ?? seeded
+            token: (persistToken ? Keychain.readToken() : nil) ?? seeded,
+            expired: expiredUrl.isEmpty || expiredUser.isEmpty
+                ? nil
+                : OutboxAccount(url: expiredUrl, username: expiredUser)
         )
     }
 
@@ -75,8 +82,28 @@ final class HostedSessionStore {
         let previous = session
         defaults.set(username, forKey: "username")
         if persistToken { Keychain.saveToken(token) }
+        clearExpired()
         session.username = username
         session.token = token
+        notify(previous)
+    }
+
+    /// A 401. Deletes the token and keeps the account so downloads can stay.
+    /// With no username there is nothing to resume, so the saved account is cleared.
+    func expire() {
+        let previous = session
+        defaults.removeObject(forKey: "username")
+        defaults.removeObject(forKey: "token")
+        if persistToken { Keychain.deleteToken() }
+        session.username = nil
+        session.token = nil
+        if let account = previous.outboxAccount {
+            defaults.set(account.url, forKey: "expired_url")
+            defaults.set(account.username, forKey: "expired_user")
+            session.expired = account
+        } else {
+            clearExpired()
+        }
         notify(previous)
     }
 
@@ -85,9 +112,16 @@ final class HostedSessionStore {
         defaults.removeObject(forKey: "username")
         defaults.removeObject(forKey: "token")
         if persistToken { Keychain.deleteToken() }
+        clearExpired()
         session.username = nil
         session.token = nil
         notify(previous)
+    }
+
+    private func clearExpired() {
+        defaults.removeObject(forKey: "expired_url")
+        defaults.removeObject(forKey: "expired_user")
+        session.expired = nil
     }
 
     private func notify(_ previous: HostedSession) {

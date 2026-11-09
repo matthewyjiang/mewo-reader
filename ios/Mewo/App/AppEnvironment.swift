@@ -60,7 +60,7 @@ final class AppEnvironment {
     }
 
     /// Clears the outbox first when the reader confirmed, then signs out.
-    /// A 401 uses `hostedAuth.signOut()` directly and leaves the file in place.
+    /// A 401 calls `sessions.expire()` and leaves the file in place.
     func signOut(discardUnsent: Bool) async {
         if discardUnsent {
             await hostedLibrary.discardOutbox()
