@@ -1,6 +1,6 @@
 import type { CheckStatus } from './invites';
 import type {
-  AdminInvite, AdminUser, AuthResponse, BookRecord, BookRequest, CatalogWork, CommentIndex,
+  AdminInvite, AdminUser, AuthResponse, BlockedRelease, BookRecord, BookRequest, CatalogWork, CommentIndex,
   CreatedInvite, FeedPost, HomeFeedPage, Me, PostComment, ProfileBooks, ProfilePostsPage,
   ProfileRecord, ProfileRepostsPage, RepostState, SearchKind, SearchPage, ServerInfo,
   ServerSettings, SettingsPatch, WorkDetail,
@@ -119,6 +119,41 @@ export class HostedClient {
 
   serverInfo(): Promise<ServerInfo> {
     return this.json('/admin/server');
+  }
+
+  async blocklist(): Promise<BlockedRelease[]> {
+    return (await this.json<{ items: BlockedRelease[] }>('/admin/blocklist')).items;
+  }
+
+  async unblock(id: string): Promise<void> {
+    await this.response(`/admin/blocklist/${encodeURIComponent(id)}`, { method: 'DELETE' });
+  }
+
+  reportWrongFile(id: string): Promise<BookRequest> {
+    return this.json(this.bookPath(id, '/wrong-file'), 'POST', { confirm: true });
+  }
+
+  replaceEpub(id: string, epub: File, force: boolean): Promise<BookRecord> {
+    const token = this.token();
+    const path = `${this.bookPath(id, '/epub')}?force=${force ? 1 : 0}`;
+    return new Promise((resolve, reject) => {
+      const xhr = new XMLHttpRequest();
+      xhr.open('PUT', `/v1${path}`);
+      if (token) xhr.setRequestHeader('Authorization', `Bearer ${token}`);
+      xhr.onerror = () => reject(new ApiError(0, 'Upload failed. Check your connection and try again.'));
+      xhr.onload = () => {
+        try {
+          if (xhr.status < 200 || xhr.status >= 300) this.fail(xhr.status, xhr.responseText, token);
+          resolve(JSON.parse(xhr.responseText) as BookRecord);
+        } catch (error) {
+          reject(error instanceof ApiError
+            ? error : new ApiError(xhr.status, 'Could not read the server response.'));
+        }
+      };
+      const body = new FormData();
+      body.append('epub', epub);
+      xhr.send(body);
+    });
   }
 
   async library(): Promise<BookRecord[]> {

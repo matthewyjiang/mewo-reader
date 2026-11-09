@@ -2,11 +2,13 @@
 //!
 //! Prowlarr and SABnzbd stay inside the worker. Handlers only see [`BookRequest`].
 
+pub(crate) mod aliases;
 pub(crate) mod languages;
 mod matching;
 mod openlibrary;
 mod pick;
 mod prowlarr;
+pub(crate) mod reopen;
 mod sabnzbd;
 pub mod worker;
 
@@ -493,12 +495,15 @@ async fn create_request(
     if body.cover_id.is_some_and(|id| id < 0) {
         return Err(ApiError::BadRequest("coverId must be 0 or more.".into()));
     }
-    let cached = state.work_cache.cached_canonical(&asked);
+    let resolved = aliases::canonical(&state, &asked).await;
     let mut tx = state.pool.begin_with("BEGIN IMMEDIATE").await?;
+    let mut keys = aliases::group(&mut *tx, &resolved).await?;
+    if !keys.all.iter().any(|key| key == &asked) {
+        keys.all.push(asked);
+    }
     let admitted = admit(
         &mut tx,
-        &asked,
-        cached.as_deref(),
+        &keys,
         Seed {
             user_id: &authed.user_id,
             title: &title,
@@ -638,10 +643,13 @@ async fn retry_request(
             "Only a failed or canceled request can be retried.".into(),
         ));
     }
-    let cached = state.work_cache.cached_canonical(&row.work_key);
+    let resolved = aliases::canonical(&state, &row.work_key).await;
     let mut tx = state.pool.begin_with("BEGIN IMMEDIATE").await?;
-    let work_key = resolve_key(&mut *tx, &row.work_key, cached.as_deref()).await?;
-    let outcome = requeue(&mut tx, &row, &work_key).await?;
+    let mut keys = aliases::group(&mut *tx, &resolved).await?;
+    if !keys.all.iter().any(|key| key == &row.work_key) {
+        keys.all.push(row.work_key.clone());
+    }
+    let outcome = requeue(&mut tx, &row, &keys).await?;
     tx.commit().await?;
     match outcome {
         Requeued::Existing(existing) => Ok(Json(*existing)),
@@ -736,41 +744,37 @@ enum Admitted {
 }
 
 /// Reuse an imported copy, follow the in-flight leader, or become the leader.
-/// The caller's own active row is returned as it stands. A dead import is not
-/// a hold: the row the catalog shows becomes the live copy.
+/// Lookups use every key in the alias group. A new row is stored under the
+/// canonical key. A follower stores the leader row's key, which may still be
+/// the alias a download started under. The caller's own active row is returned
+/// as it stands. A dead import is not a hold: the row the catalog shows
+/// becomes the live copy.
 async fn admit(
     tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
-    asked: &str,
-    cached: Option<&str>,
+    keys: &aliases::WorkKeys,
     seed: Seed<'_>,
 ) -> Result<Admitted, ApiError> {
-    let work_key = resolve_key(&mut **tx, asked, cached).await?;
-    if let Some(existing) = active_for_work(&mut **tx, seed.user_id, &work_key).await? {
+    if let Some(existing) = active_for_work(&mut **tx, seed.user_id, &keys.all).await? {
         return Ok(Admitted::Existing(Box::new(existing)));
     }
-    if work_key != asked {
-        if let Some(existing) = active_for_work(&mut **tx, seed.user_id, asked).await? {
-            return Ok(Admitted::Existing(Box::new(existing)));
-        }
-    }
-    if let Some(book_id) = reusable_book(&mut **tx, &work_key).await? {
-        if let Some(existing) = own_imported(&mut **tx, seed.user_id, &work_key, &book_id).await? {
+    if let Some(book_id) = reusable_book(&mut **tx, &keys.all).await? {
+        if let Some(existing) = own_imported(&mut **tx, seed.user_id, &keys.all, &book_id).await? {
             return Ok(Admitted::Existing(Box::new(existing)));
         }
         // Same rule as retry: the catalog's row for this work becomes the
         // import. A newer failure or cancel wins over an older dead import.
-        if let Some(dead) = dead_import(&mut **tx, seed.user_id, &work_key).await? {
-            let take_closed = match newest_closed(&mut **tx, seed.user_id, &work_key).await? {
+        if let Some(dead) = dead_import(&mut **tx, seed.user_id, &keys.all).await? {
+            let take_closed = match newest_closed(&mut **tx, seed.user_id, &keys.all).await? {
                 Some((id, at)) if shows_before(at, &id, dead.created_at, &dead.id) => Some(id),
                 _ => None,
             };
             if let Some(id) = take_closed {
-                cancel_dead_imports(tx, seed.user_id, &work_key).await?;
+                cancel_dead_imports(tx, seed.user_id, &keys.all).await?;
                 if let Some(existing) = attach_hold(
                     tx,
                     &id,
                     seed.user_id,
-                    &work_key,
+                    &keys.canonical,
                     &book_id,
                     "'failed', 'canceled'",
                 )
@@ -782,35 +786,35 @@ async fn admit(
                 tx,
                 &dead.id,
                 seed.user_id,
-                &work_key,
+                &keys.canonical,
                 &book_id,
                 "'imported'",
             )
             .await?
             {
-                cancel_dead_imports(tx, seed.user_id, &work_key).await?;
+                cancel_dead_imports(tx, seed.user_id, &keys.all).await?;
                 return Ok(Admitted::Existing(Box::new(existing)));
             } else {
-                cancel_dead_imports(tx, seed.user_id, &work_key).await?;
+                cancel_dead_imports(tx, seed.user_id, &keys.all).await?;
             }
         }
-        let id = insert_imported(tx, &seed, &work_key, &book_id).await?;
+        let id = insert_imported(tx, &seed, &keys.canonical, &book_id).await?;
         return Ok(Admitted::Fresh { id, wake: false });
     }
-    if let Some(leader) = leader_id(&mut **tx, &work_key).await? {
-        return follow(tx, &seed, &work_key, &leader).await;
+    if let Some((leader, leader_key)) = leader_of(&mut **tx, &keys.all).await? {
+        return follow(tx, &seed, &keys.all, &leader_key, &leader).await;
     }
     ensure_under_cap(&mut **tx, seed.user_id).await?;
-    match insert_leader(tx, &seed, &work_key).await {
+    match insert_leader(tx, &seed, &keys.canonical).await {
         Ok(id) => Ok(Admitted::Fresh { id, wake: true }),
         Err(err) if leader_conflict(&err) => {
-            let Some(leader) = leader_id(&mut **tx, &work_key).await? else {
+            let Some((leader, leader_key)) = leader_of(&mut **tx, &keys.all).await? else {
                 return Err(err.into());
             };
-            follow(tx, &seed, &work_key, &leader).await
+            follow(tx, &seed, &keys.all, &leader_key, &leader).await
         }
         Err(err) if user_conflict(&err) => {
-            if let Some(existing) = active_for_work(&mut **tx, seed.user_id, &work_key).await? {
+            if let Some(existing) = active_for_work(&mut **tx, seed.user_id, &keys.all).await? {
                 return Ok(Admitted::Existing(Box::new(existing)));
             }
             Err(ApiError::Conflict(
@@ -821,50 +825,23 @@ async fn admit(
     }
 }
 
-/// A cached redirect is used only when nothing is already stored under the
-/// asked key. The worker caches the key it was given, so rewriting that key
-/// would miss the row and start a second download.
-fn choose_key(asked: &str, cached: Option<&str>, asked_taken: bool) -> String {
-    if asked_taken {
-        return asked.to_string();
-    }
-    match cached {
-        Some(key) if key != asked && clean_work_key(key).is_ok() => key.to_string(),
-        _ => asked.to_string(),
-    }
+fn keys_json(keys: &[String]) -> String {
+    serde_json::to_string(keys).unwrap_or_else(|_| "[]".into())
 }
 
-async fn resolve_key<'a, E>(
-    executor: E,
-    asked: &str,
-    cached: Option<&str>,
-) -> Result<String, ApiError>
-where
-    E: sqlx::Executor<'a, Database = sqlx::Sqlite>,
-{
-    let taken: Option<i64> = sqlx::query_scalar(
-        "SELECT 1 FROM book_requests
-         WHERE work_key = ? AND state IN ('requested', 'downloading', 'imported')
-         LIMIT 1",
-    )
-    .bind(asked)
-    .fetch_optional(executor)
-    .await?;
-    Ok(choose_key(asked, cached, taken.is_some()))
-}
-
-async fn reusable_book<'a, E>(executor: E, work_key: &str) -> Result<Option<String>, ApiError>
+async fn reusable_book<'a, E>(executor: E, keys: &[String]) -> Result<Option<String>, ApiError>
 where
     E: sqlx::Executor<'a, Database = sqlx::Sqlite>,
 {
     let book_id: Option<String> = sqlx::query_scalar(
         "SELECT r.book_id FROM book_requests r
          JOIN books b ON b.id = r.book_id
-         WHERE r.work_key = ? AND r.state = 'imported' AND r.book_id IS NOT NULL
+         WHERE r.work_key IN (SELECT value FROM json_each(?))
+           AND r.state = 'imported' AND r.book_id IS NOT NULL
          ORDER BY r.updated_at
          LIMIT 1",
     )
-    .bind(work_key)
+    .bind(keys_json(keys))
     .fetch_optional(executor)
     .await?;
     Ok(book_id)
@@ -875,7 +852,7 @@ where
 async fn own_imported<'a, E>(
     executor: E,
     user_id: &str,
-    work_key: &str,
+    keys: &[String],
     book_id: &str,
 ) -> Result<Option<BookRequest>, ApiError>
 where
@@ -884,14 +861,14 @@ where
     let sql = format!(
         "{REQUEST_COLUMNS}
          WHERE r.user_id = ? AND r.state = 'imported'
-           AND (r.work_key = ? OR r.book_id = ?)
+           AND (r.work_key IN (SELECT value FROM json_each(?)) OR r.book_id = ?)
            AND EXISTS (SELECT 1 FROM books b WHERE b.id = r.book_id)
          ORDER BY r.updated_at DESC
          LIMIT 1"
     );
     let row = sqlx::query_as::<_, RequestRow>(&sql)
         .bind(user_id)
-        .bind(work_key)
+        .bind(keys_json(keys))
         .bind(book_id)
         .fetch_optional(executor)
         .await?;
@@ -908,20 +885,21 @@ struct DeadImport {
 async fn dead_import<'a, E>(
     executor: E,
     user_id: &str,
-    work_key: &str,
+    keys: &[String],
 ) -> Result<Option<DeadImport>, ApiError>
 where
     E: sqlx::Executor<'a, Database = sqlx::Sqlite>,
 {
     let row: Option<(String, i64)> = sqlx::query_as(
         "SELECT r.id, r.created_at FROM book_requests r
-         WHERE r.user_id = ? AND r.work_key = ? AND r.state = 'imported'
+         WHERE r.user_id = ? AND r.work_key IN (SELECT value FROM json_each(?))
+           AND r.state = 'imported'
            AND NOT EXISTS (SELECT 1 FROM books b WHERE b.id = r.book_id)
          ORDER BY r.created_at DESC, r.id DESC
          LIMIT 1",
     )
     .bind(user_id)
-    .bind(work_key)
+    .bind(keys_json(keys))
     .fetch_optional(executor)
     .await?;
     Ok(row.map(|(id, created_at)| DeadImport { id, created_at }))
@@ -937,19 +915,20 @@ fn shows_before(at: i64, id: &str, other_at: i64, other_id: &str) -> bool {
 async fn newest_closed<'a, E>(
     executor: E,
     user_id: &str,
-    work_key: &str,
+    keys: &[String],
 ) -> Result<Option<(String, i64)>, ApiError>
 where
     E: sqlx::Executor<'a, Database = sqlx::Sqlite>,
 {
     let row = sqlx::query_as(
         "SELECT id, created_at FROM book_requests
-         WHERE user_id = ? AND work_key = ? AND state IN ('failed', 'canceled')
+         WHERE user_id = ? AND work_key IN (SELECT value FROM json_each(?))
+           AND state IN ('failed', 'canceled')
          ORDER BY created_at DESC, id DESC
          LIMIT 1",
     )
     .bind(user_id)
-    .bind(work_key)
+    .bind(keys_json(keys))
     .fetch_optional(executor)
     .await?;
     Ok(row)
@@ -1006,7 +985,7 @@ where
 async fn cancel_dead_imports(
     tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
     user_id: &str,
-    work_key: &str,
+    keys: &[String],
 ) -> Result<(), ApiError> {
     let now = now_ms();
     sqlx::query(
@@ -1015,32 +994,41 @@ async fn cancel_dead_imports(
              updated_at = ?, next_check_at = ?
          WHERE id IN (
              SELECT r.id FROM book_requests r
-             WHERE r.user_id = ? AND r.work_key = ? AND r.state = 'imported'
+             WHERE r.user_id = ? AND r.work_key IN (SELECT value FROM json_each(?))
+               AND r.state = 'imported'
                AND NOT EXISTS (SELECT 1 FROM books b WHERE b.id = r.book_id)
          )",
     )
     .bind(now)
     .bind(now)
     .bind(user_id)
-    .bind(work_key)
+    .bind(keys_json(keys))
     .execute(&mut **tx)
     .await?;
     Ok(())
 }
 
-async fn leader_id<'a, E>(executor: E, work_key: &str) -> Result<Option<String>, ApiError>
+/// The in-flight leader for this alias group, and the key stored on that row.
+/// A download already running wins over a newer request, matching the dedupe
+/// migration. Followers copy that key so they stay on the same row.
+pub(crate) async fn leader_of<'a, E>(
+    executor: E,
+    keys: &[String],
+) -> Result<Option<(String, String)>, ApiError>
 where
     E: sqlx::Executor<'a, Database = sqlx::Sqlite>,
 {
-    let id: Option<String> = sqlx::query_scalar(
-        "SELECT id FROM book_requests
-         WHERE work_key = ? AND follows IS NULL AND state IN ('requested', 'downloading')
+    let row: Option<(String, String)> = sqlx::query_as(
+        "SELECT id, work_key FROM book_requests
+         WHERE work_key IN (SELECT value FROM json_each(?))
+           AND follows IS NULL AND state IN ('requested', 'downloading')
+         ORDER BY CASE state WHEN 'downloading' THEN 0 ELSE 1 END, created_at, id
          LIMIT 1",
     )
-    .bind(work_key)
+    .bind(keys_json(keys))
     .fetch_optional(executor)
     .await?;
-    Ok(id)
+    Ok(row)
 }
 
 async fn insert_imported(
@@ -1076,13 +1064,14 @@ async fn insert_imported(
 async fn follow(
     tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
     seed: &Seed<'_>,
-    work_key: &str,
+    keys: &[String],
+    leader_key: &str,
     leader: &str,
 ) -> Result<Admitted, ApiError> {
-    match insert_follower(tx, seed, work_key, leader).await {
+    match insert_follower(tx, seed, leader_key, leader).await {
         Ok(id) => Ok(Admitted::Fresh { id, wake: false }),
         Err(err) if user_conflict(&err) => {
-            if let Some(existing) = active_for_work(&mut **tx, seed.user_id, work_key).await? {
+            if let Some(existing) = active_for_work(&mut **tx, seed.user_id, keys).await? {
                 return Ok(Admitted::Existing(Box::new(existing)));
             }
             Err(err.into())
@@ -1160,32 +1149,38 @@ enum Requeued {
 async fn requeue(
     tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
     row: &RequestRow,
-    work_key: &str,
+    keys: &aliases::WorkKeys,
 ) -> Result<Requeued, ApiError> {
     let now = now_ms();
-    if let Some(book_id) = reusable_book(&mut **tx, work_key).await? {
-        if let Some(existing) = own_imported(&mut **tx, &row.user_id, work_key, &book_id).await? {
+    if let Some(book_id) = reusable_book(&mut **tx, &keys.all).await? {
+        if let Some(existing) = own_imported(&mut **tx, &row.user_id, &keys.all, &book_id).await? {
             return Ok(Requeued::Existing(Box::new(existing)));
         }
-        if let Some(dead) = dead_import(&mut **tx, &row.user_id, work_key).await? {
+        if let Some(dead) = dead_import(&mut **tx, &row.user_id, &keys.all).await? {
             // The catalog shows one row per work, newest first. The book has
             // to land on that row, and the dead import must not stay beside it.
             if !shows_before(row.created_at, &row.id, dead.created_at, &dead.id) {
-                if let Some(existing) =
-                    attach_hold(tx, &dead.id, &row.user_id, work_key, &book_id, "'imported'")
-                        .await?
+                if let Some(existing) = attach_hold(
+                    tx,
+                    &dead.id,
+                    &row.user_id,
+                    &keys.canonical,
+                    &book_id,
+                    "'imported'",
+                )
+                .await?
                 {
-                    cancel_dead_imports(tx, &row.user_id, work_key).await?;
+                    cancel_dead_imports(tx, &row.user_id, &keys.all).await?;
                     return Ok(Requeued::Existing(Box::new(existing)));
                 }
             }
-            cancel_dead_imports(tx, &row.user_id, work_key).await?;
+            cancel_dead_imports(tx, &row.user_id, &keys.all).await?;
         }
         let Some(existing) = attach_hold(
             tx,
             &row.id,
             &row.user_id,
-            work_key,
+            &keys.canonical,
             &book_id,
             "'failed', 'canceled'",
         )
@@ -1197,25 +1192,25 @@ async fn requeue(
         };
         return Ok(Requeued::Existing(Box::new(existing)));
     }
-    if let Some(leader) = leader_id(&mut **tx, work_key).await? {
+    if let Some((leader, leader_key)) = leader_of(&mut **tx, &keys.all).await? {
         if leader != row.id {
-            become_follower(tx, row, work_key, &leader, now).await?;
+            become_follower(tx, row, &leader_key, &leader, now).await?;
             return Ok(Requeued::Ready { wake: false });
         }
     }
     // The owner's cap, even when an admin presses retry. A follower does not
     // spend a slot, and neither does a reuse.
     ensure_under_cap(&mut **tx, &row.user_id).await?;
-    match become_leader(tx, row, work_key, now).await {
+    match become_leader(tx, row, &keys.canonical, now).await {
         Ok(true) => Ok(Requeued::Ready { wake: true }),
         Ok(false) => Err(ApiError::Conflict(
             "Only a failed or canceled request can be retried.".into(),
         )),
         Err(err) if leader_conflict(&err) => {
-            let Some(leader) = leader_id(&mut **tx, work_key).await? else {
+            let Some((leader, leader_key)) = leader_of(&mut **tx, &keys.all).await? else {
                 return Err(err.into());
             };
-            become_follower(tx, row, work_key, &leader, now).await?;
+            become_follower(tx, row, &leader_key, &leader, now).await?;
             Ok(Requeued::Ready { wake: false })
         }
         Err(err) if user_conflict(&err) => Err(ApiError::Conflict(
@@ -1374,20 +1369,21 @@ where
 async fn active_for_work<'a, E>(
     executor: E,
     user_id: &str,
-    work_key: &str,
+    keys: &[String],
 ) -> Result<Option<BookRequest>, ApiError>
 where
     E: sqlx::Executor<'a, Database = sqlx::Sqlite>,
 {
     let sql = format!(
         "{REQUEST_COLUMNS}
-         WHERE r.user_id = ? AND r.work_key = ? AND r.state IN ('requested', 'downloading')
+         WHERE r.user_id = ? AND r.work_key IN (SELECT value FROM json_each(?))
+           AND r.state IN ('requested', 'downloading')
          ORDER BY r.created_at DESC
          LIMIT 1"
     );
     let row = sqlx::query_as::<_, RequestRow>(&sql)
         .bind(user_id)
-        .bind(work_key)
+        .bind(keys_json(keys))
         .fetch_optional(executor)
         .await?;
     Ok(row.map(|row| row.into_wire(false)))
@@ -1495,14 +1491,16 @@ async fn copies_by_work(
     Ok(out)
 }
 
-/// Asked key wins unless the canonical key is the viewer's own copy and the
-/// asked key is someone else's.
-fn prefer_copy(asked: Option<ServerCopy>, canonical: Option<ServerCopy>) -> Option<ServerCopy> {
-    match (asked, canonical) {
-        (Some(asked), Some(canonical)) if canonical.mine && !asked.mine => Some(canonical),
-        (Some(asked), _) => Some(asked),
-        (None, canonical) => canonical,
+/// The viewer's own copy wins. Otherwise the first key in `keys` that has one,
+/// which is the asked key when the catalog put it first.
+fn prefer_copy(copies: &HashMap<String, ServerCopy>, keys: &[String]) -> Option<ServerCopy> {
+    if let Some(mine) = keys
+        .iter()
+        .find_map(|key| copies.get(key).filter(|copy| copy.mine))
+    {
+        return Some(mine.clone());
     }
+    keys.iter().find_map(|key| copies.get(key).cloned())
 }
 
 async fn latest_detail(
@@ -1561,20 +1559,34 @@ async fn others_for_work(
     Ok(rows.into_iter().map(|row| row.into_wire(true)).collect())
 }
 
+async fn expand_keys(pool: &SqlitePool, keys: &[String]) -> Result<Vec<String>, ApiError> {
+    let mut out = Vec::new();
+    for key in keys {
+        if !out.contains(key) {
+            out.push(key.clone());
+        }
+        let found = aliases::group(pool, key).await?;
+        for alias in found.all {
+            if !out.contains(&alias) {
+                out.push(alias);
+            }
+        }
+    }
+    Ok(out)
+}
+
 async fn work_status(
     state: &AppState,
     authed: &Authed,
     keys: &[String],
 ) -> Result<WorkStatus, ApiError> {
-    let request = latest_detail(&state.pool, &authed.user_id, keys).await?;
-    let copies = copies_by_work(&state.pool, &authed.user_id, keys).await?;
-    let on_server = prefer_copy(
-        keys.first().and_then(|key| copies.get(key).cloned()),
-        keys.get(1).and_then(|key| copies.get(key).cloned()),
-    );
+    let keys = expand_keys(&state.pool, keys).await?;
+    let request = latest_detail(&state.pool, &authed.user_id, &keys).await?;
+    let copies = copies_by_work(&state.pool, &authed.user_id, &keys).await?;
+    let on_server = prefer_copy(&copies, &keys);
     let active = active_leaders(&state.pool, &authed.user_id).await?;
     let other_requests = if authed.is_admin {
-        others_for_work(&state.pool, &authed.user_id, keys).await?
+        others_for_work(&state.pool, &authed.user_id, &keys).await?
     } else {
         Vec::new()
     };
@@ -1699,25 +1711,36 @@ async fn downloads_check(dir: Option<&std::path::Path>) -> Check {
 
 #[cfg(test)]
 mod tests {
-    use super::choose_key;
+    use std::collections::HashMap;
+
+    use super::prefer_copy;
+    use super::ServerCopy;
+
+    fn copy(id: &str, mine: bool) -> ServerCopy {
+        ServerCopy {
+            book_id: id.into(),
+            owner_username: String::new(),
+            mine,
+            shared: false,
+            held: !mine,
+        }
+    }
 
     #[test]
-    fn a_cached_redirect_is_kept_when_the_asked_key_is_already_stored() {
+    fn own_copy_wins_and_otherwise_the_asked_key_does() {
+        let mut copies = HashMap::new();
+        copies.insert("/works/OL1W".into(), copy("asked", false));
+        copies.insert("/works/OL2W".into(), copy("canonical", true));
+        let picked = prefer_copy(&copies, &["/works/OL1W".into(), "/works/OL2W".into()]).unwrap();
+        assert_eq!(picked.book_id, "canonical");
+        copies.insert("/works/OL2W".into(), copy("canonical", false));
+        let picked = prefer_copy(&copies, &["/works/OL1W".into(), "/works/OL2W".into()]).unwrap();
+        assert_eq!(picked.book_id, "asked");
         assert_eq!(
-            choose_key("/works/OL893415W", Some("/works/OL893414W"), true),
-            "/works/OL893415W"
-        );
-        assert_eq!(
-            choose_key("/works/OL893415W", Some("/works/OL893414W"), false),
-            "/works/OL893414W"
-        );
-        assert_eq!(
-            choose_key("/works/OL893415W", None, false),
-            "/works/OL893415W"
-        );
-        assert_eq!(
-            choose_key("/works/OL893415W", Some("not a key"), false),
-            "/works/OL893415W"
+            prefer_copy(&copies, &["/works/missing".into(), "/works/OL2W".into()])
+                .unwrap()
+                .book_id,
+            "canonical"
         );
     }
 

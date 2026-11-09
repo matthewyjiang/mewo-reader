@@ -297,16 +297,7 @@ pub async fn upload_book(
     headers: HeaderMap,
     multipart: Multipart,
 ) -> Result<Json<BookRecord>, ApiError> {
-    let max = crate::settings::load(&state.pool).await?.max_epub_bytes;
-    let limit = request_body_limit(max) as u64;
-    let declared = content_length(&headers);
-    if declared.is_some_and(|n| n > limit) {
-        return Err(ApiError::RequestTooLarge);
-    }
-    state
-        .disk
-        .require(&state.data_dir, declared.unwrap_or(max))?;
-    let staged = read_upload(&state, multipart, max, Budget::new(max)).await?;
+    let staged = read_checked_upload(&state, &headers, multipart).await?;
     let book = library::import(
         &state,
         &library::Owner {
@@ -408,6 +399,74 @@ pub async fn patch_book(
         .await?;
     }
     Ok(Json(book_record(&state, &authed.user_id, &row.id).await?))
+}
+
+pub async fn wrong_file(
+    State(state): State<AppState>,
+    authed: Authed,
+    Path(id): Path<String>,
+    body: Result<Json<serde_json::Value>, axum::extract::rejection::JsonRejection>,
+) -> Result<(axum::http::StatusCode, Json<crate::requests::BookRequest>), ApiError> {
+    let body = json_body(body, "Wrong file report must be a JSON object.")?;
+    let confirm = body
+        .get("confirm")
+        .and_then(|value| value.as_bool())
+        .ok_or_else(|| ApiError::BadRequest("Wrong file report must be a JSON object.".into()))?;
+    if !confirm {
+        return Err(ApiError::BadRequest(
+            "Confirm to report a wrong file.".into(),
+        ));
+    }
+    let request = crate::requests::reopen::wrong_file(&state, &authed, &id).await?;
+    Ok((axum::http::StatusCode::ACCEPTED, Json(request)))
+}
+
+#[derive(Deserialize)]
+pub(crate) struct ForceQuery {
+    #[serde(default)]
+    force: u8,
+}
+
+pub(crate) async fn replace_epub(
+    State(state): State<AppState>,
+    authed: Authed,
+    Path(id): Path<String>,
+    Query(query): Query<ForceQuery>,
+    headers: HeaderMap,
+    multipart: Multipart,
+) -> Result<Json<BookRecord>, ApiError> {
+    let found: Option<(String, i64)> = sqlx::query_as(&format!(
+        "SELECT b.user_id, CASE WHEN {BOOK_VISIBLE_TO} THEN 1 ELSE 0 END
+         FROM books b WHERE b.id = ?"
+    ))
+    .bind(&authed.user_id)
+    .bind(&id)
+    .fetch_optional(&state.pool)
+    .await?;
+    let Some((owner, visible)) = found else {
+        return Err(ApiError::NotFound);
+    };
+    if !authed.is_admin && visible == 0 {
+        return Err(ApiError::NotFound);
+    }
+    if owner != authed.user_id && !authed.is_admin {
+        return Err(ApiError::Forbidden(
+            "Only the person who added this book can replace its file.".into(),
+        ));
+    }
+    let staged = read_checked_upload(&state, &headers, multipart).await?;
+    let replaced = library::replace(
+        &state,
+        &library::Owner {
+            user_id: &authed.user_id,
+            username: &authed.username,
+        },
+        &id,
+        staged,
+        query.force == 1,
+    )
+    .await?;
+    Ok(Json(replaced.book))
 }
 
 pub async fn download_epub(
@@ -1207,6 +1266,7 @@ impl ProfileRepostRow {
             files_owner: None,
             holds: 0,
             feed_rev: self.feed_rev,
+            has_release: 0,
         }
         .into_record(viewer);
         Ok(ProfileRepostRecord {
@@ -1268,6 +1328,7 @@ impl FeedRow {
             files_owner: None,
             holds: 0,
             feed_rev: self.feed_rev,
+            has_release: 0,
         }
         .into_record(viewer);
         let post = stored_post(
@@ -1370,6 +1431,7 @@ impl ProfilePostRow {
             files_owner: None,
             holds: 0,
             feed_rev: self.feed_rev,
+            has_release: 0,
         }
         .into_record(viewer);
         Ok(ProfilePostRecord {
@@ -1676,6 +1738,23 @@ impl Budget {
         self.left -= n;
         Ok(())
     }
+}
+
+async fn read_checked_upload(
+    state: &AppState,
+    headers: &HeaderMap,
+    multipart: Multipart,
+) -> Result<Staged, ApiError> {
+    let max = crate::settings::load(&state.pool).await?.max_epub_bytes;
+    let limit = request_body_limit(max) as u64;
+    let declared = content_length(headers);
+    if declared.is_some_and(|n| n > limit) {
+        return Err(ApiError::RequestTooLarge);
+    }
+    state
+        .disk
+        .require(&state.data_dir, declared.unwrap_or(max))?;
+    read_upload(state, multipart, max, Budget::new(max)).await
 }
 
 async fn read_upload(

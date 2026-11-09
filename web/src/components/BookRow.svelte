@@ -4,12 +4,16 @@
   import { store, message } from '../lib/store.svelte';
   import { router, readerUrl } from '../lib/router.svelte';
   import Avatar from './Avatar.svelte';
+  import BookFileSheet from './BookFileSheet.svelte';
   import Icon from './Icon.svelte';
 
   let { book, onremove }: {
     book: BookRecord;
     onremove?: (book: BookRecord) => void;
   } = $props();
+
+  let fileOpen = $state(false);
+  const canFile = $derived(!book.isSample && (book.mine || store.me?.isAdmin === true));
 
   async function share(shared: boolean): Promise<void> {
     try {
@@ -40,8 +44,17 @@
       {/if}
     </div>
   </a>
-  {#if book.mine || book.held}
+  {#if canFile || book.held}
     <div class="book-actions">
+      {#if canFile}
+        <button
+          class="icon-button"
+          aria-label={`Book file for ${book.title}`}
+          onclick={() => { fileOpen = true; }}
+        >
+          <Icon name="file" size={18} />
+        </button>
+      {/if}
       {#if book.mine}
         <button
           class="icon-button"
@@ -65,6 +78,9 @@
     </div>
   {/if}
 </div>
+{#if fileOpen}
+  <BookFileSheet {book} onclose={() => { fileOpen = false; }} />
+{/if}
 
 <style>
 .book-row {

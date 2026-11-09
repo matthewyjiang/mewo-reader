@@ -10,6 +10,7 @@
   import SignIn from './components/SignIn.svelte';
   import TopBar from './components/TopBar.svelte';
   import UnderlineTabs from './components/UnderlineTabs.svelte';
+  import Blocklist from './screens/Blocklist.svelte';
   import Feed from './screens/Feed.svelte';
   import Home from './screens/Home.svelte';
   import Invites from './screens/Invites.svelte';
@@ -75,6 +76,7 @@
       '/settings/library': 'Library', '/settings/about': 'About',
       '/settings/server': 'Server', '/settings/server/users': 'Users',
       '/settings/server/invites': 'Invites',
+      '/settings/server/blocklist': 'Blocked releases',
       '/settings/requests': 'Requests',
     };
     return titles[path] ?? 'Mewo';
@@ -421,6 +423,8 @@
               />
             {:else if path === '/settings/server/invites'}
               <Invites scroller={main} />
+            {:else if path === '/settings/server/blocklist'}
+              <Blocklist scroller={main} />
             {:else if path === '/settings/server' || path === '/settings/server/users'}
               <Server {path} scroller={main} onprofile={openProfile} />
             {:else if path === '/settings/requests'}

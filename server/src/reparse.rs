@@ -142,7 +142,7 @@ impl Reparser<'_> {
         if book.posts_indexed != 1 {
             return Ok(self.skipped(&book, 0, "not indexed"));
         }
-        let (old_posts, seen_feed, seen_parser) = load_seen(self.pool, &book.id).await?;
+        let (old_posts, seen_feed, seen_parser) = search::load_seen(self.pool, &book.id).await?;
         let path = book_dir(self.data_dir, &book.files_owner, &book.id).join("book.epub");
         let permit = self.parsers.acquire().await?;
         let parsed = match self.parsers.parse_owned(path, permit).await {
@@ -222,6 +222,8 @@ impl Reparser<'_> {
                     bump_feed_rev: true,
                     parser_rev: PARSER_REV,
                     seen: Some((seen_feed, seen_parser)),
+                    epub: None,
+                    replaced_at: None,
                 },
             )
             .await?;
@@ -325,46 +327,6 @@ struct BookRow {
     owner: String,
     files_owner: String,
     posts_indexed: i64,
-}
-
-#[derive(sqlx::FromRow)]
-struct StoredPost {
-    idx: i64,
-    kind: String,
-    text: String,
-    chapter: String,
-}
-
-/// Posts and the book revisions, from one snapshot. The write later matches
-/// those revisions, so a second reparse built on the same rows refuses.
-async fn load_seen(pool: &SqlitePool, book_id: &str) -> Result<(Vec<Post>, i64, i64), ApiError> {
-    let mut tx = pool.begin().await?;
-    let (feed_rev, parser_rev): (i64, i64) =
-        sqlx::query_as("SELECT feed_rev, parser_rev FROM books WHERE id = ?")
-            .bind(book_id)
-            .fetch_one(&mut *tx)
-            .await?;
-    let rows = sqlx::query_as::<_, StoredPost>(
-        "SELECT idx, kind, text, chapter FROM posts WHERE book_id = ? ORDER BY idx ASC",
-    )
-    .bind(book_id)
-    .fetch_all(&mut *tx)
-    .await?;
-    tx.commit().await?;
-    let mut posts = Vec::with_capacity(rows.len());
-    for (expected, row) in rows.into_iter().enumerate() {
-        if row.idx != expected as i64 {
-            tracing::error!(book_id, idx = row.idx, expected, "post indexes have a gap");
-            return Err(ApiError::Internal);
-        }
-        posts.push(Post {
-            id: row.idx.to_string(),
-            kind: search::parse_kind(&row.kind)?,
-            text: row.text,
-            chapter: row.chapter,
-        });
-    }
-    Ok((posts, feed_rev, parser_rev))
 }
 
 /// Kind, text, and chapter. Alignment still ignores chapter; this is only

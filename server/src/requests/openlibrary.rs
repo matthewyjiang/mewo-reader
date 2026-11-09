@@ -45,7 +45,7 @@ impl Limiter {
         }
     }
 
-    async fn pace(&self) {
+    pub(crate) async fn pace(&self) {
         let _permit = self
             .sem
             .acquire()
@@ -477,7 +477,7 @@ fn work_fail(err: UpstreamError) -> InfoFail {
 
 /// `/type/redirect` only. Any other document, including one with a stray
 /// `location`, is the work itself.
-fn json_redirect(value: &serde_json::Value) -> Option<String> {
+pub(crate) fn json_redirect(value: &serde_json::Value) -> Option<String> {
     let type_key = value
         .pointer("/type/key")
         .and_then(|item| item.as_str())

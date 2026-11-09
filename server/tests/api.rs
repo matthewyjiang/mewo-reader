@@ -7194,7 +7194,7 @@ async fn write_posts(pool: &SqlitePool, dir: &Path, book_id: &str, posts: &[Stor
         .unwrap();
 }
 
-fn indexes_of<'a>(posts: &'a [StoredPost], text: &str) -> Vec<i64> {
+fn indexes_of(posts: &[StoredPost], text: &str) -> Vec<i64> {
     posts
         .iter()
         .filter(|post| post.text == text)
@@ -8378,6 +8378,230 @@ async fn register_with(app: &axum::Router, username: &str, invite: &str) {
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{body}");
+}
+
+async fn put_epub(
+    app: &axum::Router,
+    token: &str,
+    id: &str,
+    force: u8,
+    epub: Option<&[u8]>,
+) -> (StatusCode, Value) {
+    put_replacement(app, token, id, force, epub, None).await
+}
+
+async fn put_replacement(
+    app: &axum::Router,
+    token: &str,
+    id: &str,
+    force: u8,
+    epub: Option<&[u8]>,
+    cover: Option<&[u8]>,
+) -> (StatusCode, Value) {
+    let mut fields: Vec<(&str, Option<&str>, &[u8])> = match epub {
+        Some(bytes) => vec![("epub", Some("book.epub"), bytes)],
+        None => vec![("title", None, b"nope")],
+    };
+    if let Some(cover) = cover {
+        fields.push(("cover", Some("cover.jpg"), cover));
+    }
+    let (content_type, body) = multipart(&fields);
+    let req = Request::builder()
+        .method("PUT")
+        .uri(format!("/v1/books/{id}/epub?force={force}"))
+        .header(header::AUTHORIZATION, format!("Bearer {token}"))
+        .header(header::CONTENT_TYPE, content_type)
+        .body(Body::from(body))
+        .unwrap();
+    let (status, bytes) = send(app, req).await;
+    let value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+    (status, value)
+}
+
+#[tokio::test]
+async fn replace_keeps_anchors_until_the_file_is_too_different() {
+    let (app, tmp) = app().await;
+    let matt = register(&app, "matt", "password1").await;
+    let ted = register(&app, "ted", "password1").await;
+    let carol = register(&app, "carol", "password1").await;
+    let bytes = common::epub();
+    let (status, book) = upload(&app, &matt, "Pride", "Jane", &bytes, None, false).await;
+    assert_eq!(status, StatusCode::OK, "{book}");
+    let id = book["id"].as_str().unwrap().to_string();
+    let pool = open_db(tmp.path()).await;
+    let matt_id = user_id(&pool, "matt").await;
+    let ted_id = user_id(&pool, "ted").await;
+    insert_imported(&pool, "hold-ted", &ted_id, "/works/OL1W", &id, 1).await;
+    let (status, thread) = json_req(
+        &app,
+        "POST",
+        &format!("/v1/books/{id}/comments/0"),
+        Some(&ted),
+        json!({ "text": "while private" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{thread}");
+    let (status, _) = empty_req(
+        &app,
+        "PUT",
+        &format!("/v1/books/{id}/posts/0/repost"),
+        Some(&ted),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let epub_path = tmp
+        .path()
+        .join("books")
+        .join(&matt_id)
+        .join(&id)
+        .join("book.epub");
+    let posts_path = epub_path.parent().unwrap().join("posts.json");
+    let before = std::fs::read(&epub_path).unwrap();
+    assert_eq!(before, bytes);
+
+    let (status, hidden) = put_epub(&app, &carol, &id, 0, Some(&bytes)).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{hidden}");
+    let (status, missing) = put_epub(&app, &carol, "missing-book", 0, Some(&bytes)).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{missing}");
+    assert_eq!(hidden, missing);
+    let (status, body) = put_epub(&app, &ted, &id, 0, Some(&bytes)).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+    assert_eq!(std::fs::read(&epub_path).unwrap(), before);
+    let (status, body) = put_epub(&app, &matt, &id, 0, None).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert_eq!(std::fs::read(&epub_path).unwrap(), before);
+
+    let other = common::with_chapter(
+        "<html><body><h1>Nope</h1><p>Completely different words.</p></body></html>",
+    );
+    let (status, body) = put_epub(&app, &matt, &id, 0, Some(&other)).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert!(body["error"].as_str().unwrap().contains("matches"));
+    assert_eq!(std::fs::read(&epub_path).unwrap(), before);
+    let rev: i64 = sqlx::query_scalar("SELECT feed_rev FROM books WHERE id = ?")
+        .bind(&id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(rev, 0);
+    let replaced: Option<i64> = sqlx::query_scalar("SELECT replaced_at FROM books WHERE id = ?")
+        .bind(&id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert!(replaced.is_none());
+
+    let (status, body) = put_epub(&app, &matt, &id, 0, Some(&bytes)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["id"], id);
+    assert_eq!(body["feedRev"], 1);
+    assert_eq!(std::fs::read(&epub_path).unwrap(), bytes);
+    assert!(posts_path.is_file());
+    let replaced: i64 = sqlx::query_scalar("SELECT replaced_at FROM books WHERE id = ?")
+        .bind(&id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert!(replaced > 0);
+    let comment: (String, i64) =
+        sqlx::query_as("SELECT post_id, private FROM comments WHERE book_id = ? AND user_id = ?")
+            .bind(&id)
+            .bind(&ted_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(comment.0, "0");
+    assert_eq!(comment.1, 1);
+    let repost: (String, i64) =
+        sqlx::query_as("SELECT post_id, private FROM reposts WHERE book_id = ? AND user_id = ?")
+            .bind(&id)
+            .bind(&ted_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(repost.0, "0");
+    assert_eq!(repost.1, 1);
+
+    let (status, body) = put_epub(&app, &matt, &id, 1, Some(&other)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["feedRev"], 2);
+    assert_eq!(std::fs::read(&epub_path).unwrap(), other);
+    let (status, missing) = put_epub(&app, &matt, "missing-book", 0, Some(&bytes)).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{missing}");
+
+    sqlx::query("UPDATE users SET is_admin = 1 WHERE username = 'carol'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let (status, body) = put_epub(&app, &carol, &id, 1, Some(&bytes)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["feedRev"], 3);
+    assert_eq!(std::fs::read(&epub_path).unwrap(), bytes);
+}
+
+#[tokio::test]
+async fn replace_moves_the_cover_and_refuses_a_sample_or_an_unindexed_book() {
+    let (app, tmp) = app().await;
+    let matt = register(&app, "matt", "password1").await;
+    let bytes = common::epub();
+    let (status, book) = upload(
+        &app,
+        &matt,
+        "Pride",
+        "Jane",
+        &bytes,
+        Some(b"cover-a"),
+        false,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{book}");
+    let id = book["id"].as_str().unwrap().to_string();
+    let pool = open_db(tmp.path()).await;
+    let matt_id = user_id(&pool, "matt").await;
+    let epub_path = tmp
+        .path()
+        .join("books")
+        .join(&matt_id)
+        .join(&id)
+        .join("book.epub");
+    let before = std::fs::read(&epub_path).unwrap();
+
+    sqlx::query("UPDATE books SET posts_indexed = 0 WHERE id = ?")
+        .bind(&id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let (status, body) = put_epub(&app, &matt, &id, 0, Some(&bytes)).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_eq!(body["error"], "This book is still being prepared.");
+    assert_eq!(std::fs::read(&epub_path).unwrap(), before);
+
+    sqlx::query("UPDATE books SET posts_indexed = 1, is_sample = 1 WHERE id = ?")
+        .bind(&id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let (status, body) = put_epub(&app, &matt, &id, 0, Some(&bytes)).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_eq!(body["error"], "A sample can't be replaced.");
+    assert_eq!(std::fs::read(&epub_path).unwrap(), before);
+
+    sqlx::query("UPDATE books SET is_sample = 0 WHERE id = ?")
+        .bind(&id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let (status, body) = put_replacement(&app, &matt, &id, 0, Some(&bytes), Some(b"cover-b")).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let req = Request::builder()
+        .method("GET")
+        .uri(format!("/v1/books/{id}/cover"))
+        .header(header::AUTHORIZATION, format!("Bearer {matt}"))
+        .body(Body::empty())
+        .unwrap();
+    let (status, cover) = send(&app, req).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(cover.as_ref(), b"cover-b");
 }
 
 async fn post_check(

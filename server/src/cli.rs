@@ -38,6 +38,7 @@ Usage:
   mewo-server admin invites revoke <id>
   mewo-server admin reparse <book-id> [--dry-run] [--force]
   mewo-server admin reparse --all [--dry-run] [--force]
+  mewo-server admin works aliases [--dry-run] [--merge]
   mewo-server admin sessions revoke <username>
   mewo-server admin sessions revoke --all
 ";
@@ -57,8 +58,15 @@ pub enum AdminCommand {
     Create(String),
     Invites(InviteCommand),
     Reparse(ReparseArgs),
+    Works(WorksCommand),
     /// `None` is `--all`. A username cannot be `--all`.
     RevokeSessions(Option<String>),
+}
+
+#[derive(Debug)]
+pub enum WorksCommand {
+    /// Dry-run unless `--merge` is set without `--dry-run`.
+    Aliases { dry_run: bool, merge: bool },
 }
 
 #[derive(Debug)]
@@ -101,6 +109,7 @@ fn parse_admin(args: &[String]) -> Result<Command, String> {
         [verb, name] if verb == "create" => AdminCommand::Create(name.clone()),
         [verb, rest @ ..] if verb == "invites" => parse_invites(rest)?,
         [verb, rest @ ..] if verb == "reparse" => parse_reparse(rest)?,
+        [verb, rest @ ..] if verb == "works" => parse_works(rest)?,
         [verb, action, flag] if verb == "sessions" && action == "revoke" && flag == "--all" => {
             AdminCommand::RevokeSessions(None)
         }
@@ -168,6 +177,27 @@ fn parse_days(raw: &str) -> Result<u32, String> {
         return Err(USAGE.to_string());
     }
     Ok(days)
+}
+
+fn parse_works(args: &[String]) -> Result<AdminCommand, String> {
+    match args {
+        [verb, rest @ ..] if verb == "aliases" => {
+            let mut dry_run = false;
+            let mut merge = false;
+            for arg in rest {
+                match arg.as_str() {
+                    "--dry-run" => dry_run = true,
+                    "--merge" => merge = true,
+                    _ => return Err(USAGE.to_string()),
+                }
+            }
+            Ok(AdminCommand::Works(WorksCommand::Aliases {
+                dry_run,
+                merge,
+            }))
+        }
+        _ => Err(USAGE.to_string()),
+    }
 }
 
 fn parse_reparse(args: &[String]) -> Result<AdminCommand, String> {
@@ -242,6 +272,7 @@ async fn dispatch(
         AdminCommand::Create(name) => create(pool, &name, stdin, out, err).await,
         AdminCommand::Invites(command) => invites(pool, command, out, err).await,
         AdminCommand::Reparse(args) => reparse(pool, config, args, out, err).await,
+        AdminCommand::Works(command) => works(config, command, out, err).await,
         AdminCommand::RevokeSessions(name) => revoke_sessions(pool, name, out, err).await,
     }
 }
@@ -349,6 +380,28 @@ fn reparse_code(reports: &[Report]) -> i32 {
         1
     } else {
         0
+    }
+}
+
+async fn works(
+    config: &Config,
+    command: WorksCommand,
+    out: &mut dyn Write,
+    err: &mut dyn Write,
+) -> Result<i32, io::Error> {
+    let WorksCommand::Aliases { dry_run, merge } = command;
+    let state = match crate::prepare(config.clone()).await {
+        Ok(state) => state,
+        Err(error) => {
+            writeln!(err, "{error}")?;
+            return Ok(2);
+        }
+    };
+    // Default is a dry run. `--merge` performs it. `--dry-run` still wins.
+    let apply = merge && !dry_run;
+    match crate::requests::aliases::consolidate(&state, apply, out).await {
+        Ok(()) => Ok(0),
+        Err(error) => Ok(user_or_db(error, err)),
     }
 }
 
@@ -643,6 +696,27 @@ mod tests {
         assert!(parse(words(&["admin"])).is_err());
         assert!(parse(words(&["admin", "grant"])).is_err());
         assert!(parse(words(&["admin", "grant", "matt", "extra"])).is_err());
+        match parse(words(&["admin", "works", "aliases"])) {
+            Ok(Command::Admin(AdminCommand::Works(WorksCommand::Aliases { dry_run, merge }))) => {
+                assert!(!dry_run);
+                assert!(!merge);
+            }
+            other => panic!("{other:?}"),
+        }
+        match parse(words(&[
+            "admin",
+            "works",
+            "aliases",
+            "--merge",
+            "--dry-run",
+        ])) {
+            Ok(Command::Admin(AdminCommand::Works(WorksCommand::Aliases { dry_run, merge }))) => {
+                assert!(dry_run);
+                assert!(merge);
+            }
+            other => panic!("{other:?}"),
+        }
+        assert!(parse(words(&["admin", "works", "aliases", "--apply"])).is_err());
         match parse(words(&["admin", "reparse", "book", "--dry-run", "--force"])) {
             Ok(Command::Admin(AdminCommand::Reparse(args))) => {
                 assert!(matches!(args.target, ReparseTarget::One(id) if id == "book"));

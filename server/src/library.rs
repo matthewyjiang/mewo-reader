@@ -205,7 +205,113 @@ pub(crate) async fn import(
         owner_username: owner.username.to_string(),
         held: false,
         feed_rev: 0,
+        has_release: false,
+        reportable: false,
     })
+}
+
+pub(crate) struct Replaced {
+    pub book: BookRecord,
+    #[allow(dead_code)]
+    pub matched_ratio: f32,
+}
+
+/// Swap `staged` onto an existing book. Below half the posts aligning exactly,
+/// and without `force`, the book is left as it was.
+pub(crate) async fn replace(
+    state: &AppState,
+    owner: &Owner<'_>,
+    book_id: &str,
+    staged: Staged,
+    force: bool,
+) -> Result<Replaced, ApiError> {
+    let result = replace_staged(state, owner, book_id, &staged, force).await;
+    if result.is_err() {
+        let _ = tokio::fs::remove_dir_all(&staged.temp_dir).await;
+    }
+    result
+}
+
+async fn replace_staged(
+    state: &AppState,
+    owner: &Owner<'_>,
+    book_id: &str,
+    staged: &Staged,
+    force: bool,
+) -> Result<Replaced, ApiError> {
+    let found: Option<(String, i64, i64)> = sqlx::query_as(
+        "SELECT COALESCE(files_user_id, user_id), posts_indexed, is_sample FROM books WHERE id = ?",
+    )
+    .bind(book_id)
+    .fetch_optional(&state.pool)
+    .await?;
+    let Some((files_owner, indexed, sample)) = found else {
+        return Err(ApiError::NotFound);
+    };
+    if indexed != 1 {
+        return Err(ApiError::Conflict(
+            "This book is still being prepared.".into(),
+        ));
+    }
+    if sample != 0 {
+        return Err(ApiError::Conflict("A sample can't be replaced.".into()));
+    }
+    let (old_posts, feed_rev, parser_rev) = search::load_seen(&state.pool, book_id).await?;
+    let old_keys: Vec<crate::anchors::PostKey> = old_posts.iter().map(Into::into).collect();
+    let new_keys: Vec<crate::anchors::PostKey> =
+        staged.posts.posts.iter().map(Into::into).collect();
+    let remap = crate::anchors::align(&old_keys, &new_keys);
+    let matched_ratio = remap.matched_ratio();
+    if !force && matched_ratio < 0.5 {
+        return Err(ApiError::Conflict(format!(
+            "This file matches {:.0}% of the current book.",
+            matched_ratio * 100.0
+        )));
+    }
+    let dir = book_dir(&state.data_dir, &files_owner, book_id);
+    let epub = staged.temp_dir.join("book.epub");
+    search::store_feed_with(
+        &state.pool,
+        &dir,
+        book_id,
+        &staged.posts,
+        search::FeedUpdate {
+            remap: Some(&remap),
+            bump_feed_rev: true,
+            parser_rev: crate::feed::PARSER_REV,
+            seen: Some((feed_rev, parser_rev)),
+            epub: Some(&epub),
+            replaced_at: Some(now_ms()),
+        },
+    )
+    .await?;
+    let cover = staged.temp_dir.join("cover.jpg");
+    match tokio::fs::rename(&cover, dir.join("cover.jpg")).await {
+        Ok(()) => {}
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+        Err(err) => return Err(err.into()),
+    }
+    let _ = tokio::fs::remove_dir_all(&staged.temp_dir).await;
+    let book = book_record(state, owner.user_id, book_id).await?;
+    Ok(Replaced {
+        book,
+        matched_ratio,
+    })
+}
+
+async fn book_record(
+    state: &AppState,
+    user_id: &str,
+    book_id: &str,
+) -> Result<BookRecord, ApiError> {
+    let row = sqlx::query_as::<_, BookRow>(&format!("{BOOK_SELECT} WHERE b.id = ?"))
+        .bind(user_id)
+        .bind(user_id)
+        .bind(book_id)
+        .fetch_optional(&state.pool)
+        .await?
+        .ok_or(ApiError::NotFound)?;
+    Ok(row.into_record(user_id))
 }
 
 /// Deletes a book this process just inserted. Used when a cancel wins the

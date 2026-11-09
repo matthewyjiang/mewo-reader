@@ -353,7 +353,8 @@ async fn requested(
         Err(err) => return hold(&state.pool, &row.id, "requested", "Prowlarr", &err, now_ms).await,
     };
     let tried = guids(&row.tried_guids);
-    let choice = pick::pick(&matcher, &releases, &tried, max_bytes, languages);
+    let blocked = pick::Blocklist::load(&state.pool).await?;
+    let choice = pick::pick(&matcher, &releases, &tried, &blocked, max_bytes, languages);
     let Some(release) = choice.release else {
         let gave_up = row.created_at < now_ms.saturating_sub(GIVE_UP_MS);
         let message = match choice.closest {
@@ -646,6 +647,17 @@ async fn completed(
     .bind(now_ms)
     .bind(now_ms)
     .bind(&row.id)
+    .execute(&mut *tx)
+    .await?;
+    // A wrong-file reopen asked to keep the copy it replaced shared or private.
+    sqlx::query(
+        "UPDATE books SET shared = (
+             SELECT want_shared FROM book_requests WHERE id = ?
+         )
+         WHERE id = ?",
+    )
+    .bind(&row.id)
+    .bind(&book.id)
     .execute(&mut *tx)
     .await?;
     tx.commit().await?;

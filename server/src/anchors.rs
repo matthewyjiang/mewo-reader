@@ -48,12 +48,20 @@ impl Remap {
                 .all(|(index, new_index)| *new_index as usize == index)
     }
 
-    #[cfg(test)]
     pub(crate) fn matched_ratio(&self) -> f32 {
         if self.new_of.is_empty() {
             1.0
         } else {
             self.matched as f32 / self.new_of.len() as f32
+        }
+    }
+
+    /// The new index when `old_index` aligned exactly. A snap is not an anchor.
+    pub(crate) fn anchored(&self, old_index: usize) -> Option<u32> {
+        if self.exact.get(old_index).copied().unwrap_or(false) {
+            self.new_of.get(old_index).copied()
+        } else {
+            None
         }
     }
 

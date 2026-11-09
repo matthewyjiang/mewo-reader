@@ -21,6 +21,12 @@ export interface BookRecord {
    * `ownerUsername` is filled in. A shared book keeps the name.
    */
   held?: boolean;
+  /** Bumped when posts are renumbered. Older shelves omit it. */
+  feedRev?: number;
+  /** The imported file still has a release that can be reported. */
+  hasRelease?: boolean;
+  /** This account added the book and it still has a reportable release. */
+  reportable?: boolean;
 }
 
 export interface FeedPost {
@@ -272,6 +278,20 @@ export interface ServerInfo {
   storageBytes: number;
   /** Active invites: unused, unrevoked, and not yet expired. */
   invites: number;
+  /** Releases a reader reported as the wrong file. Older servers omit it. */
+  blocked?: number;
+}
+
+export interface BlockedRelease {
+  id: string;
+  guid: string;
+  indexer: string;
+  title: string;
+  size: number;
+  workKey: string | null;
+  bookTitle: string | null;
+  bookAuthor: string | null;
+  createdAt: number;
 }
 
 export interface AdminInvite {

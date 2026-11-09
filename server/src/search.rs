@@ -165,6 +165,10 @@ async fn popular_books(
                 COALESCE(p.progress_index, 0) AS progress_index,
                 b.is_sample, b.shared, b.user_id AS owner_id,
                 owner.username AS owner_username, b.feed_rev,
+                (b.replaced_at IS NULL AND EXISTS (
+                    SELECT 1 FROM book_requests lr
+                    WHERE lr.id = b.id AND lr.release_title IS NOT NULL
+                )) AS has_release,
                 EXISTS (
                     SELECT 1 FROM book_requests holder
                     WHERE holder.book_id = b.id AND holder.user_id = ?
@@ -588,6 +592,7 @@ impl PostHitRow {
             files_owner: None,
             holds: 0,
             feed_rev: self.feed_rev,
+            has_release: 0,
         }
         .into_record(viewer);
         Ok(PostHitRecord {
@@ -826,6 +831,10 @@ pub(crate) struct FeedUpdate<'a> {
     /// `(feed_rev, parser_rev)` read with the posts this diff was built from.
     /// The write matches both and refuses when another reparse already won.
     pub seen: Option<(i64, i64)>,
+    /// Swap this file onto `book.epub` in the same transaction as the feed.
+    pub epub: Option<&'a Path>,
+    /// Set when a reader uploaded a replacement.
+    pub replaced_at: Option<i64>,
 }
 
 impl FeedUpdate<'static> {
@@ -835,6 +844,8 @@ impl FeedUpdate<'static> {
             bump_feed_rev: false,
             parser_rev: crate::feed::PARSER_REV,
             seen: None,
+            epub: None,
+            replaced_at: None,
         }
     }
 
@@ -845,8 +856,53 @@ impl FeedUpdate<'static> {
             bump_feed_rev: false,
             parser_rev: 0,
             seen: None,
+            epub: None,
+            replaced_at: None,
         }
     }
+}
+
+#[derive(sqlx::FromRow)]
+struct SeenPost {
+    idx: i64,
+    kind: String,
+    text: String,
+    chapter: String,
+}
+
+/// Posts and the book revisions, from one snapshot. The write later matches
+/// those revisions, so a second rewrite built on the same rows refuses.
+pub(crate) async fn load_seen(
+    pool: &SqlitePool,
+    book_id: &str,
+) -> Result<(Vec<Post>, i64, i64), ApiError> {
+    let mut tx = pool.begin().await?;
+    let (feed_rev, parser_rev): (i64, i64) =
+        sqlx::query_as("SELECT feed_rev, parser_rev FROM books WHERE id = ?")
+            .bind(book_id)
+            .fetch_one(&mut *tx)
+            .await?;
+    let rows = sqlx::query_as::<_, SeenPost>(
+        "SELECT idx, kind, text, chapter FROM posts WHERE book_id = ? ORDER BY idx ASC",
+    )
+    .bind(book_id)
+    .fetch_all(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    let mut posts = Vec::with_capacity(rows.len());
+    for (expected, row) in rows.into_iter().enumerate() {
+        if row.idx != expected as i64 {
+            tracing::error!(book_id, idx = row.idx, expected, "post indexes have a gap");
+            return Err(ApiError::Internal);
+        }
+        posts.push(Post {
+            id: row.idx.to_string(),
+            kind: parse_kind(&row.kind)?,
+            text: row.text,
+            chapter: row.chapter,
+        });
+    }
+    Ok((posts, feed_rev, parser_rev))
 }
 
 pub(crate) fn stale_reparse() -> ApiError {
@@ -854,8 +910,11 @@ pub(crate) fn stale_reparse() -> ApiError {
 }
 
 /// Writes the feed file and the search rows in one database transaction.
-/// The file is written before commit, so a crash leaves `posts_indexed` at 0
-/// and the next backfill retries. Returns the bytes stored in `posts.json`.
+/// A replacement stages both new files, moves the live ones aside, and commits
+/// only after the renames. An error puts the live files back. A feed with no
+/// epub still writes `posts.json` before commit, so a crash leaves
+/// `posts_indexed` at 0 and the next backfill retries. Returns the bytes
+/// stored in `posts.json`.
 pub(crate) async fn store_feed(
     pool: &SqlitePool,
     dir: &Path,
@@ -879,21 +938,65 @@ pub(crate) async fn store_feed_with(
     // A startup backfill and a comment can want the write lock together.
     // One long wait loses: the writer times out, or backfill gives up and
     // leaves the book unindexed. Wait briefly, let the other statement
-    // finish, and try the same book again.
+    // finish, and try the same book again. Each attempt stages its own tmps
+    // so a locked commit, which restores the previous files, can try again.
     let mut attempt = 0;
     loop {
-        match write_indexed(pool, dir, book_id, posts, &bytes, &update).await {
+        let staged = stage_replacement(dir, update.epub, &bytes).await?;
+        match write_indexed(pool, dir, book_id, posts, &bytes, &update, staged.as_ref()).await {
             Ok(()) => return Ok(bytes),
             Err(WriteFailure::Locked) if attempt + 1 < FEED_WRITE_ATTEMPTS => {
+                discard_staged(staged.as_ref()).await;
                 attempt += 1;
                 tokio::time::sleep(BACKFILL_PAUSE).await;
             }
             Err(WriteFailure::Locked) => {
+                discard_staged(staged.as_ref()).await;
                 tracing::error!(book_id, "posts index stayed busy");
                 return Err(ApiError::Internal);
             }
-            Err(WriteFailure::Other(err)) => return Err(err),
+            Err(WriteFailure::Other(err)) => {
+                discard_staged(staged.as_ref()).await;
+                return Err(err);
+            }
         }
+    }
+}
+
+struct StagedFiles {
+    epub: PathBuf,
+    posts: PathBuf,
+}
+
+/// Copy the new epub and write the new posts beside the live files, before
+/// the transaction opens. `None` is a feed write that does not replace the epub.
+async fn stage_replacement(
+    dir: &Path,
+    epub: Option<&Path>,
+    bytes: &[u8],
+) -> Result<Option<StagedFiles>, ApiError> {
+    let Some(src) = epub else {
+        return Ok(None);
+    };
+    let staged = StagedFiles {
+        epub: dir.join(format!("book-{}.tmp", Uuid::new_v4())),
+        posts: dir.join(format!("posts-{}.tmp", Uuid::new_v4())),
+    };
+    if let Err(err) = tokio::fs::copy(src, &staged.epub).await {
+        let _ = tokio::fs::remove_file(&staged.epub).await;
+        return Err(err.into());
+    }
+    if let Err(err) = tokio::fs::write(&staged.posts, bytes).await {
+        discard_staged(Some(&staged)).await;
+        return Err(err.into());
+    }
+    Ok(Some(staged))
+}
+
+async fn discard_staged(staged: Option<&StagedFiles>) {
+    if let Some(staged) = staged {
+        let _ = tokio::fs::remove_file(&staged.epub).await;
+        let _ = tokio::fs::remove_file(&staged.posts).await;
     }
 }
 
@@ -980,6 +1083,7 @@ async fn write_indexed(
     posts: &Posts,
     bytes: &[u8],
     update: &FeedUpdate<'_>,
+    staged: Option<&StagedFiles>,
 ) -> Result<(), WriteFailure> {
     let mut conn = pool.acquire().await.map_err(WriteFailure::sqlx)?;
     // The pooled connection keeps this pragma. Put the normal timeout back
@@ -991,7 +1095,7 @@ async fn write_indexed(
         // The pragma did not change. Nothing to put back.
         return Err(WriteFailure::sqlx(err));
     }
-    let outcome = write_tx(&mut conn, dir, book_id, posts, bytes, update).await;
+    let outcome = write_tx(&mut conn, dir, book_id, posts, bytes, update, staged).await;
     let restore = format!(
         "PRAGMA busy_timeout = {}",
         crate::db::BUSY_TIMEOUT.as_millis()
@@ -1009,6 +1113,7 @@ async fn write_tx(
     posts: &Posts,
     bytes: &[u8],
     update: &FeedUpdate<'_>,
+    staged: Option<&StagedFiles>,
 ) -> Result<(), WriteFailure> {
     // Deferred is enough for a fresh import. A remap has to lock out a like
     // that read the old index and would insert it after the ids move. A seen
@@ -1059,6 +1164,14 @@ async fn write_tx(
         .execute(&mut *tx)
         .await
         .map_err(WriteFailure::sqlx)?;
+    if let Some(at) = update.replaced_at {
+        sqlx::query("UPDATE books SET replaced_at = ? WHERE id = ?")
+            .bind(at)
+            .bind(book_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(WriteFailure::sqlx)?;
+    }
     if update.seen.is_some() && updated.rows_affected() != 1 {
         // A bump always changes feed_rev, so 0 rows means the WHERE missed.
         // Without a bump, SQLite also reports 0 when the SET matches the row.
@@ -1073,11 +1186,194 @@ async fn write_tx(
             return Err(WriteFailure::Other(stale_reparse()));
         }
     }
-    write_posts_file(dir, bytes)
-        .await
-        .map_err(WriteFailure::Other)?;
-    tx.commit().await.map_err(WriteFailure::sqlx)?;
+    let installed = if let Some(staged) = staged {
+        Some(
+            install_swap(dir, staged, book_id)
+                .await
+                .map_err(WriteFailure::Other)?,
+        )
+    } else {
+        write_posts_file(dir, bytes)
+            .await
+            .map_err(WriteFailure::Other)?;
+        None
+    };
+    #[cfg(test)]
+    if swap_fault(book_id) == Some(SwapFault::Commit) {
+        if let Some(installed) = &installed {
+            restore_swap(installed).await;
+        }
+        return Err(WriteFailure::Other(ApiError::Internal));
+    }
+    if let Err(err) = tx.commit().await {
+        if let Some(installed) = &installed {
+            restore_swap(installed).await;
+        }
+        return Err(WriteFailure::sqlx(err));
+    }
+    if let Some(installed) = &installed {
+        drop_backups(installed).await;
+    }
     Ok(())
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SwapFault {
+    Posts,
+    Commit,
+}
+
+#[cfg(test)]
+static SWAP_FAULT: std::sync::Mutex<Option<(&'static str, SwapFault)>> =
+    std::sync::Mutex::new(None);
+
+#[cfg(test)]
+fn swap_fault(book_id: &str) -> Option<SwapFault> {
+    SWAP_FAULT
+        .lock()
+        .unwrap_or_else(|err| err.into_inner())
+        .as_ref()
+        .and_then(|(id, fault)| (*id == book_id).then_some(*fault))
+}
+
+#[cfg(test)]
+fn arm_swap_fault(book_id: &'static str, fault: SwapFault) {
+    *SWAP_FAULT.lock().unwrap_or_else(|err| err.into_inner()) = Some((book_id, fault));
+}
+
+#[cfg(test)]
+fn clear_swap_fault() {
+    *SWAP_FAULT.lock().unwrap_or_else(|err| err.into_inner()) = None;
+}
+
+struct Installed {
+    epub_live: PathBuf,
+    posts_live: PathBuf,
+    epub_backup: Option<PathBuf>,
+    posts_backup: Option<PathBuf>,
+    epub_tmp: PathBuf,
+    posts_tmp: PathBuf,
+    epub_installed: bool,
+    posts_installed: bool,
+}
+
+/// Move the live files aside, then rename the staged tmps onto those names.
+/// A failure restores the backups and removes any tmp that is still there.
+async fn install_swap(
+    dir: &Path,
+    staged: &StagedFiles,
+    book_id: &str,
+) -> Result<Installed, ApiError> {
+    #[cfg(not(test))]
+    let _ = book_id;
+    let mut installed = Installed {
+        epub_live: dir.join("book.epub"),
+        posts_live: dir.join("posts.json"),
+        epub_backup: None,
+        posts_backup: None,
+        epub_tmp: staged.epub.clone(),
+        posts_tmp: staged.posts.clone(),
+        epub_installed: false,
+        posts_installed: false,
+    };
+    if let Err(err) = move_aside(&mut installed).await {
+        restore_swap(&installed).await;
+        return Err(err);
+    }
+    if let Err(err) = tokio::fs::rename(&installed.epub_tmp, &installed.epub_live).await {
+        restore_swap(&installed).await;
+        return Err(err.into());
+    }
+    installed.epub_installed = true;
+    #[cfg(test)]
+    if swap_fault(book_id) == Some(SwapFault::Posts) {
+        restore_swap(&installed).await;
+        return Err(ApiError::Internal);
+    }
+    if let Err(err) = tokio::fs::rename(&installed.posts_tmp, &installed.posts_live).await {
+        restore_swap(&installed).await;
+        return Err(err.into());
+    }
+    installed.posts_installed = true;
+    Ok(installed)
+}
+
+async fn move_aside(installed: &mut Installed) -> Result<(), ApiError> {
+    if file_exists(&installed.epub_live).await? {
+        let backup = installed
+            .epub_live
+            .with_file_name(format!("book-{}.bak", Uuid::new_v4()));
+        tokio::fs::rename(&installed.epub_live, &backup).await?;
+        installed.epub_backup = Some(backup);
+    }
+    if file_exists(&installed.posts_live).await? {
+        let backup = installed
+            .posts_live
+            .with_file_name(format!("posts-{}.bak", Uuid::new_v4()));
+        if let Err(err) = tokio::fs::rename(&installed.posts_live, &backup).await {
+            return Err(err.into());
+        }
+        installed.posts_backup = Some(backup);
+    }
+    Ok(())
+}
+
+async fn file_exists(path: &Path) -> Result<bool, ApiError> {
+    match tokio::fs::metadata(path).await {
+        Ok(_) => Ok(true),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(err) => Err(err.into()),
+    }
+}
+
+async fn restore_swap(installed: &Installed) {
+    restore_one(
+        &installed.epub_live,
+        installed.epub_backup.as_deref(),
+        installed.epub_installed,
+    )
+    .await;
+    restore_one(
+        &installed.posts_live,
+        installed.posts_backup.as_deref(),
+        installed.posts_installed,
+    )
+    .await;
+    let _ = tokio::fs::remove_file(&installed.epub_tmp).await;
+    let _ = tokio::fs::remove_file(&installed.posts_tmp).await;
+}
+
+async fn restore_one(live: &Path, backup: Option<&Path>, installed: bool) {
+    if let Some(backup) = backup {
+        if let Err(err) = tokio::fs::rename(backup, live).await {
+            tracing::error!(error = %err, path = %live.display(), "could not restore the previous file");
+        }
+        return;
+    }
+    if installed {
+        if let Err(err) = tokio::fs::remove_file(live).await {
+            if err.kind() != std::io::ErrorKind::NotFound {
+                tracing::error!(error = %err, path = %live.display(), "could not remove the new file");
+            }
+        }
+    }
+}
+
+async fn drop_backups(installed: &Installed) {
+    for path in [
+        installed.epub_backup.as_ref(),
+        installed.posts_backup.as_ref(),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        if let Err(err) = tokio::fs::remove_file(path).await {
+            if err.kind() != std::io::ErrorKind::NotFound {
+                tracing::error!(error = %err, path = %path.display(), "could not remove the backup");
+            }
+        }
+    }
 }
 
 async fn insert_posts(
@@ -1544,6 +1840,8 @@ mod tests {
             bump_feed_rev: true,
             parser_rev: crate::feed::PARSER_REV,
             seen: Some((0, 0)),
+            epub: None,
+            replaced_at: None,
         };
         store_feed_with(
             &state.pool,
@@ -1595,6 +1893,242 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(feed_rev, 1);
+    }
+
+    #[tokio::test]
+    async fn a_failed_swap_leaves_posts_json_and_the_epub() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let state = crate::prepare(crate::config::Config {
+            listen: "127.0.0.1:0".into(),
+            data_dir: tmp.path().to_path_buf(),
+            web_dir: None,
+            allow_signup: false,
+            max_epub_bytes: crate::config::MIN_EPUB_BYTES,
+            downloads_dir: None,
+            openlibrary_url: "https://openlibrary.org".into(),
+            auth: crate::config::AuthConfig::default(),
+            limits: crate::config::LimitsConfig {
+                max_parses: 1,
+                parse_wait: Duration::from_millis(10),
+                min_free_bytes: 0,
+            },
+        })
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO users (id, username, username_norm, password_hash, created_at)
+             VALUES ('owner', 'owner', 'owner', 'x', 1)",
+        )
+        .execute(&state.pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO books
+             (id, user_id, title, author, handle, imported_at, post_count, is_sample, shared, posts_indexed)
+             VALUES ('book', 'owner', 'Pain', 'Lewis', 'lewis', 1, 1, 0, 0, 1)",
+        )
+        .execute(&state.pool)
+        .await
+        .unwrap();
+        let dir = crate::library::book_dir(&state.data_dir, "owner", "book");
+        tokio::fs::create_dir_all(&dir).await.unwrap();
+        let posts_bytes = b"old-posts".to_vec();
+        let epub_bytes = b"old-epub".to_vec();
+        tokio::fs::write(dir.join("posts.json"), &posts_bytes)
+            .await
+            .unwrap();
+        tokio::fs::write(dir.join("book.epub"), &epub_bytes)
+            .await
+            .unwrap();
+        let posts = Posts {
+            posts: vec![post("0", PostKind::Body, "Hi")],
+        };
+        let missing = dir.join("missing.epub");
+        let err = store_feed_with(
+            &state.pool,
+            &dir,
+            "book",
+            &posts,
+            FeedUpdate {
+                remap: None,
+                bump_feed_rev: true,
+                parser_rev: crate::feed::PARSER_REV,
+                seen: Some((0, 0)),
+                epub: Some(&missing),
+                replaced_at: Some(1),
+            },
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(err, ApiError::Internal), "{err}");
+        assert_eq!(
+            tokio::fs::read(dir.join("posts.json")).await.unwrap(),
+            posts_bytes
+        );
+        assert_eq!(
+            tokio::fs::read(dir.join("book.epub")).await.unwrap(),
+            epub_bytes
+        );
+        let mut names = tokio::fs::read_dir(&dir).await.unwrap();
+        while let Some(entry) = names.next_entry().await.unwrap() {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            assert!(!name.contains(".tmp"), "{name}");
+        }
+
+        let fresh = dir.join("fresh.epub");
+        tokio::fs::write(&fresh, b"new-epub").await.unwrap();
+        let err = store_feed_with(
+            &state.pool,
+            &dir,
+            "book",
+            &posts,
+            FeedUpdate {
+                remap: None,
+                bump_feed_rev: true,
+                parser_rev: crate::feed::PARSER_REV,
+                seen: Some((9, 9)),
+                epub: Some(&fresh),
+                replaced_at: Some(2),
+            },
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(err, ApiError::Conflict(_)), "{err}");
+        assert_eq!(
+            tokio::fs::read(dir.join("posts.json")).await.unwrap(),
+            posts_bytes
+        );
+        assert_eq!(
+            tokio::fs::read(dir.join("book.epub")).await.unwrap(),
+            epub_bytes
+        );
+        let mut names = tokio::fs::read_dir(&dir).await.unwrap();
+        while let Some(entry) = names.next_entry().await.unwrap() {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            assert!(!name.contains(".tmp"), "{name}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_failure_after_the_epub_rename_puts_the_old_files_back() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let state = crate::prepare(crate::config::Config {
+            listen: "127.0.0.1:0".into(),
+            data_dir: tmp.path().to_path_buf(),
+            web_dir: None,
+            allow_signup: false,
+            max_epub_bytes: crate::config::MIN_EPUB_BYTES,
+            downloads_dir: None,
+            openlibrary_url: "https://openlibrary.org".into(),
+            auth: crate::config::AuthConfig::default(),
+            limits: crate::config::LimitsConfig {
+                max_parses: 1,
+                parse_wait: Duration::from_millis(10),
+                min_free_bytes: 0,
+            },
+        })
+        .await
+        .unwrap();
+        let book_id = "swap-fault";
+        sqlx::query(
+            "INSERT INTO users (id, username, username_norm, password_hash, created_at)
+             VALUES ('owner', 'owner', 'owner', 'x', 1)",
+        )
+        .execute(&state.pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO books
+             (id, user_id, title, author, handle, imported_at, post_count, is_sample, shared, posts_indexed)
+             VALUES (?, 'owner', 'Pain', 'Lewis', 'lewis', 1, 1, 0, 0, 1)",
+        )
+        .bind(book_id)
+        .execute(&state.pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO posts (book_id, idx, kind, chapter, text) VALUES (?, 0, 'Body', '', 'Hello')",
+        )
+        .bind(book_id)
+        .execute(&state.pool)
+        .await
+        .unwrap();
+        let dir = crate::library::book_dir(&state.data_dir, "owner", book_id);
+        tokio::fs::create_dir_all(&dir).await.unwrap();
+        let posts_bytes = b"old-posts".to_vec();
+        let epub_bytes = b"old-epub".to_vec();
+        tokio::fs::write(dir.join("posts.json"), &posts_bytes)
+            .await
+            .unwrap();
+        tokio::fs::write(dir.join("book.epub"), &epub_bytes)
+            .await
+            .unwrap();
+        let posts = Posts {
+            posts: vec![post("0", PostKind::Body, "Hi")],
+        };
+        let fresh = dir.join("fresh.epub");
+        tokio::fs::write(&fresh, b"new-epub").await.unwrap();
+
+        for fault in [super::SwapFault::Posts, super::SwapFault::Commit] {
+            super::arm_swap_fault(book_id, fault);
+            let _clear = ClearSwapFault;
+            let err = store_feed_with(
+                &state.pool,
+                &dir,
+                book_id,
+                &posts,
+                FeedUpdate {
+                    remap: None,
+                    bump_feed_rev: true,
+                    parser_rev: crate::feed::PARSER_REV,
+                    seen: Some((0, 0)),
+                    epub: Some(&fresh),
+                    replaced_at: Some(1),
+                },
+            )
+            .await
+            .unwrap_err();
+            assert!(matches!(err, ApiError::Internal), "{fault:?} {err}");
+            assert_eq!(
+                tokio::fs::read(dir.join("book.epub")).await.unwrap(),
+                epub_bytes,
+                "{fault:?}"
+            );
+            assert_eq!(
+                tokio::fs::read(dir.join("posts.json")).await.unwrap(),
+                posts_bytes,
+                "{fault:?}"
+            );
+            let feed_rev: i64 = sqlx::query_scalar("SELECT feed_rev FROM books WHERE id = ?")
+                .bind(book_id)
+                .fetch_one(&state.pool)
+                .await
+                .unwrap();
+            assert_eq!(feed_rev, 0, "{fault:?}");
+            let rows: Vec<(i64, String)> =
+                sqlx::query_as("SELECT idx, text FROM posts WHERE book_id = ? ORDER BY idx")
+                    .bind(book_id)
+                    .fetch_all(&state.pool)
+                    .await
+                    .unwrap();
+            assert_eq!(rows, vec![(0, "Hello".to_owned())], "{fault:?}");
+            let mut names = tokio::fs::read_dir(&dir).await.unwrap();
+            while let Some(entry) = names.next_entry().await.unwrap() {
+                let name = entry.file_name();
+                let name = name.to_string_lossy();
+                assert!(!name.contains(".tmp") && !name.contains(".bak"), "{name}");
+            }
+        }
+    }
+
+    struct ClearSwapFault;
+
+    impl Drop for ClearSwapFault {
+        fn drop(&mut self) {
+            super::clear_swap_fault();
+        }
     }
 
     fn post(id: &str, kind: PostKind, text: &str) -> Post {

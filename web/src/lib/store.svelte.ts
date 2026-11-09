@@ -282,16 +282,27 @@ class HostedStore {
     }));
   }
 
+  forgetCover(id: string): void {
+    const cover = this.covers[id];
+    if (cover) URL.revokeObjectURL(cover);
+    delete this.covers[id];
+    this.pendingCovers.delete(id);
+  }
+
   async loadCover(id: string): Promise<void> {
     if (id in this.covers || this.removed.has(id)) return;
     const pending = this.pendingCovers.get(id);
     if (pending) return pending;
     const epoch = this.epoch;
     const promise = this.api.cover(id).then((blob) => {
+      // A replace drops this request. Publishing it would put the old cover back.
+      if (this.pendingCovers.get(id) !== promise) return;
       // Check before allocating a URL, not just before publishing it.
       if (this.valid(id, epoch)) this.covers[id] = blob ? URL.createObjectURL(blob) : null;
     }).finally(() => {
-      if (epoch === this.epoch) this.pendingCovers.delete(id);
+      if (epoch === this.epoch && this.pendingCovers.get(id) === promise) {
+        this.pendingCovers.delete(id);
+      }
     });
     this.pendingCovers.set(id, promise);
     return promise;
