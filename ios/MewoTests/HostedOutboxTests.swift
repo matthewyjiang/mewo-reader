@@ -281,10 +281,9 @@ final class HostedOutboxTests: XCTestCase {
         let outbox = makeOutbox()
         async let first = try outbox.toggleLike(bookId: book, postId: "p", base: [])
         async let second = try outbox.toggleLike(bookId: book, postId: "p", base: [])
-        let liked = try await first
-        let cleared = try await second
-        XCTAssertEqual(liked, ["p"])
-        XCTAssertEqual(cleared, [])
+        // The executor chooses which tap reaches the actor first. The results stay opposite.
+        let outcomes = [try await first, try await second].sorted { $0.count > $1.count }
+        XCTAssertEqual(outcomes, [Set(["p"]), []])
         guard case .like(let pending) = outbox.queue.ops.first else {
             return XCTFail("the second tap did not stay queued")
         }
