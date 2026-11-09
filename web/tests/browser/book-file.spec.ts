@@ -97,6 +97,35 @@ async function openSheet(page: Page): Promise<void> {
   await expect(page.getByRole('button', { name: 'Wrong file' })).toBeVisible();
 }
 
+const png = (pixel: string) => Buffer.from(
+  'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8' + pixel + 'AAAABJRU5ErkJggg==',
+  'base64',
+);
+
+test('a replacement shows the new cover', async ({ page }) => {
+  let generation = 0;
+  await page.route('**/v1/books/dune/cover', async (route) => {
+    generation += 1;
+    const pixel = generation === 1 ? 'z8BQDwAEhQGAhKmMIQ' : '/5+hHgAHggJ/PchI7w';
+    await route.fulfill({ status: 200, contentType: 'image/png', body: png(pixel) });
+  });
+  await page.setViewportSize({ width: 1280, height: 800 });
+  await page.goto('/?tab=books');
+  const cover = page.locator('a', { hasText: 'Dune' }).locator('img');
+  await expect(cover).toBeVisible();
+  const first = await cover.getAttribute('src');
+  await page.getByRole('button', { name: 'Book file for Dune' }).click();
+  await page.getByRole('button', { name: 'Upload replacement' }).setInputFiles({
+    name: 'other.epub',
+    mimeType: 'application/epub+zip',
+    buffer: Buffer.from('not the same book'),
+  });
+  await page.getByRole('button', { name: 'Replace anyway' }).click();
+  await expect(page.getByRole('heading', { name: 'Book file' })).toHaveCount(0);
+  await expect.poll(async () => cover.getAttribute('src')).not.toBe(first);
+  expect(generation).toBeGreaterThan(1);
+});
+
 test('book file and blocked releases', async ({ page }) => {
   await page.setViewportSize({ width: 1280, height: 800 });
   await openSheet(page);

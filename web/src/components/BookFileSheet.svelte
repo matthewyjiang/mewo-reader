@@ -22,6 +22,7 @@
     error = '';
     try {
       await store.api.replaceEpub(book.id, file, force);
+      store.forgetCover(book.id);
       await store.load();
       onclose();
     } catch (err) {
