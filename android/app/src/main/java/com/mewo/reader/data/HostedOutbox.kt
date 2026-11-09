@@ -24,7 +24,7 @@ import java.util.concurrent.atomic.AtomicReference
 
 /** Who the queue belongs to. A queue is only drained for this exact account. */
 @Serializable
-internal data class OutboxAccount(val url: String, val username: String)
+data class OutboxAccount(val url: String, val username: String)
 
 @Serializable
 internal sealed interface OutboxOp {
