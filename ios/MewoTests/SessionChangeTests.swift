@@ -77,6 +77,7 @@ final class SessionChangeTests: XCTestCase {
     }
 }
 
+@MainActor
 final class HostedSessionStoreTests: XCTestCase {
     func testExpirePersistsAcrossInstancesAndSignInAndSignOutClearIt() {
         let name = "mewo-session-\(UUID().uuidString)"
@@ -86,7 +87,7 @@ final class HostedSessionStoreTests: XCTestCase {
         let store = HostedSessionStore(defaults: defaults, persistToken: false)
         store.setBaseUrl("https://mewo.example/")
         store.setSignedIn(username: "ada", token: "token-a")
-        store.expire()
+        store.expire(token: "token-a")
         XCTAssertNil(store.session.token)
         XCTAssertNil(store.session.username)
         XCTAssertFalse(store.session.signedIn)
@@ -129,9 +130,12 @@ final class HostedSessionStoreTests: XCTestCase {
         let store = HostedSessionStore(defaults: defaults, persistToken: false)
         store.setBaseUrl("https://mewo.example")
         store.setSignedIn(username: "ada", token: "token-a")
-        store.expire()
+        store.expire(token: "token-a")
         XCTAssertEqual(store.session.expired?.username, "ada")
-        store.expire()
+        store.expire(token: "token-a")
+        XCTAssertEqual(store.session.expired?.username, "ada")
+        store.setSignedIn(username: "", token: "token-b")
+        store.expire(token: "token-b")
         XCTAssertNil(store.session.expired)
         XCTAssertNil(defaults.string(forKey: "expired_url"))
         XCTAssertNil(defaults.string(forKey: "expired_user"))
@@ -146,7 +150,7 @@ final class HostedSessionStoreTests: XCTestCase {
         let ada = OutboxAccount(url: "https://mewo.example", username: "ada")
         store.noteFilesOnDisk(ada)
         store.setSignedIn(username: "bea", token: "token-b")
-        store.expire()
+        store.expire(token: "token-b")
         store.signOut()
         XCTAssertEqual(store.filesOnDisk, ada)
         XCTAssertEqual(defaults.string(forKey: "files_url"), ada.url)

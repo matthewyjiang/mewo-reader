@@ -248,9 +248,7 @@ final class HostedLibraryStore: LibraryStore {
             remote.books = remote.books.filter { safeBookId($0.id) != nil }
             return remote
         } catch let err as HostedException where err.code == 401 {
-            if sessions.session.token == session.token {
-                sessions.expire()
-            }
+            sessions.expire(token: session.token)
             throw err
         }
     }
@@ -1701,6 +1699,7 @@ private final class ResumeBox: @unchecked Sendable {
     }
 }
 
+@MainActor
 func expireOn401<T>(
     sessions: HostedSessionStore,
     session: HostedSession,
@@ -1709,9 +1708,7 @@ func expireOn401<T>(
     do {
         return try await operation()
     } catch let err as HostedException where err.code == 401 {
-        if sessions.session.token == session.token {
-            sessions.expire()
-        }
+        sessions.expire(token: session.token)
         throw err
     }
 }

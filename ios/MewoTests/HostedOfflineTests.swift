@@ -1088,6 +1088,38 @@ final class HostedOfflineTests: XCTestCase {
         XCTAssertEqual(client.commentIds, [replyId])
     }
 
+    func testTwoConcurrent401sKeepTheDownload() async throws {
+        let store = try await open([book(idA, importedAt: 3)])
+        await store.setDownloaded(id: idA, on: true)
+        XCTAssertTrue(postsExist(idA))
+        let signed = sessions.session
+        let hold = QuietPark()
+        let arrived = Arrival()
+        await withTaskGroup(of: Void.self) { group in
+            for _ in 0..<2 {
+                group.addTask {
+                    do {
+                        _ = try await expireOn401(sessions: self.sessions, session: signed) {
+                            if arrived.bump() == 2 { hold.release() }
+                            await hold.wait()
+                            throw HostedException(message: "Sign in again.", code: 401)
+                        }
+                    } catch let err as HostedException {
+                        XCTAssertEqual(err.code, 401)
+                    } catch {
+                        XCTFail("unexpected \(error)")
+                    }
+                }
+            }
+        }
+        try await waitUntil("the 401s did not settle") {
+            if case .loaded(_, false) = store.loadState { return !sessions.session.signedIn }
+            return false
+        }
+        XCTAssertTrue(postsExist(idA), "two 401s wiped the download")
+        XCTAssertEqual(sessions.session.expired, OutboxAccount(url: server, username: "ada"))
+    }
+
     func testA401ThenAnotherAccountDropsSocialAndTheOutbox() async throws {
         let store = try await open([book(idA, importedAt: 3)])
         await store.setDownloaded(id: idA, on: true)
@@ -1807,6 +1839,18 @@ final class HostedDiskLog: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
         return flags.count
+    }
+}
+
+private final class Arrival: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value = 0
+    func bump() -> Int {
+        lock.lock()
+        value += 1
+        let next = value
+        lock.unlock()
+        return next
     }
 }
 

@@ -96,10 +96,12 @@ final class HostedSessionStore {
         notify(previous)
     }
 
-    /// A 401. Deletes the token and keeps the account so downloads can stay.
-    /// With no username there is nothing to resume, so the saved account is cleared.
-    func expire() {
+    /// A 401 for `token`. One check-and-set: a second call, or any other token, does nothing.
+    /// A signed-in session with no username has nothing to resume, so the saved account is cleared.
+    @MainActor
+    func expire(token: String?) {
         let previous = session
+        guard previous.signedIn, previous.token == token else { return }
         defaults.removeObject(forKey: "username")
         defaults.removeObject(forKey: "token")
         if persistToken { Keychain.deleteToken() }

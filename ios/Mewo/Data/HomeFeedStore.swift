@@ -125,9 +125,7 @@ final class HomeFeedStore {
         do {
             return try await client.feed(session, cursor: cursor)
         } catch let err as HostedException where err.code == 401 {
-            if sessions.session.token == session.token {
-                sessions.expire()
-            }
+            sessions.expire(token: session.token)
             throw err
         }
     }
