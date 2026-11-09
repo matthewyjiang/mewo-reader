@@ -2027,11 +2027,12 @@ async fn open_library_down_at_completed_keeps_the_job() {
         fail_message: String::new(),
         in_queue: true,
     });
+    let hits_after_ask = world.catalog.lock().await.hits.len();
     worker::tick_at(&world.state, now).await.unwrap();
     let row = stored(&world.state.pool, &id).await;
     assert_eq!(row.state, "downloading");
     assert_eq!(row.download_id.as_deref(), Some("kept"));
-    assert!(world.catalog.lock().await.hits.is_empty());
+    assert_eq!(world.catalog.lock().await.hits.len(), hits_after_ask);
 
     finish_job(&world, "kept", &format!("/data/mewo-{id}")).await;
     write_epub(
@@ -2075,12 +2076,12 @@ async fn a_merged_work_follows_the_live_key() {
     assert_eq!(
         hits,
         vec![
-            "q=key:/works/OL893415W".to_string(),
             "work=/works/OL893415W".to_string(),
             "q=key:/works/OL893414W".to_string(),
             "author_key=OL79034A".to_string(),
         ]
     );
+    assert_eq!(created["workKey"], "/works/OL893414W");
 }
 
 #[tokio::test]
@@ -2157,6 +2158,7 @@ async fn one_open_library_pair_per_request() {
     assert_eq!(
         hits,
         vec![
+            "work=/works/OL893414W".to_string(),
             "q=key:/works/OL893414W".to_string(),
             "author_key=OL79034A".to_string(),
         ]
@@ -4786,6 +4788,441 @@ async fn a_busy_parser_does_not_fail_the_download() {
     let sab = world.sab.lock().await;
     assert!(sab.deletes.is_empty());
     assert_eq!(sab.jobs.len(), 1);
+}
+
+const OLD_WORK: &str = "/works/OL893415W";
+const LIVE_WORK: &str = "/works/OL893414W";
+
+async fn arm_merged(world: &World) {
+    let mut catalog = world.catalog.lock().await;
+    catalog.merged = Some((OLD_WORK.into(), LIVE_WORK.into()));
+}
+
+async fn leaders(pool: &SqlitePool) -> i64 {
+    sqlx::query_scalar(
+        "SELECT COUNT(*) FROM book_requests
+         WHERE work_key IN (?, ?) AND follows IS NULL
+           AND state IN ('requested', 'downloading')",
+    )
+    .bind(OLD_WORK)
+    .bind(LIVE_WORK)
+    .fetch_one(pool)
+    .await
+    .unwrap()
+}
+
+fn restarted_config(world: &World) -> Config {
+    Config {
+        listen: "127.0.0.1:0".into(),
+        data_dir: world.state.data_dir.clone(),
+        web_dir: None,
+        allow_signup: true,
+        max_epub_bytes: 64 * 1024 * 1024,
+        downloads_dir: Some(world.downloads.path().to_path_buf()),
+        openlibrary_url: world.state.openlibrary_url.clone(),
+        auth: AuthConfig::default(),
+        limits: test_limits(),
+    }
+}
+
+async fn request_on(app: &axum::Router, token: &str, work: &str) -> (StatusCode, Value) {
+    json_req(
+        app,
+        "POST",
+        "/v1/requests",
+        Some(token),
+        json!({
+            "workKey": work,
+            "title": "Dune",
+            "author": "Frank Herbert",
+            "year": 1965,
+            "coverId": 11481354
+        }),
+    )
+    .await
+}
+
+/// Request the alias, drop the in-memory cache with a fresh `prepare()`, then
+/// request the live key. One leader and one SABnzbd job either way around.
+#[tokio::test]
+async fn a_merged_work_stays_one_leader_after_restart() {
+    for (first, second) in [(OLD_WORK, LIVE_WORK), (LIVE_WORK, OLD_WORK)] {
+        let world = world().await;
+        arm_merged(&world).await;
+        world.prowlarr.lock().await.key_ok = true;
+        let created = ask(&world, first).await;
+        let leader = created["id"].as_str().unwrap().to_string();
+        let now = created["createdAt"].as_i64().unwrap();
+        assert_eq!(created["workKey"], LIVE_WORK);
+        worker::tick_at(&world.state, now).await.unwrap();
+        assert_eq!(world.sab.lock().await.adds.len(), 1);
+        assert_eq!(leaders(&world.state.pool).await, 1);
+
+        let state = prepare(restarted_config(&world)).await.unwrap();
+        let app = router(state.clone());
+        let ada = account(&world, "ada").await;
+        let (status, body) = request_on(&app, &ada.token, second).await;
+        assert_eq!(status, StatusCode::CREATED, "{body}");
+        assert_eq!(body["workKey"], LIVE_WORK);
+        assert_eq!(
+            follows_of(&state.pool, body["id"].as_str().unwrap())
+                .await
+                .as_deref(),
+            Some(leader.as_str())
+        );
+        worker::tick_at(&state, now + POLL).await.unwrap();
+        assert_eq!(
+            world.sab.lock().await.adds.len(),
+            1,
+            "{first} then {second}"
+        );
+        assert_eq!(leaders(&state.pool).await, 1, "{first} then {second}");
+    }
+}
+
+/// A download that started under the alias key, before aliases were durable.
+#[tokio::test]
+async fn a_legacy_alias_keyed_leader_is_followed() {
+    let world = world().await;
+    arm_merged(&world).await;
+    sqlx::query(
+        "INSERT INTO book_requests (
+            id, user_id, work_key, title, author, state, tried_guids,
+            next_check_at, created_at, updated_at
+         ) VALUES ('legacy', ?, ?, 'Dune', 'Frank Herbert', 'downloading', '[]', 0, 1, 1)",
+    )
+    .bind(&world.user_id)
+    .bind(OLD_WORK)
+    .execute(&world.state.pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO work_aliases (alias_key, canonical_key, resolved_at) VALUES (?, ?, 1)",
+    )
+    .bind(OLD_WORK)
+    .bind(LIVE_WORK)
+    .execute(&world.state.pool)
+    .await
+    .unwrap();
+    let ada = account(&world, "ada").await;
+    let (status, body) = post_work(&world, &ada.token, LIVE_WORK).await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    assert_eq!(body["workKey"], OLD_WORK);
+    assert_eq!(
+        follows_of(&world.state.pool, body["id"].as_str().unwrap())
+            .await
+            .as_deref(),
+        Some("legacy")
+    );
+    assert_eq!(leaders(&world.state.pool).await, 1);
+}
+
+#[tokio::test]
+async fn concurrent_requests_for_merged_keys_share_one_leader() {
+    let world = world().await;
+    arm_merged(&world).await;
+    let ada = account(&world, "ada").await;
+    let bea = account(&world, "bea").await;
+    let (left, right) = tokio::join!(
+        post_work(&world, &ada.token, OLD_WORK),
+        post_work(&world, &bea.token, LIVE_WORK),
+    );
+    assert_eq!(left.0, StatusCode::CREATED, "{}", left.1);
+    assert_eq!(right.0, StatusCode::CREATED, "{}", right.1);
+    assert_eq!(leaders(&world.state.pool).await, 1);
+    let followers: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM book_requests
+         WHERE work_key IN (?, ?) AND follows IS NOT NULL AND state = 'requested'",
+    )
+    .bind(OLD_WORK)
+    .bind(LIVE_WORK)
+    .fetch_one(&world.state.pool)
+    .await
+    .unwrap();
+    assert_eq!(followers, 1);
+}
+
+#[tokio::test]
+async fn an_imported_alias_is_the_same_book_as_the_live_key() {
+    let world = world().await;
+    arm_merged(&world).await;
+    let book_id = bring_in(&world, OLD_WORK).await;
+    let ada = account(&world, "ada").await;
+    let carol = account(&world, "carol").await;
+    say(&world, &world.token, &book_id, "owner note").await;
+    let adds = world.sab.lock().await.adds.len();
+    let (status, body) = post_work(&world, &ada.token, LIVE_WORK).await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    assert_eq!(body["bookId"], book_id);
+    assert_eq!(body["state"], "imported");
+    assert_eq!(book_count(&world.state.pool).await, 1);
+    assert!(epub_file(&world, &world.user_id, &book_id).is_file());
+    assert!(!epub_file(&world, &ada.id, &book_id).exists());
+    assert_eq!(world.sab.lock().await.adds.len(), adds);
+
+    let ada_texts = thread_texts(&world, &ada.token, &book_id).await;
+    assert!(ada_texts.is_empty(), "{ada_texts:?}");
+    say(&world, &ada.token, &book_id, "holder private").await;
+    let matt_texts = thread_texts(&world, &world.token, &book_id).await;
+    assert_eq!(matt_texts, vec!["owner note".to_string()]);
+    let ada_texts = thread_texts(&world, &ada.token, &book_id).await;
+    assert_eq!(ada_texts, vec!["holder private".to_string()]);
+    let (status, missing) = empty_req(
+        &world.app,
+        "GET",
+        &format!("/v1/books/{book_id}"),
+        Some(&carol.token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{missing}");
+}
+
+async fn shelf_copy(pool: &SqlitePool, id: &str, user: &str, at: i64) {
+    sqlx::query(
+        "INSERT INTO books (id, user_id, title, author, handle, imported_at, post_count)
+         VALUES (?, ?, 'Dune', 'Frank Herbert', ?, ?, 2)",
+    )
+    .bind(id)
+    .bind(user)
+    .bind(id)
+    .bind(at)
+    .execute(pool)
+    .await
+    .unwrap();
+    for (idx, text) in [(0_i64, "Hello"), (1_i64, "World")] {
+        sqlx::query(
+            "INSERT INTO posts (book_id, idx, kind, chapter, text) VALUES (?, ?, 'Body', '', ?)",
+        )
+        .bind(id)
+        .bind(idx)
+        .bind(text)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+}
+
+async fn held_request(pool: &SqlitePool, id: &str, user: &str, work: &str, book: &str, at: i64) {
+    sqlx::query(
+        "INSERT INTO book_requests (
+            id, user_id, work_key, title, author, state, book_id, tried_guids,
+            next_check_at, created_at, updated_at
+         ) VALUES (?, ?, ?, 'Dune', 'Frank Herbert', 'imported', ?, '[]', 0, ?, ?)",
+    )
+    .bind(id)
+    .bind(user)
+    .bind(work)
+    .bind(book)
+    .bind(at)
+    .bind(at)
+    .execute(pool)
+    .await
+    .unwrap();
+}
+
+fn book_epub(world: &World, owner: &str, book: &str) -> std::path::PathBuf {
+    epub_file(world, owner, book)
+}
+
+async fn run_aliases(world: &World, dry_run: bool, merge: bool) -> (i32, String, String) {
+    let mut input = std::io::Cursor::new(Vec::<u8>::new());
+    let mut out = Vec::new();
+    let mut err = Vec::new();
+    let code = mewo_server::cli::run(
+        mewo_server::cli::AdminCommand::Works(mewo_server::cli::WorksCommand::Aliases {
+            dry_run,
+            merge,
+        }),
+        &restarted_config(world),
+        &mut input,
+        &mut out,
+        &mut err,
+    )
+    .await;
+    (
+        code,
+        String::from_utf8(out).unwrap(),
+        String::from_utf8(err).unwrap(),
+    )
+}
+
+#[tokio::test]
+async fn aliases_dry_run_prints_the_plan_and_merge_keeps_one_copy() {
+    let world = world().await;
+    let ada = account(&world, "ada").await;
+    let carol = account(&world, "carol").await;
+    let bea = account(&world, "bea").await;
+    shelf_copy(&world.state.pool, "older", &world.user_id, 10).await;
+    shelf_copy(&world.state.pool, "newer", &world.user_id, 20).await;
+    held_request(
+        &world.state.pool,
+        "req-old",
+        &world.user_id,
+        OLD_WORK,
+        "older",
+        10,
+    )
+    .await;
+    held_request(&world.state.pool, "ada-old", &ada.id, OLD_WORK, "older", 11).await;
+    held_request(
+        &world.state.pool,
+        "req-new",
+        &world.user_id,
+        LIVE_WORK,
+        "newer",
+        20,
+    )
+    .await;
+    held_request(
+        &world.state.pool,
+        "bea-new",
+        &bea.id,
+        LIVE_WORK,
+        "newer",
+        21,
+    )
+    .await;
+    sqlx::query(
+        "INSERT INTO work_aliases (alias_key, canonical_key, resolved_at) VALUES (?, ?, 1)",
+    )
+    .bind(OLD_WORK)
+    .bind(LIVE_WORK)
+    .execute(&world.state.pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO comments (id, user_id, book_id, post_id, text, created_at)
+         VALUES ('kept-reply', ?, 'newer', '0', 'anchored', 1),
+                ('lost-reply', ?, 'newer', '99', 'nowhere', 2)",
+    )
+    .bind(&ada.id)
+    .bind(&ada.id)
+    .execute(&world.state.pool)
+    .await
+    .unwrap();
+    sqlx::query("UPDATE comments SET private = 1 WHERE id = 'kept-reply'")
+        .execute(&world.state.pool)
+        .await
+        .unwrap();
+    sqlx::query(
+        "INSERT INTO reposts (user_id, book_id, post_id, created_at)
+         VALUES (?, 'newer', '1', 3)",
+    )
+    .bind(&ada.id)
+    .execute(&world.state.pool)
+    .await
+    .unwrap();
+    sqlx::query("UPDATE reposts SET private = 1 WHERE book_id = 'newer' AND user_id = ?")
+        .bind(&ada.id)
+        .execute(&world.state.pool)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO likes (user_id, book_id, post_id) VALUES (?, 'newer', '0')")
+        .bind(&ada.id)
+        .execute(&world.state.pool)
+        .await
+        .unwrap();
+    sqlx::query(
+        "INSERT INTO book_progress (user_id, book_id, progress_index) VALUES (?, 'newer', 0)",
+    )
+    .bind(&carol.id)
+    .execute(&world.state.pool)
+    .await
+    .unwrap();
+    std::fs::create_dir_all(book_epub(&world, &world.user_id, "older").parent().unwrap()).unwrap();
+    std::fs::write(book_epub(&world, &world.user_id, "older"), b"older").unwrap();
+    std::fs::create_dir_all(book_epub(&world, &world.user_id, "newer").parent().unwrap()).unwrap();
+    std::fs::write(book_epub(&world, &world.user_id, "newer"), b"newer").unwrap();
+
+    let (code, out, err) = run_aliases(&world, false, false).await;
+    assert_eq!(code, 0, "{err}");
+    assert!(out.contains("dry-run /works/OL893414W"), "{out}");
+    assert!(out.contains("keep older (2 holders)"), "{out}");
+    assert!(out.contains("drop newer (2 holders)"), "{out}");
+    assert!(out.contains("replies move 1 lost 1"), "{out}");
+    assert!(out.contains("reposts move 1 lost 0"), "{out}");
+    assert!(out.contains("likes move 1 lost 0"), "{out}");
+    assert!(out.contains("progress move 1 lost 0"), "{out}");
+    assert!(
+        out.contains("lost reply lost-reply post 99 (no anchor)"),
+        "{out}"
+    );
+    assert_eq!(book_count(&world.state.pool).await, 2);
+    assert!(book_epub(&world, &world.user_id, "older").is_file());
+    assert!(book_epub(&world, &world.user_id, "newer").is_file());
+    let still: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM comments WHERE book_id = 'newer'")
+        .fetch_one(&world.state.pool)
+        .await
+        .unwrap();
+    assert_eq!(still, 2);
+
+    let (code, out, err) = run_aliases(&world, true, true).await;
+    assert_eq!(code, 0, "{err}");
+    assert!(out.contains("dry-run"), "{out}");
+    assert_eq!(book_count(&world.state.pool).await, 2);
+
+    let (code, out, err) = run_aliases(&world, false, true).await;
+    assert_eq!(code, 0, "{err}");
+    assert!(out.contains("merged /works/OL893414W"), "{out}");
+    assert_eq!(book_count(&world.state.pool).await, 1);
+    assert!(book_epub(&world, &world.user_id, "older").is_file());
+    assert!(!book_epub(&world, &world.user_id, "newer").exists());
+    let kept: (String, String, i64) =
+        sqlx::query_as("SELECT book_id, post_id, private FROM comments WHERE id = 'kept-reply'")
+            .fetch_one(&world.state.pool)
+            .await
+            .unwrap();
+    assert_eq!(kept.0, "older");
+    assert_eq!(kept.1, "0");
+    assert_eq!(kept.2, 1);
+    let lost: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM comments WHERE id = 'lost-reply'")
+        .fetch_one(&world.state.pool)
+        .await
+        .unwrap();
+    assert_eq!(lost, 0);
+    let repost: (String, i64) =
+        sqlx::query_as("SELECT book_id, private FROM reposts WHERE user_id = ?")
+            .bind(&ada.id)
+            .fetch_one(&world.state.pool)
+            .await
+            .unwrap();
+    assert_eq!(repost.0, "older");
+    assert_eq!(repost.1, 1);
+    let progress: (String, i64) =
+        sqlx::query_as("SELECT book_id, progress_index FROM book_progress WHERE user_id = ?")
+            .bind(&carol.id)
+            .fetch_one(&world.state.pool)
+            .await
+            .unwrap();
+    assert_eq!(progress.0, "older");
+    assert_eq!(progress.1, 0);
+    let on_newer: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM book_requests WHERE book_id = 'newer' AND state = 'imported'",
+    )
+    .fetch_one(&world.state.pool)
+    .await
+    .unwrap();
+    assert_eq!(on_newer, 0);
+    let on_older: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM book_requests WHERE book_id = 'older' AND state = 'imported'",
+    )
+    .fetch_one(&world.state.pool)
+    .await
+    .unwrap();
+    // Matt already held the survivor, so that duplicate request is canceled.
+    // Bea's hold moves onto the surviving book.
+    assert_eq!(on_older, 3);
+    let bea_book: String =
+        sqlx::query_scalar("SELECT book_id FROM book_requests WHERE id = 'bea-new'")
+            .fetch_one(&world.state.pool)
+            .await
+            .unwrap();
+    assert_eq!(bea_book, "older");
+    let dup: String = sqlx::query_scalar("SELECT state FROM book_requests WHERE id = 'req-new'")
+        .fetch_one(&world.state.pool)
+        .await
+        .unwrap();
+    assert_eq!(dup, "canceled");
 }
 
 async fn detail_phase(world: &World) -> String {
