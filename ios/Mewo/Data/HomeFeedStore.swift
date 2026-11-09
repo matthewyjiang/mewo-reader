@@ -23,6 +23,7 @@ final class HomeFeedStore {
         sessions.addListener { [weak self] previous, next in
             self?.sessionChanged(from: previous, to: next)
         }
+        dropStaleFeed()
         restore()
         if refreshesOnInit, sessions.session.signedIn {
             Task { await self.load() }
@@ -124,9 +125,7 @@ final class HomeFeedStore {
         do {
             return try await client.feed(session, cursor: cursor)
         } catch let err as HostedException where err.code == 401 {
-            if sessions.session.token == session.token {
-                sessions.signOut()
-            }
+            sessions.expire(token: session.token)
             throw err
         }
     }
@@ -134,7 +133,6 @@ final class HomeFeedStore {
     private func sessionChanged(from previous: HostedSession, to next: HostedSession) {
         let urlChanged = previous.normalizedUrl() != next.normalizedUrl()
         let userChanged = previous.username != next.username
-        let signedOut = previous.signedIn && !next.signedIn
         let tokenChanged = previous.token != next.token
         guard tokenChanged || (previous.signedIn && (urlChanged || userChanged)) else { return }
         epoch += 1
@@ -143,8 +141,10 @@ final class HomeFeedStore {
         flight = nil
         more?.task.cancel()
         more = nil
-        if previous.signedIn && (signedOut || urlChanged || userChanged) {
-            clear(previous)
+        let owed = sessionChange(from: sessionForFiles(onDisk: sessions.filesOnDisk), to: next)
+        let cleanup = fileCleanup(sessionChange(from: previous, to: next), owed)
+        for account in cleanup.accounts {
+            clear(account)
         }
         if next.signedIn {
             restore()
@@ -152,6 +152,12 @@ final class HomeFeedStore {
         } else {
             loadState = .signedOut
         }
+    }
+
+    private func dropStaleFeed() {
+        let owed = sessionChange(from: sessionForFiles(onDisk: sessions.filesOnDisk), to: sessions.session)
+        if case .otherUser(let old) = owed { clear(old) }
+        if case .wipe(let old) = owed { clear(old) }
     }
 
     private func restore() {
@@ -167,9 +173,8 @@ final class HomeFeedStore {
         }
     }
 
-    private func clear(_ session: HostedSession) {
-        guard let url = session.normalizedUrl(), let user = session.username else { return }
-        try? FileManager.default.removeItem(at: feedFile(url, user))
+    private func clear(_ account: OutboxAccount) {
+        try? FileManager.default.removeItem(at: feedFile(account.url, account.username))
     }
 
     private func writeFeed(url: String, username: String, page: HomeFeedPage) {

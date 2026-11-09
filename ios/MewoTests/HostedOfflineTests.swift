@@ -13,6 +13,7 @@ final class HostedOfflineTests: XCTestCase {
     override func setUp() async throws {
         HostedDisk.beforeClaim = nil
         HostedDisk.beforeScan = nil
+        HostedDisk.beforeSessionFiles = nil
         HostedDisk.recordPublishes = false
         HostedDisk.resetPublishes()
         HostedDisk.note = { HostedDiskLog.shared.note() }
@@ -38,6 +39,7 @@ final class HostedOfflineTests: XCTestCase {
         HostedDisk.beforeScan = nil
         HostedDisk.beforeForget = nil
         HostedDisk.beforeLaunch = nil
+        HostedDisk.beforeSessionFiles = nil
         HostedDisk.note = nil
         HostedDisk.noteDecode = nil
         HostedDisk.recordPublishes = false
@@ -1057,6 +1059,206 @@ final class HostedOfflineTests: XCTestCase {
         XCTAssertEqual(try XCTUnwrap(store.offline[idA]), .downloaded)
     }
 
+    func testA401KeepsDownloadsForTheSameAccount() async throws {
+        let store = try await open([book(idA, importedAt: 3)])
+        await store.setDownloaded(id: idA, on: true)
+        let postsBefore = client.postsCalls.count
+        XCTAssertEqual(try XCTUnwrap(store.offline[idA]), .downloaded)
+        XCTAssertEqual(shelfCache().read(serverUrl: server, username: "ada")?.map(\.id), [idA])
+        let replyId = try await queueOfflineReply(store)
+
+        try await expireLibrary()
+        XCTAssertTrue(postsExist(idA))
+        XCTAssertEqual(shelfCache().read(serverUrl: server, username: "ada")?.map(\.id), [idA])
+        XCTAssertEqual(sessions.session.expired, OutboxAccount(url: server, username: "ada"))
+        XCTAssertEqual(try readOutbox().ops.count, 1)
+        XCTAssertTrue(client.commentIds.isEmpty)
+
+        client.libraryError = nil
+        client.addCommentError = nil
+        sessions.setSignedIn(username: "ada", token: "token-b")
+        try await waitUntil("the reply was not sent once") {
+            client.commentIds == [replyId]
+                && !outboxExists()
+                && settled(store, ids: [idA])
+        }
+        XCTAssertEqual(try XCTUnwrap(store.offline[idA]), .downloaded)
+        XCTAssertEqual(client.postsCalls.count, postsBefore)
+        XCTAssertTrue(postsExist(idA))
+        XCTAssertEqual(client.commentIds, [replyId])
+    }
+
+    func testTwoConcurrent401sKeepTheDownload() async throws {
+        let store = try await open([book(idA, importedAt: 3)])
+        await store.setDownloaded(id: idA, on: true)
+        XCTAssertTrue(postsExist(idA))
+        let signed = sessions.session
+        let hold = QuietPark()
+        let arrived = Arrival()
+        await withTaskGroup(of: Void.self) { group in
+            for _ in 0..<2 {
+                group.addTask {
+                    do {
+                        _ = try await expireOn401(sessions: self.sessions, session: signed) {
+                            if arrived.bump() == 2 { hold.release() }
+                            await hold.wait()
+                            throw HostedException(message: "Sign in again.", code: 401)
+                        }
+                    } catch let err as HostedException {
+                        XCTAssertEqual(err.code, 401)
+                    } catch {
+                        XCTFail("unexpected \(error)")
+                    }
+                }
+            }
+        }
+        try await waitUntil("the 401s did not settle") {
+            if case .loaded(_, false) = store.loadState { return !sessions.session.signedIn }
+            return false
+        }
+        XCTAssertTrue(postsExist(idA), "two 401s wiped the download")
+        XCTAssertEqual(sessions.session.expired, OutboxAccount(url: server, username: "ada"))
+    }
+
+    func testA401ThenAnotherAccountDropsSocialAndTheOutbox() async throws {
+        let store = try await open([book(idA, importedAt: 3)])
+        await store.setDownloaded(id: idA, on: true)
+        _ = try await store.likes(id: idA)
+        XCTAssertTrue(socialExists(idA))
+        _ = try await queueOfflineReply(store)
+
+        try await expireLibrary()
+        XCTAssertTrue(postsExist(idA))
+        XCTAssertTrue(socialExists(idA))
+        XCTAssertTrue(outboxExists())
+
+        client.libraryError = nil
+        client.addCommentError = nil
+        client.shelf = [book(idB, importedAt: 1)]
+        sessions.setSignedIn(username: "bea", token: "token-b")
+        try await waitUntil("Bea's shelf did not drop Ada's social cache") {
+            settled(store, ids: [idB]) && !socialExists(idA) && !outboxExists()
+        }
+        XCTAssertNil(shelfCache().read(serverUrl: server, username: "ada"))
+        XCTAssertTrue(postsExist(idA))
+        XCTAssertTrue(client.commentIds.isEmpty)
+        do {
+            _ = try await store.feed(id: idA)
+            XCTFail("Ada's download must not open on Bea's shelf")
+        } catch {
+            XCTAssertEqual(error.localizedDescription, "That book is not on your shelf.")
+        }
+    }
+
+    func testA401ThenAnotherServerWipesDownloads() async throws {
+        let store = try await open([book(idA, importedAt: 3)])
+        await store.setDownloaded(id: idA, on: true)
+        _ = try await queueOfflineReply(store)
+        try await expireLibrary()
+        XCTAssertTrue(postsExist(idA))
+
+        let other = "https://other.example"
+        sessions.setBaseUrl(other)
+        XCTAssertTrue(postsExist(idA))
+        XCTAssertEqual(shelfCache().read(serverUrl: server, username: "ada")?.map(\.id), [idA])
+        XCTAssertTrue(outboxExists())
+
+        client.libraryError = nil
+        client.shelf = [book(idA, importedAt: 3)]
+        sessions.setSignedIn(username: "ada", token: "token-c")
+        try await waitUntil("the other server did not wipe downloads") {
+            !postsExist(idA) && settled(store, ids: [idA]) && !outboxExists()
+        }
+        XCTAssertNil(shelfCache().read(serverUrl: server, username: "ada"))
+        XCTAssertTrue(client.commentIds.isEmpty)
+    }
+
+    func testA401ForTheNextAccountStillDropsThePreviousSocialCache() async throws {
+        let store = try await open([book(idA, importedAt: 3), book(idB, importedAt: 2)])
+        await store.setDownloaded(id: idA, on: true)
+        _ = try await store.likes(id: idA)
+        XCTAssertTrue(socialExists(idA))
+        XCTAssertEqual(shelfCache().read(serverUrl: server, username: "ada")?.map(\.id), [idA, idB])
+        try await expireLibrary()
+        XCTAssertTrue(socialExists(idA))
+        XCTAssertEqual(sessions.filesOnDisk, OutboxAccount(url: server, username: "ada"))
+
+        let gate = QuietPark()
+        let parked = Flag()
+        HostedDisk.beforeSessionFiles = {
+            parked.set()
+            await gate.wait()
+        }
+        defer {
+            HostedDisk.beforeSessionFiles = nil
+            gate.release()
+        }
+        sessions.setSignedIn(username: "bea", token: "token-b")
+        try await waitUntil("cleanup did not reach the file step") { parked.isSet }
+
+        client.libraryError = HostedException(message: "Sign in again.", code: 401)
+        client.shelf = [book(idB, importedAt: 2)]
+        do {
+            try await store.load()
+            XCTFail("Bea's first call should 401")
+        } catch let err as HostedException {
+            XCTAssertEqual(err.code, 401)
+        }
+        XCTAssertEqual(sessions.session.expired?.username, "bea")
+        gate.release()
+        client.libraryError = nil
+        sessions.setSignedIn(username: "bea", token: "token-c")
+        try await waitUntil("Ada's social cache stayed on Bea's shelf") {
+            !socialExists(idA) && shelfCache().read(serverUrl: server, username: "ada") == nil && settled(store, ids: [idB])
+        }
+    }
+
+    func testRelaunchDropsAPreviousAccountsSocialCache() async throws {
+        writePosts(idA, "secret")
+        try JSONFiles.write(SocialCache(likes: ["p"], likesKnown: true), to: bookDir(idA).appendingPathComponent("social.json"))
+        try shelfCache().write(serverUrl: server, username: "ada", books: [book(idA, importedAt: 3)])
+        defaults.set(server, forKey: "files_url")
+        defaults.set("ada", forKey: "files_user")
+        defaults.set("bea", forKey: "username")
+        sessions = HostedSessionStore(defaults: defaults, persistToken: false)
+        sessions.setBaseUrl(server)
+        XCTAssertEqual(sessions.filesOnDisk, OutboxAccount(url: server, username: "ada"))
+        sessions.setSignedIn(username: "bea", token: "token-b")
+        XCTAssertEqual(sessions.filesOnDisk?.username, "ada")
+        client.shelf = [book(idB, importedAt: 1)]
+        let store = makeStore()
+        self.store = store
+        try await waitUntil("relaunch left Ada's cache") {
+            !socialExists(idA) && shelfCache().read(serverUrl: server, username: "ada") == nil && settled(store, ids: [idB])
+        }
+    }
+
+    func testSignOutAlsoClearsTheShelfOfTheAccountThatJustLeft() async throws {
+        _ = try await open([book(idA, importedAt: 3)])
+        try await expireLibrary()
+        XCTAssertEqual(sessions.filesOnDisk?.username, "ada")
+        sessions.setSignedIn(username: "bea", token: "token-b")
+        XCTAssertEqual(sessions.filesOnDisk?.username, "ada")
+        try shelfCache().write(serverUrl: server, username: "bea", books: [book(idB, importedAt: 1)])
+        sessions.signOut()
+        try await waitUntil("Bea's shelf stayed after sign-out") {
+            shelfCache().read(serverUrl: server, username: "ada") == nil
+                && shelfCache().read(serverUrl: server, username: "bea") == nil
+        }
+    }
+
+    func testSignOutWithNoUsernameWipesHostedFiles() async throws {
+        let store = makeStore()
+        self.store = store
+        sessions.setSignedIn(username: "", token: "token-a")
+        let marker = hostedRoot().appendingPathComponent("marker")
+        try Data("x".utf8).write(to: marker)
+        sessions.signOut()
+        try await waitUntil("a nameless sign-out left hosted files") {
+            !FileManager.default.fileExists(atPath: marker.path)
+        }
+    }
+
     private func open(_ books: [BookRecord]) async throws -> HostedLibraryStore {
         client.shelf = books
         let store = makeStore()
@@ -1146,6 +1348,46 @@ final class HostedOfflineTests: XCTestCase {
         ShelfCache(directory: root.appendingPathComponent("hosted-shelves", isDirectory: true))
     }
 
+    private func outboxFile() -> URL {
+        root.appendingPathComponent("hosted-outbox.json")
+    }
+
+    private func outboxExists() -> Bool {
+        FileManager.default.fileExists(atPath: outboxFile().path)
+    }
+
+    private func readOutbox() throws -> OutboxFile {
+        let data = try Data(contentsOf: outboxFile())
+        return try JSONFiles.decoder.decode(OutboxFile.self, from: data)
+    }
+
+    /// Queues a reply while offline and returns its lowercase id. The 401 task clears memory after it decides what to keep.
+    private func queueOfflineReply(_ store: HostedLibraryStore) async throws -> String {
+        client.addCommentError = offlineError()
+        _ = try await store.addComment(id: idA, postId: "p", text: "queued")
+        try await waitUntil("the reply was not queued") { store.unsentReplies == 1 && outboxExists() }
+        guard case .reply(let reply) = try readOutbox().ops.first else {
+            XCTFail("reply was not saved")
+            throw CancellationError()
+        }
+        XCTAssertEqual(reply.id, reply.id.lowercased())
+        XCTAssertNotNil(UUID(uuidString: reply.id))
+        return reply.id
+    }
+
+    private func expireLibrary() async throws {
+        client.libraryError = HostedException(message: "Sign in again.", code: 401)
+        do {
+            try await store?.load()
+            XCTFail("401 should fail the refresh")
+        } catch let err as HostedException {
+            XCTAssertEqual(err.code, 401)
+        }
+        try await waitUntil("expiry did not finish") {
+            !sessions.session.signedIn && store?.unsentReplies == 0
+        }
+    }
+
     private func book(_ id: String, importedAt: Int64) -> BookRecord {
         BookRecord(
             id: id,
@@ -1207,6 +1449,7 @@ private final class OfflineClient: @unchecked Sendable {
     private var indexCount = 0
     private var likesCount = 0
     private var likeLog: [(String, Bool)] = []
+    private var commentLog: [String] = []
 
     init() {
         client.hooks.library = { [weak self] _ in
@@ -1257,6 +1500,7 @@ private final class OfflineClient: @unchecked Sendable {
         client.hooks.addComment = { [weak self] _, _, _, text, commentId, _ in
             guard let self else { throw CancellationError() }
             if let addCommentError = self.addCommentError { throw addCommentError }
+            self.noteComment(commentId)
             let thread = [PostComment(id: commentId, username: "ada", text: text, createdAt: 2, mine: true)]
             self.thread = thread
             return thread
@@ -1329,6 +1573,10 @@ private final class OfflineClient: @unchecked Sendable {
         lock.lock(); defer { lock.unlock() }; return likeLog
     }
 
+    var commentIds: [String] {
+        lock.lock(); defer { lock.unlock() }; return commentLog
+    }
+
     func resetCalls() {
         lock.lock()
         calls.removeAll()
@@ -1383,6 +1631,12 @@ private final class OfflineClient: @unchecked Sendable {
     private func noteLike(_ postId: String, _ on: Bool) {
         lock.lock()
         likeLog.append((postId, on))
+        lock.unlock()
+    }
+
+    private func noteComment(_ id: String) {
+        lock.lock()
+        commentLog.append(id)
         lock.unlock()
     }
 
@@ -1585,6 +1839,18 @@ final class HostedDiskLog: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
         return flags.count
+    }
+}
+
+private final class Arrival: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value = 0
+    func bump() -> Int {
+        lock.lock()
+        value += 1
+        let next = value
+        lock.unlock()
+        return next
     }
 }
 

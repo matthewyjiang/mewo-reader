@@ -13,6 +13,75 @@ extension HostedSession {
         guard let username, !username.isEmpty else { return nil }
         return OutboxAccount(url: url, username: username)
     }
+
+    /// Who the shelf, downloads, and home feed belong to. Expired is not signed in.
+    var filesOwner: OutboxAccount? { outboxAccount ?? expired }
+}
+
+enum SessionChange: Equatable {
+    case keep
+    case expired
+    case otherUser(OutboxAccount)
+    case wipe(OutboxAccount)
+    /// Signed in with a token but no username. `hosted/` goes; there is no shelf account.
+    case wipeHosted
+}
+
+/// A 401 on the current account is `.expired` and leaves files in place.
+/// Sign-out and a server change wipe that account. A signed-in session with no
+/// username wipes `hosted/` and has no shelf to clear.
+func sessionChange(from previous: HostedSession, to next: HostedSession) -> SessionChange {
+    guard let old = previous.filesOwner else {
+        if previous.signedIn && !next.signedIn { return .wipeHosted }
+        return .keep
+    }
+    let new = next.filesOwner
+    if new == old {
+        return previous.signedIn && !next.signedIn ? .expired : .keep
+    }
+    if new == nil || new?.url != old.url {
+        return .wipe(old)
+    }
+    return .otherUser(old)
+}
+
+/// Unsigned session whose files belong to `account`, so a launch can compare them.
+func sessionForFiles(onDisk account: OutboxAccount?) -> HostedSession {
+    HostedSession(baseUrl: account?.url ?? "", expired: account)
+}
+
+struct FileCleanup: Equatable {
+    var accounts: [OutboxAccount]
+    /// `hosted/` is removed. A wipe is not downgraded to a social-only delete.
+    var wipeHosted: Bool
+    /// Social files go, and the downloads stay. False when `wipeHosted` already removes them.
+    var clearSocial: Bool
+
+    var deletesFiles: Bool { wipeHosted || clearSocial || !accounts.isEmpty }
+}
+
+/// The disk owner and the account that just changed are both cleared.
+/// Expire and keep add nothing, so a stale owner is still deleted.
+func fileCleanup(_ sessionDelta: SessionChange, _ diskDelta: SessionChange) -> FileCleanup {
+    var cleanup = FileCleanup(accounts: [], wipeHosted: false, clearSocial: false)
+    func absorb(_ change: SessionChange) {
+        switch change {
+        case .otherUser(let old):
+            if !cleanup.accounts.contains(old) { cleanup.accounts.append(old) }
+            cleanup.clearSocial = true
+        case .wipe(let old):
+            if !cleanup.accounts.contains(old) { cleanup.accounts.append(old) }
+            cleanup.wipeHosted = true
+        case .wipeHosted:
+            cleanup.wipeHosted = true
+        case .keep, .expired:
+            break
+        }
+    }
+    absorb(diskDelta)
+    absorb(sessionDelta)
+    if cleanup.wipeHosted { cleanup.clearSocial = false }
+    return cleanup
 }
 
 enum OutboxOp: Equatable, Sendable {
