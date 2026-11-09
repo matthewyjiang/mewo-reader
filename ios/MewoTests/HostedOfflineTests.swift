@@ -1201,6 +1201,20 @@ final class HostedOfflineTests: XCTestCase {
         }
     }
 
+    func testSignOutAlsoClearsTheShelfOfTheAccountThatJustLeft() async throws {
+        _ = try await open([book(idA, importedAt: 3)])
+        try await expireLibrary()
+        XCTAssertEqual(sessions.filesOnDisk?.username, "ada")
+        sessions.setSignedIn(username: "bea", token: "token-b")
+        XCTAssertEqual(sessions.filesOnDisk?.username, "ada")
+        try shelfCache().write(serverUrl: server, username: "bea", books: [book(idB, importedAt: 1)])
+        sessions.signOut()
+        try await waitUntil("Bea's shelf stayed after sign-out") {
+            shelfCache().read(serverUrl: server, username: "ada") == nil
+                && shelfCache().read(serverUrl: server, username: "bea") == nil
+        }
+    }
+
     func testSignOutWithNoUsernameWipesHostedFiles() async throws {
         let store = makeStore()
         self.store = store

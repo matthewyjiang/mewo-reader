@@ -50,14 +50,38 @@ func sessionForFiles(onDisk account: OutboxAccount?) -> HostedSession {
     HostedSession(baseUrl: account?.url ?? "", expired: account)
 }
 
-/// A delete still owed for the account on disk wins over expire or keep.
-func pendingFileChange(_ sessionDelta: SessionChange, _ diskDelta: SessionChange) -> SessionChange {
-    switch diskDelta {
-    case .otherUser, .wipe, .wipeHosted:
-        return diskDelta
-    case .keep, .expired:
-        return sessionDelta
+struct FileCleanup: Equatable {
+    var accounts: [OutboxAccount]
+    /// `hosted/` is removed. A wipe is not downgraded to a social-only delete.
+    var wipeHosted: Bool
+    /// Social files go, and the downloads stay. False when `wipeHosted` already removes them.
+    var clearSocial: Bool
+
+    var deletesFiles: Bool { wipeHosted || clearSocial || !accounts.isEmpty }
+}
+
+/// The disk owner and the account that just changed are both cleared.
+/// Expire and keep add nothing, so a stale owner is still deleted.
+func fileCleanup(_ sessionDelta: SessionChange, _ diskDelta: SessionChange) -> FileCleanup {
+    var cleanup = FileCleanup(accounts: [], wipeHosted: false, clearSocial: false)
+    func absorb(_ change: SessionChange) {
+        switch change {
+        case .otherUser(let old):
+            if !cleanup.accounts.contains(old) { cleanup.accounts.append(old) }
+            cleanup.clearSocial = true
+        case .wipe(let old):
+            if !cleanup.accounts.contains(old) { cleanup.accounts.append(old) }
+            cleanup.wipeHosted = true
+        case .wipeHosted:
+            cleanup.wipeHosted = true
+        case .keep, .expired:
+            break
+        }
     }
+    absorb(diskDelta)
+    absorb(sessionDelta)
+    if cleanup.wipeHosted { cleanup.clearSocial = false }
+    return cleanup
 }
 
 enum OutboxOp: Equatable, Sendable {

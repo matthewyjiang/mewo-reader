@@ -565,6 +565,17 @@ final class HomeFeedStoreTests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: feedFile(user: "bea").path))
     }
 
+    func testSignOutClearsTheFeedLeftBehindAStaleDiskOwner() throws {
+        let server = "https://mewo.example"
+        sessions.noteFilesOnDisk(OutboxAccount(url: server, username: "ada"))
+        try JSONFiles.write(HomeFeedPage(items: [feedItem("ada secret")], nextCursor: nil), to: feedFile(user: "ada"))
+        sessions.setSignedIn(username: "bea", token: "token-b")
+        try JSONFiles.write(HomeFeedPage(items: [feedItem("bea secret")], nextCursor: nil), to: feedFile(user: "bea"))
+        sessions.signOut()
+        XCTAssertFalse(FileManager.default.fileExists(atPath: feedFile(user: "ada").path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: feedFile(user: "bea").path))
+    }
+
     func testA401KeepsTheCacheAndAnotherAccountDeletesIt() async throws {
         sessions.setSignedIn(username: "ada", token: "token-a")
         try await gate.waitForCalls(1)

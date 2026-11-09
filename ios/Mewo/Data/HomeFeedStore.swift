@@ -144,11 +144,9 @@ final class HomeFeedStore {
         more?.task.cancel()
         more = nil
         let owed = sessionChange(from: sessionForFiles(onDisk: sessions.filesOnDisk), to: next)
-        switch pendingFileChange(sessionChange(from: previous, to: next), owed) {
-        case .otherUser(let old), .wipe(let old):
-            clear(old)
-        case .keep, .expired, .wipeHosted:
-            break
+        let cleanup = fileCleanup(sessionChange(from: previous, to: next), owed)
+        for account in cleanup.accounts {
+            clear(account)
         }
         if next.signedIn {
             restore()

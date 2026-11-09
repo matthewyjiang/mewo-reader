@@ -285,9 +285,9 @@ final class HostedLibraryStore: LibraryStore {
         }
         let sessionDelta = sessionChange(from: previous, to: next)
         let owed = sessionChange(from: sessionForFiles(onDisk: sessions.filesOnDisk), to: next)
-        let immediate = pendingFileChange(sessionDelta, owed)
+        let immediate = fileCleanup(sessionDelta, owed)
         // Cancel what is running for this session now, before a newer sign-in can start its own.
-        let watched = (sessionDelta == .keep && immediate == .keep) ? nil : detachCancelledTransfers()
+        let watched = (sessionDelta == .keep && !immediate.deletesFiles) ? nil : detachCancelledTransfers()
         let prior = maintenance
         let task = Task { @MainActor in
             await prior?.value
@@ -310,9 +310,9 @@ final class HostedLibraryStore: LibraryStore {
     }
 
     /// Compares the current session with `previous` and with the account still on disk.
-    private func fileChange(since previous: HostedSession) -> SessionChange {
+    private func fileChange(since previous: HostedSession) -> FileCleanup {
         let current = sessions.session
-        return pendingFileChange(
+        return fileCleanup(
             sessionChange(from: previous, to: current),
             sessionChange(from: sessionForFiles(onDisk: sessions.filesOnDisk), to: current)
         )
@@ -321,25 +321,19 @@ final class HostedLibraryStore: LibraryStore {
     /// Deletes a shelf or downloads still owed to the account on disk, then records the owner.
     private func reconcileFiles(stamp: String?) async {
         let owed = sessionChange(from: sessionForFiles(onDisk: sessions.filesOnDisk), to: sessions.session)
-        await applyFiles(owed, stamp: stamp, watched: nil)
+        await applyFiles(fileCleanup(.keep, owed), stamp: stamp, watched: nil)
     }
 
-    private func applyFiles(_ change: SessionChange, stamp: String?, watched: Task<Void, Never>?) async {
-        switch change {
-        case .otherUser(let old), .wipe(let old):
-            await clearShelf(old)
-        case .keep, .expired, .wipeHosted:
-            break
+    private func applyFiles(_ cleanup: FileCleanup, stamp: String?, watched: Task<Void, Never>?) async {
+        for account in cleanup.accounts {
+            await clearShelf(account)
         }
         if let watched { await watched.value }
         guard sessions.session.token == stamp else { return }
-        switch change {
-        case .wipe, .wipeHosted:
+        if cleanup.wipeHosted {
             await wipeHostedFiles(stamp: stamp)
-        case .otherUser:
+        } else if cleanup.clearSocial {
             await clearSocialFiles(stamp: stamp)
-        case .keep, .expired:
-            break
         }
         guard sessions.session.token == stamp else { return }
         sessions.noteFilesOnDisk(sessions.session.filesOwner)

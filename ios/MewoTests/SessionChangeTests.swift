@@ -50,8 +50,24 @@ final class SessionChangeTests: XCTestCase {
     func testDiskOwnerStillDeletesWhenTheSessionWouldKeep() {
         let bea = HostedSession(baseUrl: url, username: "bea", token: "token-b")
         let owed = sessionChange(from: sessionForFiles(onDisk: ada), to: bea)
-        XCTAssertEqual(pendingFileChange(.keep, owed), .otherUser(ada))
-        XCTAssertEqual(pendingFileChange(.expired, owed), .otherUser(ada))
+        let kept = fileCleanup(.keep, owed)
+        XCTAssertEqual(kept.accounts, [ada])
+        XCTAssertTrue(kept.clearSocial)
+        XCTAssertFalse(kept.wipeHosted)
+        let expired = fileCleanup(.expired, owed)
+        XCTAssertEqual(expired.accounts, [ada])
+        XCTAssertTrue(expired.clearSocial)
+    }
+
+    func testAWipeIsNotDroppedForTheAccountStillOnDisk() {
+        let bea = OutboxAccount(url: other, username: "bea")
+        let cleanup = fileCleanup(.wipe(bea), .otherUser(ada))
+        XCTAssertEqual(cleanup.accounts, [ada, bea])
+        XCTAssertTrue(cleanup.wipeHosted)
+        XCTAssertFalse(cleanup.clearSocial)
+        let sameServer = fileCleanup(.wipe(OutboxAccount(url: url, username: "bea")), .wipe(ada))
+        XCTAssertEqual(sameServer.accounts, [ada, OutboxAccount(url: url, username: "bea")])
+        XCTAssertTrue(sameServer.wipeHosted)
     }
 
     func testTokenRotationKeepsFiles() {
