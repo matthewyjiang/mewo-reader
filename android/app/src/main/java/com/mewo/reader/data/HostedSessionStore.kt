@@ -1,6 +1,7 @@
 package com.mewo.reader.data
 
 import android.content.Context
+import android.os.Looper
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -33,31 +34,66 @@ fun normalizeBaseUrl(raw: String): String {
 
 class HostedSessionStore(context: Context) {
     private val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+    private val sessionLock = Any()
     private val _session = MutableStateFlow(read())
     val session: StateFlow<HostedSession> = _session.asStateFlow()
 
     fun setBaseUrl(url: String) {
-        prefs.edit().putString(KEY_URL, url).apply()
-        _session.update { it.copy(baseUrl = url) }
+        synchronized(sessionLock) {
+            prefs.edit().putString(KEY_URL, url).apply()
+            _session.update { it.copy(baseUrl = url) }
+        }
     }
 
     fun setSignedIn(username: String, token: String) {
-        prefs.edit()
-            .putString(KEY_USER, username)
-            .putString(KEY_TOKEN, token)
-            .remove(KEY_EXPIRED_URL)
-            .remove(KEY_EXPIRED_USER)
-            .apply()
-        _session.update { it.copy(username = username, token = token, expired = null) }
-        val url = _session.value.normalizedUrl()
-        val account = if (url != null && username.isNotBlank()) OutboxAccount(url, username) else null
-        // Record the owner only once the session shows this account. Doing it earlier makes
-        // an in-flight signed-out collection look like a wipe. A later account does not
-        // replace the owner until cleanup finishes.
-        if (diskOwner() == null && account != null) setDiskOwner(account)
+        synchronized(sessionLock) {
+            prefs.edit()
+                .putString(KEY_USER, username)
+                .putString(KEY_TOKEN, token)
+                .remove(KEY_EXPIRED_URL)
+                .remove(KEY_EXPIRED_USER)
+                .apply()
+            _session.update { it.copy(username = username, token = token, expired = null) }
+            val url = _session.value.normalizedUrl()
+            val account = if (url != null && username.isNotBlank()) OutboxAccount(url, username) else null
+            // Record the owner only once the session shows this account. Doing it earlier makes
+            // an in-flight signed-out collection look like a wipe. A later account does not
+            // replace the owner until cleanup finishes.
+            if (diskOwner() == null && account != null) setDiskOwner(account)
+        }
     }
 
     fun signOut() {
+        synchronized(sessionLock) { signOutLocked() }
+    }
+
+    /**
+     * A 401 for [token]. No-op unless the session is still signed in with that exact token,
+     * so a second 401 cannot clear [HostedSession.expired] and wipe the downloads.
+     * A signed-in session with no username still signs out.
+     */
+    fun expire(token: String) {
+        synchronized(sessionLock) {
+            val current = _session.value
+            if (current.token != token || !current.signedIn) return
+            val url = current.normalizedUrl()
+            val user = current.username?.takeIf { it.isNotBlank() }
+            if (url == null || user == null) {
+                signOutLocked()
+                return
+            }
+            val account = OutboxAccount(url, user)
+            prefs.edit()
+                .remove(KEY_USER)
+                .remove(KEY_TOKEN)
+                .putString(KEY_EXPIRED_URL, account.url)
+                .putString(KEY_EXPIRED_USER, account.username)
+                .apply()
+            _session.value = current.copy(username = null, token = null, expired = account)
+        }
+    }
+
+    private fun signOutLocked() {
         prefs.edit()
             .remove(KEY_USER)
             .remove(KEY_TOKEN)
@@ -65,25 +101,6 @@ class HostedSessionStore(context: Context) {
             .remove(KEY_EXPIRED_USER)
             .apply()
         _session.update { it.copy(username = null, token = null, expired = null) }
-    }
-
-    /** A 401. The token is dropped and the account is remembered so its downloads can stay. */
-    fun expire() {
-        val current = _session.value
-        val url = current.normalizedUrl()
-        val user = current.username?.takeIf { it.isNotBlank() }
-        if (url == null || user == null) {
-            signOut()
-            return
-        }
-        val account = OutboxAccount(url, user)
-        prefs.edit()
-            .remove(KEY_USER)
-            .remove(KEY_TOKEN)
-            .putString(KEY_EXPIRED_URL, account.url)
-            .putString(KEY_EXPIRED_USER, account.username)
-            .apply()
-        _session.update { it.copy(username = null, token = null, expired = account) }
     }
 
     /** Whose shelf and downloads are on disk. Sign-in does not clear this; cleanup does. */
@@ -101,7 +118,9 @@ class HostedSessionStore(context: Context) {
         } else {
             editor.putString(KEY_FILES_URL, account.url).putString(KEY_FILES_USER, account.username)
         }
-        editor.commit()
+        // commit() on the main thread froze the UI. Off the main thread it still
+        // finishes before the caller continues, so a kill keeps this owner.
+        if (Looper.myLooper() == Looper.getMainLooper()) editor.apply() else editor.commit()
     }
 
     private fun read(): HostedSession {
@@ -145,9 +164,9 @@ internal sealed interface SessionChange {
 }
 
 /**
- * [owner] is the account whose files are still on disk. Sign-in clears [HostedSession.expired]
- * immediately, so this owner is what a later 401 or a relaunch has to clean up.
- * A signed-in session with no username still wipes on the way out.
+ * [owner] is the account whose files are still on disk, or null to use [previous].
+ * A signed-in session with no username wipes on the way out. That includes a sign-out
+ * conflated into the next account: the files have no owner to keep them for.
  */
 internal fun sessionChange(
     owner: OutboxAccount?,
@@ -156,7 +175,9 @@ internal fun sessionChange(
 ): SessionChange {
     val old = owner ?: previous.filesOwner()
     if (old == null) {
-        return if (previous.signedIn && !next.signedIn) SessionChange.Wipe(null) else SessionChange.Keep
+        if (!previous.signedIn) return SessionChange.Keep
+        if (!next.signedIn || next.filesOwner() != null) return SessionChange.Wipe(null)
+        return SessionChange.Keep
     }
     val new = next.filesOwner()
     if (new == old) {
@@ -166,12 +187,45 @@ internal fun sessionChange(
     return SessionChange.OtherUser(old)
 }
 
+internal data class FileCleanup(
+    val accounts: List<OutboxAccount>,
+    /** `hosted/` is removed. A wipe is not downgraded to a social-only delete. */
+    val wipeHosted: Boolean,
+    /** Social files go and the downloads stay. False when [wipeHosted] already removes them. */
+    val clearSocial: Boolean,
+)
+
+/** The disk owner and the account that just changed are both cleared. */
+internal fun fileCleanup(sessionDelta: SessionChange, diskDelta: SessionChange): FileCleanup {
+    val accounts = mutableListOf<OutboxAccount>()
+    var wipeHosted = false
+    var clearSocial = false
+    fun absorb(change: SessionChange) {
+        when (change) {
+            is SessionChange.OtherUser -> {
+                if (change.old !in accounts) accounts.add(change.old)
+                clearSocial = true
+            }
+            is SessionChange.Wipe -> {
+                change.old?.let { if (it !in accounts) accounts.add(it) }
+                wipeHosted = true
+            }
+            SessionChange.Keep, SessionChange.Expired -> Unit
+        }
+    }
+    absorb(diskDelta)
+    absorb(sessionDelta)
+    if (wipeHosted) clearSocial = false
+    return FileCleanup(accounts, wipeHosted, clearSocial)
+}
+
 /** A 401 for the session still on screen expires it. The error still propagates. */
 internal fun <T> HostedSessionStore.expireOn401(session: HostedSession, block: () -> T): T {
     return try {
         block()
     } catch (err: HostedException) {
-        if (err.code == 401 && this.session.value.token == session.token) expire()
+        val token = session.token
+        if (err.code == 401 && token != null) expire(token)
         throw err
     }
 }

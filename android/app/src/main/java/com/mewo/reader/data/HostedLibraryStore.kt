@@ -149,44 +149,38 @@ class HostedLibraryStore(
             // Don't load inside the collector. A blocked refresh must not delay
             // the next account's clear, or the old shelf stays on screen.
             sessions.session.collect { emitted ->
+                hostedOnSession?.invoke()
                 val session = sessions.session.value
                 // This emission lost the race with a newer sign-in. Applying the stale
                 // snapshot would wipe the owner that sign-in just recorded.
                 if (session != emitted) return@collect
                 val owner = sessions.diskOwner()
                 if (sessions.session.value != session) return@collect
-                // setSignedIn drops `expired` before this runs. The disk owner is who the
-                // files still belong to, and it changes only after the cleanup below.
-                val change = sessionChange(owner, previous, session)
-                if (change is SessionChange.OtherUser || change is SessionChange.Wipe) {
+                // The disk owner can still be the account a newer sign-in replaced.
+                // Clear that account and the one that just changed. A wipe is not downgraded.
+                val sessionDelta = sessionChange(null, previous, session)
+                val diskDelta = sessionChange(owner, previous, session)
+                val cleanup = fileCleanup(sessionDelta, diskDelta)
+                if (cleanup.wipeHosted || cleanup.clearSocial) {
                     hostedBeforeFilesChange?.invoke()
                 }
-                when (change) {
-                    SessionChange.Keep -> Unit
-                    // The token is gone, but this person can sign back in and keep the download.
-                    SessionChange.Expired -> {
-                        refreshJob?.cancel()
-                        cancelDownloads()
-                        clearMemory(session)
-                    }
-                    is SessionChange.OtherUser -> {
-                        refreshJob?.cancel()
-                        clearShelf(change.old)
-                        cancelDownloads()
-                        clearSocialFiles()
-                        clearMemory(session)
-                    }
-                    is SessionChange.Wipe -> {
-                        refreshJob?.cancel()
-                        change.old?.let { clearShelf(it) }
-                        wipeCache()
-                        clearMemory(session)
-                    }
+                val resetMemory = sessionDelta != SessionChange.Keep
+                if (resetMemory || cleanup.wipeHosted || cleanup.clearSocial) {
+                    refreshJob?.cancel()
+                    cancelDownloads()
                 }
+                for (account in cleanup.accounts) clearShelf(account)
+                if (cleanup.wipeHosted) {
+                    wipeCache()
+                } else if (cleanup.clearSocial) {
+                    clearSocialFiles()
+                }
+                if (resetMemory) clearMemory(session)
                 // A newer sign-in may already have recorded its owner. Writing this
                 // snapshot would clear that record before its own cleanup runs.
                 if (sessions.session.value.filesOwner() == session.filesOwner()) {
-                    sessions.setDiskOwner(session.filesOwner())
+                    val recorded = session.filesOwner()
+                    withContext(Dispatchers.IO) { sessions.setDiskOwner(recorded) }
                 }
                 previous = session
                 // Attach before the refresh so a resumed queue is in memory for the
@@ -289,9 +283,8 @@ class HostedLibraryStore(
                     }
                     remote.copy(books = remote.books.filter { safeBookId(it.id) != null })
                 } catch (err: HostedException) {
-                    if (err.code == 401 && sessions.session.value.token == session.token) {
-                        sessions.expire()
-                    }
+                    val token = session.token
+                    if (err.code == 401 && token != null) sessions.expire(token)
                     throw err
                 }
             }
@@ -859,11 +852,13 @@ class HostedLibraryStore(
             else -> event
         }
         if (sessions.session.value.token == owner.token) {
-            val previous = _library.value.books
+            val previousBooks = _library.value.books
             _library.value = LibrarySnapshot(shown)
-            _load.value = reduceLibraryLoad(_load.value, shownEvent)
-            if (event is LibraryEvent.RefreshSucceeded) forgetPosts(previous, books)
+            // The refresh is still running until the posts scan finishes. Publishing
+            // "not refreshing" first lets a reader observe the shelf before the decode.
+            if (event is LibraryEvent.RefreshSucceeded) forgetPosts(previousBooks, books)
             rescan(shown)
+            _load.value = reduceLibraryLoad(_load.value, shownEvent)
         }
         val url = owner.normalizedUrl()
         val user = owner.username
@@ -1168,6 +1163,9 @@ internal var hostedBeforeClaim: (() -> Unit)? = null
 
 /** When set, account-switch and wipe cleanup blocks here. Tests expire the new token in that gap. */
 internal var hostedBeforeFilesChange: (() -> Unit)? = null
+
+/** When set, the session collector blocks before it reads the emission. Tests conflate two changes. */
+internal var hostedOnSession: (() -> Unit)? = null
 
 /**
  * Runs at the end of a shelf publish, after the rows are visible. Tests pause here

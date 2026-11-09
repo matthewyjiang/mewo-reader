@@ -25,7 +25,7 @@ class HostedSessionStoreTest {
         val store = HostedSessionStore(context)
         store.setBaseUrl("https://mewo.example/")
         store.setSignedIn("ada", "token-a")
-        store.expire()
+        store.expire("token-a")
 
         assertFalse(store.session.value.signedIn)
         assertNull(store.session.value.username)
@@ -39,13 +39,13 @@ class HostedSessionStoreTest {
         val store = HostedSessionStore(context)
         store.setBaseUrl("https://mewo.example")
         store.setSignedIn("ada", "token-a")
-        store.expire()
+        store.expire("token-a")
         store.setSignedIn("ada", "token-b")
         assertNull(store.session.value.expired)
         assertEquals("token-b", store.session.value.token)
         assertNull(HostedSessionStore(context).session.value.expired)
 
-        store.expire()
+        store.expire("token-b")
         assertEquals(OutboxAccount("https://mewo.example", "ada"), store.session.value.expired)
         store.signOut()
         assertNull(store.session.value.expired)
@@ -60,13 +60,32 @@ class HostedSessionStoreTest {
         val store = HostedSessionStore(context)
         store.setBaseUrl("https://mewo.example")
         store.setSignedIn("ada", "token-a")
-        store.expire()
+        store.expire("token-a")
         store.setBaseUrl("https://other.example")
 
         val again = HostedSessionStore(context)
         assertEquals("https://other.example", again.session.value.baseUrl)
         assertEquals(OutboxAccount("https://mewo.example", "ada"), again.session.value.expired)
         assertFalse(again.session.value.signedIn)
+    }
+
+    @Test
+    fun aSecondExpireLeavesTheAccountAndABlankUsernameSignsOut() {
+        val store = HostedSessionStore(context)
+        store.setBaseUrl("https://mewo.example")
+        store.setSignedIn("ada", "token-a")
+        store.expire("token-a")
+        store.expire("token-a")
+        assertEquals(OutboxAccount("https://mewo.example", "ada"), store.session.value.expired)
+
+        val bare = HostedSessionStore(context)
+        bare.setBaseUrl("https://mewo.example")
+        bare.setSignedIn("", "token-a")
+        bare.expire("token-a")
+        assertFalse(bare.session.value.signedIn)
+        assertNull(bare.session.value.expired)
+        bare.expire("token-a")
+        assertNull(bare.session.value.expired)
     }
 
     @Test
@@ -87,7 +106,7 @@ class HostedSessionStoreTest {
         store.setBaseUrl("https://mewo.example")
         store.setDiskOwner(ada)
         store.setSignedIn("bea", "token-b")
-        store.expire()
+        store.expire("token-b")
 
         assertEquals(OutboxAccount("https://mewo.example", "bea"), store.session.value.expired)
         assertEquals(ada, store.diskOwner())

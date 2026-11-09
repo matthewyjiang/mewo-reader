@@ -79,6 +79,40 @@ class SessionChangeTest {
     }
 
     @Test
+    fun leavingASignedInSessionWithNoUsernameForAnAccountWipes() {
+        val bare = HostedSession(baseUrl = SERVER, token = "t")
+        val bea = HostedSession(baseUrl = SERVER, username = "bea", token = "b")
+        val sessionDelta = sessionChange(null, bare, bea)
+        assertEquals(SessionChange.Wipe(null), sessionDelta)
+        val cleanup = fileCleanup(sessionDelta, sessionChange(OutboxAccount(SERVER, "bea"), bare, bea))
+        assertTrue(cleanup.wipeHosted)
+        assertEquals(false, cleanup.clearSocial)
+    }
+
+    @Test
+    fun aStaleDiskOwnerDoesNotHideTheAccountThatJustLeft() {
+        val bea = OutboxAccount(SERVER, "bea")
+        val beaSession = HostedSession(baseUrl = SERVER, username = "bea", token = "t")
+        val signedOut = HostedSession(baseUrl = SERVER)
+        val cleanup = fileCleanup(
+            sessionChange(null, beaSession, signedOut),
+            sessionChange(ada, beaSession, signedOut),
+        )
+        assertEquals(listOf(ada, bea), cleanup.accounts)
+        assertTrue(cleanup.wipeHosted)
+        assertEquals(false, cleanup.clearSocial)
+    }
+
+    @Test
+    fun aWipeIsNotDowngradedToASocialDelete() {
+        val bea = OutboxAccount(SERVER, "bea")
+        val cleanup = fileCleanup(SessionChange.Wipe(bea), SessionChange.OtherUser(ada))
+        assertEquals(listOf(ada, bea), cleanup.accounts)
+        assertTrue(cleanup.wipeHosted)
+        assertEquals(false, cleanup.clearSocial)
+    }
+
+    @Test
     fun diskOwnerStillDropsThePreviousAccountAfterTheSessionForgotThem() {
         val bea = HostedSession(baseUrl = SERVER, username = "bea", token = "t")
         assertEquals(SessionChange.OtherUser(ada), sessionChange(ada, bea, bea))
