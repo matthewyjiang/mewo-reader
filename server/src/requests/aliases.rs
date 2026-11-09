@@ -12,7 +12,7 @@ use crate::feed::PostKind;
 use crate::library;
 use crate::AppState;
 use sqlx::{Acquire, Connection, SqlitePool};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::io::Write;
 
 /// How far a chain or a cycle is followed. Longer than this, the walk stops.
@@ -27,6 +27,11 @@ pub(crate) struct WorkKeys {
 /// Canonical key for `asked`, before the caller opens its write transaction.
 /// A table hit does not call Open Library. A hop that errors returns `asked`.
 pub(crate) async fn canonical(state: &AppState, asked: &str) -> String {
+    resolve(state, asked, true).await
+}
+
+/// `remember` writes a new redirect. A dry run passes false and leaves the table alone.
+async fn resolve(state: &AppState, asked: &str, remember: bool) -> String {
     if let Some(found) = stored_canonical(&state.pool, asked).await {
         return found;
     }
@@ -35,13 +40,17 @@ pub(crate) async fn canonical(state: &AppState, asked: &str) -> String {
             return cached;
         }
         if super::clean_work_key(&cached).is_ok() {
-            let _ = record(&state.pool, asked, &cached, now_ms()).await;
+            if remember {
+                let _ = record(&state.pool, asked, &cached, now_ms()).await;
+            }
             return cached;
         }
     }
     match one_hop(state, asked).await {
         Some(next) if next != asked && super::clean_work_key(&next).is_ok() => {
-            let _ = record(&state.pool, asked, &next, now_ms()).await;
+            if remember {
+                let _ = record(&state.pool, asked, &next, now_ms()).await;
+            }
             next
         }
         _ => asked.to_string(),
@@ -145,9 +154,9 @@ pub(crate) async fn record(
     Ok(())
 }
 
-/// `admin works aliases`. Records redirects, then prints each group that has
-/// two downloaded books. `apply` moves holders onto the survivor and deletes
-/// the other copies. Dry-run prints the same plan and writes nothing but aliases.
+/// `admin works aliases`. Prints each group that has two downloaded books.
+/// `apply` records redirects, then moves holders onto the survivor and deletes
+/// the other copies. A dry run looks the redirects up and writes nothing.
 pub(crate) async fn consolidate(
     state: &AppState,
     apply: bool,
@@ -160,11 +169,20 @@ pub(crate) async fn consolidate(
     )
     .fetch_all(&state.pool)
     .await?;
+    let mut buckets: HashMap<String, Vec<String>> = HashMap::new();
+    for key in keys {
+        let resolved = resolve(state, &key, apply).await;
+        buckets.entry(resolved).or_default().push(key);
+    }
     let mut seen = HashSet::new();
     let mut groups = Vec::new();
-    for key in keys {
-        let resolved = canonical(state, &key).await;
-        let found = group(&state.pool, &resolved).await?;
+    for (canonical, asked) in buckets {
+        let mut found = group(&state.pool, &canonical).await?;
+        for key in asked {
+            if !found.all.contains(&key) {
+                found.all.push(key);
+            }
+        }
         if seen.insert(found.canonical.clone()) {
             groups.push(found);
         }
@@ -561,10 +579,16 @@ async fn apply_plan(
         match (shift.kind, shift.dest_post) {
             ("reply", Some(dest)) => {
                 sqlx::query(
-                    "UPDATE comments SET book_id = ?, post_id = ? WHERE id = ? AND book_id = ?",
+                    "UPDATE comments
+                     SET book_id = ?, post_id = ?,
+                         private = private OR (
+                             SELECT shared = 0 AND is_sample = 0 FROM books WHERE id = ?
+                         )
+                     WHERE id = ? AND book_id = ?",
                 )
                 .bind(&plan.keep_id)
                 .bind(dest.to_string())
+                .bind(&shift.book_id)
                 .bind(&shift.who)
                 .bind(&shift.book_id)
                 .execute(&mut **tx)
@@ -658,8 +682,10 @@ async fn apply_plan(
     Ok(())
 }
 
-/// Move one like or repost onto the survivor. `UPDATE`, so `private` stays
-/// as it was written. A row that cannot land is deleted instead of inserted.
+/// Move one like or repost onto the survivor. `UPDATE`, never insert, so a
+/// repost keeps the flag it had. A private source book forces that flag on:
+/// the owner's own rows were stored as public. A row that cannot land is
+/// deleted instead of inserted.
 async fn move_keyed(
     tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
     table: &str,
@@ -667,13 +693,25 @@ async fn move_keyed(
     shift: &Shift,
     dest: i64,
 ) -> Result<(), ApiError> {
-    let sql = format!(
-        "UPDATE OR IGNORE {table} SET book_id = ?, post_id = ?
-         WHERE book_id = ? AND user_id = ? AND post_id = ?"
-    );
-    let changed = sqlx::query(&sql)
-        .bind(survivor)
-        .bind(dest.to_string())
+    let private_source = table == "reposts";
+    let sql = if private_source {
+        format!(
+            "UPDATE OR IGNORE {table}
+             SET book_id = ?, post_id = ?,
+                 private = private OR (SELECT shared = 0 AND is_sample = 0 FROM books WHERE id = ?)
+             WHERE book_id = ? AND user_id = ? AND post_id = ?"
+        )
+    } else {
+        format!(
+            "UPDATE OR IGNORE {table} SET book_id = ?, post_id = ?
+             WHERE book_id = ? AND user_id = ? AND post_id = ?"
+        )
+    };
+    let mut query = sqlx::query(&sql).bind(survivor).bind(dest.to_string());
+    if private_source {
+        query = query.bind(&shift.book_id);
+    }
+    let changed = query
         .bind(&shift.book_id)
         .bind(&shift.user_id)
         .bind(&shift.post_id)

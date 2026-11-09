@@ -2,7 +2,7 @@
   export type IconName =
     | 'home' | 'search' | 'heart' | 'comment' | 'quote' | 'share'
     | 'back' | 'close' | 'plus' | 'trash' | 'settings' | 'chevron'
-    | 'more' | 'book' | 'lock' | 'people' | 'refresh' | 'person' | 'repost' | 'shield'
+    | 'more' | 'book' | 'file' | 'lock' | 'people' | 'refresh' | 'person' | 'repost' | 'shield'
     | 'clock' | 'check' | 'retry' | 'external';
   const paths: Record<IconName, string> = {
     home: 'M3 10 12 3l9 7v10a1 1 0 0 1-1 1h-5v-7H9v7H4a1 1 0 0 1-1-1Z',
@@ -21,6 +21,7 @@
       + 'm7 9a4 4 0 1 1-8 0 4 4 0 0 1 8 0',
     chevron: 'm9 5 7 7-7 7',
     more: 'M4 12h.01M12 12h.01M20 12h.01',
+    file: 'M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8zM14 3v5h5M8 13h8M8 17h6',
     book: 'M12 5C8 2 4 3 2 4v16c4-2 7-1 10 1m0-16c4-3 8-2 10-1v16'
       + 'c-4-2-7-1-10 1V5',
     // Material Icons Outlined lock. Fill glyph (shackle cutout and keyhole are subpaths).

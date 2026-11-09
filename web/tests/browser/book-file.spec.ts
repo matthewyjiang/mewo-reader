@@ -7,11 +7,21 @@ const book = {
   mine: true,
   held: true,
   shared: true,
+  isSample: false,
   progressIndex: 0,
   progressTotal: 12,
   hasRelease: true,
   reportable: true,
   feedRev: 0,
+};
+
+const sample = {
+  ...book,
+  id: 'sample',
+  title: 'Sample',
+  isSample: true,
+  hasRelease: false,
+  reportable: false,
 };
 
 const blocked = {
@@ -49,7 +59,7 @@ test.beforeEach(async ({ page }) => {
     if (path === '/v1/me') {
       return json({ username: 'matt', isAdmin: true, canRequest: true });
     }
-    if (path === '/v1/library') return json({ books: reported ? [] : [book] });
+    if (path === '/v1/library') return json({ books: reported ? [] : [book, sample] });
     if (path === '/v1/feed') return json({ items: [], nextCursor: null });
     if (path === '/v1/books/dune/wrong-file' && method === 'POST') {
       reported = true;
@@ -79,6 +89,8 @@ async function theme(page: Page, name: string): Promise<void> {
 
 async function openSheet(page: Page): Promise<void> {
   await page.goto('/?tab=books');
+  await expect(page.getByText('Sample', { exact: true })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Book file for Sample' })).toHaveCount(0);
   await page.getByRole('button', { name: 'Book file for Dune' }).click();
   await expect(page.getByRole('heading', { name: 'Book file' })).toBeVisible();
   await expect(page.getByText('Upload replacement')).toBeVisible();
@@ -89,6 +101,13 @@ test('book file and blocked releases', async ({ page }) => {
   await page.setViewportSize({ width: 1280, height: 800 });
   await openSheet(page);
   await page.screenshot({ path: '/opt/cursor/artifacts/book-file-light.png' });
+  await page.getByRole('button', { name: 'Wrong file' }).click();
+  await expect(page.getByRole('heading', { name: 'Delete this copy?' })).toBeVisible();
+  await expect(page.getByText(
+    'Replies, likes and reading progress on it are deleted for everyone who has it. Mewo then looks for another copy.',
+  )).toBeVisible();
+  await page.screenshot({ path: '/opt/cursor/artifacts/wrong-file-confirm-light.png' });
+  await page.getByRole('button', { name: 'Keep' }).click();
 
   await theme(page, 'x_lights_out');
   await openSheet(page);
@@ -99,7 +118,7 @@ test('book file and blocked releases', async ({ page }) => {
   await page.screenshot({ path: '/opt/cursor/artifacts/book-file-narrow.png' });
 
   await page.getByRole('button', { name: 'Wrong file' }).click();
-  await expect(page.getByRole('heading', { name: 'Report wrong file?' })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Delete this copy?' })).toBeVisible();
   await page.getByRole('button', { name: 'Keep' }).click();
   await expect(page.getByRole('heading', { name: 'Book file' })).toBeVisible();
 
@@ -115,14 +134,14 @@ test('book file and blocked releases', async ({ page }) => {
 
   await openSheet(page);
   await page.getByRole('button', { name: 'Wrong file' }).click();
-  await page.getByRole('button', { name: 'Report' }).click();
+  await page.getByRole('button', { name: 'Delete and search' }).click();
   await expect(page.getByRole('heading', { name: 'No books' })).toBeVisible();
 
   await page.setViewportSize({ width: 1280, height: 800 });
   await theme(page, 'x_light');
   await page.goto('/settings/server/blocklist');
   await expect(page.getByRole('button', { name: 'Unblock' })).toBeVisible();
-  await expect(page.getByText('Dune', { exact: true })).toBeVisible();
+  await expect(page.getByText('Dune retail', { exact: true })).toBeVisible();
   await page.screenshot({ path: '/opt/cursor/artifacts/blocklist-light.png' });
 
   await theme(page, 'x_lights_out');

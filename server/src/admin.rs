@@ -222,14 +222,10 @@ async fn unblock(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<axum::http::StatusCode, ApiError> {
-    let deleted = sqlx::query("DELETE FROM release_blocklist WHERE id = ?")
+    sqlx::query("DELETE FROM release_blocklist WHERE id = ?")
         .bind(&id)
         .execute(&state.pool)
-        .await?
-        .rows_affected();
-    if deleted == 0 {
-        return Err(ApiError::NotFound);
-    }
+        .await?;
     Ok(axum::http::StatusCode::NO_CONTENT)
 }
 

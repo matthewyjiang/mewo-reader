@@ -61,7 +61,10 @@
 
 <Sheet label="Book file" onclose={() => { if (!busy) onclose(); }}>
   <section class="book-file">
-    <h2>{confirming ? 'Report wrong file?' : 'Book file'}</h2>
+    <h2>{confirming ? 'Delete this copy?' : 'Book file'}</h2>
+    {#if confirming}
+      <p>Replies, likes and reading progress on it are deleted for everyone who has it. Mewo then looks for another copy.</p>
+    {/if}
     {#if error}<p class="error" role="alert">{error}</p>{/if}
     <div class="actions">
       {#if confirming}
@@ -69,7 +72,7 @@
           Keep
         </button>
         <button class="pill danger" disabled={busy} onclick={() => { void report(); }}>
-          {busy ? 'Reporting…' : 'Report'}
+          {busy ? 'Deleting…' : 'Delete and search'}
         </button>
       {:else}
         <label class="pill">
@@ -104,6 +107,11 @@
 .book-file h2 {
   font-size: 1.25rem;
   line-height: 1.3;
+}
+
+.book-file p {
+  margin: 16px 0 0;
+  line-height: 1.4;
 }
 
 .actions {

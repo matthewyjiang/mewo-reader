@@ -13,7 +13,7 @@
   } = $props();
 
   let fileOpen = $state(false);
-  const canFile = $derived(book.mine || store.me?.isAdmin === true);
+  const canFile = $derived(!book.isSample && (book.mine || store.me?.isAdmin === true));
 
   async function share(shared: boolean): Promise<void> {
     try {
@@ -52,7 +52,7 @@
           aria-label={`Book file for ${book.title}`}
           onclick={() => { fileOpen = true; }}
         >
-          <Icon name="book" size={18} />
+          <Icon name="file" size={18} />
         </button>
       {/if}
       {#if book.mine}

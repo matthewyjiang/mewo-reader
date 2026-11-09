@@ -435,13 +435,20 @@ pub(crate) async fn replace_epub(
     headers: HeaderMap,
     multipart: Multipart,
 ) -> Result<Json<BookRecord>, ApiError> {
-    let owner: Option<String> = sqlx::query_scalar("SELECT user_id FROM books WHERE id = ?")
-        .bind(&id)
-        .fetch_optional(&state.pool)
-        .await?;
-    let Some(owner) = owner else {
+    let found: Option<(String, i64)> = sqlx::query_as(&format!(
+        "SELECT b.user_id, CASE WHEN {BOOK_VISIBLE_TO} THEN 1 ELSE 0 END
+         FROM books b WHERE b.id = ?"
+    ))
+    .bind(&authed.user_id)
+    .bind(&id)
+    .fetch_optional(&state.pool)
+    .await?;
+    let Some((owner, visible)) = found else {
         return Err(ApiError::NotFound);
     };
+    if !authed.is_admin && visible == 0 {
+        return Err(ApiError::NotFound);
+    }
     if owner != authed.user_id && !authed.is_admin {
         return Err(ApiError::Forbidden(
             "Only the person who added this book can replace its file.".into(),

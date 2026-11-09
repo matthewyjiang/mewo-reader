@@ -1011,7 +1011,7 @@ async fn cancel_dead_imports(
 /// The in-flight leader for this alias group, and the key stored on that row.
 /// A download already running wins over a newer request, matching the dedupe
 /// migration. Followers copy that key so they stay on the same row.
-async fn leader_of<'a, E>(
+pub(crate) async fn leader_of<'a, E>(
     executor: E,
     keys: &[String],
 ) -> Result<Option<(String, String)>, ApiError>

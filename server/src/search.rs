@@ -932,25 +932,49 @@ pub(crate) async fn store_feed_with(
         tracing::error!(error = %err, "could not encode posts.json");
         ApiError::Internal
     })?;
+    // The new epub lands in the book directory before the transaction, so a
+    // failed swap can delete it without having touched book.epub or posts.json.
+    let staged_epub = match update.epub {
+        Some(src) => {
+            let tmp = dir.join(format!("book-{}.tmp", Uuid::new_v4()));
+            tokio::fs::copy(src, &tmp).await?;
+            Some(tmp)
+        }
+        None => None,
+    };
+    let prepared = FeedUpdate {
+        remap: update.remap,
+        bump_feed_rev: update.bump_feed_rev,
+        parser_rev: update.parser_rev,
+        seen: update.seen,
+        epub: staged_epub.as_deref(),
+        replaced_at: update.replaced_at,
+    };
     // A startup backfill and a comment can want the write lock together.
     // One long wait loses: the writer times out, or backfill gives up and
     // leaves the book unindexed. Wait briefly, let the other statement
     // finish, and try the same book again.
     let mut attempt = 0;
-    loop {
-        match write_indexed(pool, dir, book_id, posts, &bytes, &update).await {
-            Ok(()) => return Ok(bytes),
+    let result = loop {
+        match write_indexed(pool, dir, book_id, posts, &bytes, &prepared).await {
+            Ok(()) => break Ok(bytes),
             Err(WriteFailure::Locked) if attempt + 1 < FEED_WRITE_ATTEMPTS => {
                 attempt += 1;
                 tokio::time::sleep(BACKFILL_PAUSE).await;
             }
             Err(WriteFailure::Locked) => {
                 tracing::error!(book_id, "posts index stayed busy");
-                return Err(ApiError::Internal);
+                break Err(ApiError::Internal);
             }
-            Err(WriteFailure::Other(err)) => return Err(err),
+            Err(WriteFailure::Other(err)) => break Err(err),
+        }
+    };
+    if result.is_err() {
+        if let Some(tmp) = &staged_epub {
+            let _ = tokio::fs::remove_file(tmp).await;
         }
     }
+    result
 }
 
 const POST_INSERT_BATCH: usize = 500;
@@ -1137,14 +1161,14 @@ async fn write_tx(
             return Err(WriteFailure::Other(stale_reparse()));
         }
     }
-    write_posts_file(dir, bytes)
-        .await
-        .map_err(WriteFailure::Other)?;
     if let Some(src) = update.epub {
-        tokio::fs::copy(src, dir.join("book.epub"))
+        tokio::fs::rename(src, dir.join("book.epub"))
             .await
             .map_err(|err| WriteFailure::Other(err.into()))?;
     }
+    write_posts_file(dir, bytes)
+        .await
+        .map_err(WriteFailure::Other)?;
     tx.commit().await.map_err(WriteFailure::sqlx)?;
     Ok(())
 }
@@ -1666,6 +1690,122 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(feed_rev, 1);
+    }
+
+    #[tokio::test]
+    async fn a_failed_swap_leaves_posts_json_and_the_epub() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let state = crate::prepare(crate::config::Config {
+            listen: "127.0.0.1:0".into(),
+            data_dir: tmp.path().to_path_buf(),
+            web_dir: None,
+            allow_signup: false,
+            max_epub_bytes: crate::config::MIN_EPUB_BYTES,
+            downloads_dir: None,
+            openlibrary_url: "https://openlibrary.org".into(),
+            auth: crate::config::AuthConfig::default(),
+            limits: crate::config::LimitsConfig {
+                max_parses: 1,
+                parse_wait: Duration::from_millis(10),
+                min_free_bytes: 0,
+            },
+        })
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO users (id, username, username_norm, password_hash, created_at)
+             VALUES ('owner', 'owner', 'owner', 'x', 1)",
+        )
+        .execute(&state.pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO books
+             (id, user_id, title, author, handle, imported_at, post_count, is_sample, shared, posts_indexed)
+             VALUES ('book', 'owner', 'Pain', 'Lewis', 'lewis', 1, 1, 0, 0, 1)",
+        )
+        .execute(&state.pool)
+        .await
+        .unwrap();
+        let dir = crate::library::book_dir(&state.data_dir, "owner", "book");
+        tokio::fs::create_dir_all(&dir).await.unwrap();
+        let posts_bytes = b"old-posts".to_vec();
+        let epub_bytes = b"old-epub".to_vec();
+        tokio::fs::write(dir.join("posts.json"), &posts_bytes)
+            .await
+            .unwrap();
+        tokio::fs::write(dir.join("book.epub"), &epub_bytes)
+            .await
+            .unwrap();
+        let posts = Posts {
+            posts: vec![post("0", PostKind::Body, "Hi")],
+        };
+        let missing = dir.join("missing.epub");
+        let err = store_feed_with(
+            &state.pool,
+            &dir,
+            "book",
+            &posts,
+            FeedUpdate {
+                remap: None,
+                bump_feed_rev: true,
+                parser_rev: crate::feed::PARSER_REV,
+                seen: Some((0, 0)),
+                epub: Some(&missing),
+                replaced_at: Some(1),
+            },
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(err, ApiError::Internal), "{err}");
+        assert_eq!(
+            tokio::fs::read(dir.join("posts.json")).await.unwrap(),
+            posts_bytes
+        );
+        assert_eq!(
+            tokio::fs::read(dir.join("book.epub")).await.unwrap(),
+            epub_bytes
+        );
+        let mut names = tokio::fs::read_dir(&dir).await.unwrap();
+        while let Some(entry) = names.next_entry().await.unwrap() {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            assert!(!name.contains(".tmp"), "{name}");
+        }
+
+        let fresh = dir.join("fresh.epub");
+        tokio::fs::write(&fresh, b"new-epub").await.unwrap();
+        let err = store_feed_with(
+            &state.pool,
+            &dir,
+            "book",
+            &posts,
+            FeedUpdate {
+                remap: None,
+                bump_feed_rev: true,
+                parser_rev: crate::feed::PARSER_REV,
+                seen: Some((9, 9)),
+                epub: Some(&fresh),
+                replaced_at: Some(2),
+            },
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(err, ApiError::Conflict(_)), "{err}");
+        assert_eq!(
+            tokio::fs::read(dir.join("posts.json")).await.unwrap(),
+            posts_bytes
+        );
+        assert_eq!(
+            tokio::fs::read(dir.join("book.epub")).await.unwrap(),
+            epub_bytes
+        );
+        let mut names = tokio::fs::read_dir(&dir).await.unwrap();
+        while let Some(entry) = names.next_entry().await.unwrap() {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            assert!(!name.contains(".tmp"), "{name}");
+        }
     }
 
     fn post(id: &str, kind: PostKind, text: &str) -> Post {

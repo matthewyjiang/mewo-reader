@@ -8387,10 +8387,24 @@ async fn put_epub(
     force: u8,
     epub: Option<&[u8]>,
 ) -> (StatusCode, Value) {
-    let fields: Vec<(&str, Option<&str>, &[u8])> = match epub {
+    put_replacement(app, token, id, force, epub, None).await
+}
+
+async fn put_replacement(
+    app: &axum::Router,
+    token: &str,
+    id: &str,
+    force: u8,
+    epub: Option<&[u8]>,
+    cover: Option<&[u8]>,
+) -> (StatusCode, Value) {
+    let mut fields: Vec<(&str, Option<&str>, &[u8])> = match epub {
         Some(bytes) => vec![("epub", Some("book.epub"), bytes)],
         None => vec![("title", None, b"nope")],
     };
+    if let Some(cover) = cover {
+        fields.push(("cover", Some("cover.jpg"), cover));
+    }
     let (content_type, body) = multipart(&fields);
     let req = Request::builder()
         .method("PUT")
@@ -8445,7 +8459,12 @@ async fn replace_keeps_anchors_until_the_file_is_too_different() {
     let before = std::fs::read(&epub_path).unwrap();
     assert_eq!(before, bytes);
 
-    let (status, body) = put_epub(&app, &carol, &id, 0, Some(&bytes)).await;
+    let (status, hidden) = put_epub(&app, &carol, &id, 0, Some(&bytes)).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{hidden}");
+    let (status, missing) = put_epub(&app, &carol, "missing-book", 0, Some(&bytes)).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{missing}");
+    assert_eq!(hidden, missing);
+    let (status, body) = put_epub(&app, &ted, &id, 0, Some(&bytes)).await;
     assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
     assert_eq!(std::fs::read(&epub_path).unwrap(), before);
     let (status, body) = put_epub(&app, &matt, &id, 0, None).await;
@@ -8518,6 +8537,71 @@ async fn replace_keeps_anchors_until_the_file_is_too_different() {
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(body["feedRev"], 3);
     assert_eq!(std::fs::read(&epub_path).unwrap(), bytes);
+}
+
+#[tokio::test]
+async fn replace_moves_the_cover_and_refuses_a_sample_or_an_unindexed_book() {
+    let (app, tmp) = app().await;
+    let matt = register(&app, "matt", "password1").await;
+    let bytes = common::epub();
+    let (status, book) = upload(
+        &app,
+        &matt,
+        "Pride",
+        "Jane",
+        &bytes,
+        Some(b"cover-a"),
+        false,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{book}");
+    let id = book["id"].as_str().unwrap().to_string();
+    let pool = open_db(tmp.path()).await;
+    let matt_id = user_id(&pool, "matt").await;
+    let epub_path = tmp
+        .path()
+        .join("books")
+        .join(&matt_id)
+        .join(&id)
+        .join("book.epub");
+    let before = std::fs::read(&epub_path).unwrap();
+
+    sqlx::query("UPDATE books SET posts_indexed = 0 WHERE id = ?")
+        .bind(&id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let (status, body) = put_epub(&app, &matt, &id, 0, Some(&bytes)).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_eq!(body["error"], "This book is still being prepared.");
+    assert_eq!(std::fs::read(&epub_path).unwrap(), before);
+
+    sqlx::query("UPDATE books SET posts_indexed = 1, is_sample = 1 WHERE id = ?")
+        .bind(&id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let (status, body) = put_epub(&app, &matt, &id, 0, Some(&bytes)).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_eq!(body["error"], "A sample can't be replaced.");
+    assert_eq!(std::fs::read(&epub_path).unwrap(), before);
+
+    sqlx::query("UPDATE books SET is_sample = 0 WHERE id = ?")
+        .bind(&id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let (status, body) = put_replacement(&app, &matt, &id, 0, Some(&bytes), Some(b"cover-b")).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let req = Request::builder()
+        .method("GET")
+        .uri(format!("/v1/books/{id}/cover"))
+        .header(header::AUTHORIZATION, format!("Bearer {matt}"))
+        .body(Body::empty())
+        .unwrap();
+    let (status, cover) = send(&app, req).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(cover.as_ref(), b"cover-b");
 }
 
 async fn post_check(

@@ -58,7 +58,7 @@
   <ul class="block-list">
     {#each items as row (row.id)}
       <li class="block-row">
-        <span class="title">{row.bookTitle || row.title}</span>
+        <span class="title truncate">{row.title}</span>
         <button
           class="pill"
           disabled={pending === row.id}
@@ -74,6 +74,8 @@
 <style>
 .block-list {
   list-style: none;
+  padding: 0;
+  margin: 0;
 }
 
 .block-row {

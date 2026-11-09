@@ -5082,14 +5082,7 @@ async fn aliases_dry_run_prints_the_plan_and_merge_keeps_one_copy() {
         21,
     )
     .await;
-    sqlx::query(
-        "INSERT INTO work_aliases (alias_key, canonical_key, resolved_at) VALUES (?, ?, 1)",
-    )
-    .bind(OLD_WORK)
-    .bind(LIVE_WORK)
-    .execute(&world.state.pool)
-    .await
-    .unwrap();
+    arm_merged(&world).await;
     sqlx::query(
         "INSERT INTO comments (id, user_id, book_id, post_id, text, created_at)
          VALUES ('kept-reply', ?, 'newer', '0', 'anchored', 1),
@@ -5155,11 +5148,21 @@ async fn aliases_dry_run_prints_the_plan_and_merge_keeps_one_copy() {
         .await
         .unwrap();
     assert_eq!(still, 2);
+    let aliases: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM work_aliases")
+        .fetch_one(&world.state.pool)
+        .await
+        .unwrap();
+    assert_eq!(aliases, 0);
 
     let (code, out, err) = run_aliases(&world, true, true).await;
     assert_eq!(code, 0, "{err}");
     assert!(out.contains("dry-run"), "{out}");
     assert_eq!(book_count(&world.state.pool).await, 2);
+    let aliases: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM work_aliases")
+        .fetch_one(&world.state.pool)
+        .await
+        .unwrap();
+    assert_eq!(aliases, 0);
 
     let (code, out, err) = run_aliases(&world, false, true).await;
     assert_eq!(code, 0, "{err}");
@@ -5223,6 +5226,11 @@ async fn aliases_dry_run_prints_the_plan_and_merge_keeps_one_copy() {
         .await
         .unwrap();
     assert_eq!(dup, "canceled");
+    let aliases: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM work_aliases")
+        .fetch_one(&world.state.pool)
+        .await
+        .unwrap();
+    assert_eq!(aliases, 1);
 }
 
 fn dune_releases(origin: &str) -> Vec<Value> {
@@ -5375,7 +5383,7 @@ async fn wrong_file_blocks_the_release_and_keeps_sharing() {
         Some(&world.token),
     )
     .await;
-    assert_eq!(status, StatusCode::NOT_FOUND, "{missing}");
+    assert_eq!(status, StatusCode::NO_CONTENT, "{missing}");
     let blocked: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM release_blocklist")
         .fetch_one(&world.state.pool)
         .await
@@ -5448,6 +5456,12 @@ async fn wrong_file_after_the_book_is_passed_on() {
 async fn wrong_file_is_owner_or_admin_and_refuses_leave_the_book() {
     let world = world().await;
     let (book_id, ada) = imported_pair(&world).await;
+    let stranger = account(&world, "carol").await;
+    let (status, hidden) = report_wrong(&world, &stranger.token, &book_id, true).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{hidden}");
+    let (status, missing) = report_wrong(&world, &stranger.token, "missing-book", true).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{missing}");
+    assert_eq!(hidden, missing);
     share_book(&world, &book_id).await;
     let books = book_count(&world.state.pool).await;
     let (status, body) = report_wrong(&world, &ada.token, &book_id, true).await;
@@ -5487,6 +5501,7 @@ async fn wrong_file_is_owner_or_admin_and_refuses_leave_the_book() {
         .unwrap();
     let (status, body) = report_wrong(&world, &ada.token, &book_id, true).await;
     assert_eq!(status, StatusCode::ACCEPTED, "{body}");
+    assert_eq!(body["requester"], "matt");
     assert_eq!(book_count(&world.state.pool).await, books - 1);
     let private_copy: i64 =
         sqlx::query_scalar("SELECT want_shared FROM book_requests WHERE id = ?")
@@ -5496,6 +5511,257 @@ async fn wrong_file_is_owner_or_admin_and_refuses_leave_the_book() {
             .unwrap();
     // share_book set it shared, then we turned requests off and back on. Still shared.
     assert_eq!(private_copy, 1);
+    let leader: String = sqlx::query_scalar("SELECT user_id FROM book_requests WHERE id = ?")
+        .bind(body["id"].as_str().unwrap())
+        .fetch_one(&world.state.pool)
+        .await
+        .unwrap();
+    assert_eq!(leader, world.user_id);
+    let follows: String = sqlx::query_scalar(
+        "SELECT follows FROM book_requests WHERE user_id = ? AND state = 'requested'",
+    )
+    .bind(&ada.id)
+    .fetch_one(&world.state.pool)
+    .await
+    .unwrap();
+    assert_eq!(follows, body["id"].as_str().unwrap());
+}
+
+#[tokio::test]
+async fn a_private_copy_merged_into_a_shared_book_stays_hidden() {
+    let world = world().await;
+    let carol = account(&world, "carol").await;
+    let older = "11111111-1111-4111-8111-111111111111";
+    let newer = "22222222-2222-4222-8222-222222222222";
+    shelf_copy(&world.state.pool, older, &world.user_id, 10).await;
+    shelf_copy(&world.state.pool, newer, &world.user_id, 20).await;
+    sqlx::query("UPDATE books SET shared = 1 WHERE id = ?")
+        .bind(older)
+        .execute(&world.state.pool)
+        .await
+        .unwrap();
+    held_request(
+        &world.state.pool,
+        "req-old",
+        &world.user_id,
+        OLD_WORK,
+        older,
+        10,
+    )
+    .await;
+    held_request(
+        &world.state.pool,
+        "req-new",
+        &world.user_id,
+        LIVE_WORK,
+        newer,
+        20,
+    )
+    .await;
+    sqlx::query(
+        "INSERT INTO work_aliases (alias_key, canonical_key, resolved_at) VALUES (?, ?, 1)",
+    )
+    .bind(OLD_WORK)
+    .bind(LIVE_WORK)
+    .execute(&world.state.pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO comments (id, user_id, book_id, post_id, text, created_at)
+         VALUES ('owner-reply', ?, ?, '0', 'while private', 1)",
+    )
+    .bind(&world.user_id)
+    .bind(newer)
+    .execute(&world.state.pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO reposts (user_id, book_id, post_id, created_at) VALUES (?, ?, '1', 2)",
+    )
+    .bind(&world.user_id)
+    .bind(newer)
+    .execute(&world.state.pool)
+    .await
+    .unwrap();
+    let before: (i64, i64) = sqlx::query_as(
+        "SELECT
+            (SELECT private FROM comments WHERE id = 'owner-reply'),
+            (SELECT private FROM reposts WHERE book_id = ?)",
+    )
+    .bind(newer)
+    .fetch_one(&world.state.pool)
+    .await
+    .unwrap();
+    assert_eq!(before, (0, 0));
+
+    let (code, out, err) = run_aliases(&world, false, true).await;
+    assert_eq!(code, 0, "{err}{out}");
+    let flags: (i64, i64) = sqlx::query_as(
+        "SELECT
+            (SELECT private FROM comments WHERE id = 'owner-reply'),
+            (SELECT private FROM reposts WHERE user_id = ?)",
+    )
+    .bind(&world.user_id)
+    .fetch_one(&world.state.pool)
+    .await
+    .unwrap();
+    assert_eq!(flags, (1, 1));
+    let (status, seen) = empty_req(
+        &world.app,
+        "GET",
+        &format!("/v1/books/{older}/comments"),
+        Some(&carol.token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{seen}");
+    assert_eq!(seen["counts"], json!({}));
+    assert_eq!(seen["reposts"], json!({}));
+    let (status, mine) = empty_req(
+        &world.app,
+        "GET",
+        &format!("/v1/books/{older}/comments"),
+        Some(&world.token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{mine}");
+    assert_eq!(mine["counts"]["0"], 1);
+    assert_eq!(mine["reposts"]["1"], 1);
+}
+
+#[tokio::test]
+async fn merging_two_private_copies_stays_hidden_after_the_survivor_is_shared() {
+    let world = world().await;
+    let carol = account(&world, "carol").await;
+    let older = "11111111-1111-4111-8111-111111111111";
+    let newer = "22222222-2222-4222-8222-222222222222";
+    shelf_copy(&world.state.pool, older, &world.user_id, 10).await;
+    shelf_copy(&world.state.pool, newer, &world.user_id, 20).await;
+    held_request(
+        &world.state.pool,
+        "req-old",
+        &world.user_id,
+        OLD_WORK,
+        older,
+        10,
+    )
+    .await;
+    held_request(
+        &world.state.pool,
+        "req-new",
+        &world.user_id,
+        LIVE_WORK,
+        newer,
+        20,
+    )
+    .await;
+    sqlx::query(
+        "INSERT INTO work_aliases (alias_key, canonical_key, resolved_at) VALUES (?, ?, 1)",
+    )
+    .bind(OLD_WORK)
+    .bind(LIVE_WORK)
+    .execute(&world.state.pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO comments (id, user_id, book_id, post_id, text, created_at)
+         VALUES ('owner-reply', ?, ?, '0', 'still private', 1)",
+    )
+    .bind(&world.user_id)
+    .bind(newer)
+    .execute(&world.state.pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO reposts (user_id, book_id, post_id, created_at) VALUES (?, ?, '1', 2)",
+    )
+    .bind(&world.user_id)
+    .bind(newer)
+    .execute(&world.state.pool)
+    .await
+    .unwrap();
+
+    let (code, out, err) = run_aliases(&world, false, true).await;
+    assert_eq!(code, 0, "{err}{out}");
+    let (status, shared) = json_req(
+        &world.app,
+        "PATCH",
+        &format!("/v1/books/{older}"),
+        Some(&world.token),
+        json!({ "shared": true }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{shared}");
+    assert_eq!(shared["shared"], true);
+    let (status, seen) = empty_req(
+        &world.app,
+        "GET",
+        &format!("/v1/books/{older}/comments"),
+        Some(&carol.token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{seen}");
+    assert_eq!(seen["counts"], json!({}));
+    assert_eq!(seen["reposts"], json!({}));
+}
+
+#[tokio::test]
+async fn wrong_file_refuses_a_replaced_book() {
+    let world = world().await;
+    let (book_id, _) = imported_pair(&world).await;
+    let books = book_count(&world.state.pool).await;
+    sqlx::query("UPDATE books SET replaced_at = 5 WHERE id = ?")
+        .bind(&book_id)
+        .execute(&world.state.pool)
+        .await
+        .unwrap();
+    let (status, body) = report_wrong(&world, &world.token, &book_id, true).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_eq!(
+        body["error"],
+        "This file was replaced, so it can't be reported."
+    );
+    assert_eq!(book_count(&world.state.pool).await, books);
+    assert!(epub_file(&world, &world.user_id, &book_id).is_file());
+    let blocked: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM release_blocklist")
+        .fetch_one(&world.state.pool)
+        .await
+        .unwrap();
+    assert_eq!(blocked, 0);
+}
+
+#[tokio::test]
+async fn an_admin_report_stays_with_the_owner() {
+    let world = world().await;
+    let (book_id, _) = imported_pair(&world).await;
+    let carol = account(&world, "carol").await;
+    sqlx::query("UPDATE users SET is_admin = 1 WHERE id = ?")
+        .bind(&carol.id)
+        .execute(&world.state.pool)
+        .await
+        .unwrap();
+    let (status, body) = report_wrong(&world, &carol.token, &book_id, true).await;
+    assert_eq!(status, StatusCode::ACCEPTED, "{body}");
+    assert_eq!(body["requester"], "matt");
+    let leader: String = sqlx::query_scalar("SELECT user_id FROM book_requests WHERE id = ?")
+        .bind(body["id"].as_str().unwrap())
+        .fetch_one(&world.state.pool)
+        .await
+        .unwrap();
+    assert_eq!(leader, world.user_id);
+    let carol_rows: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM book_requests WHERE user_id = ? AND state = 'requested'",
+    )
+    .bind(&carol.id)
+    .fetch_one(&world.state.pool)
+    .await
+    .unwrap();
+    assert_eq!(carol_rows, 0);
+    let want: i64 = sqlx::query_scalar("SELECT want_shared FROM book_requests WHERE id = ?")
+        .bind(body["id"].as_str().unwrap())
+        .fetch_one(&world.state.pool)
+        .await
+        .unwrap();
+    assert_eq!(want, 0);
 }
 
 async fn detail_phase(world: &World) -> String {

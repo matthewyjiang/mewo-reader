@@ -1,15 +1,17 @@
 //! A reader says the imported file is the wrong book.
 //!
 //! The release goes on the blocklist, every hold of that copy is canceled, and
-//! the same people get one new request: the reporter leads, the others follow.
-//! The new copy keeps the sharing the old one had. Nothing is deleted when
-//! requests are off, the caller cannot act, or the new request cannot start.
+//! the owner leads one new request. Other holders follow. An admin who does
+//! not hold the book gets no row. The new copy keeps the sharing the old one
+//! had. Nothing is deleted when requests are off, the caller cannot act, or
+//! the new request cannot start.
 
 use crate::auth::Authed;
 use crate::db::now_ms;
 use crate::error::ApiError;
 use crate::library;
 use crate::requests::pick::title_norm;
+use crate::visibility::BOOK_VISIBLE_TO;
 use crate::AppState;
 use sqlx::{Connection, SqlitePool};
 use uuid::Uuid;
@@ -30,9 +32,17 @@ pub(crate) async fn wrong_file(
     let Some(book) = load_book(&state.pool, book_id).await? else {
         return Err(ApiError::NotFound);
     };
+    if !authed.is_admin && !visible_to(&state.pool, &authed.user_id, book_id).await? {
+        return Err(ApiError::NotFound);
+    }
     if book.owner_id != authed.user_id && !authed.is_admin {
         return Err(ApiError::Forbidden(
             "Only the person who added this book can report a wrong file.".into(),
+        ));
+    }
+    if book.replaced_at.is_some() {
+        return Err(ApiError::Conflict(
+            "This file was replaced, so it can't be reported.".into(),
         ));
     }
     let Some(source) = load_source(&state.pool, book_id).await? else {
@@ -59,14 +69,14 @@ pub(crate) async fn wrong_file(
     let mut conn = state.pool.acquire().await?;
     let mut tx = conn.begin_with("BEGIN IMMEDIATE").await?;
     let keys = aliases::group(&mut *tx, &canonical).await?;
-    if active_for(&mut tx, &authed.user_id, &keys.all).await? {
+    if active_for(&mut tx, &book.owner_id, &keys.all).await? {
         return Err(ApiError::Conflict(
             "You already have a request for this book.".into(),
         ));
     }
-    let existing = leader_of(&mut tx, &keys.all).await?;
+    let existing = super::leader_of(&mut *tx, &keys.all).await?;
     let leading = existing.is_none();
-    if leading && at_cap(&mut tx, &authed.user_id).await? {
+    if leading && at_cap(&mut tx, &book.owner_id).await? {
         return Err(ApiError::Conflict(
             "You have 5 requests in progress.".into(),
         ));
@@ -85,7 +95,7 @@ pub(crate) async fn wrong_file(
         },
     )
     .await?;
-    let holders = holders_of(&mut tx, book_id, &authed.user_id, &book.owner_id).await?;
+    let holders = holders_of(&mut tx, book_id, &book.owner_id).await?;
     let now = now_ms();
     sqlx::query(
         "UPDATE book_requests
@@ -98,10 +108,10 @@ pub(crate) async fn wrong_file(
     .bind(book_id)
     .execute(&mut *tx)
     .await?;
-    let (leader_id, leader_key) = if let Some((id, key)) = existing {
-        let id = insert_follower(
+    let (owner_request, leader_id, leader_key) = if let Some((id, key)) = existing {
+        let owner_request = insert_follower(
             &mut tx,
-            &authed.user_id,
+            &book.owner_id,
             &key,
             &id,
             &source,
@@ -109,23 +119,21 @@ pub(crate) async fn wrong_file(
             now,
         )
         .await?;
-        (id, key)
+        (owner_request, id, key)
     } else {
         let id = insert_leader(
             &mut tx,
-            &authed.user_id,
+            &book.owner_id,
             &keys.canonical,
             &source,
             book.shared,
             now,
         )
         .await?;
-        (id, keys.canonical)
+        let leader_id = id.clone();
+        (id, leader_id, keys.canonical)
     };
     for user_id in holders {
-        if user_id == authed.user_id {
-            continue;
-        }
         if active_for(&mut tx, &user_id, &keys.all).await? {
             continue;
         }
@@ -159,7 +167,7 @@ pub(crate) async fn wrong_file(
     if leading {
         state.worker.notify_one();
     }
-    load_request(&state.pool, &leader_id).await
+    load_request(&state.pool, &owner_request).await
 }
 
 struct BookMeta {
@@ -168,25 +176,38 @@ struct BookMeta {
     title: String,
     author: String,
     shared: bool,
+    replaced_at: Option<i64>,
 }
 
 async fn load_book(pool: &SqlitePool, book_id: &str) -> Result<Option<BookMeta>, ApiError> {
-    let row: Option<(String, String, String, String, i64)> = sqlx::query_as(
-        "SELECT user_id, COALESCE(files_user_id, user_id), title, author, shared
+    let row: Option<(String, String, String, String, i64, Option<i64>)> = sqlx::query_as(
+        "SELECT user_id, COALESCE(files_user_id, user_id), title, author, shared, replaced_at
          FROM books WHERE id = ?",
     )
     .bind(book_id)
     .fetch_optional(pool)
     .await?;
-    Ok(
-        row.map(|(owner_id, files_owner, title, author, shared)| BookMeta {
+    Ok(row.map(
+        |(owner_id, files_owner, title, author, shared, replaced_at)| BookMeta {
             owner_id,
             files_owner,
             title,
             author,
             shared: shared != 0,
-        }),
-    )
+            replaced_at,
+        },
+    ))
+}
+
+async fn visible_to(pool: &SqlitePool, user_id: &str, book_id: &str) -> Result<bool, ApiError> {
+    let hit: Option<i64> = sqlx::query_scalar(&format!(
+        "SELECT 1 FROM books b WHERE b.id = ? AND {BOOK_VISIBLE_TO}"
+    ))
+    .bind(book_id)
+    .bind(user_id)
+    .fetch_optional(pool)
+    .await?;
+    Ok(hit.is_some())
 }
 
 #[derive(sqlx::FromRow)]
@@ -255,23 +276,6 @@ async fn at_cap(
     Ok(active >= ACTIVE_CAP)
 }
 
-async fn leader_of(
-    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
-    keys: &[String],
-) -> Result<Option<(String, String)>, ApiError> {
-    let listed = serde_json::to_string(keys).unwrap_or_else(|_| "[]".into());
-    let row = sqlx::query_as(
-        "SELECT id, work_key FROM book_requests
-         WHERE work_key IN (SELECT value FROM json_each(?))
-           AND state IN ('requested', 'downloading') AND follows IS NULL
-         LIMIT 1",
-    )
-    .bind(listed)
-    .fetch_optional(&mut **tx)
-    .await?;
-    Ok(row)
-}
-
 struct Block<'a> {
     guid: &'a str,
     indexer: &'a str,
@@ -333,20 +337,16 @@ fn user_conflict(err: &sqlx::Error) -> bool {
 async fn holders_of(
     tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
     book_id: &str,
-    reporter: &str,
     owner_id: &str,
 ) -> Result<Vec<String>, ApiError> {
-    let mut users: Vec<String> = sqlx::query_scalar(
+    let users = sqlx::query_scalar(
         "SELECT DISTINCT user_id FROM book_requests
          WHERE book_id = ? AND state = 'imported' AND user_id <> ?",
     )
     .bind(book_id)
-    .bind(reporter)
+    .bind(owner_id)
     .fetch_all(&mut **tx)
     .await?;
-    if owner_id != reporter && !users.iter().any(|id| id == owner_id) {
-        users.push(owner_id.to_string());
-    }
     Ok(users)
 }
 

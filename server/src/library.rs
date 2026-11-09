@@ -239,14 +239,23 @@ async fn replace_staged(
     staged: &Staged,
     force: bool,
 ) -> Result<Replaced, ApiError> {
-    let files_owner: Option<String> =
-        sqlx::query_scalar("SELECT COALESCE(files_user_id, user_id) FROM books WHERE id = ?")
-            .bind(book_id)
-            .fetch_optional(&state.pool)
-            .await?;
-    let Some(files_owner) = files_owner else {
+    let found: Option<(String, i64, i64)> = sqlx::query_as(
+        "SELECT COALESCE(files_user_id, user_id), posts_indexed, is_sample FROM books WHERE id = ?",
+    )
+    .bind(book_id)
+    .fetch_optional(&state.pool)
+    .await?;
+    let Some((files_owner, indexed, sample)) = found else {
         return Err(ApiError::NotFound);
     };
+    if indexed != 1 {
+        return Err(ApiError::Conflict(
+            "This book is still being prepared.".into(),
+        ));
+    }
+    if sample != 0 {
+        return Err(ApiError::Conflict("A sample can't be replaced.".into()));
+    }
     let (old_posts, feed_rev, parser_rev) = search::load_seen(&state.pool, book_id).await?;
     let old_keys: Vec<crate::anchors::PostKey> = old_posts.iter().map(Into::into).collect();
     let new_keys: Vec<crate::anchors::PostKey> =
@@ -276,6 +285,12 @@ async fn replace_staged(
         },
     )
     .await?;
+    let cover = staged.temp_dir.join("cover.jpg");
+    match tokio::fs::rename(&cover, dir.join("cover.jpg")).await {
+        Ok(()) => {}
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+        Err(err) => return Err(err.into()),
+    }
     let _ = tokio::fs::remove_dir_all(&staged.temp_dir).await;
     let book = book_record(state, owner.user_id, book_id).await?;
     Ok(Replaced {
