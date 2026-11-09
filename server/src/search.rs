@@ -831,6 +831,10 @@ pub(crate) struct FeedUpdate<'a> {
     /// `(feed_rev, parser_rev)` read with the posts this diff was built from.
     /// The write matches both and refuses when another reparse already won.
     pub seen: Option<(i64, i64)>,
+    /// Swap this file onto `book.epub` in the same transaction as the feed.
+    pub epub: Option<&'a Path>,
+    /// Set when a reader uploaded a replacement.
+    pub replaced_at: Option<i64>,
 }
 
 impl FeedUpdate<'static> {
@@ -840,6 +844,8 @@ impl FeedUpdate<'static> {
             bump_feed_rev: false,
             parser_rev: crate::feed::PARSER_REV,
             seen: None,
+            epub: None,
+            replaced_at: None,
         }
     }
 
@@ -850,8 +856,53 @@ impl FeedUpdate<'static> {
             bump_feed_rev: false,
             parser_rev: 0,
             seen: None,
+            epub: None,
+            replaced_at: None,
         }
     }
+}
+
+#[derive(sqlx::FromRow)]
+struct SeenPost {
+    idx: i64,
+    kind: String,
+    text: String,
+    chapter: String,
+}
+
+/// Posts and the book revisions, from one snapshot. The write later matches
+/// those revisions, so a second rewrite built on the same rows refuses.
+pub(crate) async fn load_seen(
+    pool: &SqlitePool,
+    book_id: &str,
+) -> Result<(Vec<Post>, i64, i64), ApiError> {
+    let mut tx = pool.begin().await?;
+    let (feed_rev, parser_rev): (i64, i64) =
+        sqlx::query_as("SELECT feed_rev, parser_rev FROM books WHERE id = ?")
+            .bind(book_id)
+            .fetch_one(&mut *tx)
+            .await?;
+    let rows = sqlx::query_as::<_, SeenPost>(
+        "SELECT idx, kind, text, chapter FROM posts WHERE book_id = ? ORDER BY idx ASC",
+    )
+    .bind(book_id)
+    .fetch_all(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    let mut posts = Vec::with_capacity(rows.len());
+    for (expected, row) in rows.into_iter().enumerate() {
+        if row.idx != expected as i64 {
+            tracing::error!(book_id, idx = row.idx, expected, "post indexes have a gap");
+            return Err(ApiError::Internal);
+        }
+        posts.push(Post {
+            id: row.idx.to_string(),
+            kind: parse_kind(&row.kind)?,
+            text: row.text,
+            chapter: row.chapter,
+        });
+    }
+    Ok((posts, feed_rev, parser_rev))
 }
 
 pub(crate) fn stale_reparse() -> ApiError {
@@ -1064,6 +1115,14 @@ async fn write_tx(
         .execute(&mut *tx)
         .await
         .map_err(WriteFailure::sqlx)?;
+    if let Some(at) = update.replaced_at {
+        sqlx::query("UPDATE books SET replaced_at = ? WHERE id = ?")
+            .bind(at)
+            .bind(book_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(WriteFailure::sqlx)?;
+    }
     if update.seen.is_some() && updated.rows_affected() != 1 {
         // A bump always changes feed_rev, so 0 rows means the WHERE missed.
         // Without a bump, SQLite also reports 0 when the SET matches the row.
@@ -1081,6 +1140,11 @@ async fn write_tx(
     write_posts_file(dir, bytes)
         .await
         .map_err(WriteFailure::Other)?;
+    if let Some(src) = update.epub {
+        tokio::fs::copy(src, dir.join("book.epub"))
+            .await
+            .map_err(|err| WriteFailure::Other(err.into()))?;
+    }
     tx.commit().await.map_err(WriteFailure::sqlx)?;
     Ok(())
 }
@@ -1549,6 +1613,8 @@ mod tests {
             bump_feed_rev: true,
             parser_rev: crate::feed::PARSER_REV,
             seen: Some((0, 0)),
+            epub: None,
+            replaced_at: None,
         };
         store_feed_with(
             &state.pool,

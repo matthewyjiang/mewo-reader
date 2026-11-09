@@ -297,16 +297,7 @@ pub async fn upload_book(
     headers: HeaderMap,
     multipart: Multipart,
 ) -> Result<Json<BookRecord>, ApiError> {
-    let max = crate::settings::load(&state.pool).await?.max_epub_bytes;
-    let limit = request_body_limit(max) as u64;
-    let declared = content_length(&headers);
-    if declared.is_some_and(|n| n > limit) {
-        return Err(ApiError::RequestTooLarge);
-    }
-    state
-        .disk
-        .require(&state.data_dir, declared.unwrap_or(max))?;
-    let staged = read_upload(&state, multipart, max, Budget::new(max)).await?;
+    let staged = read_checked_upload(&state, &headers, multipart).await?;
     let book = library::import(
         &state,
         &library::Owner {
@@ -428,6 +419,47 @@ pub async fn wrong_file(
     }
     let request = crate::requests::reopen::wrong_file(&state, &authed, &id).await?;
     Ok((axum::http::StatusCode::ACCEPTED, Json(request)))
+}
+
+#[derive(Deserialize)]
+pub(crate) struct ForceQuery {
+    #[serde(default)]
+    force: u8,
+}
+
+pub(crate) async fn replace_epub(
+    State(state): State<AppState>,
+    authed: Authed,
+    Path(id): Path<String>,
+    Query(query): Query<ForceQuery>,
+    headers: HeaderMap,
+    multipart: Multipart,
+) -> Result<Json<BookRecord>, ApiError> {
+    let owner: Option<String> = sqlx::query_scalar("SELECT user_id FROM books WHERE id = ?")
+        .bind(&id)
+        .fetch_optional(&state.pool)
+        .await?;
+    let Some(owner) = owner else {
+        return Err(ApiError::NotFound);
+    };
+    if owner != authed.user_id && !authed.is_admin {
+        return Err(ApiError::Forbidden(
+            "Only the person who added this book can replace its file.".into(),
+        ));
+    }
+    let staged = read_checked_upload(&state, &headers, multipart).await?;
+    let replaced = library::replace(
+        &state,
+        &library::Owner {
+            user_id: &authed.user_id,
+            username: &authed.username,
+        },
+        &id,
+        staged,
+        query.force == 1,
+    )
+    .await?;
+    Ok(Json(replaced.book))
 }
 
 pub async fn download_epub(
@@ -1699,6 +1731,23 @@ impl Budget {
         self.left -= n;
         Ok(())
     }
+}
+
+async fn read_checked_upload(
+    state: &AppState,
+    headers: &HeaderMap,
+    multipart: Multipart,
+) -> Result<Staged, ApiError> {
+    let max = crate::settings::load(&state.pool).await?.max_epub_bytes;
+    let limit = request_body_limit(max) as u64;
+    let declared = content_length(headers);
+    if declared.is_some_and(|n| n > limit) {
+        return Err(ApiError::RequestTooLarge);
+    }
+    state
+        .disk
+        .require(&state.data_dir, declared.unwrap_or(max))?;
+    read_upload(state, multipart, max, Budget::new(max)).await
 }
 
 async fn read_upload(

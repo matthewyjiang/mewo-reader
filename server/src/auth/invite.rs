@@ -1020,7 +1020,8 @@ mod tests {
         assert!(ten < eleven);
         assert_eq!(listed[ten].1, "reparse");
         assert_eq!(listed[eleven].1, "invites");
-        assert_eq!(listed.last().unwrap().0, 11);
+        assert_eq!(listed.last().unwrap().0, 12);
+        assert_eq!(listed.last().unwrap().1, "replace blocklist");
 
         let (_tmp, fresh) = file_pool(1).await;
         assert_invites(&fresh).await;
@@ -1070,8 +1071,13 @@ mod tests {
         assert_eq!(ten.1, "reparse");
         assert_eq!(eleven.1, "invites");
         assert_eq!((ten.2, eleven.2), (1, 1));
+        let twelve = rows.iter().find(|row| row.0 == 12).unwrap();
+        assert_eq!(twelve.1, "replace blocklist");
+        assert_eq!(twelve.2, 1);
         assert!(rows.windows(2).all(|pair| pair[0].0 < pair[1].0));
-        assert_eq!(rows.last().unwrap().0, 11);
+        assert_eq!(rows.last().unwrap().0, 12);
+        assert!(table_exists(pool, "release_blocklist").await);
+        assert!(table_exists(pool, "work_aliases").await);
         assert!(table_exists(pool, "invites").await);
         let index: i64 = sqlx::query_scalar(
             "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = 'invites_created'",

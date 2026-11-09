@@ -133,6 +133,29 @@ export class HostedClient {
     return this.json(this.bookPath(id, '/wrong-file'), 'POST', { confirm: true });
   }
 
+  replaceEpub(id: string, epub: File, force: boolean): Promise<BookRecord> {
+    const token = this.token();
+    const path = `${this.bookPath(id, '/epub')}?force=${force ? 1 : 0}`;
+    return new Promise((resolve, reject) => {
+      const xhr = new XMLHttpRequest();
+      xhr.open('PUT', `/v1${path}`);
+      if (token) xhr.setRequestHeader('Authorization', `Bearer ${token}`);
+      xhr.onerror = () => reject(new ApiError(0, 'Upload failed. Check your connection and try again.'));
+      xhr.onload = () => {
+        try {
+          if (xhr.status < 200 || xhr.status >= 300) this.fail(xhr.status, xhr.responseText, token);
+          resolve(JSON.parse(xhr.responseText) as BookRecord);
+        } catch (error) {
+          reject(error instanceof ApiError
+            ? error : new ApiError(xhr.status, 'Could not read the server response.'));
+        }
+      };
+      const body = new FormData();
+      body.append('epub', epub);
+      xhr.send(body);
+    });
+  }
+
   async library(): Promise<BookRecord[]> {
     return (await this.json<{ books: BookRecord[] }>('/library')).books;
   }

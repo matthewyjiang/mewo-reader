@@ -73,14 +73,16 @@ pub(crate) async fn wrong_file(
     }
     insert_block(
         &mut tx,
-        &guid,
-        source.indexer.as_deref().unwrap_or(""),
-        &release_title,
-        release_size,
-        &source.work_key,
-        &book.title,
-        &book.author,
-        &authed.user_id,
+        &Block {
+            guid: &guid,
+            indexer: source.indexer.as_deref().unwrap_or(""),
+            title: &release_title,
+            size: release_size,
+            work_key: &source.work_key,
+            book_title: &book.title,
+            book_author: &book.author,
+            blocked_by: &authed.user_id,
+        },
     )
     .await?;
     let holders = holders_of(&mut tx, book_id, &authed.user_id, &book.owner_id).await?;
@@ -187,6 +189,7 @@ async fn load_book(pool: &SqlitePool, book_id: &str) -> Result<Option<BookMeta>,
     )
 }
 
+#[derive(sqlx::FromRow)]
 struct Source {
     work_key: String,
     title: String,
@@ -200,47 +203,15 @@ struct Source {
 }
 
 async fn load_source(pool: &SqlitePool, book_id: &str) -> Result<Option<Source>, ApiError> {
-    let row: Option<(
-        String,
-        String,
-        String,
-        Option<i64>,
-        Option<i64>,
-        Option<String>,
-        Option<i64>,
-        Option<String>,
-        String,
-    )> = sqlx::query_as(
+    sqlx::query_as(
         "SELECT work_key, title, author, year, cover_id, release_title, release_size,
                 indexer, tried_guids
          FROM book_requests WHERE id = ?",
     )
     .bind(book_id)
     .fetch_optional(pool)
-    .await?;
-    Ok(row.map(
-        |(
-            work_key,
-            title,
-            author,
-            year,
-            cover_id,
-            release_title,
-            release_size,
-            indexer,
-            tried_guids,
-        )| Source {
-            work_key,
-            title,
-            author,
-            year,
-            cover_id,
-            release_title,
-            release_size,
-            indexer,
-            tried_guids,
-        },
-    ))
+    .await
+    .map_err(Into::into)
 }
 
 fn last_guid(raw: &str) -> Option<String> {
@@ -301,16 +272,20 @@ async fn leader_of(
     Ok(row)
 }
 
+struct Block<'a> {
+    guid: &'a str,
+    indexer: &'a str,
+    title: &'a str,
+    size: i64,
+    work_key: &'a str,
+    book_title: &'a str,
+    book_author: &'a str,
+    blocked_by: &'a str,
+}
+
 async fn insert_block(
     tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
-    guid: &str,
-    indexer: &str,
-    title: &str,
-    size: i64,
-    work_key: &str,
-    book_title: &str,
-    book_author: &str,
-    blocked_by: &str,
+    block: &Block<'_>,
 ) -> Result<(), ApiError> {
     sqlx::query(
         "INSERT INTO release_blocklist (
@@ -319,15 +294,15 @@ async fn insert_block(
          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(Uuid::new_v4().to_string())
-    .bind(guid)
-    .bind(indexer)
-    .bind(title)
-    .bind(title_norm(title))
-    .bind(size)
-    .bind(work_key)
-    .bind(book_title)
-    .bind(book_author)
-    .bind(blocked_by)
+    .bind(block.guid)
+    .bind(block.indexer)
+    .bind(block.title)
+    .bind(title_norm(block.title))
+    .bind(block.size)
+    .bind(block.work_key)
+    .bind(block.book_title)
+    .bind(block.book_author)
+    .bind(block.blocked_by)
     .bind(now_ms())
     .execute(&mut **tx)
     .await
@@ -439,24 +414,27 @@ async fn insert_follower(
     Ok(id)
 }
 
+#[derive(sqlx::FromRow)]
+struct RequestRecord {
+    id: String,
+    work_key: String,
+    title: String,
+    author: String,
+    year: Option<i64>,
+    cover_id: Option<i64>,
+    state: String,
+    progress: i64,
+    error: Option<String>,
+    book_id: Option<String>,
+    requester: String,
+    created_at: i64,
+    updated_at: i64,
+}
+
 async fn load_request(pool: &SqlitePool, id: &str) -> Result<BookRequest, ApiError> {
-    let row: Option<(
-        String,
-        String,
-        String,
-        String,
-        Option<i64>,
-        Option<i64>,
-        String,
-        i64,
-        Option<String>,
-        Option<String>,
-        String,
-        i64,
-        i64,
-    )> = sqlx::query_as(
+    let row: Option<RequestRecord> = sqlx::query_as(
         "SELECT r.id, r.work_key, r.title, r.author, r.year, r.cover_id, r.state, r.progress,
-                r.error, r.book_id, u.username, r.created_at, r.updated_at
+                r.error, r.book_id, u.username AS requester, r.created_at, r.updated_at
          FROM book_requests r
          JOIN users u ON u.id = r.user_id
          WHERE r.id = ?",
@@ -464,38 +442,23 @@ async fn load_request(pool: &SqlitePool, id: &str) -> Result<BookRequest, ApiErr
     .bind(id)
     .fetch_optional(pool)
     .await?;
-    let Some((
-        id,
-        work_key,
-        title,
-        author,
-        year,
-        cover_id,
-        state,
-        progress,
-        error,
-        book_id,
-        requester,
-        created_at,
-        updated_at,
-    )) = row
-    else {
+    let Some(row) = row else {
         return Err(ApiError::NotFound);
     };
     Ok(BookRequest {
-        id,
-        work_key,
-        title,
-        author,
-        year,
-        cover_id,
-        state,
-        progress,
-        error,
-        book_id,
-        requester,
-        created_at,
-        updated_at,
+        id: row.id,
+        work_key: row.work_key,
+        title: row.title,
+        author: row.author,
+        year: row.year,
+        cover_id: row.cover_id,
+        state: row.state,
+        progress: row.progress,
+        error: row.error,
+        book_id: row.book_id,
+        requester: row.requester,
+        created_at: row.created_at,
+        updated_at: row.updated_at,
         follows: None,
     })
 }

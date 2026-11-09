@@ -295,30 +295,22 @@ async fn plan_group(
         let old_posts = load_posts(tx, &copy.id).await?;
         let remap = anchors::align(&post_keys(&old_posts), &survivor_keys);
         push_comments(tx, &mut shifts, copy, &old_posts, &survivor_posts, &remap).await?;
+        let aligned = Aligned {
+            old_posts: &old_posts,
+            new_posts: &survivor_posts,
+            remap: &remap,
+        };
         push_keyed(
             tx,
             &mut shifts,
             "repost",
             "reposts",
             copy,
-            &old_posts,
-            &survivor_posts,
-            &remap,
+            &aligned,
             &keep.id,
         )
         .await?;
-        push_keyed(
-            tx,
-            &mut shifts,
-            "like",
-            "likes",
-            copy,
-            &old_posts,
-            &survivor_posts,
-            &remap,
-            &keep.id,
-        )
-        .await?;
+        push_keyed(tx, &mut shifts, "like", "likes", copy, &aligned, &keep.id).await?;
         push_progress(
             tx,
             &mut shifts,
@@ -388,6 +380,12 @@ fn post_keys(rows: &[StoredPost]) -> Vec<PostKey> {
     keys
 }
 
+struct Aligned<'a> {
+    old_posts: &'a [StoredPost],
+    new_posts: &'a [StoredPost],
+    remap: &'a anchors::Remap,
+}
+
 fn has_post(rows: &[StoredPost], idx: i64) -> bool {
     rows.iter().any(|row| row.idx == idx)
 }
@@ -416,7 +414,7 @@ async fn push_comments(
     remap: &anchors::Remap,
 ) -> Result<(), ApiError> {
     let rows: Vec<(String, String, String)> = sqlx::query_as(
-        "SELECT id, user_id, post_id FROM comments WHERE book_id = ? ORDER BY id ASC",
+        "SELECT id, user_id, post_id FROM comments WHERE book_id = ? ORDER BY id ASC -- own rows only",
     )
     .bind(&copy.id)
     .fetch_all(&mut **tx)
@@ -449,7 +447,7 @@ async fn occupied(
     post_id: &str,
 ) -> Result<bool, ApiError> {
     let sql =
-        format!("SELECT 1 FROM {table} WHERE book_id = ? AND user_id = ? AND post_id = ? LIMIT 1");
+        format!("SELECT 1 FROM {table} WHERE book_id = ? AND user_id = ? AND post_id = ? LIMIT 1 -- own rows only");
     let hit: Option<i64> = sqlx::query_scalar(&sql)
         .bind(survivor)
         .bind(user_id)
@@ -465,20 +463,23 @@ async fn push_keyed(
     kind: &'static str,
     table: &str,
     copy: &Copy,
-    old_posts: &[StoredPost],
-    new_posts: &[StoredPost],
-    remap: &anchors::Remap,
+    aligned: &Aligned<'_>,
     survivor: &str,
 ) -> Result<(), ApiError> {
     let sql = format!(
-        "SELECT user_id, post_id FROM {table} WHERE book_id = ? ORDER BY user_id ASC, post_id ASC"
+        "SELECT user_id, post_id FROM {table} WHERE book_id = ? ORDER BY user_id ASC, post_id ASC -- own rows only"
     );
     let rows: Vec<(String, String)> = sqlx::query_as(&sql)
         .bind(&copy.id)
         .fetch_all(&mut **tx)
         .await?;
     for (user_id, post_id) in rows {
-        let dest = destination(remap, old_posts, new_posts, &post_id);
+        let dest = destination(
+            aligned.remap,
+            aligned.old_posts,
+            aligned.new_posts,
+            &post_id,
+        );
         let (dest_post, reason) = match dest {
             Some(dest) => {
                 let landed = dest.to_string();
@@ -570,7 +571,7 @@ async fn apply_plan(
                 .await?;
             }
             ("reply", None) => {
-                sqlx::query("DELETE FROM comments WHERE id = ? AND book_id = ?")
+                sqlx::query("DELETE FROM comments WHERE id = ? AND book_id = ? -- own rows only")
                     .bind(&shift.who)
                     .bind(&shift.book_id)
                     .execute(&mut **tx)
@@ -589,7 +590,7 @@ async fn apply_plan(
                     "likes"
                 };
                 let sql = format!(
-                    "DELETE FROM {table} WHERE book_id = ? AND user_id = ? AND post_id = ?"
+                    "DELETE FROM {table} WHERE book_id = ? AND user_id = ? AND post_id = ? -- own rows only"
                 );
                 sqlx::query(&sql)
                     .bind(&shift.book_id)
@@ -681,7 +682,7 @@ async fn move_keyed(
         .rows_affected();
     if changed == 0 {
         let drop_sql =
-            format!("DELETE FROM {table} WHERE book_id = ? AND user_id = ? AND post_id = ?");
+            format!("DELETE FROM {table} WHERE book_id = ? AND user_id = ? AND post_id = ? -- own rows only");
         sqlx::query(&drop_sql)
             .bind(&shift.book_id)
             .bind(&shift.user_id)
