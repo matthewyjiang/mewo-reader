@@ -42,9 +42,16 @@ final class SessionChangeTests: XCTestCase {
         XCTAssertEqual(sessionChange(from: expired, to: typed), .keep)
     }
 
-    func testExpireWithNoUsernameWipes() {
-        let expired = HostedSession(baseUrl: url, expired: ada)
-        XCTAssertEqual(sessionChange(from: expired, to: HostedSession(baseUrl: url)), .wipe(ada))
+    func testSignOutWithNoUsernameWipesHostedFiles() {
+        let bare = HostedSession(baseUrl: url, token: "token")
+        XCTAssertEqual(sessionChange(from: bare, to: HostedSession(baseUrl: url)), .wipeHosted)
+    }
+
+    func testDiskOwnerStillDeletesWhenTheSessionWouldKeep() {
+        let bea = HostedSession(baseUrl: url, username: "bea", token: "token-b")
+        let owed = sessionChange(from: sessionForFiles(onDisk: ada), to: bea)
+        XCTAssertEqual(pendingFileChange(.keep, owed), .otherUser(ada))
+        XCTAssertEqual(pendingFileChange(.expired, owed), .otherUser(ada))
     }
 
     func testTokenRotationKeepsFiles() {
@@ -112,5 +119,23 @@ final class HostedSessionStoreTests: XCTestCase {
         XCTAssertNil(store.session.expired)
         XCTAssertNil(defaults.string(forKey: "expired_url"))
         XCTAssertNil(defaults.string(forKey: "expired_user"))
+    }
+
+    func testFilesOwnerSurvivesSignInExpireAndSignOut() {
+        let name = "mewo-session-\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: name)!
+        defer { defaults.removePersistentDomain(forName: name) }
+        let store = HostedSessionStore(defaults: defaults, persistToken: false)
+        store.setBaseUrl("https://mewo.example")
+        let ada = OutboxAccount(url: "https://mewo.example", username: "ada")
+        store.noteFilesOnDisk(ada)
+        store.setSignedIn(username: "bea", token: "token-b")
+        store.expire()
+        store.signOut()
+        XCTAssertEqual(store.filesOnDisk, ada)
+        XCTAssertEqual(defaults.string(forKey: "files_url"), ada.url)
+        XCTAssertEqual(defaults.string(forKey: "files_user"), "ada")
+        let restored = HostedSessionStore(defaults: defaults, persistToken: false)
+        XCTAssertEqual(restored.filesOnDisk, ada)
     }
 }

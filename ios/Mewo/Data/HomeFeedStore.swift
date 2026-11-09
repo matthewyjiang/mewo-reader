@@ -23,6 +23,7 @@ final class HomeFeedStore {
         sessions.addListener { [weak self] previous, next in
             self?.sessionChanged(from: previous, to: next)
         }
+        dropStaleFeed()
         restore()
         if refreshesOnInit, sessions.session.signedIn {
             Task { await self.load() }
@@ -142,10 +143,11 @@ final class HomeFeedStore {
         flight = nil
         more?.task.cancel()
         more = nil
-        switch sessionChange(from: previous, to: next) {
+        let owed = sessionChange(from: sessionForFiles(onDisk: sessions.filesOnDisk), to: next)
+        switch pendingFileChange(sessionChange(from: previous, to: next), owed) {
         case .otherUser(let old), .wipe(let old):
             clear(old)
-        case .keep, .expired:
+        case .keep, .expired, .wipeHosted:
             break
         }
         if next.signedIn {
@@ -154,6 +156,12 @@ final class HomeFeedStore {
         } else {
             loadState = .signedOut
         }
+    }
+
+    private func dropStaleFeed() {
+        let owed = sessionChange(from: sessionForFiles(onDisk: sessions.filesOnDisk), to: sessions.session)
+        if case .otherUser(let old) = owed { clear(old) }
+        if case .wipe(let old) = owed { clear(old) }
     }
 
     private func restore() {

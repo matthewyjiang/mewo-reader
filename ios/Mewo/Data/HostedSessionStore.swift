@@ -33,6 +33,9 @@ final class HostedSessionStore {
     private let defaults: UserDefaults
     private let persistToken: Bool
     private(set) var session: HostedSession
+    /// Who owns the shelf and downloads on disk. Sign-in does not clear this.
+    /// The library replaces it only after that account's files are deleted.
+    private(set) var filesOnDisk: OutboxAccount?
     /// Fires after the URL, account, or sign-in changes. The library drops the previous shelf before the next refresh.
     var onSessionChange: ((HostedSession, HostedSession) -> Void)?
     private var listeners: [UUID: (HostedSession, HostedSession) -> Void] = [:]
@@ -69,6 +72,11 @@ final class HostedSessionStore {
                 ? nil
                 : OutboxAccount(url: expiredUrl, username: expiredUser)
         )
+        let filesUrl = defaults.string(forKey: "files_url") ?? ""
+        let filesUser = defaults.string(forKey: "files_user") ?? ""
+        filesOnDisk = filesUrl.isEmpty || filesUser.isEmpty
+            ? nil
+            : OutboxAccount(url: filesUrl, username: filesUser)
     }
 
     func setBaseUrl(_ url: String) {
@@ -116,6 +124,18 @@ final class HostedSessionStore {
         session.username = nil
         session.token = nil
         notify(previous)
+    }
+
+    /// Records the account whose files are on disk. Does not notify listeners.
+    func noteFilesOnDisk(_ account: OutboxAccount?) {
+        if let account {
+            defaults.set(account.url, forKey: "files_url")
+            defaults.set(account.username, forKey: "files_user")
+        } else {
+            defaults.removeObject(forKey: "files_url")
+            defaults.removeObject(forKey: "files_user")
+        }
+        filesOnDisk = account
     }
 
     private func clearExpired() {

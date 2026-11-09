@@ -23,12 +23,18 @@ enum SessionChange: Equatable {
     case expired
     case otherUser(OutboxAccount)
     case wipe(OutboxAccount)
+    /// Signed in with a token but no username. `hosted/` goes; there is no shelf account.
+    case wipeHosted
 }
 
 /// A 401 on the current account is `.expired` and leaves files in place.
-/// Sign-out, a server change, and an expiry with no username wipe them.
+/// Sign-out and a server change wipe that account. A signed-in session with no
+/// username wipes `hosted/` and has no shelf to clear.
 func sessionChange(from previous: HostedSession, to next: HostedSession) -> SessionChange {
-    guard let old = previous.filesOwner else { return .keep }
+    guard let old = previous.filesOwner else {
+        if previous.signedIn && !next.signedIn { return .wipeHosted }
+        return .keep
+    }
     let new = next.filesOwner
     if new == old {
         return previous.signedIn && !next.signedIn ? .expired : .keep
@@ -37,6 +43,21 @@ func sessionChange(from previous: HostedSession, to next: HostedSession) -> Sess
         return .wipe(old)
     }
     return .otherUser(old)
+}
+
+/// Unsigned session whose files belong to `account`, so a launch can compare them.
+func sessionForFiles(onDisk account: OutboxAccount?) -> HostedSession {
+    HostedSession(baseUrl: account?.url ?? "", expired: account)
+}
+
+/// A delete still owed for the account on disk wins over expire or keep.
+func pendingFileChange(_ sessionDelta: SessionChange, _ diskDelta: SessionChange) -> SessionChange {
+    switch diskDelta {
+    case .otherUser, .wipe, .wipeHosted:
+        return diskDelta
+    case .keep, .expired:
+        return sessionDelta
+    }
 }
 
 enum OutboxOp: Equatable, Sendable {

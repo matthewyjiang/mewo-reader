@@ -13,6 +13,7 @@ final class HostedOfflineTests: XCTestCase {
     override func setUp() async throws {
         HostedDisk.beforeClaim = nil
         HostedDisk.beforeScan = nil
+        HostedDisk.beforeSessionFiles = nil
         HostedDisk.recordPublishes = false
         HostedDisk.resetPublishes()
         HostedDisk.note = { HostedDiskLog.shared.note() }
@@ -38,6 +39,7 @@ final class HostedOfflineTests: XCTestCase {
         HostedDisk.beforeScan = nil
         HostedDisk.beforeForget = nil
         HostedDisk.beforeLaunch = nil
+        HostedDisk.beforeSessionFiles = nil
         HostedDisk.note = nil
         HostedDisk.noteDecode = nil
         HostedDisk.recordPublishes = false
@@ -1137,6 +1139,78 @@ final class HostedOfflineTests: XCTestCase {
         }
         XCTAssertNil(shelfCache().read(serverUrl: server, username: "ada"))
         XCTAssertTrue(client.commentIds.isEmpty)
+    }
+
+    func testA401ForTheNextAccountStillDropsThePreviousSocialCache() async throws {
+        let store = try await open([book(idA, importedAt: 3), book(idB, importedAt: 2)])
+        await store.setDownloaded(id: idA, on: true)
+        _ = try await store.likes(id: idA)
+        XCTAssertTrue(socialExists(idA))
+        XCTAssertEqual(shelfCache().read(serverUrl: server, username: "ada")?.map(\.id), [idA, idB])
+        try await expireLibrary()
+        XCTAssertTrue(socialExists(idA))
+        XCTAssertEqual(sessions.filesOnDisk, OutboxAccount(url: server, username: "ada"))
+
+        let gate = QuietPark()
+        let parked = Flag()
+        HostedDisk.beforeSessionFiles = {
+            parked.set()
+            await gate.wait()
+        }
+        defer {
+            HostedDisk.beforeSessionFiles = nil
+            gate.release()
+        }
+        sessions.setSignedIn(username: "bea", token: "token-b")
+        try await waitUntil("cleanup did not reach the file step") { parked.isSet }
+
+        client.libraryError = HostedException(message: "Sign in again.", code: 401)
+        client.shelf = [book(idB, importedAt: 2)]
+        do {
+            try await store.load()
+            XCTFail("Bea's first call should 401")
+        } catch let err as HostedException {
+            XCTAssertEqual(err.code, 401)
+        }
+        XCTAssertEqual(sessions.session.expired?.username, "bea")
+        gate.release()
+        client.libraryError = nil
+        sessions.setSignedIn(username: "bea", token: "token-c")
+        try await waitUntil("Ada's social cache stayed on Bea's shelf") {
+            !socialExists(idA) && shelfCache().read(serverUrl: server, username: "ada") == nil && settled(store, ids: [idB])
+        }
+    }
+
+    func testRelaunchDropsAPreviousAccountsSocialCache() async throws {
+        writePosts(idA, "secret")
+        try JSONFiles.write(SocialCache(likes: ["p"], likesKnown: true), to: bookDir(idA).appendingPathComponent("social.json"))
+        try shelfCache().write(serverUrl: server, username: "ada", books: [book(idA, importedAt: 3)])
+        defaults.set(server, forKey: "files_url")
+        defaults.set("ada", forKey: "files_user")
+        defaults.set("bea", forKey: "username")
+        sessions = HostedSessionStore(defaults: defaults, persistToken: false)
+        sessions.setBaseUrl(server)
+        XCTAssertEqual(sessions.filesOnDisk, OutboxAccount(url: server, username: "ada"))
+        sessions.setSignedIn(username: "bea", token: "token-b")
+        XCTAssertEqual(sessions.filesOnDisk?.username, "ada")
+        client.shelf = [book(idB, importedAt: 1)]
+        let store = makeStore()
+        self.store = store
+        try await waitUntil("relaunch left Ada's cache") {
+            !socialExists(idA) && shelfCache().read(serverUrl: server, username: "ada") == nil && settled(store, ids: [idB])
+        }
+    }
+
+    func testSignOutWithNoUsernameWipesHostedFiles() async throws {
+        let store = makeStore()
+        self.store = store
+        sessions.setSignedIn(username: "", token: "token-a")
+        let marker = hostedRoot().appendingPathComponent("marker")
+        try Data("x".utf8).write(to: marker)
+        sessions.signOut()
+        try await waitUntil("a nameless sign-out left hosted files") {
+            !FileManager.default.fileExists(atPath: marker.path)
+        }
     }
 
     private func open(_ books: [BookRecord]) async throws -> HostedLibraryStore {

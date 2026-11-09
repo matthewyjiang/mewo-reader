@@ -90,11 +90,14 @@ final class HostedLibraryStore: LibraryStore {
         // A sign-in that lands while this task is still attaching owns the refresh. Loading again
         // after that refresh finished would leave the shelf refreshing on a fetch nobody is waiting for.
         let generation = sessionGeneration
+        let stamp = sessions.session.token
         if refreshesOnInit {
             Task { @MainActor in
                 if let hold = HostedDisk.beforeLaunch {
                     await hold()
                 }
+                await self.reconcileFiles(stamp: stamp)
+                guard self.sessionGeneration == generation else { return }
                 await self.outbox.attach(self.sessions.session)
                 guard self.sessionGeneration == generation else { return }
                 if self.sessions.session.signedIn, !self.shelfRaw.isEmpty {
@@ -108,6 +111,8 @@ final class HostedLibraryStore: LibraryStore {
                 loadState = .loaded(books: cached, refreshing: false)
             }
             Task { @MainActor in
+                await self.reconcileFiles(stamp: stamp)
+                guard self.sessionGeneration == generation else { return }
                 await self.outbox.attach(self.sessions.session)
                 guard self.sessionGeneration == generation else { return }
                 if self.sessions.session.signedIn, !self.shelfRaw.isEmpty {
@@ -278,28 +283,20 @@ final class HostedLibraryStore: LibraryStore {
                 files.setShelf([])
             }
         }
-        let change = sessionChange(from: previous, to: next)
+        let sessionDelta = sessionChange(from: previous, to: next)
+        let owed = sessionChange(from: sessionForFiles(onDisk: sessions.filesOnDisk), to: next)
+        let immediate = pendingFileChange(sessionDelta, owed)
         // Cancel what is running for this session now, before a newer sign-in can start its own.
-        let watched = change == .keep ? nil : detachCancelledTransfers()
+        let watched = (sessionDelta == .keep && immediate == .keep) ? nil : detachCancelledTransfers()
         let prior = maintenance
         let task = Task { @MainActor in
             await prior?.value
-            switch change {
-            case .otherUser(let old), .wipe(let old):
-                await self.clearShelf(old)
-            case .keep, .expired:
-                break
+            if let hold = HostedDisk.beforeSessionFiles {
+                await hold()
             }
-            if let watched { await watched.value }
-            guard self.sessions.session.token == stamp else { return }
-            switch change {
-            case .wipe:
-                await self.wipeHostedFiles(stamp: stamp)
-            case .otherUser:
-                await self.clearSocialFiles(stamp: stamp)
-            case .keep, .expired:
-                break
-            }
+            // The session may have moved while this waited. The disk owner is what a bail or a kill left behind.
+            let files = self.fileChange(since: previous)
+            await self.applyFiles(files, stamp: stamp, watched: watched)
             guard self.sessions.session.token == stamp else { return }
             await self.outbox.attach(self.sessions.session)
             guard self.sessions.session.token == stamp else { return }
@@ -310,6 +307,42 @@ final class HostedLibraryStore: LibraryStore {
             try? await self.load()
         }
         maintenance = task
+    }
+
+    /// Compares the current session with `previous` and with the account still on disk.
+    private func fileChange(since previous: HostedSession) -> SessionChange {
+        let current = sessions.session
+        return pendingFileChange(
+            sessionChange(from: previous, to: current),
+            sessionChange(from: sessionForFiles(onDisk: sessions.filesOnDisk), to: current)
+        )
+    }
+
+    /// Deletes a shelf or downloads still owed to the account on disk, then records the owner.
+    private func reconcileFiles(stamp: String?) async {
+        let owed = sessionChange(from: sessionForFiles(onDisk: sessions.filesOnDisk), to: sessions.session)
+        await applyFiles(owed, stamp: stamp, watched: nil)
+    }
+
+    private func applyFiles(_ change: SessionChange, stamp: String?, watched: Task<Void, Never>?) async {
+        switch change {
+        case .otherUser(let old), .wipe(let old):
+            await clearShelf(old)
+        case .keep, .expired, .wipeHosted:
+            break
+        }
+        if let watched { await watched.value }
+        guard sessions.session.token == stamp else { return }
+        switch change {
+        case .wipe, .wipeHosted:
+            await wipeHostedFiles(stamp: stamp)
+        case .otherUser:
+            await clearSocialFiles(stamp: stamp)
+        case .keep, .expired:
+            break
+        }
+        guard sessions.session.token == stamp else { return }
+        sessions.noteFilesOnDisk(sessions.session.filesOwner)
     }
 
     private func restoreCachedShelf() {
@@ -1470,6 +1503,8 @@ enum HostedDisk {
     static var beforeForget: (@MainActor () async -> Void)?
     /// Parks the launch task before it attaches, so a test can let a sign-in refresh finish first.
     static var beforeLaunch: (@MainActor () async -> Void)?
+    /// Parks a session's file cleanup before it deletes the previous account's cache.
+    static var beforeSessionFiles: (@MainActor () async -> Void)?
     static var recordPublishes = false
     private static let publishLock = NSLock()
     private static var publishes = 0
