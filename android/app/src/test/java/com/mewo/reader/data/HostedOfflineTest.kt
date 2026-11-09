@@ -55,6 +55,7 @@ class HostedOfflineTest {
         hostedPostsDecodes.set(0)
         hostedDiskThreads.clear()
         hostedBeforeClaim = null
+        hostedBeforeFilesChange = null
         hostedAfterShelfShown = null
         context.filesDir.listFiles()?.forEach { it.deleteRecursively() }
         context.getSharedPreferences("mewo_hosted", 0).edit().clear().commit()
@@ -63,6 +64,7 @@ class HostedOfflineTest {
     @After
     fun tearDown() {
         hostedAfterShelfShown = null
+        hostedBeforeFilesChange = null
         job.cancel()
         Dispatchers.resetMain()
     }
@@ -766,6 +768,398 @@ class HostedOfflineTest {
     }
 
     @Test
+    fun a401KeepsDownloadsForTheSameAccount() = runBlocking {
+        val client = OfflineClient()
+        val sessions = HostedSessionStore(context)
+        sessions.setBaseUrl(SERVER)
+        val store = HostedLibraryStore(context, EpubOpener(context), sessions, client, scope)
+        client.shelf.add(book(A, importedAt = 3))
+        sessions.setSignedIn("ada", "token-a")
+        withTimeout(5_000) {
+            while (
+                store.library.value.books.none { it.id == A } ||
+                store.loadState.value !is LibraryLoaded ||
+                store.loadState.value.isRefreshing()
+            ) {
+                delay(20)
+            }
+        }
+        store.setDownloaded(A, true)
+        assertTrue(store.offline.value[A] is OfflineState.Downloaded)
+        val postsCalls = client.postsCalls.size
+        val shelves = ShelfCache(File(context.filesDir, "hosted-shelves"), json)
+        withTimeout(5_000) {
+            while (shelves.read(SERVER, "ada")?.any { it.id == A } != true) delay(20)
+        }
+        val feeds = FileHomeFeedCache(File(context.filesDir, "home-feeds"))
+        val feedKey = "$SERVER\nada"
+        feeds.write(feedKey, HomeFeedPage())
+
+        loadUntil401(store, client, sessions)
+        withTimeout(5_000) {
+            while (sessions.session.value.signedIn || store.library.value.books.isNotEmpty()) delay(20)
+        }
+
+        assertTrue(File(bookDir(A), "posts.json").exists())
+        assertTrue(File(bookDir(A), "social.json").exists())
+        assertEquals(listOf(A), shelves.read(SERVER, "ada")?.map { it.id })
+        assertEquals(HomeFeedPage(), feeds.read(feedKey))
+
+        client.libraryError = null
+        sessions.setSignedIn("ada", "token-b")
+        withTimeout(5_000) {
+            while (
+                store.offline.value[A] !is OfflineState.Downloaded ||
+                store.library.value.books.none { it.id == A } ||
+                store.loadState.value !is LibraryLoaded ||
+                store.loadState.value.isRefreshing()
+            ) {
+                delay(20)
+            }
+        }
+        assertEquals(postsCalls, client.postsCalls.size)
+    }
+
+    @Test
+    fun a401ThenAnotherAccountDropsSocialAndShelf() = runBlocking {
+        val client = OfflineClient()
+        val sessions = HostedSessionStore(context)
+        sessions.setBaseUrl(SERVER)
+        val store = HostedLibraryStore(context, EpubOpener(context), sessions, client, scope)
+        client.shelf.add(book(A, importedAt = 3))
+        sessions.setSignedIn("ada", "token-a")
+        withTimeout(5_000) {
+            while (
+                store.library.value.books.none { it.id == A } ||
+                store.loadState.value !is LibraryLoaded ||
+                store.loadState.value.isRefreshing()
+            ) {
+                delay(20)
+            }
+        }
+        store.setDownloaded(A, true)
+        val shelves = ShelfCache(File(context.filesDir, "hosted-shelves"), json)
+        withTimeout(5_000) {
+            while (shelves.read(SERVER, "ada")?.any { it.id == A } != true) delay(20)
+        }
+        assertTrue(File(bookDir(A), "social.json").exists())
+
+        loadUntil401(store, client, sessions)
+        withTimeout(5_000) { while (sessions.session.value.signedIn) delay(20) }
+
+        client.libraryError = null
+        client.shelf.clear()
+        client.shelf.add(book(B, importedAt = 1))
+        sessions.setSignedIn("bea", "token-b")
+        withTimeout(5_000) {
+            while (
+                store.library.value.books.none { it.id == B } ||
+                store.loadState.value !is LibraryLoaded ||
+                store.loadState.value.isRefreshing()
+            ) {
+                delay(20)
+            }
+        }
+
+        assertFalse(File(bookDir(A), "social.json").exists())
+        assertTrue(File(bookDir(A), "posts.json").exists())
+        assertNull(shelves.read(SERVER, "ada"))
+        try {
+            store.feed(A)
+            fail("Ada's download must not open on Bea's shelf")
+        } catch (err: IllegalStateException) {
+            assertEquals("That book is not on your shelf.", err.message)
+        }
+    }
+
+    @Test
+    fun a401ForTheNextAccountStillDropsThePreviousCaches() = runBlocking {
+        val client = OfflineClient()
+        val sessions = HostedSessionStore(context)
+        sessions.setBaseUrl(SERVER)
+        val store = HostedLibraryStore(context, EpubOpener(context), sessions, client, scope)
+        client.shelf.add(book(A, importedAt = 3))
+        sessions.setSignedIn("ada", "token-a")
+        withTimeout(5_000) {
+            while (
+                store.library.value.books.none { it.id == A } ||
+                store.loadState.value !is LibraryLoaded ||
+                store.loadState.value.isRefreshing()
+            ) {
+                delay(20)
+            }
+        }
+        store.setDownloaded(A, true)
+        val shelves = ShelfCache(File(context.filesDir, "hosted-shelves"), json)
+        withTimeout(5_000) {
+            while (shelves.read(SERVER, "ada")?.any { it.id == A } != true) delay(20)
+        }
+        val ada = OutboxAccount(SERVER, "ada")
+        loadUntil401(store, client, sessions)
+        withTimeout(5_000) { while (sessions.session.value.signedIn) delay(20) }
+        assertEquals(ada, sessions.diskOwner())
+        assertTrue(File(bookDir(A), "social.json").exists())
+
+        val entered = CountDownLatch(1)
+        val release = CountDownLatch(1)
+        hostedBeforeFilesChange = {
+            entered.countDown()
+            if (!release.await(5, TimeUnit.SECONDS)) error("files change timed out")
+        }
+        try {
+            client.libraryError = null
+            sessions.setSignedIn("bea", "token-b")
+            assertTrue(entered.await(5, TimeUnit.SECONDS))
+            loadUntil401(store, client, sessions)
+            assertEquals(ada, sessions.diskOwner())
+            assertEquals("bea", sessions.session.value.expired?.username)
+            client.libraryError = null
+            client.shelf.clear()
+            client.shelf.add(book(B, importedAt = 1))
+            release.countDown()
+            sessions.setSignedIn("bea", "token-c")
+            withTimeout(5_000) {
+                while (
+                    store.library.value.books.none { it.id == B } ||
+                    store.loadState.value !is LibraryLoaded ||
+                    store.loadState.value.isRefreshing()
+                ) {
+                    delay(20)
+                }
+            }
+            assertFalse(File(bookDir(A), "social.json").exists())
+            assertNull(shelves.read(SERVER, "ada"))
+            assertTrue(File(bookDir(A), "posts.json").exists())
+        } finally {
+            release.countDown()
+            hostedBeforeFilesChange = null
+        }
+    }
+
+    @Test
+    fun aRelaunchAfterTheNextAccounts401DropsThePreviousCaches() = runBlocking {
+        val client = OfflineClient()
+        val sessions = HostedSessionStore(context)
+        sessions.setBaseUrl(SERVER)
+        val store = HostedLibraryStore(context, EpubOpener(context), sessions, client, scope)
+        client.shelf.add(book(A, importedAt = 3))
+        sessions.setSignedIn("ada", "token-a")
+        withTimeout(5_000) {
+            while (
+                store.library.value.books.none { it.id == A } ||
+                store.loadState.value !is LibraryLoaded ||
+                store.loadState.value.isRefreshing()
+            ) {
+                delay(20)
+            }
+        }
+        store.likes(A)
+        val shelves = ShelfCache(File(context.filesDir, "hosted-shelves"), json)
+        withTimeout(5_000) {
+            while (shelves.read(SERVER, "ada") == null) delay(20)
+        }
+        loadUntil401(store, client, sessions)
+        val ada = OutboxAccount(SERVER, "ada")
+        withTimeout(5_000) {
+            while (sessions.session.value.signedIn || sessions.diskOwner() != ada) delay(20)
+        }
+        assertTrue(File(bookDir(A), "social.json").exists())
+
+        job.cancel()
+        job = SupervisorJob()
+        scope = CoroutineScope(job + Dispatchers.Default)
+        sessions.setSignedIn("bea", "token-b")
+        sessions.expire()
+        assertEquals(ada, sessions.diskOwner())
+        assertEquals("bea", sessions.session.value.expired?.username)
+
+        client.libraryError = null
+        client.shelf.clear()
+        client.shelf.add(book(B, importedAt = 1))
+        val restarted = HostedLibraryStore(context, EpubOpener(context), sessions, client, scope)
+        withTimeout(5_000) {
+            while (File(bookDir(A), "social.json").exists() || shelves.read(SERVER, "ada") != null) delay(20)
+        }
+        sessions.setSignedIn("bea", "token-c")
+        withTimeout(5_000) {
+            while (
+                restarted.library.value.books.none { it.id == B } ||
+                restarted.loadState.value !is LibraryLoaded ||
+                restarted.loadState.value.isRefreshing()
+            ) {
+                delay(20)
+            }
+        }
+        assertFalse(File(bookDir(A), "social.json").exists())
+        assertNull(shelves.read(SERVER, "ada"))
+    }
+
+    @Test
+    fun aSignedInSessionWithNoUsernameWipesTheCache() = runBlocking {
+        context.getSharedPreferences("mewo_hosted", 0).edit()
+            .putString("base_url", SERVER)
+            .putString("token", "token-a")
+            .commit()
+        val client = OfflineClient()
+        client.blockPosts = true
+        client.shelf.add(book(A, importedAt = 3))
+        val sessions = HostedSessionStore(context)
+        assertTrue(sessions.session.value.signedIn)
+        assertNull(sessions.session.value.username)
+        val store = HostedLibraryStore(context, EpubOpener(context), sessions, client, scope)
+        withTimeout(5_000) {
+            while (
+                store.library.value.books.none { it.id == A } ||
+                store.loadState.value !is LibraryLoaded ||
+                store.loadState.value.isRefreshing()
+            ) {
+                delay(20)
+            }
+        }
+        val hosted = File(context.filesDir, "hosted")
+        val downloading = scope.launch { store.setDownloaded(A, true) }
+        withTimeout(5_000) {
+            while (client.entered.get() < 1) delay(10)
+        }
+        val marker = File(hosted, "marker")
+        marker.writeText("x")
+
+        sessions.expire()
+        withTimeout(5_000) {
+            while (marker.exists() || sessions.session.value.signedIn) delay(10)
+        }
+        client.hold.countDown()
+        downloading.join()
+        assertEquals(emptyList<String>(), hostedFileNames())
+        assertFalse(sessions.session.value.signedIn)
+        assertNull(sessions.session.value.expired)
+    }
+
+    @Test
+    fun a401ThenAnotherServerWipes() = runBlocking {
+        val client = OfflineClient()
+        val sessions = HostedSessionStore(context)
+        sessions.setBaseUrl(SERVER)
+        val store = HostedLibraryStore(context, EpubOpener(context), sessions, client, scope)
+        client.shelf.add(book(A, importedAt = 3))
+        sessions.setSignedIn("ada", "token-a")
+        withTimeout(5_000) {
+            while (
+                store.library.value.books.none { it.id == A } ||
+                store.loadState.value !is LibraryLoaded ||
+                store.loadState.value.isRefreshing()
+            ) {
+                delay(20)
+            }
+        }
+        store.setDownloaded(A, true)
+        val shelves = ShelfCache(File(context.filesDir, "hosted-shelves"), json)
+        withTimeout(5_000) {
+            while (shelves.read(SERVER, "ada")?.any { it.id == A } != true) delay(20)
+        }
+        val feeds = FileHomeFeedCache(File(context.filesDir, "home-feeds"))
+        val feedKey = "$SERVER\nada"
+        feeds.write(feedKey, HomeFeedPage())
+
+        loadUntil401(store, client, sessions)
+        withTimeout(5_000) { while (sessions.session.value.signedIn) delay(20) }
+        assertTrue(File(bookDir(A), "posts.json").exists())
+
+        client.libraryError = null
+        sessions.setBaseUrl(OTHER)
+        sessions.setSignedIn("ada", "token-b")
+        withTimeout(5_000) {
+            while (
+                File(bookDir(A), "posts.json").exists() ||
+                shelves.read(SERVER, "ada") != null ||
+                feeds.read(feedKey) != null
+            ) {
+                delay(20)
+            }
+        }
+        assertEquals(emptyList<String>(), hostedFileNames())
+    }
+
+    @Test
+    fun a401KeepsTheOutboxForTheSameAccount() = runBlocking {
+        data class Queued(
+            val store: HostedLibraryStore,
+            val client: OfflineClient,
+            val sessions: HostedSessionStore,
+            val id: String,
+            val file: File,
+        )
+
+        suspend fun queueReply(): Queued {
+            val client = OfflineClient()
+            client.commentError = IOException("offline")
+            val sessions = HostedSessionStore(context)
+            sessions.setBaseUrl(SERVER)
+            val store = HostedLibraryStore(context, EpubOpener(context), sessions, client, scope)
+            client.shelf.add(book(A, importedAt = 3))
+            sessions.setSignedIn("ada", "token-a")
+            withTimeout(5_000) {
+                while (
+                    store.library.value.books.none { it.id == A } ||
+                    store.loadState.value !is LibraryLoaded ||
+                    store.loadState.value.isRefreshing()
+                ) {
+                    delay(20)
+                }
+            }
+            val thread = store.addComment(A, "p", "offline note")
+            val reply = thread.single { it.text == "offline note" }
+            assertEquals(CommentStatus.Sending, reply.status)
+            val file = File(context.filesDir, HOSTED_OUTBOX_FILE)
+            assertTrue(file.exists())
+            assertTrue(client.sentCommentIds.isEmpty())
+            return Queued(store, client, sessions, reply.id, file)
+        }
+
+        val same = queueReply()
+        loadUntil401(same.store, same.client, same.sessions)
+        withTimeout(5_000) { while (same.sessions.session.value.signedIn) delay(20) }
+        assertTrue(same.file.exists())
+        assertTrue(same.client.sentCommentIds.isEmpty())
+
+        same.client.libraryError = null
+        same.client.commentError = null
+        same.sessions.setSignedIn("ada", "token-b")
+        withTimeout(5_000) {
+            while (same.client.sentCommentIds.toList() != listOf(same.id) || same.file.exists()) delay(20)
+        }
+        assertEquals(listOf(same.id), same.client.sentCommentIds.toList())
+
+        job.cancel()
+        job = SupervisorJob()
+        scope = CoroutineScope(job + Dispatchers.Default)
+        context.filesDir.listFiles()?.forEach { it.deleteRecursively() }
+        context.getSharedPreferences("mewo_hosted", 0).edit().clear().commit()
+
+        val other = queueReply()
+        loadUntil401(other.store, other.client, other.sessions)
+        withTimeout(5_000) { while (other.sessions.session.value.signedIn) delay(20) }
+        assertTrue(other.file.exists())
+
+        other.client.libraryError = null
+        other.client.commentError = null
+        other.client.shelf.clear()
+        other.client.shelf.add(book(B, importedAt = 1))
+        other.sessions.setSignedIn("bea", "token-b")
+        withTimeout(5_000) {
+            while (
+                other.file.exists() ||
+                other.store.library.value.books.none { it.id == B } ||
+                other.store.loadState.value !is LibraryLoaded ||
+                other.store.loadState.value.isRefreshing()
+            ) {
+                delay(20)
+            }
+        }
+        assertTrue(other.client.sentCommentIds.isEmpty())
+    }
+
+    @Test
     fun anOldPostsCacheIsParsedOnce() = runBlocking {
         val client = OfflineClient()
         writePosts(A, "old", version = 2)
@@ -808,6 +1202,26 @@ class HostedOfflineTest {
             store.setDownloaded(A, false)
             store.setDownloaded(B, false)
         }
+    }
+
+    /**
+     * A refresh already in flight can take the 401 and expire the session before this
+     * call observes the exception. Either result is the expired session.
+     */
+    private suspend fun loadUntil401(
+        store: HostedLibraryStore,
+        client: OfflineClient,
+        sessions: HostedSessionStore,
+    ) {
+        client.libraryError = HostedException("expired", 401)
+        withTimeout(5_000) {
+            while (sessions.session.value.signedIn) {
+                val err = runCatching { store.load() }.exceptionOrNull()
+                if (err is HostedException && err.code == 401) return@withTimeout
+                delay(10)
+            }
+        }
+        assertFalse(sessions.session.value.signedIn)
     }
 
     private fun open(client: OfflineClient, books: List<BookRecord>): HostedLibraryStore {
@@ -918,6 +1332,8 @@ class HostedOfflineTest {
         val indexHold = CountDownLatch(1)
         var progress: Float? = 0.4f
         var delayProgress = false
+        var commentError: Exception? = null
+        val sentCommentIds = ConcurrentLinkedQueue<String>()
 
         override fun library(session: HostedSession): LibrarySnapshot {
             libraryError?.let { throw it }
@@ -984,10 +1400,24 @@ class HostedOfflineTest {
             commentsError?.let { throw it }
             return thread
         }
+
+        override fun addComment(
+            session: HostedSession,
+            id: String,
+            postId: String,
+            text: String,
+            commentId: String,
+            `private`: Boolean,
+        ): List<PostComment> {
+            commentError?.let { throw it }
+            sentCommentIds.add(commentId)
+            return listOf(PostComment(commentId, session.username ?: "ada", text, 5, mine = true))
+        }
     }
 
     companion object {
         private const val SERVER = "https://mewo.example"
+        private const val OTHER = "https://other.example"
         private const val A = "11111111-1111-1111-1111-111111111111"
         private const val B = "22222222-2222-2222-2222-222222222222"
         private const val C = "33333333-3333-3333-3333-333333333333"

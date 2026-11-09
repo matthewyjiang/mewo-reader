@@ -148,28 +148,45 @@ class HostedLibraryStore(
             var previous = sessions.session.value
             // Don't load inside the collector. A blocked refresh must not delay
             // the next account's clear, or the old shelf stays on screen.
-            sessions.session.collect { session ->
-                val urlChanged = previous.normalizedUrl() != session.normalizedUrl()
-                val userChanged = previous.username != session.username
-                val signedOut = previous.signedIn && !session.signedIn
-                if (previous.signedIn && (signedOut || urlChanged || userChanged)) {
-                    refreshJob?.cancel()
-                    clearShelf(previous)
-                    if (signedOut || urlChanged) {
-                        wipeCache()
-                    } else {
+            sessions.session.collect { emitted ->
+                val session = sessions.session.value
+                // This emission lost the race with a newer sign-in. Applying the stale
+                // snapshot would wipe the owner that sign-in just recorded.
+                if (session != emitted) return@collect
+                val owner = sessions.diskOwner()
+                if (sessions.session.value != session) return@collect
+                // setSignedIn drops `expired` before this runs. The disk owner is who the
+                // files still belong to, and it changes only after the cleanup below.
+                val change = sessionChange(owner, previous, session)
+                if (change is SessionChange.OtherUser || change is SessionChange.Wipe) {
+                    hostedBeforeFilesChange?.invoke()
+                }
+                when (change) {
+                    SessionChange.Keep -> Unit
+                    // The token is gone, but this person can sign back in and keep the download.
+                    SessionChange.Expired -> {
+                        refreshJob?.cancel()
+                        cancelDownloads()
+                        clearMemory(session)
+                    }
+                    is SessionChange.OtherUser -> {
+                        refreshJob?.cancel()
+                        clearShelf(change.old)
                         cancelDownloads()
                         clearSocialFiles()
+                        clearMemory(session)
                     }
-                    mutex.withLock {
-                        _library.value = LibrarySnapshot()
-                        _load.value = if (session.signedIn) LibraryLoading else LibraryLoaded(emptyList(), false)
+                    is SessionChange.Wipe -> {
+                        refreshJob?.cancel()
+                        change.old?.let { clearShelf(it) }
+                        wipeCache()
+                        clearMemory(session)
                     }
-                    synchronized(offlineLock) {
-                        live.value = emptyMap()
-                        onDisk.clear()
-                        publishOfflineLocked()
-                    }
+                }
+                // A newer sign-in may already have recorded its owner. Writing this
+                // snapshot would clear that record before its own cleanup runs.
+                if (sessions.session.value.filesOwner() == session.filesOwner()) {
+                    sessions.setDiskOwner(session.filesOwner())
                 }
                 previous = session
                 // Attach before the refresh so a resumed queue is in memory for the
@@ -235,6 +252,8 @@ class HostedLibraryStore(
         val session = sessions.session.value
         if (!session.signedIn) {
             mutex.withLock {
+                // A sign-out load can still be queued when the same account signs back in.
+                if (sessions.session.value.signedIn) return@withLock
                 _library.value = LibrarySnapshot()
                 _load.value = LibraryLoaded(emptyList(), refreshing = false)
             }
@@ -271,7 +290,7 @@ class HostedLibraryStore(
                     remote.copy(books = remote.books.filter { safeBookId(it.id) != null })
                 } catch (err: HostedException) {
                     if (err.code == 401 && sessions.session.value.token == session.token) {
-                        sessions.signOut()
+                        sessions.expire()
                     }
                     throw err
                 }
@@ -314,13 +333,24 @@ class HostedLibraryStore(
         }
     }
 
-    private suspend fun clearShelf(session: HostedSession) {
-        val url = session.normalizedUrl() ?: return
-        val user = session.username ?: return
+    private suspend fun clearShelf(owner: OutboxAccount) {
         withContext(Dispatchers.IO) {
             noteDisk()
-            shelfCache.clear(url, user)
-            FileHomeFeedCache(File(context.filesDir, "home-feeds")).clear("$url\n$user")
+            shelfCache.clear(owner.url, owner.username)
+            FileHomeFeedCache(File(context.filesDir, "home-feeds"))
+                .clear("${owner.url}\n${owner.username}")
+        }
+    }
+
+    private suspend fun clearMemory(session: HostedSession) {
+        mutex.withLock {
+            _library.value = LibrarySnapshot()
+            _load.value = if (session.signedIn) LibraryLoading else LibraryLoaded(emptyList(), false)
+        }
+        synchronized(offlineLock) {
+            live.value = emptyMap()
+            onDisk.clear()
+            publishOfflineLocked()
         }
     }
 
@@ -1135,6 +1165,9 @@ internal val hostedDiskThreads = ConcurrentLinkedQueue<String>()
 
 /** When set, a Download all worker blocks here before it claims a book. Tests cancel in that gap. */
 internal var hostedBeforeClaim: (() -> Unit)? = null
+
+/** When set, account-switch and wipe cleanup blocks here. Tests expire the new token in that gap. */
+internal var hostedBeforeFilesChange: (() -> Unit)? = null
 
 /**
  * Runs at the end of a shelf publish, after the rows are visible. Tests pause here

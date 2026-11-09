@@ -125,7 +125,9 @@ private fun HostedAccountForm(
     LaunchedEffect(allowSignup) {
         if (allowSignup == false && mode == AuthMode.Create) mode = AuthMode.SignIn
     }
-    var username by remember { mutableStateOf(hosted.session.username.orEmpty()) }
+    var username by remember {
+        mutableStateOf(hosted.session.username ?: hosted.session.expired?.username.orEmpty())
+    }
     var password by remember { mutableStateOf("") }
     var busy by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
