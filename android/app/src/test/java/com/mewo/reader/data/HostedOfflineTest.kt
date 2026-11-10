@@ -158,7 +158,7 @@ class HostedOfflineTest {
     fun downloadedIsTheCurrentPostsFileOnTheShelf() = runBlocking {
         val client = OfflineClient()
         writePosts(A, "secret")
-        writePosts(B, "other", version = 2)
+        writePosts(B, "other", version = 1)
         val store = open(client, listOf(book(A, importedAt = 3), book(B, importedAt = 2)))
         assertTrue(store.offline.value[A] is OfflineState.Downloaded)
         assertTrue(store.offline.value[B] is OfflineState.NotDownloaded)
@@ -168,7 +168,7 @@ class HostedOfflineTest {
         assertEquals("secret", store.feed(B).single().text)
         assertEquals(listOf(B), client.postsCalls.toList())
         assertTrue(store.offline.value[B] is OfflineState.Downloaded)
-        assertEquals(1, readPostsVersion(B))
+        assertEquals(2, readPostsVersion(B))
     }
 
     @Test
@@ -1316,7 +1316,7 @@ class HostedOfflineTest {
     @Test
     fun anOldPostsCacheIsParsedOnce() = runBlocking {
         val client = OfflineClient()
-        writePosts(A, "old", version = 2)
+        writePosts(A, "old", version = 1)
         val store = open(client, listOf(book(A, importedAt = 3)))
         val first = hostedPostsDecodes.get()
         assertTrue(first > 0)
@@ -1326,7 +1326,7 @@ class HostedOfflineTest {
 
         File(bookDir(A), "posts.json").delete()
         store.saveProgress(A, 8)
-        writePosts(A, "new", version = 1)
+        writePosts(A, "new", version = 2)
         val mid = hostedPostsDecodes.get()
         store.saveProgress(A, 9)
         assertTrue(hostedPostsDecodes.get() > mid)
@@ -1421,7 +1421,7 @@ class HostedOfflineTest {
         assertTrue(names.toString(), names.isNotEmpty() && names.none { it.startsWith("mewo-main") })
     }
 
-    private fun writePosts(id: String, text: String, version: Int = 1) {
+    private fun writePosts(id: String, text: String, version: Int = 2) {
         val dir = bookDir(id).apply { mkdirs() }
         File(dir, "posts.json").writeText(
             json.encodeToString(

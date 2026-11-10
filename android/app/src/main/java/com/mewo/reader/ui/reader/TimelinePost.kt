@@ -29,6 +29,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.scale
@@ -38,7 +39,15 @@ import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.role
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.LinkAnnotation
+import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.TextLinkStyles
+import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.buildAnnotatedString
+import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.text.withLink
 import androidx.compose.ui.unit.dp
 import com.mewo.reader.data.FeedPost
 import com.mewo.reader.data.PostKind
@@ -112,7 +121,7 @@ fun TimelinePost(
                 )
             }
             Spacer(Modifier.height(4.dp))
-            Text(
+            LinkedPostText(
                 text = post.text,
                 style = if (isHeading) {
                     readerType.headingStyle(MaterialTheme.typography.titleMedium)
@@ -311,7 +320,7 @@ fun CommentItem(
                     )
                 }
                 Spacer(Modifier.height(4.dp))
-                Text(
+                LinkedPostText(
                     text = post.text,
                     style = if (isHeading) {
                         readerType.headingStyle(MaterialTheme.typography.titleMedium)
@@ -357,5 +366,39 @@ fun CommentItem(
             endPadding = 12.dp,
         )
         HorizontalDivider(color = MaterialTheme.colorScheme.outline, thickness = 0.6.dp)
+    }
+}
+
+@Composable
+internal fun LinkedPostText(
+    text: String,
+    style: TextStyle,
+    modifier: Modifier = Modifier,
+) {
+    val linkColor = MaterialTheme.colorScheme.primary
+    val annotated = remember(text, linkColor) { linkedText(text, linkColor) }
+    Text(text = annotated, style = style, modifier = modifier)
+}
+
+private fun linkedText(text: String, linkColor: Color): AnnotatedString {
+    val spans = linkSpans(text)
+    if (spans.isEmpty()) return AnnotatedString(text)
+    return buildAnnotatedString {
+        var cursor = 0
+        for (span in spans) {
+            if (span.start > cursor) append(text.substring(cursor, span.start))
+            withLink(
+                LinkAnnotation.Url(
+                    span.href,
+                    TextLinkStyles(
+                        SpanStyle(color = linkColor, textDecoration = TextDecoration.Underline),
+                    ),
+                ),
+            ) {
+                append(text.substring(span.start, span.end))
+            }
+            cursor = span.end
+        }
+        if (cursor < text.length) append(text.substring(cursor))
     }
 }

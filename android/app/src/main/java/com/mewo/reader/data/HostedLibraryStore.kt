@@ -1147,10 +1147,10 @@ fun requireBookId(id: String): String {
 
 const val HOSTED_NOT_SIGNED_IN = "Sign in to the hosted library first."
 
-/** Server posts cached per hosted book. Bump the version if the server's post shape changes. */
+/** Server posts cached per hosted book. 2 refetches books reparsed for URL spacing. */
 private const val POSTS_CACHE = "posts.json"
 private const val SOCIAL_FILE = "social.json"
-private const val HOSTED_POSTS_CACHE_VERSION = 1
+private const val HOSTED_POSTS_CACHE_VERSION = 2
 
 /** Decode attempts of a posts file that exists. Tests use this to catch repeat scans. */
 internal val hostedPostsDecodes = AtomicInteger(0)

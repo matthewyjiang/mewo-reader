@@ -485,7 +485,7 @@ fun ThreadPost(
                 }
             }
             Spacer(Modifier.height(2.dp))
-            Text(
+            LinkedPostText(
                 text = text,
                 style = if (heading) {
                     readerType.headingStyle(MaterialTheme.typography.titleMedium)
