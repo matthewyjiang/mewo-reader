@@ -46,3 +46,13 @@ test('an unmatched parenthesis inside the url is kept and the wrapping one is no
 test('a label that is not a url is left alone', () => {
   assert.deepEqual(linkSpans('See this paper.'), []);
 });
+
+test('an ipv6 url keeps its closing bracket', () => {
+  const text = 'http://[::1]';
+  assert.deepEqual(linkSpans(text), [{ start: 0, end: text.length, href: text }]);
+  const dotted = 'see http://[::1].';
+  const spans = linkSpans(dotted);
+  assert.equal(spans[0].href, 'http://[::1]');
+  assert.equal(dotted[spans[0].end], '.');
+  assert.equal(linkSpans('http://example.com/foo]')[0].href, 'http://example.com/foo');
+});

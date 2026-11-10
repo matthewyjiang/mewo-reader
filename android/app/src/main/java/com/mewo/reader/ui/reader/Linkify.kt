@@ -7,8 +7,8 @@ private const val TRAILING = ".,;:!?)]}'\""
 /**
  * Same rule as web `linkSpans`. A match starts at `http://` or `https://`
  * even when the previous character is not a space, ends at whitespace, and
- * drops trailing `.,;:!?)]}'"` except a `)` that closes an unmatched `(`.
- * A trailing `/` stays. Indexes are UTF-16 code units.
+ * drops trailing `.,;:!?)]}'"` except a `)` or `]` that closes an unmatched
+ * opener. A trailing `/` stays. Indexes are UTF-16 code units.
  */
 fun linkSpans(text: String): List<LinkSpan> {
     val spans = mutableListOf<LinkSpan>()
@@ -26,7 +26,7 @@ fun linkSpans(text: String): List<LinkSpan> {
         var end = start
         while (end < text.length && !text[end].isWhitespace()) end += 1
         while (end > start + schemeLength && text[end - 1] in TRAILING) {
-            if (text[end - 1] == ')' && unmatchedOpen(text, start, end - 1)) break
+            if (keepCloser(text, start, end)) break
             end -= 1
         }
         if (end > start + schemeLength) {
@@ -39,14 +39,23 @@ fun linkSpans(text: String): List<LinkSpan> {
     return spans
 }
 
-private fun unmatchedOpen(text: String, start: Int, end: Int): Boolean {
-    var open = 0
-    var close = 0
+private fun keepCloser(text: String, start: Int, end: Int): Boolean {
+    val closer = text[end - 1]
+    return when (closer) {
+        ')' -> unmatched(text, start, end - 1, '(', ')')
+        ']' -> unmatched(text, start, end - 1, '[', ']')
+        else -> false
+    }
+}
+
+private fun unmatched(text: String, start: Int, end: Int, open: Char, close: Char): Boolean {
+    var opened = 0
+    var closed = 0
     for (index in start until end) {
         when (text[index]) {
-            '(' -> open += 1
-            ')' -> close += 1
+            open -> opened += 1
+            close -> closed += 1
         }
     }
-    return open > close
+    return opened > closed
 }

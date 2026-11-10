@@ -53,4 +53,15 @@ class LinkifyTest {
     fun aLabelThatIsNotAUrlIsLeftAlone() {
         assertEquals(emptyList<LinkSpan>(), linkSpans("See this paper."))
     }
+
+    @Test
+    fun anIpv6UrlKeepsItsClosingBracket() {
+        val text = "http://[::1]"
+        assertEquals(listOf(LinkSpan(0, text.length, text)), linkSpans(text))
+        val dotted = "see http://[::1]."
+        val spans = linkSpans(dotted)
+        assertEquals("http://[::1]", spans.single().href)
+        assertEquals('.', dotted[spans[0].end])
+        assertEquals("http://example.com/foo", linkSpans("http://example.com/foo]").single().href)
+    }
 }
