@@ -1,6 +1,7 @@
 <script lang="ts">
   import Avatar from './Avatar.svelte';
   import Icon from './Icon.svelte';
+  import PostText from './PostText.svelte';
   import { profileUrl, router } from '../lib/router.svelte';
 
   let {
@@ -24,6 +25,19 @@
     event.preventDefault();
     if (onprofile) onprofile(handle);
     else router.go(profileUrl(handle));
+  }
+
+  function openRow(event: MouseEvent): void {
+    const target = event.target;
+    if (target instanceof Element && target.closest('a, button')) return;
+    onopen?.();
+  }
+
+  function openRowKey(event: KeyboardEvent): void {
+    if (event.target !== event.currentTarget) return;
+    if (event.key !== 'Enter' && event.key !== ' ') return;
+    event.preventDefault();
+    onopen?.();
   }
 </script>
 
@@ -78,11 +92,18 @@
       {/if}
     </div>
     {#if onopen}
-      <button type="button" class="post-body body-button" class:heading onclick={onopen}>
-        {text}
-      </button>
+      <div
+        class="post-body body-button"
+        class:heading
+        role="button"
+        tabindex="0"
+        onclick={openRow}
+        onkeydown={openRowKey}
+      >
+        <PostText {text} />
+      </div>
     {:else}
-      <div class="post-body" class:heading>{text}</div>
+      <div class="post-body" class:heading><PostText {text} /></div>
     {/if}
   </div>
 </div>
@@ -118,6 +139,7 @@
   display: block;
   text-align: left;
   width: 100%;
+  cursor: pointer;
 }
 
 .reply-menu {

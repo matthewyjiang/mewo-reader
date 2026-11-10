@@ -1,6 +1,7 @@
 <script lang="ts">
   import Avatar from './Avatar.svelte';
   import Icon from './Icon.svelte';
+  import PostText from './PostText.svelte';
   import type { BookRecord, FeedPost } from '../lib/models';
   import { store, message } from '../lib/store.svelte';
   import { readerUrl, router } from '../lib/router.svelte';
@@ -48,6 +49,38 @@
     }
   }
 
+  function blocked(event: Event): boolean {
+    const target = event.target;
+    return target instanceof Element && Boolean(target.closest('a, button'));
+  }
+
+  function readerTab(): void {
+    window.open(readerUrl(book.id, post.id), '_blank', 'noopener,noreferrer');
+  }
+
+  function openCard(event: MouseEvent): void {
+    if (blocked(event)) return;
+    if (event.metaKey || event.ctrlKey) {
+      event.preventDefault();
+      readerTab();
+      return;
+    }
+    onopen?.();
+  }
+
+  function openCardAux(event: MouseEvent): void {
+    if (event.button !== 1 || blocked(event)) return;
+    event.preventDefault();
+    readerTab();
+  }
+
+  function openCardKey(event: KeyboardEvent): void {
+    if (event.target !== event.currentTarget) return;
+    if (event.key !== 'Enter' && event.key !== ' ') return;
+    event.preventDefault();
+    onopen?.();
+  }
+
   async function share(quote: boolean): Promise<void> {
     try {
       const text = quote ? `${post.text}\n\n— ${book.author}, ${book.title}` : post.text;
@@ -79,16 +112,19 @@
       {/if}
     </div>
     {#if onopen}
-      <a
+      <div
         class:heading={post.kind === 'Heading'}
         class="post-body post-link"
-        href={readerUrl(book.id, post.id)}
-        onclick={(event) => { event.preventDefault(); onopen?.(); }}
+        role="link"
+        tabindex="0"
+        onclick={openCard}
+        onauxclick={openCardAux}
+        onkeydown={openCardKey}
       >
-        {post.text}
-      </a>
+        <PostText text={post.text} />
+      </div>
     {:else}
-      <div class:heading={post.kind === 'Heading'} class="post-body">{post.text}</div>
+      <div class:heading={post.kind === 'Heading'} class="post-body"><PostText text={post.text} /></div>
     {/if}
     <div class="post-actions">
       <button
@@ -158,6 +194,7 @@
 
 .post-link {
   display: block;
+  cursor: pointer;
 }
 
 .post-link:hover {

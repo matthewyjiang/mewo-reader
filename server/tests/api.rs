@@ -7260,7 +7260,7 @@ async fn reparse_removes_duplicate_headings_and_keeps_every_anchor_on_the_same_t
         .fetch_one(&pool)
         .await
         .unwrap();
-    assert_eq!(simple_rev, 1);
+    assert_eq!(simple_rev, 2);
 
     let dir = book_dir_for(&pool, tmp.path(), &book_id).await;
     let original = stored_posts(&pool, &book_id).await;
@@ -7552,7 +7552,7 @@ async fn reparse_removes_duplicate_headings_and_keeps_every_anchor_on_the_same_t
         .fetch_one(&pool)
         .await
         .unwrap();
-    assert_eq!(parser_rev, 1);
+    assert_eq!(parser_rev, 2);
 
     let (code, out, err) = admin_cli(tmp.path(), reparse_cmd(&["--all"]), "").await;
     assert_eq!(code, 0, "{out}{err}");
@@ -7620,7 +7620,7 @@ async fn reparse_refuses_a_body_change_without_force() {
         .fetch_one(&pool)
         .await
         .unwrap();
-    assert_eq!(rev, 1);
+    assert_eq!(rev, 2);
     let text: String =
         sqlx::query_scalar("SELECT text FROM posts WHERE book_id = ? AND text = 'Pain text.'")
             .bind(&book_id)
@@ -7691,7 +7691,7 @@ async fn reparse_continues_after_an_unreadable_epub() {
         .fetch_one(&pool)
         .await
         .unwrap();
-    assert_eq!(good_rev, 1);
+    assert_eq!(good_rev, 2);
 }
 
 #[tokio::test]
@@ -7764,7 +7764,7 @@ async fn reparse_all_reports_a_broken_book_and_continues() {
         .fetch_one(&pool)
         .await
         .unwrap();
-    assert_eq!(rev, 1);
+    assert_eq!(rev, 2);
 }
 
 #[tokio::test]
@@ -7804,7 +7804,7 @@ async fn reparse_rewrites_a_chapter_only_change() {
         .fetch_one(&pool)
         .await
         .unwrap();
-    assert_eq!(parser_rev, 1);
+    assert_eq!(parser_rev, 2);
 }
 
 #[tokio::test]
@@ -7844,7 +7844,7 @@ async fn reparse_rewrites_a_stale_posts_json_without_moving_posts() {
         .fetch_one(&pool)
         .await
         .unwrap();
-    assert_eq!(revs, (0, 1));
+    assert_eq!(revs, (0, 2));
 }
 
 async fn tmp_entries(data: &Path) -> Vec<String> {

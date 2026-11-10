@@ -120,7 +120,8 @@ button, a, input, textarea {
   touch-action: manipulation;
 }
 
-button:focus-visible, a:focus-visible, input:focus-visible, textarea:focus-visible {
+button:focus-visible, a:focus-visible, input:focus-visible, textarea:focus-visible,
+.post-link:focus-visible, .body-button:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 3px;
 }
@@ -308,6 +309,12 @@ strong {
   line-height: var(--post-line);
   white-space: pre-wrap;
   overflow-wrap: anywhere;
+}
+
+.post-body a {
+  color: var(--accent);
+  text-decoration: underline;
+  text-underline-offset: 3px;
 }
 
 .post-body.heading {

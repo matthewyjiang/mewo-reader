@@ -215,14 +215,7 @@ pub(crate) async fn apply(
     sqlx::query("CREATE TEMP TABLE anchor_map(old INTEGER PRIMARY KEY, new INTEGER NOT NULL)")
         .execute(tx.deref_mut())
         .await?;
-    let mapped: Vec<(i64, i64)> = remap
-        .new_of
-        .iter()
-        .enumerate()
-        .filter(|(old, new_index)| **new_index as usize != *old)
-        .map(|(old, new_index)| (old as i64, *new_index as i64))
-        .collect();
-    insert_map(tx, &mapped).await?;
+    insert_map(tx, &anchor_map_rows(remap)).await?;
     remap_comments(tx, book_id).await?;
     // UPDATE, not delete-and-insert. `reposts_private` is AFTER INSERT and
     // would recompute `private` from today's sharing.
@@ -233,6 +226,18 @@ pub(crate) async fn apply(
         .execute(tx.deref_mut())
         .await?;
     Ok(())
+}
+
+/// Rows `apply` writes. A space-only edit is identity, so this is empty and
+/// no anchor moves.
+fn anchor_map_rows(remap: &Remap) -> Vec<(i64, i64)> {
+    remap
+        .new_of
+        .iter()
+        .enumerate()
+        .filter(|(old, new_index)| **new_index as usize != *old)
+        .map(|(old, new_index)| (old as i64, *new_index as i64))
+        .collect()
 }
 
 async fn insert_map(
@@ -484,6 +489,105 @@ mod tests {
         assert_eq!(clamp_index(remap.new_of[2], remap.new_len), 0);
         assert_eq!(clamp_index(5, 1), 0);
         assert_eq!(clamp_index(5, 0), 0);
+    }
+
+    #[tokio::test]
+    async fn a_space_before_a_url_writes_no_anchor_map_row() {
+        let old = [
+            body("Before."),
+            body("microbes:https://www.ncbi.nlm.nih.gov/pmc/articles/PMC4790845/"),
+            body("After."),
+        ];
+        let new = [
+            body("Before."),
+            body("microbes: https://www.ncbi.nlm.nih.gov/pmc/articles/PMC4790845/"),
+            body("After."),
+        ];
+        let remap = align(&old, &new);
+        assert_eq!(remap.new_of, vec![0, 1, 2]);
+        assert!(!remap.exact[1]);
+        assert_eq!(remap.matched, 2);
+        assert_eq!(remap.snapped, 0);
+        assert!(anchor_map_rows(&remap).is_empty());
+
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        sqlx::query("CREATE TABLE comments (book_id TEXT NOT NULL, post_id TEXT NOT NULL)")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query(
+            "CREATE TABLE likes (
+                user_id TEXT NOT NULL,
+                book_id TEXT NOT NULL,
+                post_id TEXT NOT NULL,
+                PRIMARY KEY (user_id, book_id, post_id)
+            )",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "CREATE TABLE reposts (
+                user_id TEXT NOT NULL,
+                book_id TEXT NOT NULL,
+                post_id TEXT NOT NULL,
+                PRIMARY KEY (user_id, book_id, post_id)
+            )",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "CREATE TABLE book_progress (book_id TEXT NOT NULL, progress_index INTEGER NOT NULL)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query("INSERT INTO comments (book_id, post_id) VALUES ('book', '1')")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO likes (user_id, book_id, post_id) VALUES ('u', 'book', '1')")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO reposts (user_id, book_id, post_id) VALUES ('u', 'book', '1')")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO book_progress (book_id, progress_index) VALUES ('book', 1)")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let mut tx = pool.begin_with("BEGIN IMMEDIATE").await.unwrap();
+        apply(&mut tx, "book", &remap).await.unwrap();
+        tx.commit().await.unwrap();
+
+        let comment: String = sqlx::query_scalar("SELECT post_id FROM comments -- own rows only")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        let like: String = sqlx::query_scalar("SELECT post_id FROM likes -- own rows only")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        let repost: String = sqlx::query_scalar("SELECT post_id FROM reposts -- own rows only")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        let progress: i64 =
+            sqlx::query_scalar("SELECT progress_index FROM book_progress -- own rows only")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(comment, "1");
+        assert_eq!(like, "1");
+        assert_eq!(repost, "1");
+        assert_eq!(progress, 1);
     }
 
     fn clamp_index(index: u32, new_len: u32) -> u32 {

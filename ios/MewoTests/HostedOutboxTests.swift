@@ -244,8 +244,10 @@ final class HostedOutboxTests: XCTestCase {
         XCTAssertEqual(try String(contentsOf: bad, encoding: .utf8), "{not json")
         XCTAssertFalse(fileExists())
         try await outbox.enqueue(reply("c1", "hi"))
+        // The send clears the queue before its file delete lands. Writing over the file
+        // in that gap gets removed by the delete, and the old quarantine stays in place.
         try await waitUntil("enqueue after quarantine did not send") {
-            script.commentCalls == ["c1"] && outbox.queue.ops.isEmpty
+            script.commentCalls == ["c1"] && outbox.queue.ops.isEmpty && !fileExists()
         }
 
         try Data("{again".utf8).write(to: outboxFile())
