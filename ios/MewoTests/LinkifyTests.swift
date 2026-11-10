@@ -95,6 +95,30 @@ final class LinkifyTests: XCTestCase {
         XCTAssertNil(view.textLayoutManager, "reading the layout manager rebuilt the text view", file: file, line: line)
     }
 
+    func testTheTextStorageOutlivesInit() {
+        let text = "see https://example.com/a today"
+        let view = autoreleasepool { () -> PostTextView in
+            let view = PostTextView(frame: .zero, textContainer: nil)
+            view.bounds = CGRect(x: 0, y: 0, width: 320, height: 80)
+            view.apply(text: text, font: .systemFont(ofSize: 17), lineSpacing: 7, ink: .label, link: .systemBlue)
+            return view
+        }
+        autoreleasepool {}
+
+        let storage = view.textStorage
+        let layout = view.layoutManager
+        XCTAssertTrue(view.ownedTextStorage === storage)
+        XCTAssertTrue(storage.layoutManagers.first === layout)
+        XCTAssertTrue(layout.textContainers.first === view.textContainer)
+        XCTAssertNil(view.textLayoutManager)
+
+        view.layoutManager.ensureLayout(for: view.textContainer)
+        let point = viewPoint(in: view, range: linkSpans(text)[0].range, text: text)
+        XCTAssertEqual(view.link(at: point)?.absoluteString, "https://example.com/a")
+        let see = text.range(of: "see")!
+        XCTAssertNil(view.link(at: viewPoint(in: view, range: see, text: text)))
+    }
+
     func testALinkTapOpensTheUrlAndDoesNotOpenTheRow() {
         let text = "see https://example.com/a today"
         let view = laidOut(text)

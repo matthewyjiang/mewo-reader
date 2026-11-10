@@ -179,34 +179,48 @@ final class PostTextView: UITextView {
     var onOpen: (() -> Void)?
     var onLink: ((URL) -> Void)?
     private var renderedKey: String?
+    /// `NSTextContainer.layoutManager` does not retain the storage. This property does,
+    /// from before `super.init` until the view is released. A local tuple is not enough:
+    /// an optimized build can drop it once `init` has read the container.
+    let ownedTextStorage: NSTextStorage
 
     /// `PostTextView()` and `makeUIView` both land here. A nil container would select
     /// TextKit 2, and the first `layoutManager` read (sizing and link hits) would then
     /// rebuild the view in TextKit 1 compatibility mode. Link hit testing uses that
     /// layout manager, so a nil container is wired to TextKit 1 before `super`.
     override init(frame: CGRect, textContainer: NSTextContainer?) {
-        let container = Self.textKit1Container(replacing: textContainer)
-        super.init(frame: frame, textContainer: container.container)
+        let built = Self.textKit1Stack(textContainer)
+        ownedTextStorage = built.storage
+        super.init(frame: frame, textContainer: built.container)
         configure()
     }
 
-    /// Keeps the text storage alive until `UITextView` retains it. The container's
-    /// `layoutManager` is an unretained pointer back to that storage.
-    private static func textKit1Container(replacing textContainer: NSTextContainer?) -> (storage: NSTextStorage, container: NSTextContainer) {
-        if let textContainer, textContainer.layoutManager != nil || textContainer.textLayoutManager != nil {
-            return (NSTextStorage(), textContainer)
+    required init?(coder: NSCoder) {
+        // A nib builds and retains its own stack.
+        ownedTextStorage = NSTextStorage()
+        super.init(coder: coder)
+        configure()
+    }
+
+    private struct TextKit1Stack {
+        var storage: NSTextStorage
+        var container: NSTextContainer
+    }
+
+    /// The returned storage is assigned to `ownedTextStorage` before `super.init`.
+    private static func textKit1Stack(_ textContainer: NSTextContainer?) -> TextKit1Stack {
+        if let textContainer, let storage = textContainer.layoutManager?.textStorage {
+            return TextKit1Stack(storage: storage, container: textContainer)
+        }
+        if let textContainer, textContainer.textLayoutManager != nil {
+            return TextKit1Stack(storage: NSTextStorage(), container: textContainer)
         }
         let storage = NSTextStorage()
         let layout = NSLayoutManager()
         let container = textContainer ?? NSTextContainer()
         storage.addLayoutManager(layout)
         layout.addTextContainer(container)
-        return (storage, container)
-    }
-
-    required init?(coder: NSCoder) {
-        super.init(coder: coder)
-        configure()
+        return TextKit1Stack(storage: storage, container: container)
     }
 
     private func configure() {
@@ -228,6 +242,10 @@ final class PostTextView: UITextView {
     override var canBecomeFirstResponder: Bool { false }
 
     func apply(text: String, font: UIFont, lineSpacing: CGFloat, ink: UIColor, link: UIColor) {
+        precondition(
+            ownedTextStorage === textStorage || ownedTextStorage.layoutManagers.isEmpty,
+            "post text lost its text storage"
+        )
         let key = "\(text)\u{0}\(font.fontName)\u{0}\(font.pointSize)\u{0}\(lineSpacing)\u{0}\(ink)\u{0}\(link)"
         if key != renderedKey {
             renderedKey = key
