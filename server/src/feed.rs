@@ -23,11 +23,13 @@ pub struct Posts {
 /// Bump when `assemble` or the EPUB walk changes what it emits for the same file.
 /// 1 = collapse duplicate TOC targets, and merge headings only when they name
 /// the same chapter.
+/// 2 = insert one space when a text node starting with `http://` or `https://`
+/// is glued to the previous word.
 ///
 /// `FIXTURE_POSTS_SHA256` is the parse of `tests/fixtures/*.epub` at this
 /// revision. `parser_rev_tracks_golden_output` fails when the bytes change
 /// and this pair was not updated together.
-pub const PARSER_REV: i64 = 1;
+pub const PARSER_REV: i64 = 2;
 pub const FIXTURE_POSTS_SHA256: &str =
     "99503c5cfe51274072df58ccd0ad73549007c6b97d42ff247c099de62184d984";
 

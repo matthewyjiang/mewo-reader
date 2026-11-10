@@ -387,6 +387,8 @@ fn resolve(base: &str, href: &str) -> Result<String, String> {
 /// flushes; inline nodes concatenate; language changes split segments, not posts;
 /// whitespace-only text nodes are ignored, HTML ASCII whitespace collapses, NBSP
 /// survives, zero-width spaces and soft hyphens disappear. CSS does not affect it.
+/// A text node that starts with `http://` or `https://` and is glued to the
+/// previous word gets one separating space.
 ///
 /// Deviations: html5ever repairs malformed HTML instead of JSoup; entities decode
 /// once (JSoup + Readium unescapes twice); UTF-8 documents only. script/style/head
@@ -570,6 +572,9 @@ struct TextParser {
 
 impl TextParser {
     fn append(&mut self, text: &str) {
+        if url_needs_gap(&self.text, text) {
+            self.text.push(' ');
+        }
         let strip_leading = self.text.ends_with(' ');
         let mut reached_nonwhite = false;
         let mut last_was_white = false;
@@ -615,6 +620,16 @@ impl TextParser {
         }
         self.segments.clear();
     }
+}
+
+/// A URL glued onto the previous word needs one space. Whitespace-only nodes
+/// never reach `append`, and a buffer that already ends in a space is left alone.
+fn url_needs_gap(buf: &str, next: &str) -> bool {
+    if buf.is_empty() || buf.ends_with(' ') {
+        return false;
+    }
+    let rest = next.trim_start_matches(|c| matches!(c, ' ' | '\t' | '\n' | '\u{c}' | '\r'));
+    rest.starts_with("https://") || rest.starts_with("http://")
 }
 
 #[cfg(test)]
@@ -828,6 +843,56 @@ mod tests {
         assert_eq!(posts[0].chapter, "Start");
         assert_eq!(posts[6].kind, PostKind::Heading);
         assert_eq!(posts[7].chapter, "Next");
+    }
+
+    fn texts_of(source: &str) -> Vec<String> {
+        text_elements(source, "notes.xhtml")
+            .into_iter()
+            .map(|element| element.text)
+            .collect()
+    }
+
+    #[test]
+    fn a_url_glued_to_the_previous_word_gains_one_space() {
+        let microbes = "<p>microbes:<a href='https://www.ncbi.nlm.nih.gov/pmc/articles/PMC4790845/'>https://www.ncbi.nlm.nih.gov/pmc/articles/PMC4790845/</a>.</p>";
+        assert_eq!(
+            texts_of(microbes),
+            ["microbes: https://www.ncbi.nlm.nih.gov/pmc/articles/PMC4790845/."]
+        );
+        let across_a_span = "<p><span>microbes:</span>\n<a href='https://www.ncbi.nlm.nih.gov/pmc/articles/PMC4790845/'>https://www.ncbi.nlm.nih.gov/pmc/articles/PMC4790845/</a>.</p>";
+        assert_eq!(
+            texts_of(across_a_span),
+            ["microbes: https://www.ncbi.nlm.nih.gov/pmc/articles/PMC4790845/."]
+        );
+        let two = "<p>supervision:<a href='https://en.wikipedia.org/wiki/Hopfield_network'>https://en.wikipedia.org/wiki/Hopfield_network</a>;\n<a href='https://en.wikipedia.org/wiki/Backpropagation'>https://en.wikipedia.org/wiki/Backpropagation</a>.</p>";
+        assert_eq!(
+            texts_of(two),
+            ["supervision: https://en.wikipedia.org/wiki/Hopfield_network; https://en.wikipedia.org/wiki/Backpropagation."]
+        );
+    }
+
+    #[test]
+    fn an_existing_separator_before_a_url_is_unchanged() {
+        let same_node = "<p>microbes:\n<a href='https://www.ncbi.nlm.nih.gov/pmc/articles/PMC4790845/'>https://www.ncbi.nlm.nih.gov/pmc/articles/PMC4790845/</a>.</p>";
+        assert_eq!(
+            texts_of(same_node),
+            ["microbes: https://www.ncbi.nlm.nih.gov/pmc/articles/PMC4790845/."]
+        );
+        let prose = "<p>See https://www.ncbi.nlm.nih.gov/pmc/articles/ and <a href='https://example.com/'>https://example.com/</a>.</p>";
+        assert_eq!(
+            texts_of(prose),
+            ["See https://www.ncbi.nlm.nih.gov/pmc/articles/ and https://example.com/."]
+        );
+        let broken = "<p>microbes:<br/><a href='https://www.ncbi.nlm.nih.gov/pmc/articles/PMC4790845/'>https://www.ncbi.nlm.nih.gov/pmc/articles/PMC4790845/</a>.</p>";
+        assert_eq!(
+            texts_of(broken),
+            [
+                "microbes:",
+                "https://www.ncbi.nlm.nih.gov/pmc/articles/PMC4790845/."
+            ]
+        );
+        let inline = "<p>left<span> </span><b>right</b></p>";
+        assert_eq!(texts_of(inline), ["leftright"]);
     }
 
     #[test]
