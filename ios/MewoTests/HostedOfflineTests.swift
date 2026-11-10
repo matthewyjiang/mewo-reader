@@ -651,6 +651,31 @@ final class HostedOfflineTests: XCTestCase {
         assertDiskOffMain()
     }
 
+    /// The account switch is still in `beforeSessionFiles` when the old five-second
+    /// clock would have fired. The wait is the shelf and the deleted cache, so a
+    /// slow cleanup still finishes.
+    func testASlowAccountSwitchStillFinishes() async throws {
+        let store = try await open([book(idA, importedAt: 3)])
+        try JSONFiles.write(SocialCache(likes: ["p"]), to: bookDir(idA).appendingPathComponent("social.json"))
+        let gate = QuietPark()
+        HostedDisk.beforeSessionFiles = {
+            await gate.wait()
+        }
+        defer {
+            HostedDisk.beforeSessionFiles = nil
+            gate.release()
+        }
+        sessions.setSignedIn(username: "bea", token: "token-b")
+        let waiting = Task {
+            try await waitUntil("account switch did not finish") {
+                !self.socialExists(idA) && self.settled(store, ids: [idA])
+            }
+        }
+        try await Task.sleep(nanoseconds: 6_000_000_000)
+        gate.release()
+        try await waiting.value
+    }
+
     func testSignOutDuringFeedLeavesTheCacheEmpty() async throws {
         client.blockPosts = true
         client.shelf = [book(idA, importedAt: 3)]
@@ -1870,11 +1895,15 @@ func offlineError(_ message: String = "offline") -> Error {
     )
 }
 
+/// Polls until `condition` is true. A shelf load and an account switch are that
+/// predicate: the session task is still deleting files and refreshing when a
+/// five-second clock already calls it a failure. A predicate that never
+/// becomes true still fails, so one wait cannot sit until the job limit.
 @MainActor
 func waitUntil(_ message: String, _ condition: () -> Bool) async throws {
-    let deadline = Date().addingTimeInterval(5)
+    let hang = Date().addingTimeInterval(60)
     while !condition() {
-        if Date() > deadline {
+        if Date() > hang {
             XCTFail(message)
             throw CancellationError()
         }
