@@ -310,6 +310,12 @@ strong {
   overflow-wrap: anywhere;
 }
 
+.post-body a {
+  color: var(--accent);
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
 .post-body.heading {
   font-size: var(--heading-size);
   line-height: var(--heading-line);
