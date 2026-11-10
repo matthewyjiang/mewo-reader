@@ -30,7 +30,6 @@ struct RepostContext: View {
 /// "Open line in book" link, and the thread line runs down to the reply.
 struct PassageReply: View {
     @Environment(\.mewo) private var mewo
-    @Environment(\.readerScale) private var scale
     var passageName: String
     var passageHandle: String
     var passageMeta: String
@@ -90,14 +89,8 @@ struct PassageReply: View {
                         .foregroundStyle(mewo.mute)
                         .lineLimit(1)
                 }
-                Text(passageText)
-                    .font(passageHeading ? MewoFont.bold(scale.headingSize) : MewoFont.regular(scale.bodySize))
-                    .lineSpacing(max(0, (passageHeading ? scale.headingLine : scale.bodyLine) - (passageHeading ? scale.headingSize : scale.bodySize)))
-                    .foregroundStyle(mewo.ink)
-                    .frame(maxWidth: .infinity, alignment: .leading)
+                LinkedPostText(text: passageText, heading: passageHeading, onOpen: onOpenPassage)
                     .padding(.top, 4)
-                    .contentShape(Rectangle())
-                    .onTapGesture(perform: onOpenPassage)
                 PostActions(
                     liked: liked,
                     commentCount: commentCount,

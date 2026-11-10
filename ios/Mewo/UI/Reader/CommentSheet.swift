@@ -9,7 +9,6 @@ struct CommentTarget: Identifiable, Equatable {
 struct CommentSheet: View {
     @Environment(\.mewo) private var mewo
     @Environment(\.app) private var app
-    @Environment(\.readerScale) private var scale
     var target: CommentTarget
     var publicNotes: Bool
     var onThreadChanged: (String, [PostComment]) -> Void
@@ -213,7 +212,6 @@ struct CommentSheet: View {
 
 struct ThreadPost: View {
     @Environment(\.mewo) private var mewo
-    @Environment(\.readerScale) private var scale
     var name: String
     var handle: String
     var meta: String
@@ -280,17 +278,8 @@ struct ThreadPost: View {
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 
-    @ViewBuilder
     private var replyText: some View {
-        let label = Text(text)
-            .font(heading ? MewoFont.bold(scale.headingSize) : MewoFont.regular(scale.bodySize))
-            .foregroundStyle(mewo.ink)
-            .frame(maxWidth: .infinity, alignment: .leading)
-        if let onOpen {
-            label.contentShape(Rectangle()).onTapGesture(perform: onOpen)
-        } else {
-            label
-        }
+        LinkedPostText(text: text, heading: heading, lineSpacing: 0, onOpen: onOpen)
     }
 }
 

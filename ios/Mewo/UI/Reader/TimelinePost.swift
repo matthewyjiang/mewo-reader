@@ -2,7 +2,6 @@ import SwiftUI
 
 struct TimelinePost: View {
     @Environment(\.mewo) private var mewo
-    @Environment(\.readerScale) private var scale
     var post: FeedPost
     var author: String
     var handle: String
@@ -24,17 +23,17 @@ struct TimelinePost: View {
         VStack(spacing: 0) {
             HStack(alignment: .top, spacing: 12) {
                 Avatar(name: author, cover: cover, size: 40)
+                    .modifier(OpenTap(action: onOpen))
                 VStack(alignment: .leading, spacing: 4) {
                     HStack(spacing: 6) {
                         Text(author)
                             .font(MewoFont.bold(15))
                             .lineLimit(1)
+                            .modifier(OpenTap(action: onOpen))
                         chapterLine
                     }
-                    Text(post.text)
-                        .font(post.kind == .heading ? MewoFont.bold(scale.headingSize) : MewoFont.regular(scale.bodySize))
-                        .lineSpacing(max(0, (post.kind == .heading ? scale.headingLine : scale.bodyLine) - (post.kind == .heading ? scale.headingSize : scale.bodySize)))
-                        .foregroundStyle(mewo.ink)
+                    // The body owns its taps. A link opens the URL and does not also open the row.
+                    LinkedPostText(text: post.text, heading: post.kind == .heading, onOpen: onOpen)
                     PostActions(
                         liked: liked,
                         commentCount: commentCount,
@@ -52,8 +51,13 @@ struct TimelinePost: View {
             .padding(.leading, 16)
             .padding(.trailing, 12)
             .padding(.top, 12)
-            .contentShape(Rectangle())
-            .onTapGesture { onOpen?() }
+            .background {
+                if let onOpen {
+                    Color.clear
+                        .contentShape(Rectangle())
+                        .onTapGesture(perform: onOpen)
+                }
+            }
             Hairline()
         }
         .foregroundStyle(mewo.ink)
@@ -68,6 +72,19 @@ struct TimelinePost: View {
             .lineLimit(1)
             .onTapGesture { onChapterClick?() }
             .accessibilityLabel("Chapters, \(post.chapter)")
+    }
+}
+
+/// Opens the row from chrome that is not the post body. Absent in the reader, where `onOpen` is nil.
+private struct OpenTap: ViewModifier {
+    var action: (() -> Void)?
+
+    func body(content: Content) -> some View {
+        if let action {
+            content.contentShape(Rectangle()).onTapGesture(perform: action)
+        } else {
+            content
+        }
     }
 }
 
