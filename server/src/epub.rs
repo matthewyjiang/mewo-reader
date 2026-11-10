@@ -387,8 +387,9 @@ fn resolve(base: &str, href: &str) -> Result<String, String> {
 /// flushes; inline nodes concatenate; language changes split segments, not posts;
 /// whitespace-only text nodes are ignored, HTML ASCII whitespace collapses, NBSP
 /// survives, zero-width spaces and soft hyphens disappear. CSS does not affect it.
-/// A text node that starts with `http://` or `https://` and is glued to the
-/// previous word gets one separating space.
+/// A text node that starts with `http://` or `https://` gets one separating
+/// space when it is glued to a word or to `:` `,` `;` `.`. An opening
+/// bracket or quote does not.
 ///
 /// Deviations: html5ever repairs malformed HTML instead of JSoup; entities decode
 /// once (JSoup + Readium unescapes twice); UTF-8 documents only. script/style/head
@@ -622,10 +623,14 @@ impl TextParser {
     }
 }
 
-/// A URL glued onto the previous word needs one space. Whitespace-only nodes
-/// never reach `append`, and a buffer that already ends in a space is left alone.
+/// A URL glued onto a word, or onto `:` `,` `;` `.`, needs one space.
+/// Opening brackets and quotes do not. Whitespace-only nodes never reach
+/// `append`.
 fn url_needs_gap(buf: &str, next: &str) -> bool {
-    if buf.is_empty() || buf.ends_with(' ') {
+    let Some(last) = buf.chars().last() else {
+        return false;
+    };
+    if !(last.is_alphanumeric() || matches!(last, ':' | ',' | ';' | '.')) {
         return false;
     }
     let rest = next.trim_start_matches(|c| matches!(c, ' ' | '\t' | '\n' | '\u{c}' | '\r'));
@@ -893,6 +898,16 @@ mod tests {
         );
         let inline = "<p>left<span> </span><b>right</b></p>";
         assert_eq!(texts_of(inline), ["leftright"]);
+    }
+
+    #[test]
+    fn a_url_after_an_opening_mark_stays_unspaced() {
+        let paren = "<p>see (<a href='https://example.com/x'>https://example.com/x</a>)</p>";
+        assert_eq!(texts_of(paren), ["see (https://example.com/x)"]);
+        let bracket = "<p>see [<a href='https://example.com/x'>https://example.com/x</a>]</p>";
+        assert_eq!(texts_of(bracket), ["see [https://example.com/x]"]);
+        let quote = "<p>see \"<a href='https://example.com/x'>https://example.com/x</a>\"</p>";
+        assert_eq!(texts_of(quote), ["see \"https://example.com/x\""]);
     }
 
     #[test]

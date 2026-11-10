@@ -24,7 +24,7 @@ pub struct Posts {
 /// 1 = collapse duplicate TOC targets, and merge headings only when they name
 /// the same chapter.
 /// 2 = insert one space when a text node starting with `http://` or `https://`
-/// is glued to the previous word.
+/// is glued to a word or to `:` `,` `;` `.`.
 ///
 /// `FIXTURE_POSTS_SHA256` is the parse of `tests/fixtures/*.epub` at this
 /// revision. `parser_rev_tracks_golden_output` fails when the bytes change
