@@ -1,10 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { showOwner } from '../src/lib/models.ts';
-import {
-  MemoryPosts, POSTS_CACHE_VERSION, loadCachedPosts, postKey, postPrefix, postsCacheRecord,
-  postsFromCache,
-} from '../src/lib/posts.ts';
+import { MemoryPosts, loadCachedPosts, postKey, postPrefix } from '../src/lib/posts.ts';
 import { pullOffset, PULL_THRESHOLD, REFRESH_GAP, refreshGap, shouldRefresh } from '../src/lib/pull.ts';
 import {
   ShelfRefresh, beginRefresh, clearShelf, droppedBookIds, failRefresh, finishRefresh,
@@ -178,14 +175,6 @@ test('a finished refresh drops saved text for books the server removed', async (
   const refreshing = { status: 'loaded', books: [book('kept'), book('gone')], refreshing: true };
   assert.equal(savedTextAllowed(refreshing, 'gone'), true);
   assert.equal(savedTextAllowed({ status: 'loading' }, 'gone'), true);
-});
-
-test('an old post cache is a miss so a reparse is fetched', () => {
-  const posts = [{ id: 'p', kind: 'Body', text: 'Hello', chapter: '1' }];
-  assert.equal(postsFromCache(posts), null);
-  assert.equal(postsFromCache({ version: 1, posts }), null);
-  assert.equal(POSTS_CACHE_VERSION, 2);
-  assert.deepEqual(postsFromCache(postsCacheRecord(posts)), posts);
 });
 
 test('posts are reused per account and not downloaded again', async () => {

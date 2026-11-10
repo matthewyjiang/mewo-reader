@@ -30,20 +30,6 @@ export function postsFromJson(value: unknown): FeedPost[] | null {
   return value;
 }
 
-/** 2 wraps `{ version, posts }`. A bare array, the previous cache, is a miss. */
-export const POSTS_CACHE_VERSION = 2;
-
-export function postsFromCache(value: unknown): FeedPost[] | null {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
-  const row = value as { version?: unknown; posts?: unknown };
-  if (row.version !== POSTS_CACHE_VERSION) return null;
-  return postsFromJson(row.posts);
-}
-
-export function postsCacheRecord(posts: FeedPost[]): { version: number; posts: FeedPost[] } {
-  return { version: POSTS_CACHE_VERSION, posts };
-}
-
 /** Use a saved feed when it exists. Otherwise download once and keep it. */
 export async function loadCachedPosts(
   key: string,
@@ -97,7 +83,7 @@ export const indexedPosts: PostCache = {
     if (typeof indexedDB === 'undefined') return null;
     try {
       const value = await withStore('readonly', (store) => requestToPromise(store.get(key)));
-      return postsFromCache(value);
+      return postsFromJson(value);
     } catch {
       return null;
     }
@@ -105,7 +91,7 @@ export const indexedPosts: PostCache = {
   async write(key: string, posts: FeedPost[]): Promise<void> {
     if (typeof indexedDB === 'undefined') return;
     try {
-      await withStore('readwrite', (store) => requestToPromise(store.put(postsCacheRecord(posts), key)));
+      await withStore('readwrite', (store) => requestToPromise(store.put(posts, key)));
     } catch {
       // The feed stays in memory for this tab when the disk write fails.
     }
