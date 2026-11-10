@@ -180,23 +180,49 @@ final class PostTextView: UITextView {
     var onLink: ((URL) -> Void)?
     private var renderedKey: String?
 
+    /// `PostTextView()` and `makeUIView` both land here. A nil container would select
+    /// TextKit 2, and the first `layoutManager` read (sizing and link hits) would then
+    /// rebuild the view in TextKit 1 compatibility mode. Link hit testing uses that
+    /// layout manager, so a nil container is wired to TextKit 1 before `super`.
     override init(frame: CGRect, textContainer: NSTextContainer?) {
-        super.init(frame: frame, textContainer: textContainer)
+        let container = Self.textKit1Container(replacing: textContainer)
+        super.init(frame: frame, textContainer: container.container)
+        configure()
+    }
+
+    /// Keeps the text storage alive until `UITextView` retains it. The container's
+    /// `layoutManager` is an unretained pointer back to that storage.
+    private static func textKit1Container(replacing textContainer: NSTextContainer?) -> (storage: NSTextStorage, container: NSTextContainer) {
+        if let textContainer, textContainer.layoutManager != nil || textContainer.textLayoutManager != nil {
+            return (NSTextStorage(), textContainer)
+        }
+        let storage = NSTextStorage()
+        let layout = NSLayoutManager()
+        let container = textContainer ?? NSTextContainer()
+        storage.addLayoutManager(layout)
+        layout.addTextContainer(container)
+        return (storage, container)
+    }
+
+    required init?(coder: NSCoder) {
+        super.init(coder: coder)
+        configure()
+    }
+
+    private func configure() {
         isEditable = false
         isSelectable = false
         isScrollEnabled = false
         isAccessibilityElement = true
         backgroundColor = .clear
         textContainerInset = .zero
-        self.textContainer.lineFragmentPadding = 0
-        self.textContainer.widthTracksTextView = true
-        self.textContainer.lineBreakMode = .byWordWrapping
+        textContainer.lineFragmentPadding = 0
+        textContainer.widthTracksTextView = true
+        textContainer.lineBreakMode = .byWordWrapping
         panGestureRecognizer.isEnabled = false
-        addGestureRecognizer(UITapGestureRecognizer(target: self, action: #selector(tapped)))
-    }
-
-    required init?(coder: NSCoder) {
-        super.init(coder: coder)
+        if gestureRecognizers?.contains(where: { $0 is PostTapRecognizer }) != true {
+            addGestureRecognizer(PostTapRecognizer(target: self, action: #selector(tapped)))
+        }
     }
 
     override var canBecomeFirstResponder: Bool { false }
@@ -301,6 +327,14 @@ func postAttributedString(
     return result
 }
 
+/// The post body's tap. Tests can inject a point and run the same action the recognizer calls.
+final class PostTapRecognizer: UITapGestureRecognizer {
+    var injectedLocation: CGPoint?
+    override func location(in view: UIView?) -> CGPoint {
+        injectedLocation ?? super.location(in: view)
+    }
+}
+
 private struct PostTextRepresentable: UIViewRepresentable {
     var text: String
     var font: UIFont
@@ -311,7 +345,7 @@ private struct PostTextRepresentable: UIViewRepresentable {
     var onLink: (URL) -> Void
 
     func makeUIView(context: Context) -> PostTextView {
-        let view = PostTextView()
+        let view = PostTextView(frame: .zero, textContainer: nil)
         view.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         view.setContentHuggingPriority(.required, for: .vertical)
         return view
