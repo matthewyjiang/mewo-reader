@@ -23,4 +23,4 @@
   }
 </script>
 
-{#each parts as part, index (index)}{#if part.href}<a href={part.href} target="_blank" rel="noopener noreferrer" onclick={openLink}>{part.text}</a>{:else}{part.text}{/if}{/each}
+{#each parts as part, index (index)}{#if part.href}<a href={part.href} target="_blank" rel="noopener noreferrer" onclick={openLink} onauxclick={openLink}>{part.text}</a>{:else}{part.text}{/if}{/each}

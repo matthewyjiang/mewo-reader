@@ -28,7 +28,8 @@
   }
 
   function openRow(event: MouseEvent): void {
-    if ((event.target as Element | null)?.closest('a')) return;
+    const target = event.target;
+    if (target instanceof Element && target.closest('a, button')) return;
     onopen?.();
   }
 

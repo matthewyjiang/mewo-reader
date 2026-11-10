@@ -49,9 +49,29 @@
     }
   }
 
+  function blocked(event: Event): boolean {
+    const target = event.target;
+    return target instanceof Element && Boolean(target.closest('a, button'));
+  }
+
+  function readerTab(): void {
+    window.open(readerUrl(book.id, post.id), '_blank', 'noopener,noreferrer');
+  }
+
   function openCard(event: MouseEvent): void {
-    if ((event.target as Element | null)?.closest('a')) return;
+    if (blocked(event)) return;
+    if (event.metaKey || event.ctrlKey) {
+      event.preventDefault();
+      readerTab();
+      return;
+    }
     onopen?.();
+  }
+
+  function openCardAux(event: MouseEvent): void {
+    if (event.button !== 1 || blocked(event)) return;
+    event.preventDefault();
+    readerTab();
   }
 
   function openCardKey(event: KeyboardEvent): void {
@@ -98,6 +118,7 @@
         role="link"
         tabindex="0"
         onclick={openCard}
+        onauxclick={openCardAux}
         onkeydown={openCardKey}
       >
         <PostText text={post.text} />

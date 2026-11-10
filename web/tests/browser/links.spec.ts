@@ -109,3 +109,62 @@ test('a feed card link does not also open the reader', async ({ page }) => {
   await expect(page).toHaveURL('/');
   await expect(page.locator('.thread-row')).toBeVisible();
 });
+
+test('a modified click opens the reader and a control inside the card does not', async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await install(page);
+  await page.goto('/');
+  const card = page.locator('article.post .post-link');
+  await expect(card).toBeVisible();
+  const outlined = await page.evaluate(() => {
+    const text = [...document.styleSheets].flatMap((sheet) => {
+      try {
+        return [...sheet.cssRules].map((rule) => rule.cssText);
+      } catch {
+        return [];
+      }
+    }).join('\n');
+    return text.includes('.post-link:focus-visible') && text.includes('.body-button:focus-visible');
+  });
+  expect(outlined).toBe(true);
+
+  const ctrl = page.waitForEvent('popup');
+  await card.click({ modifiers: ['Control'] });
+  await expect(await ctrl).toHaveURL(/\/books\/projections\?post=0$/);
+  await expect(page).toHaveURL('/');
+
+  const middle = page.waitForEvent('popup');
+  await card.click({ button: 'middle' });
+  await expect(await middle).toHaveURL(/\/books\/projections\?post=0$/);
+  await expect(page).toHaveURL('/');
+
+  const link = page.locator('article.post').locator(`a[href="${hopfield}"]`);
+  const opened = page.waitForEvent('popup');
+  await link.click();
+  await expect(await opened).toHaveURL(hopfield);
+  await expect(page).toHaveURL('/');
+
+  const middleLink = page.waitForEvent('popup', { timeout: 1000 }).then(
+    (popup) => popup.url(),
+    () => null,
+  );
+  await link.click({ button: 'middle' });
+  const middleUrl = await middleLink;
+  if (middleUrl) expect(middleUrl).toBe(hopfield);
+  await expect(page).toHaveURL('/');
+
+  await page.getByRole('button', { name: 'Comment on this line' }).click();
+  await expect(page).toHaveURL('/');
+  await expect(page.getByRole('dialog', { name: 'Notes on a line' })).toBeVisible();
+  await page.getByRole('button', { name: 'Close replies' }).click();
+
+  await page.locator('.thread-row .body-button').focus();
+  await page.keyboard.press(' ');
+  await expect(page.getByRole('dialog', { name: 'Notes on a line' })).toBeVisible();
+  await expect(page).toHaveURL('/');
+  await page.getByRole('button', { name: 'Close replies' }).click();
+
+  await card.focus();
+  await page.keyboard.press('Enter');
+  await expect(page).toHaveURL(/\/books\/projections\?post=0$/);
+});
