@@ -5909,10 +5909,12 @@ async fn active_leaders(pool: &SqlitePool, work: &str) -> Vec<String> {
     .unwrap()
 }
 
-/// ada leads, bob and carol follow, then ada's row is canceled without a
-/// hand-off: the window `sweep_inactive_leaders` repairs on a later tick.
-/// With `other_leader`, dan already leads the same work by then.
-async fn delete_with_stranded_followers(other_leader: bool) {
+/// ada leads, bob and carol follow. With `canceled`, ada's row is then
+/// canceled without a hand-off: the window `sweep_inactive_leaders` repairs on
+/// a later tick. With `other_leader`, dan already leads the same work by then.
+/// With `carol_downloading`, carol's follower row is `downloading` with a job:
+/// the worker's grab can land on a row that a cancel and retry made a follower.
+async fn delete_with_followers(canceled: bool, other_leader: bool, carol_downloading: bool) {
     let work = "/works/OL893414W";
     let world = world().await;
     let ada = account(&world, "ada").await;
@@ -5926,11 +5928,22 @@ async fn delete_with_stranded_followers(other_leader: bool) {
         assert_eq!(status, StatusCode::CREATED, "{body}");
         followers.push(body["id"].as_str().unwrap().to_string());
     }
-    sqlx::query("UPDATE book_requests SET state = 'canceled' WHERE id = ?")
-        .bind(&stranded)
+    if carol_downloading {
+        sqlx::query(
+            "UPDATE book_requests SET state = 'downloading', download_id = 'carol-job' WHERE id = ?",
+        )
+        .bind(&followers[1])
         .execute(&world.state.pool)
         .await
         .unwrap();
+    }
+    if canceled {
+        sqlx::query("UPDATE book_requests SET state = 'canceled' WHERE id = ?")
+            .bind(&stranded)
+            .execute(&world.state.pool)
+            .await
+            .unwrap();
+    }
     let dan_request = if other_leader {
         let dan = account(&world, "dan").await;
         let (status, body) = post_work(&world, &dan.token, work).await;
@@ -5961,18 +5974,42 @@ async fn delete_with_stranded_followers(other_leader: bool) {
                 follows_of(&world.state.pool, follower).await.as_deref(),
                 Some(leader.as_str())
             );
+            assert_eq!(stored(&world.state.pool, follower).await.state, "requested");
         }
+    }
+    if carol_downloading {
+        assert!(world
+            .sab
+            .lock()
+            .await
+            .deletes
+            .iter()
+            .any(|nzo| nzo == "carol-job"));
+        assert_eq!(
+            stored(&world.state.pool, &followers[1]).await.download_id,
+            None
+        );
     }
 }
 
 #[tokio::test]
 async fn deleting_an_account_promotes_followers_of_its_canceled_request() {
-    delete_with_stranded_followers(false).await;
+    delete_with_followers(true, false, false).await;
 }
 
 #[tokio::test]
 async fn deleting_an_account_moves_stranded_followers_to_the_active_leader() {
-    delete_with_stranded_followers(true).await;
+    delete_with_followers(true, true, false).await;
+}
+
+#[tokio::test]
+async fn deleting_an_account_moves_a_downloading_follower_of_its_active_request() {
+    delete_with_followers(false, false, true).await;
+}
+
+#[tokio::test]
+async fn deleting_an_account_moves_a_downloading_follower_of_its_canceled_request() {
+    delete_with_followers(true, true, true).await;
 }
 
 #[tokio::test]

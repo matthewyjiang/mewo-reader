@@ -162,9 +162,29 @@ pub async fn remove(
     )
     .await?;
     let plan = plan(&mut tx, &target.id).await?;
-    // Leaders first. `follows ON DELETE SET NULL` would otherwise turn every
+    // The worker's grab only checks `state = 'requested'`, so a cancel and a
+    // retry during a grab can leave a follower downloading. Make those plain
+    // followers again, so the hand-offs below move them, and drop their jobs.
+    let mut jobs: Vec<String> = sqlx::query_scalar(
+        "SELECT download_id FROM book_requests
+         WHERE state = 'downloading' AND download_id IS NOT NULL
+           AND follows IN (SELECT id FROM book_requests WHERE user_id = ?)",
+    )
+    .bind(&target.id)
+    .fetch_all(&mut *tx)
+    .await?;
+    sqlx::query(
+        "UPDATE book_requests
+         SET state = 'requested', download_id = NULL, progress = 0, updated_at = ?
+         WHERE state = 'downloading'
+           AND follows IN (SELECT id FROM book_requests WHERE user_id = ?)",
+    )
+    .bind(now)
+    .bind(&target.id)
+    .execute(&mut *tx)
+    .await?;
+    // Leaders next. `follows ON DELETE SET NULL` would otherwise turn every
     // follower into a leader and break `book_requests_one_leader`.
-    let mut jobs = Vec::new();
     for request_id in &plan.leaders {
         if let Some(job) = requests::cancel_leading(&mut tx, request_id, now).await? {
             jobs.push(job);
@@ -308,7 +328,7 @@ async fn plan(conn: &mut SqliteConnection, user_id: &str) -> Result<RemovalPlan,
          FROM book_requests lead
          JOIN book_requests follower ON follower.follows = lead.id
          WHERE lead.user_id = ? AND lead.state IN ('canceled', 'failed')
-           AND follower.state = 'requested'
+           AND follower.state IN ('requested', 'downloading')
          ORDER BY lead.id",
     )
     .bind(user_id)
