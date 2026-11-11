@@ -305,7 +305,10 @@ test('delete shows the preview and waits for the exact name', async ({ page }) =
   }
   await confirm.fill('byron');
   await expect(remove).toBeEnabled();
+  const reload = page.waitForRequest((request) =>
+    request.method() === 'GET' && request.url().endsWith('/v1/admin/users'));
   await remove.click();
+  await reload;
   await expect(sheet).toHaveCount(0);
   await expect(page.getByRole('button', { name: '@byron' })).toHaveCount(0);
   await expect(page.getByRole('status')).toContainText('Deleted byron.');

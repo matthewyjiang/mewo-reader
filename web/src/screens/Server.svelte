@@ -376,11 +376,16 @@
     users = users.map((row) => row.username === saved.username ? saved : row);
   }
 
-  function deleted(): void {
+  async function deleted(): Promise<void> {
     const username = deleting;
     deleting = null;
-    if (users) users = users.filter((row) => row.username !== username);
     store.notice = `Deleted ${username}.`;
+    // Passed books moved to their holders, so other rows' counts changed too.
+    try {
+      users = await store.api.adminUsers();
+    } catch (error) {
+      store.notice = message(error);
+    }
   }
 
   onMount(() => restoreScroll(scroller));
