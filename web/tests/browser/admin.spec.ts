@@ -40,6 +40,7 @@ function freshState() {
     },
     deleted: false,
     deleteError: '',
+    reloadFails: false,
     resets: 0,
   };
 }
@@ -124,6 +125,7 @@ async function answer(
     return route.fulfill({ status: 204 });
   }
   if (path === '/v1/admin/users' && method === 'GET') {
+    if (state.deleted && state.reloadFails) return json({ error: 'Internal error.' }, 500);
     return json({ items: state.deleted ? [state.ada] : [state.ada, state.byron] });
   }
   if (path === '/v1/admin/users/byron/password' && method === 'POST') {
@@ -312,6 +314,25 @@ test('delete shows the preview and waits for the exact name', async ({ page }) =
   await expect(sheet).toHaveCount(0);
   await expect(page.getByRole('button', { name: '@byron' })).toHaveCount(0);
   await expect(page.getByRole('status')).toContainText('Deleted byron.');
+});
+
+test('a failed reload after a delete keeps the row gone and the success notice', async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  const state = await install(page);
+  state.reloadFails = true;
+  await page.goto('/settings/server/users');
+  await page.getByRole('button', { name: 'Manage byron' }).click();
+  await page.getByRole('button', { name: 'Delete account' }).click();
+  const sheet = page.getByRole('dialog', { name: 'Delete account' });
+  await sheet.getByRole('textbox', { name: 'Type byron to confirm' }).fill('byron');
+  const reload = page.waitForResponse((response) =>
+    response.url().endsWith('/v1/admin/users') && response.status() === 500);
+  await sheet.getByRole('button', { name: 'Delete', exact: true }).click();
+  await reload;
+  await expect(sheet).toHaveCount(0);
+  await expect(page.getByRole('button', { name: '@byron' })).toHaveCount(0);
+  await expect(page.getByRole('button', { name: '@ada' })).toBeVisible();
+  await expect(page.getByRole('status')).toHaveText('Deleted byron.');
 });
 
 test('a delete conflict stays inline in the sheet', async ({ page }) => {

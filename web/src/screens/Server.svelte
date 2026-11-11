@@ -379,12 +379,14 @@
   async function deleted(): Promise<void> {
     const username = deleting;
     deleting = null;
+    if (users) users = users.filter((row) => row.username !== username);
     store.notice = `Deleted ${username}.`;
     // Passed books moved to their holders, so other rows' counts changed too.
+    // The delete already succeeded, so a failed refresh keeps the list as is.
     try {
       users = await store.api.adminUsers();
-    } catch (error) {
-      store.notice = message(error);
+    } catch {
+      // Keep the local list and the success notice.
     }
   }
 
