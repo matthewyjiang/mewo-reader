@@ -1,6 +1,8 @@
 <script lang="ts">
   import { onMount } from 'svelte';
+  import AccountSheet from '../components/AccountSheet.svelte';
   import Avatar from '../components/Avatar.svelte';
+  import DeleteAccountSheet from '../components/DeleteAccountSheet.svelte';
   import Icon from '../components/Icon.svelte';
   import { ApiError } from '../lib/api';
   import type { AdminUser, ServerInfo, ServerSettings } from '../lib/models';
@@ -19,6 +21,8 @@
   let settings = $state<ServerSettings | null>(null);
   let info = $state<ServerInfo | null>(null);
   let users = $state<AdminUser[] | null>(null);
+  let managing = $state<AdminUser | null>(null);
+  let deleting = $state<string | null>(null);
   let mb = $state('');
   let generation = 0;
   let pending: Promise<void> = Promise.resolve();
@@ -361,11 +365,22 @@
   async function toggleAdmin(user: AdminUser): Promise<void> {
     if (user.mine || !users) return;
     try {
-      const saved = await store.api.setAdmin(user.username, !user.isAdmin);
-      users = users.map((row) => row.username === saved.username ? saved : row);
+      replaceUser(await store.api.setAdmin(user.username, !user.isAdmin));
     } catch (error) {
       store.notice = message(error);
     }
+  }
+
+  function replaceUser(saved: AdminUser): void {
+    if (!users) return;
+    users = users.map((row) => row.username === saved.username ? saved : row);
+  }
+
+  function deleted(): void {
+    const username = deleting;
+    deleting = null;
+    if (users) users = users.filter((row) => row.username !== username);
+    store.notice = `Deleted ${username}.`;
   }
 
   onMount(() => restoreScroll(scroller));
@@ -381,9 +396,17 @@
     <div class="user-row">
       <Avatar name={user.username} size={40} />
       <span class="account-names">
-        <strong>{user.username}</strong>
+        <span class="name-line">
+          <strong>{user.username}</strong>
+          {#if user.disabled}<span class="tag">Disabled</span>{/if}
+        </span>
         <button class="handle" onclick={() => onprofile(user.username)}>@{user.username}</button>
       </span>
+      {#if !user.mine}
+        <button class="pill manage" aria-label={`Manage ${user.username}`} onclick={() => managing = user}>
+          Manage
+        </button>
+      {/if}
       <button
         class="icon-button shield"
         class:mine={user.mine}
@@ -396,6 +419,17 @@
       </button>
     </div>
   {/each}
+  {#if managing}
+    <AccountSheet
+      user={managing}
+      onclose={() => managing = null}
+      onchange={replaceUser}
+      ondelete={() => { deleting = managing!.username; managing = null; }}
+    />
+  {/if}
+  {#if deleting}
+    <DeleteAccountSheet username={deleting} onclose={() => deleting = null} ondeleted={deleted} />
+  {/if}
 {:else if status === 'ready' && settings && info}
   <label class="switch-row">
     <span>Signups</span>
@@ -917,10 +951,34 @@
   min-width: 0;
 }
 
+.name-line {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
 .user-row .account-names strong {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.tag {
+  flex: 0 0 auto;
+  padding: 2px 8px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  color: var(--like);
+  font-size: .8125rem;
+  font-weight: 700;
+  line-height: 1.23;
+}
+
+.manage {
+  flex: 0 0 auto;
+  min-height: 32px;
+  padding: 6px 14px;
 }
 
 .handle {

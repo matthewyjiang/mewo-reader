@@ -1,7 +1,7 @@
 import type { CheckStatus } from './invites';
 import type {
-  AdminInvite, AdminUser, AuthResponse, BlockedRelease, BookRecord, BookRequest, CatalogWork, CommentIndex,
-  CreatedInvite, FeedPost, HomeFeedPage, Me, PostComment, ProfileBooks, ProfilePostsPage,
+  AccountRemoval, AdminInvite, AdminUser, AuthResponse, BlockedRelease, BookRecord, BookRequest,
+  CatalogWork, CommentIndex, CreatedInvite, FeedPost, HomeFeedPage, Me, PostComment, ProfileBooks, ProfilePostsPage,
   ProfileRecord, ProfileRepostsPage, RepostState, SearchKind, SearchPage, ServerInfo,
   ServerSettings, SettingsPatch, WorkDetail,
 } from './models';
@@ -97,6 +97,15 @@ export class HostedClient {
     await this.response('/auth/logout', { method: 'POST' });
   }
 
+  /** Keeps this session and signs out the others. */
+  async changePassword(current: string, next: string): Promise<void> {
+    await this.response('/auth/password', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ currentPassword: current, newPassword: next }),
+    });
+  }
+
   me(): Promise<Me> {
     return this.json('/me');
   }
@@ -115,6 +124,26 @@ export class HostedClient {
 
   setAdmin(username: string, isAdmin: boolean): Promise<AdminUser> {
     return this.json(`/admin/users/${encodeURIComponent(username)}`, 'PATCH', { isAdmin });
+  }
+
+  setDisabled(username: string, disabled: boolean): Promise<AdminUser> {
+    return this.json(`/admin/users/${encodeURIComponent(username)}`, 'PATCH', { disabled });
+  }
+
+  async resetPassword(username: string): Promise<string> {
+    const body = await this.json<{ password: string }>(
+      `/admin/users/${encodeURIComponent(username)}/password`,
+      'POST',
+    );
+    return body.password;
+  }
+
+  accountRemoval(username: string): Promise<AccountRemoval> {
+    return this.json(`/admin/users/${encodeURIComponent(username)}/removal`);
+  }
+
+  deleteAccount(username: string): Promise<AccountRemoval> {
+    return this.json(`/admin/users/${encodeURIComponent(username)}`, 'DELETE');
   }
 
   serverInfo(): Promise<ServerInfo> {
