@@ -1020,8 +1020,8 @@ mod tests {
         assert!(ten < eleven);
         assert_eq!(listed[ten].1, "reparse");
         assert_eq!(listed[eleven].1, "invites");
-        assert_eq!(listed.last().unwrap().0, 12);
-        assert_eq!(listed.last().unwrap().1, "replace blocklist");
+        assert_eq!(listed.last().unwrap().0, 13);
+        assert_eq!(listed.last().unwrap().1, "account disable");
 
         let (_tmp, fresh) = file_pool(1).await;
         assert_invites(&fresh).await;
@@ -1075,7 +1075,7 @@ mod tests {
         assert_eq!(twelve.1, "replace blocklist");
         assert_eq!(twelve.2, 1);
         assert!(rows.windows(2).all(|pair| pair[0].0 < pair[1].0));
-        assert_eq!(rows.last().unwrap().0, 12);
+        assert_eq!(rows.last().unwrap().0, 13);
         assert!(table_exists(pool, "release_blocklist").await);
         assert!(table_exists(pool, "work_aliases").await);
         assert!(table_exists(pool, "invites").await);

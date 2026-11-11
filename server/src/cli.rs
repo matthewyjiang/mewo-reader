@@ -33,6 +33,7 @@ Usage:
   mewo-server admin grant <username>
   mewo-server admin revoke <username>
   mewo-server admin create <username>
+  mewo-server admin password <username>
   mewo-server admin invites create [--days <n>] [--note <text>]
   mewo-server admin invites list
   mewo-server admin invites revoke <id>
@@ -56,6 +57,8 @@ pub enum AdminCommand {
     Grant(String),
     Revoke(String),
     Create(String),
+    /// Sets a temporary password and prints it once.
+    Password(String),
     Invites(InviteCommand),
     Reparse(ReparseArgs),
     Works(WorksCommand),
@@ -107,6 +110,7 @@ fn parse_admin(args: &[String]) -> Result<Command, String> {
         [verb, name] if verb == "grant" => AdminCommand::Grant(name.clone()),
         [verb, name] if verb == "revoke" => AdminCommand::Revoke(name.clone()),
         [verb, name] if verb == "create" => AdminCommand::Create(name.clone()),
+        [verb, name] if verb == "password" => AdminCommand::Password(name.clone()),
         [verb, rest @ ..] if verb == "invites" => parse_invites(rest)?,
         [verb, rest @ ..] if verb == "reparse" => parse_reparse(rest)?,
         [verb, rest @ ..] if verb == "works" => parse_works(rest)?,
@@ -270,6 +274,7 @@ async fn dispatch(
         AdminCommand::Grant(name) => change(pool, &name, true, out, err).await,
         AdminCommand::Revoke(name) => change(pool, &name, false, out, err).await,
         AdminCommand::Create(name) => create(pool, &name, stdin, out, err).await,
+        AdminCommand::Password(name) => password(pool, &name, out, err).await,
         AdminCommand::Invites(command) => invites(pool, command, out, err).await,
         AdminCommand::Reparse(args) => reparse(pool, config, args, out, err).await,
         AdminCommand::Works(command) => works(config, command, out, err).await,
@@ -491,6 +496,26 @@ async fn create(
     }
 }
 
+async fn password(
+    pool: &SqlitePool,
+    name: &str,
+    out: &mut dyn Write,
+    err: &mut dyn Write,
+) -> Result<i32, io::Error> {
+    let passwords = crate::auth::Passwords::new(&crate::config::AuthConfig::default());
+    match crate::accounts::reset_password(pool, &passwords, None, name).await {
+        Ok(password) => {
+            writeln!(out, "Temporary password: {password}")?;
+            Ok(0)
+        }
+        Err(ApiError::NotFound) => {
+            writeln!(err, "No account named {name}.")?;
+            Ok(1)
+        }
+        Err(error) => Ok(user_or_db(error, err)),
+    }
+}
+
 async fn invites(
     pool: &SqlitePool,
     command: InviteCommand,
@@ -682,6 +707,12 @@ mod tests {
             Ok(Command::Admin(AdminCommand::Create(name))) => assert_eq!(name, "matt"),
             other => panic!("{other:?}"),
         }
+        match parse(words(&["admin", "password", "ada"])) {
+            Ok(Command::Admin(AdminCommand::Password(name))) => assert_eq!(name, "ada"),
+            other => panic!("{other:?}"),
+        }
+        assert!(parse(words(&["admin", "password"])).is_err());
+        assert!(parse(words(&["admin", "password", "ada", "extra"])).is_err());
         match parse(words(&["admin", "sessions", "revoke", "matt"])) {
             Ok(Command::Admin(AdminCommand::RevokeSessions(Some(name)))) => {
                 assert_eq!(name, "matt")
@@ -1214,6 +1245,49 @@ mod tests {
         let me: Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(me["isAdmin"], false);
         assert_eq!(me["username"], "ada");
+    }
+
+    #[tokio::test]
+    async fn password_prints_a_temporary_password_that_signs_in_once() {
+        let tmp = TempDir::new().unwrap();
+        let mut open = config_at(tmp.path());
+        open.allow_signup = true;
+        let app = build(open).await.unwrap();
+        let (status, body) = post_json(
+            &app,
+            "/v1/auth/register",
+            json!({ "username": "ada", "password": "password1" }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let ada = body["token"].as_str().unwrap().to_string();
+
+        let (code, out, err) = cli(tmp.path(), AdminCommand::Password("Ada".into()), "").await;
+        assert_eq!(code, 0, "{err}");
+        let password = out
+            .strip_prefix("Temporary password: ")
+            .and_then(|rest| rest.strip_suffix('\n'))
+            .unwrap_or_else(|| panic!("{out}"));
+        assert_eq!(password.len(), 19, "{out}");
+        assert_eq!(me_status(&app, &ada).await, StatusCode::UNAUTHORIZED);
+        let (status, body) = post_json(
+            &app,
+            "/v1/auth/login",
+            json!({ "username": "ada", "password": password }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let (status, _) = post_json(
+            &app,
+            "/v1/auth/login",
+            json!({ "username": "ada", "password": "password1" }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+        let (code, out, err) = cli(tmp.path(), AdminCommand::Password("nobody".into()), "").await;
+        assert_eq!(code, 1, "{out}");
+        assert_eq!(err, "No account named nobody.\n");
     }
 
     async fn me_status(app: &axum::Router, token: &str) -> StatusCode {

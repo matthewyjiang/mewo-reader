@@ -338,9 +338,8 @@ pub(crate) fn book_dir(data_dir: &Path, files_owner: &str, book_id: &str) -> Pat
 /// becomes the owner, sharing goes back to private, and the previous owner's
 /// rows on this book go away. The file stays put.
 ///
-/// Account deletion does not exist (`admin` only grants and revokes). If it
-/// is added, it must call this before the `users` cascade, or a held book
-/// disappears with the account that first imported it.
+/// `accounts::remove` calls this before the `users` cascade, or a held book
+/// would disappear with the account that first imported it.
 pub(crate) async fn pass_ownership(
     tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
     book_id: &str,

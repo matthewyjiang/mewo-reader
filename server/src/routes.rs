@@ -165,8 +165,9 @@ pub async fn login(
     let (_, norm) = normalize_username(&body.username)?;
     check_password(&body.password)?;
     let attempt = state.throttle.login(ip, &norm)?;
-    let row = sqlx::query_as::<_, (String, String, String)>(
-        "SELECT id, username, password_hash FROM users WHERE username_norm = ?",
+    let row = sqlx::query_as::<_, (String, String, String, bool)>(
+        "SELECT id, username, password_hash, disabled_at IS NOT NULL
+         FROM users WHERE username_norm = ?",
     )
     .bind(&norm)
     .fetch_optional(&state.pool)
@@ -183,9 +184,14 @@ pub async fn login(
         }
         Err(err) => return Err(err),
     };
-    let Some((id, username, password_hash)) = row.filter(|_| ok) else {
+    let Some((id, username, password_hash, disabled)) = row.filter(|_| ok) else {
         return Err(ApiError::Unauthorized("Wrong username or password.".into()));
     };
+    if disabled {
+        // The password was right, so this does not count as a guess.
+        attempt.succeeded();
+        return Err(ApiError::Forbidden("This account is disabled.".into()));
+    }
     let token = session::issue_for_login(&state.pool, &id, now_ms(), &password_hash).await?;
     attempt.succeeded();
     Ok(Json(AuthResponse { token, username }))

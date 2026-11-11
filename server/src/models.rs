@@ -167,12 +167,37 @@ pub struct AdminUser {
     pub is_admin: bool,
     pub books: i64,
     pub mine: bool,
+    pub disabled: bool,
 }
 
+/// Both fields are optional. A patch with neither is a 400.
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct PatchUser {
-    pub is_admin: bool,
+    pub is_admin: Option<bool>,
+    pub disabled: Option<bool>,
+}
+
+/// An admin reset. Shown once and never stored.
+#[derive(Debug, Serialize)]
+pub struct TempPassword {
+    pub password: String,
+}
+
+/// What deleting an account removes. The preview and the delete return the same shape.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AccountRemoval {
+    /// Books deleted with their files.
+    pub books_deleted: i64,
+    /// Of those, books someone else could read (shared, or a sample).
+    pub shared_deleted: i64,
+    /// Books another account also holds. They pass to that account.
+    pub books_passed: i64,
+    /// Books from other accounts this account was holding.
+    pub holds_released: i64,
+    /// Active requests canceled. Followers move to a new leader.
+    pub requests_canceled: i64,
 }
 
 #[derive(Debug, Serialize)]

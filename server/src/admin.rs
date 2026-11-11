@@ -1,9 +1,11 @@
+use crate::accounts;
 use crate::auth::invite;
 use crate::auth::{check_password, normalize_username, Authed, Passwords};
 use crate::db::now_ms;
 use crate::error::ApiError;
 use crate::models::{
-    AdminInvites, AdminUser, AdminUsers, CreatedInvite, NewInvite, PatchUser, ServerInfo,
+    AccountRemoval, AdminInvites, AdminUser, AdminUsers, CreatedInvite, NewInvite, PatchUser,
+    ServerInfo, TempPassword,
 };
 use crate::settings::{self, AdminSettings};
 use crate::AppState;
@@ -42,19 +44,25 @@ pub(crate) fn router() -> Router<AppState> {
             get(get_settings).patch(patch_settings),
         )
         .route("/v1/admin/users", get(list_users))
-        .route("/v1/admin/users/{username}", patch(patch_user))
+        .route(
+            "/v1/admin/users/{username}",
+            patch(patch_user).delete(delete_user),
+        )
+        .route("/v1/admin/users/{username}/removal", get(removal_preview))
         .route("/v1/admin/server", get(server_info))
         .route("/v1/admin/blocklist", get(list_blocklist))
         .route("/v1/admin/blocklist/{id}", axum::routing::delete(unblock))
         .route("/v1/admin/requests/test", post(test_requests))
         .route_layer(middleware::from_fn(require_admin))
-        .merge(invite_router())
+        .merge(no_store_router())
 }
 
-fn invite_router() -> Router<AppState> {
+/// Routes whose responses carry a secret shown once: invite links and reset passwords.
+fn no_store_router() -> Router<AppState> {
     Router::new()
         .route("/v1/admin/invites", get(list_invites).post(create_invite))
         .route("/v1/admin/invites/{id}/revoke", post(revoke_invite))
+        .route("/v1/admin/users/{username}/password", post(reset_password))
         .route_layer(middleware::from_fn(require_admin))
         .route_layer(middleware::from_fn(crate::routes::no_store))
 }
@@ -141,17 +149,63 @@ async fn patch_user(
     Path(username): Path<String>,
     body: Result<Json<PatchUser>, axum::extract::rejection::JsonRejection>,
 ) -> Result<Json<AdminUser>, ApiError> {
-    let Json(body) =
-        body.map_err(|_| ApiError::BadRequest("User patch must be a JSON object.".into()))?;
-    let row = find_account(&state.pool, &username).await?;
-    if row.id == admin.user_id {
-        return Err(ApiError::Conflict(
-            "You can't change your own admin access.".into(),
-        ));
+    let invalid = || ApiError::BadRequest("User patch must be a JSON object.".into());
+    let Json(body) = body.map_err(|_| invalid())?;
+    if body.is_admin.is_none() && body.disabled.is_none() {
+        return Err(invalid());
     }
-    set_admin(&state.pool, &row.username, body.is_admin).await?;
+    let row = find_account(&state.pool, &username).await?;
+    if let Some(disabled) = body.disabled {
+        accounts::set_disabled(&state.pool, &admin.user_id, &row.username, disabled).await?;
+        let action = if disabled { "disable" } else { "enable" };
+        tracing::info!(actor = %admin.username, target = %row.username, action, "admin account change");
+    }
+    if let Some(is_admin) = body.is_admin {
+        if row.id == admin.user_id {
+            return Err(ApiError::Conflict(
+                "You can't change your own admin access.".into(),
+            ));
+        }
+        set_admin(&state.pool, &row.username, is_admin).await?;
+    }
     let row = find_account(&state.pool, &row.username).await?;
     Ok(Json(row.into_user(&admin.user_id)))
+}
+
+async fn reset_password(
+    State(state): State<AppState>,
+    Extension(admin): Extension<Admin>,
+    Path(username): Path<String>,
+) -> Result<Json<TempPassword>, ApiError> {
+    let password = accounts::reset_password(
+        &state.pool,
+        &state.passwords,
+        Some(&admin.user_id),
+        &username,
+    )
+    .await?;
+    tracing::info!(actor = %admin.username, target = %username, action = "reset_password", "admin account change");
+    Ok(Json(TempPassword { password }))
+}
+
+async fn removal_preview(
+    State(state): State<AppState>,
+    Extension(admin): Extension<Admin>,
+    Path(username): Path<String>,
+) -> Result<Json<AccountRemoval>, ApiError> {
+    Ok(Json(
+        accounts::removal_preview(&state.pool, &admin.user_id, &username).await?,
+    ))
+}
+
+async fn delete_user(
+    State(state): State<AppState>,
+    Extension(admin): Extension<Admin>,
+    Path(username): Path<String>,
+) -> Result<Json<AccountRemoval>, ApiError> {
+    let removal = accounts::remove(&state, &admin.user_id, &username).await?;
+    tracing::info!(actor = %admin.username, target = %username, action = "delete", ?removal, "admin account change");
+    Ok(Json(removal))
 }
 
 async fn server_info(State(state): State<AppState>) -> Result<Json<ServerInfo>, ApiError> {
@@ -347,6 +401,7 @@ struct AccountRow {
     joined_at: i64,
     is_admin: bool,
     books: i64,
+    disabled: bool,
 }
 
 impl AccountRow {
@@ -357,6 +412,7 @@ impl AccountRow {
             is_admin: self.is_admin,
             books: self.books,
             mine: self.id == viewer_id,
+            disabled: self.disabled,
         }
     }
 }
@@ -372,7 +428,7 @@ struct Counts {
 async fn account_rows(pool: &SqlitePool) -> Result<Vec<AccountRow>, ApiError> {
     let rows = sqlx::query_as::<_, AccountRow>(
         "SELECT u.id AS id, u.username AS username, u.created_at AS joined_at,
-                u.is_admin AS is_admin,
+                u.is_admin AS is_admin, u.disabled_at IS NOT NULL AS disabled,
                 (SELECT COUNT(*) FROM books b WHERE b.user_id = u.id) AS books
          FROM users u
          ORDER BY u.created_at ASC, u.username ASC",
@@ -386,7 +442,7 @@ async fn find_account(pool: &SqlitePool, username: &str) -> Result<AccountRow, A
     let (_, norm) = normalize_username(username)?;
     let row = sqlx::query_as::<_, AccountRow>(
         "SELECT u.id AS id, u.username AS username, u.created_at AS joined_at,
-                u.is_admin AS is_admin,
+                u.is_admin AS is_admin, u.disabled_at IS NOT NULL AS disabled,
                 (SELECT COUNT(*) FROM books b WHERE b.user_id = u.id) AS books
          FROM users u
          WHERE u.username_norm = ?",
