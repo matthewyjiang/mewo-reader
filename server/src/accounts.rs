@@ -5,6 +5,7 @@
 //! in one `BEGIN IMMEDIATE` that also re-checks the acting admin, so two
 //! admins acting on each other at once cannot both win.
 
+use crate::admin::AdminChange;
 use crate::auth::{normalize_username, session, Passwords};
 use crate::db::now_ms;
 use crate::error::ApiError;
@@ -56,6 +57,37 @@ pub async fn reset_password(
     session::revoke_all(&mut tx, &target.id, None).await?;
     tx.commit().await?;
     Ok(password)
+}
+
+/// The only writer of `users.is_admin`. `actor` is the admin's user id, or
+/// `None` for the CLI grant and revoke. Idempotent.
+pub(crate) async fn set_admin(
+    pool: &SqlitePool,
+    actor: Option<&str>,
+    username: &str,
+    admin: bool,
+) -> Result<AdminChange, ApiError> {
+    let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
+    let target = target(
+        &mut tx,
+        actor,
+        username,
+        "You can't change your own admin access.",
+    )
+    .await?;
+    let changed = sqlx::query("UPDATE users SET is_admin = ? WHERE id = ? AND is_admin <> ?")
+        .bind(i64::from(admin))
+        .bind(&target.id)
+        .bind(i64::from(admin))
+        .execute(&mut *tx)
+        .await?
+        .rows_affected();
+    tx.commit().await?;
+    Ok(if changed == 0 {
+        AdminChange::Unchanged
+    } else {
+        AdminChange::Changed
+    })
 }
 
 /// Turns sign-in off or back on. Disabling signs the account out everywhere
@@ -138,6 +170,21 @@ pub async fn remove(
             jobs.push(job);
         }
     }
+    // A canceled or failed row can still have followers until the worker
+    // sweeps it. The same SET NULL would make each of them a leader.
+    for request_id in &plan.stranded {
+        requests::adopt_followers(&mut tx, request_id, now).await?;
+    }
+    // A leader demoted to follower keeps its job until the worker clears it.
+    // The cascade would drop the row and leave the job in SABnzbd.
+    let follower_jobs: Vec<String> = sqlx::query_scalar(
+        "SELECT download_id FROM book_requests
+         WHERE user_id = ? AND follows IS NOT NULL AND download_id IS NOT NULL",
+    )
+    .bind(&target.id)
+    .fetch_all(&mut *tx)
+    .await?;
+    jobs.extend(follower_jobs);
     for book_id in &plan.holds {
         library::release_hold(&mut tx, &target.id, book_id).await?;
     }
@@ -226,6 +273,8 @@ struct OwnedBook {
 struct RemovalPlan {
     /// Active requests no one else's row follows.
     leaders: Vec<String>,
+    /// Canceled or failed requests that still have waiting followers.
+    stranded: Vec<String>,
     /// Books owned by someone else that this account holds.
     holds: Vec<String>,
     owned: Vec<OwnedBook>,
@@ -250,6 +299,17 @@ async fn plan(conn: &mut SqliteConnection, user_id: &str) -> Result<RemovalPlan,
         "SELECT id FROM book_requests
          WHERE user_id = ? AND follows IS NULL AND state IN ('requested', 'downloading')
          ORDER BY created_at ASC, id ASC",
+    )
+    .bind(user_id)
+    .fetch_all(&mut *conn)
+    .await?;
+    let stranded = sqlx::query_scalar(
+        "SELECT DISTINCT lead.id
+         FROM book_requests lead
+         JOIN book_requests follower ON follower.follows = lead.id
+         WHERE lead.user_id = ? AND lead.state IN ('canceled', 'failed')
+           AND follower.state = 'requested'
+         ORDER BY lead.id",
     )
     .bind(user_id)
     .fetch_all(&mut *conn)
@@ -280,6 +340,7 @@ async fn plan(conn: &mut SqliteConnection, user_id: &str) -> Result<RemovalPlan,
     .await?;
     Ok(RemovalPlan {
         leaders,
+        stranded,
         holds,
         owned,
     })
@@ -343,6 +404,48 @@ mod tests {
             check_password(&password).unwrap();
             assert!(seen.insert(password), "repeated a password");
         }
+    }
+
+    #[tokio::test]
+    async fn set_admin_refuses_an_actor_who_is_no_longer_an_active_admin() {
+        let (_tmp, pool) = fresh().await;
+        user(&pool, "matt", true).await;
+        user(&pool, "bob", true).await;
+        let admins = || async {
+            sqlx::query_scalar::<_, i64>(
+                "SELECT COUNT(*) FROM users WHERE is_admin = 1 AND disabled_at IS NULL",
+            )
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+        };
+
+        assert!(matches!(
+            set_admin(&pool, Some("matt"), "matt", false).await,
+            Err(ApiError::Conflict(message)) if message == "You can't change your own admin access."
+        ));
+        sqlx::query("UPDATE users SET disabled_at = 5 WHERE id = 'matt'")
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert!(matches!(
+            set_admin(&pool, Some("matt"), "bob", false).await,
+            Err(ApiError::Forbidden(message)) if message == "Admins only."
+        ));
+        assert_eq!(admins().await, 1);
+
+        assert_eq!(
+            set_admin(&pool, None, "bob", true).await.unwrap(),
+            AdminChange::Unchanged
+        );
+        assert_eq!(
+            set_admin(&pool, None, "matt", false).await.unwrap(),
+            AdminChange::Changed
+        );
+        assert!(matches!(
+            set_admin(&pool, None, "nobody", true).await,
+            Err(ApiError::NotFound)
+        ));
     }
 
     #[tokio::test]

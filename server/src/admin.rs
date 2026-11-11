@@ -161,12 +161,7 @@ async fn patch_user(
         tracing::info!(actor = %admin.username, target = %row.username, action, "admin account change");
     }
     if let Some(is_admin) = body.is_admin {
-        if row.id == admin.user_id {
-            return Err(ApiError::Conflict(
-                "You can't change your own admin access.".into(),
-            ));
-        }
-        set_admin(&state.pool, &row.username, is_admin).await?;
+        accounts::set_admin(&state.pool, Some(&admin.user_id), &row.username, is_admin).await?;
     }
     let row = find_account(&state.pool, &row.username).await?;
     Ok(Json(row.into_user(&admin.user_id)))
@@ -311,35 +306,6 @@ async fn revoke_invite(
     Path(id): Path<String>,
 ) -> Result<Json<invite::AdminInvite>, ApiError> {
     Ok(Json(invite::revoke(&state.pool, &id, now_ms()).await?))
-}
-
-/// The only writer of `users.is_admin`. Used by `patch_user` and the CLI.
-/// Unknown username → [`ApiError::NotFound`]. Idempotent.
-pub(crate) async fn set_admin(
-    pool: &SqlitePool,
-    username: &str,
-    admin: bool,
-) -> Result<AdminChange, ApiError> {
-    let (_, norm) = normalize_username(username)?;
-    let current = sqlx::query_as::<_, (String, i64)>(
-        "SELECT username, is_admin FROM users WHERE username_norm = ?",
-    )
-    .bind(&norm)
-    .fetch_optional(pool)
-    .await?;
-    let Some((_, is_admin)) = current else {
-        return Err(ApiError::NotFound);
-    };
-    let next = i64::from(admin);
-    if is_admin == next {
-        return Ok(AdminChange::Unchanged);
-    }
-    sqlx::query("UPDATE users SET is_admin = ? WHERE username_norm = ?")
-        .bind(next)
-        .bind(&norm)
-        .execute(pool)
-        .await?;
-    Ok(AdminChange::Changed)
 }
 
 /// Creates an account with `is_admin = 1`. Ignores the signup setting.

@@ -1335,6 +1335,49 @@ pub(crate) async fn cancel_leading(
     Ok(download_id)
 }
 
+/// Followers still waiting on a canceled or failed row follow the work's
+/// active leader, or the oldest of them leads when there is none. Any other
+/// row is left alone. See `worker::sweep_inactive_leaders`.
+pub(crate) async fn adopt_followers(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    leader_id: &str,
+    now: i64,
+) -> Result<(), ApiError> {
+    let row: Option<(String, String)> =
+        sqlx::query_as("SELECT state, work_key FROM book_requests WHERE id = ?")
+            .bind(leader_id)
+            .fetch_optional(&mut **tx)
+            .await?;
+    let Some((state_now, work_key)) = row else {
+        return Ok(());
+    };
+    if state_now != "canceled" && state_now != "failed" {
+        return Ok(());
+    }
+    let active: Option<String> = sqlx::query_scalar(
+        "SELECT id FROM book_requests
+         WHERE work_key = ? AND follows IS NULL AND state IN ('requested', 'downloading')
+         LIMIT 1",
+    )
+    .bind(&work_key)
+    .fetch_optional(&mut **tx)
+    .await?;
+    if let Some(active) = active {
+        sqlx::query(
+            "UPDATE book_requests SET follows = ?, updated_at = ?
+             WHERE follows = ? AND state = 'requested'",
+        )
+        .bind(&active)
+        .bind(now)
+        .bind(leader_id)
+        .execute(&mut **tx)
+        .await?;
+    } else {
+        hand_off(tx, leader_id, now).await?;
+    }
+    Ok(())
+}
+
 /// The oldest follower becomes the leader. The caller's UPDATE of `leader_id`
 /// has to have left the active-leader index already; this fails if it has not.
 pub(crate) async fn hand_off(

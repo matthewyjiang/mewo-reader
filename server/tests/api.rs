@@ -9067,3 +9067,27 @@ async fn migration_013_adds_disabled_at_as_null() {
         .unwrap();
     assert_eq!(after, None);
 }
+
+#[tokio::test]
+async fn a_disabled_admin_cannot_demote_the_last_active_admin() {
+    let (app, tmp) = app().await;
+    let matt = register(&app, "matt", "password1").await;
+    register(&app, "bob", "password1").await;
+    grant(tmp.path(), "matt").await;
+    grant(tmp.path(), "bob").await;
+    let pool = open_db(tmp.path()).await;
+    // bob's disable of matt committed while matt's request was past the guard.
+    sqlx::query("UPDATE users SET disabled_at = 1 WHERE username = 'matt'")
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    for patch in [json!({ "disabled": true }), json!({ "isAdmin": false })] {
+        let (status, body) =
+            json_req(&app, "PATCH", "/v1/admin/users/bob", Some(&matt), patch).await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+        assert_eq!(body["error"], "Admins only.");
+    }
+    let active = "SELECT COUNT(*) FROM users WHERE is_admin = 1 AND disabled_at IS NULL";
+    assert_eq!(count(&pool, active, None).await, 1);
+}

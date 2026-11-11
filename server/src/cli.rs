@@ -461,7 +461,7 @@ async fn change(
     out: &mut dyn Write,
     err: &mut dyn Write,
 ) -> Result<i32, io::Error> {
-    match admin::set_admin(pool, name, admin).await {
+    match crate::accounts::set_admin(pool, None, name, admin).await {
         Ok(AdminChange::Changed | AdminChange::Unchanged) => {
             if admin {
                 writeln!(out, "{name} is an admin.")?;

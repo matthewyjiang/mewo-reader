@@ -5897,3 +5897,115 @@ async fn deleting_an_account_hands_its_leading_request_to_the_oldest_follower() 
         .unwrap();
     assert_eq!(books, 0);
 }
+
+async fn active_leaders(pool: &SqlitePool, work: &str) -> Vec<String> {
+    sqlx::query_scalar(
+        "SELECT id FROM book_requests
+         WHERE work_key = ? AND follows IS NULL AND state IN ('requested', 'downloading')",
+    )
+    .bind(work)
+    .fetch_all(pool)
+    .await
+    .unwrap()
+}
+
+/// ada leads, bob and carol follow, then ada's row is canceled without a
+/// hand-off: the window `sweep_inactive_leaders` repairs on a later tick.
+/// With `other_leader`, dan already leads the same work by then.
+async fn delete_with_stranded_followers(other_leader: bool) {
+    let work = "/works/OL893414W";
+    let world = world().await;
+    let ada = account(&world, "ada").await;
+    let (status, body) = post_work(&world, &ada.token, work).await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    let stranded = body["id"].as_str().unwrap().to_string();
+    let mut followers = Vec::new();
+    for name in ["bob", "carol"] {
+        let who = account(&world, name).await;
+        let (status, body) = post_work(&world, &who.token, work).await;
+        assert_eq!(status, StatusCode::CREATED, "{body}");
+        followers.push(body["id"].as_str().unwrap().to_string());
+    }
+    sqlx::query("UPDATE book_requests SET state = 'canceled' WHERE id = ?")
+        .bind(&stranded)
+        .execute(&world.state.pool)
+        .await
+        .unwrap();
+    let dan_request = if other_leader {
+        let dan = account(&world, "dan").await;
+        let (status, body) = post_work(&world, &dan.token, work).await;
+        assert_eq!(status, StatusCode::CREATED, "{body}");
+        let id = body["id"].as_str().unwrap().to_string();
+        assert!(follows_of(&world.state.pool, &id).await.is_none());
+        Some(id)
+    } else {
+        None
+    };
+
+    let (status, body) = empty_req(
+        &world.app,
+        "DELETE",
+        "/v1/admin/users/ada",
+        Some(&world.token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    let leaders = active_leaders(&world.state.pool, work).await;
+    assert_eq!(leaders.len(), 1, "{leaders:?}");
+    let leader = dan_request.unwrap_or_else(|| followers[0].clone());
+    assert_eq!(leaders[0], leader);
+    for follower in &followers {
+        if follower != &leader {
+            assert_eq!(
+                follows_of(&world.state.pool, follower).await.as_deref(),
+                Some(leader.as_str())
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn deleting_an_account_promotes_followers_of_its_canceled_request() {
+    delete_with_stranded_followers(false).await;
+}
+
+#[tokio::test]
+async fn deleting_an_account_moves_stranded_followers_to_the_active_leader() {
+    delete_with_stranded_followers(true).await;
+}
+
+#[tokio::test]
+async fn deleting_an_account_deletes_the_job_of_its_demoted_follower() {
+    let work = "/works/OL893414W";
+    let world = world().await;
+    let (status, body) = post_work(&world, &world.token, work).await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    let ada = account(&world, "ada").await;
+    let (status, body) = post_work(&world, &ada.token, work).await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    let follower = body["id"].as_str().unwrap().to_string();
+    assert!(follows_of(&world.state.pool, &follower).await.is_some());
+    // A leader demoted to follower keeps its job until `clear_follower_jobs` runs.
+    sqlx::query("UPDATE book_requests SET download_id = 'ada-job' WHERE id = ?")
+        .bind(&follower)
+        .execute(&world.state.pool)
+        .await
+        .unwrap();
+
+    let (status, body) = empty_req(
+        &world.app,
+        "DELETE",
+        "/v1/admin/users/ada",
+        Some(&world.token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(world
+        .sab
+        .lock()
+        .await
+        .deletes
+        .iter()
+        .any(|nzo| nzo == "ada-job"));
+}
