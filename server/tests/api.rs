@@ -9746,12 +9746,20 @@ async fn mail_test_is_admin_only_and_never_shows_the_password() {
     assert_eq!(body["error"], "Use STARTTLS or TLS to send a password.");
 }
 
-#[derive(Clone, Default)]
-struct Captured(Arc<std::sync::Mutex<Vec<u8>>>);
+thread_local! {
+    static LOGS: std::cell::RefCell<Option<Vec<u8>>> = const { std::cell::RefCell::new(None) };
+}
 
-impl std::io::Write for Captured {
+/// Writes into this thread's [`LOGS`] buffer, if one is open.
+struct ThreadLog;
+
+impl std::io::Write for ThreadLog {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        self.0.lock().unwrap().extend_from_slice(buf);
+        LOGS.with(|logs| {
+            if let Some(logs) = logs.borrow_mut().as_mut() {
+                logs.extend_from_slice(buf);
+            }
+        });
         Ok(buf.len())
     }
 
@@ -9760,16 +9768,38 @@ impl std::io::Write for Captured {
     }
 }
 
+/// Captures every event on this thread until [`take_logs`]. A `#[tokio::test]`
+/// runs its spawned tasks on the same thread. Tracing caches whether a callsite
+/// is wanted when the first thread reaches it, so a scoped subscriber, or a
+/// cached per-callsite filter, misses events another test thread saw first. The
+/// subscriber is global and the filter asks again on every event.
+fn capture_logs() {
+    use tracing_subscriber::layer::SubscriberExt;
+    use tracing_subscriber::Layer;
+    static INSTALL: std::sync::Once = std::sync::Once::new();
+    INSTALL.call_once(|| {
+        let layer = tracing_subscriber::fmt::layer()
+            .with_ansi(false)
+            .with_writer(|| ThreadLog)
+            .with_filter(tracing_subscriber::filter::dynamic_filter_fn(|_, _| {
+                LOGS.with(|logs| logs.borrow().is_some())
+            }));
+        tracing::subscriber::set_global_default(tracing_subscriber::registry().with(layer))
+            .unwrap();
+    });
+    LOGS.with(|logs| *logs.borrow_mut() = Some(Vec::new()));
+}
+
+fn take_logs() -> String {
+    let logs = LOGS
+        .with(|logs| logs.borrow_mut().take())
+        .unwrap_or_default();
+    String::from_utf8(logs).unwrap()
+}
+
 #[tokio::test]
 async fn reset_logs_no_token_link_or_smtp_password() {
-    let captured = Captured::default();
-    let writer = captured.clone();
-    let subscriber = tracing_subscriber::fmt()
-        .with_max_level(tracing::Level::TRACE)
-        .with_ansi(false)
-        .with_writer(move || writer.clone())
-        .finish();
-    let _guard = tracing::subscriber::set_default(subscriber);
+    capture_logs();
 
     let mail = mail_app().await;
     sqlx::query("UPDATE settings SET secrets = ? WHERE id = 1")
@@ -9789,7 +9819,7 @@ async fn reset_logs_no_token_link_or_smtp_password() {
     assert_eq!(ask_reset(&mail.app, "ada").await, StatusCode::ACCEPTED);
     mail.settle().await;
 
-    let logs = String::from_utf8(captured.0.lock().unwrap().clone()).unwrap();
+    let logs = take_logs();
     assert!(
         logs.contains("/v1/auth/reset"),
         "the capture saw the requests"
