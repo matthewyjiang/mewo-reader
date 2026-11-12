@@ -52,10 +52,57 @@ class HostedCatalogClientTest {
         try {
             val session = session(server)
             val client = HostedClient()
-            client.catalog(session, "  ", 1)
+            client.catalog(session, "  ", 1, CatalogFilter())
             assertEquals("/v1/catalog/search?page=1", server.takeRequest().path)
-            client.catalog(session, "emma", 2)
+            client.catalog(session, "emma", 2, CatalogFilter())
             assertEquals("/v1/catalog/search?page=2&q=emma", server.takeRequest().path)
+        } finally {
+            server.shutdown()
+        }
+    }
+
+    @Test
+    fun aFilterSendsTheGenreAndSortsOnlyBrowse() {
+        val server = MockWebServer()
+        repeat(3) { server.enqueue(MockResponse().setBody("""{"items":[],"nextPage":null}""")) }
+        server.start()
+        try {
+            val session = session(server)
+            val client = HostedClient()
+            val filter = CatalogFilter(genre = "science-fiction", sort = "new")
+            client.catalog(session, "", 1, filter)
+            assertEquals("/v1/catalog/search?page=1&genre=science-fiction&sort=new", server.takeRequest().path)
+            client.catalog(session, "dune or dragon", 1, filter)
+            assertEquals(
+                "/v1/catalog/search?page=1&q=dune%20or%20dragon&genre=science-fiction",
+                server.takeRequest().path,
+            )
+            client.catalog(session, "", 2, CatalogFilter(sort = "a&b"))
+            assertEquals("/v1/catalog/search?page=2&sort=a%26b", server.takeRequest().path)
+        } finally {
+            server.shutdown()
+        }
+    }
+
+    @Test
+    fun filtersDecodeInOrder() {
+        val server = MockWebServer()
+        server.enqueue(
+            MockResponse().setBody(
+                """{"genres":[{"id":"fantasy","name":"Fantasy"},{"id":"self-help","name":"Self-help"}],""" +
+                    """"sorts":[{"id":"popular","name":"Popular"},{"id":"rated","name":"Top rated"}]}""",
+            ),
+        )
+        server.start()
+        try {
+            val filters = HostedClient().catalogFilters(session(server))
+            assertEquals("/v1/catalog/filters", server.takeRequest().path)
+            assertEquals(
+                listOf(FilterOption("fantasy", "Fantasy"), FilterOption("self-help", "Self-help")),
+                filters.genres,
+            )
+            assertEquals(listOf("popular", "rated"), filters.sorts.map { it.id })
+            assertEquals("Top rated", filters.sorts[1].name)
         } finally {
             server.shutdown()
         }
@@ -208,7 +255,7 @@ class HostedCatalogClientTest {
             awaitAccess(store, CatalogAccess.On)
             var thrown: CatalogException? = null
             try {
-                store.page("   ", 1)
+                store.page("   ", 1, CatalogFilter())
             } catch (err: CatalogException) {
                 thrown = err
             }

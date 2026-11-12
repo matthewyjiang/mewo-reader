@@ -16,19 +16,7 @@ final class CatalogScreenshotTests: XCTestCase {
             return
         }
         setFailSearch(false)
-        let app = XCUIApplication()
-        app.launchArguments = [
-            "--uitesting",
-            "--hosted-url=http://127.0.0.1:8766",
-            "--hosted-user=ada",
-            "--hosted-token=token",
-            "--profile-name=Ada",
-            "--profile-handle=ada",
-            "--theme=x_light",
-            "--seed-shelf",
-            "--seed-feed",
-        ]
-        app.launch()
+        let app = launchApp()
 
         app.buttons["tab-search"].tap()
         XCTAssertTrue(app.buttons["search-tab-catalog"].waitForExistence(timeout: 8))
@@ -146,11 +134,122 @@ final class CatalogScreenshotTests: XCTestCase {
         shot(app, "add-book-menu")
     }
 
+    func testCatalogGenreAndSortMenus() throws {
+        guard fixtureReady() else {
+            XCTFail("social fixture is not reachable on 127.0.0.1:8766")
+            return
+        }
+        setFailSearch(false)
+        let app = launchApp()
+
+        app.buttons["tab-search"].tap()
+        XCTAssertTrue(app.buttons["search-tab-catalog"].waitForExistence(timeout: 8))
+        dismissKeyboard(app)
+        app.buttons["search-tab-catalog"].tap()
+        let genre = app.buttons["catalog-genre"]
+        let sort = app.buttons["catalog-sort"]
+        XCTAssertTrue(genre.waitForExistence(timeout: 8))
+        XCTAssertTrue(sort.waitForExistence(timeout: 8))
+        XCTAssertEqual(genre.label, "All genres")
+        XCTAssertEqual(sort.label, "Popular")
+        XCTAssertTrue(app.staticTexts["Trending on Open Library"].waitForExistence(timeout: 8))
+        XCTAssertTrue(app.staticTexts["Dune"].waitForExistence(timeout: 8))
+        XCTAssertTrue(waitForCatalog(q: "", genre: nil, sort: nil))
+        XCTAssertEqual(genre.frame.midY, sort.frame.midY, accuracy: 1)
+        XCTAssertEqual(genre.frame.height, sort.frame.height, accuracy: 1)
+        XCTAssertLessThan(genre.frame.maxY, app.staticTexts["catalog-heading"].frame.minY)
+        dismissKeyboard(app)
+        shot(app, "catalog-filters")
+
+        genre.tap()
+        let fantasy = app.buttons["Fantasy"]
+        XCTAssertTrue(fantasy.waitForExistence(timeout: 5))
+        XCTAssertTrue(app.buttons["Poetry"].exists)
+        shot(app, "catalog-genre-menu")
+        fantasy.tap()
+        XCTAssertTrue(waitForLabel(genre, "Fantasy"))
+        XCTAssertTrue(waitForCatalog(q: "", genre: "fantasy", sort: nil))
+        XCTAssertTrue(app.staticTexts["The Dispossessed"].waitForExistence(timeout: 8))
+        XCTAssertFalse(app.staticTexts["Trending on Open Library"].exists)
+
+        sort.tap()
+        let newest = app.buttons["New"]
+        XCTAssertTrue(newest.waitForExistence(timeout: 5))
+        newest.tap()
+        XCTAssertTrue(waitForLabel(sort, "New"))
+        XCTAssertTrue(waitForCatalog(q: "", genre: "fantasy", sort: "new"))
+        XCTAssertTrue(app.staticTexts["The Dispossessed"].waitForExistence(timeout: 8))
+        XCTAssertFalse(app.staticTexts["Trending on Open Library"].exists)
+        shot(app, "catalog-fantasy-new")
+
+        let field = app.textFields["search-field"]
+        XCTAssertTrue(field.waitForExistence(timeout: 5))
+        field.tap()
+        field.typeText("dune")
+        XCTAssertTrue(sort.waitForNonExistence(timeout: 5))
+        XCTAssertEqual(genre.label, "Fantasy")
+        XCTAssertTrue(waitForCatalog(q: "dune", genre: "fantasy", sort: nil))
+        XCTAssertTrue(app.staticTexts["Dune"].waitForExistence(timeout: 8))
+        dismissKeyboard(app)
+        shot(app, "catalog-genre-search")
+
+        app.buttons["search-clear"].tap()
+        XCTAssertTrue(sort.waitForExistence(timeout: 5))
+        XCTAssertEqual(sort.label, "New")
+        dismissKeyboard(app)
+
+        genre.tap()
+        let poetry = app.buttons["Poetry"]
+        XCTAssertTrue(poetry.waitForExistence(timeout: 5))
+        poetry.tap()
+        XCTAssertTrue(app.staticTexts["Nothing in Poetry right now. Try another genre."].waitForExistence(timeout: 8))
+        XCTAssertEqual(genre.label, "Poetry")
+        XCTAssertTrue(sort.exists)
+        shot(app, "catalog-genre-empty")
+    }
+
     func testSlideToTypeCoachLabelMatchesTheFreshSimulatorCopy() {
         XCTAssertTrue(slideToTypeCoachLabel("Speed up your typing by sliding your finger from letter to letter."))
         XCTAssertTrue(slideToTypeCoachLabel("Speed up your typing by sliding your finger across the letters to compose a word."))
         XCTAssertFalse(slideToTypeCoachLabel("Continue"))
         XCTAssertFalse(slideToTypeCoachLabel("Trending on Open Library"))
+    }
+
+    private func launchApp() -> XCUIApplication {
+        let app = XCUIApplication()
+        app.launchArguments = [
+            "--uitesting",
+            "--hosted-url=http://127.0.0.1:8766",
+            "--hosted-user=ada",
+            "--hosted-token=token",
+            "--profile-name=Ada",
+            "--profile-handle=ada",
+            "--theme=x_light",
+            "--seed-shelf",
+            "--seed-feed",
+        ]
+        app.launch()
+        return app
+    }
+
+    private func waitForLabel(_ element: XCUIElement, _ label: String) -> Bool {
+        let match = XCTNSPredicateExpectation(predicate: NSPredicate(format: "label == %@", label), object: element)
+        return XCTWaiter().wait(for: [match], timeout: 5) == .completed
+    }
+
+    /// The fixture records the last catalog search. Null genre or sort means it was not sent.
+    private func waitForCatalog(q: String, genre: String?, sort: String?) -> Bool {
+        let deadline = Date().addingTimeInterval(8)
+        while Date() < deadline {
+            if let last = controlJSON("/control/status")?["last_catalog"] as? [String: Any],
+               (last["q"] as? String) == q,
+               (last["genre"] as? String) == genre,
+               (last["sort"] as? String) == sort {
+                return true
+            }
+            RunLoop.current.run(until: Date().addingTimeInterval(0.1))
+        }
+        return false
     }
 
     private func openRow(_ app: XCUIApplication, _ olid: String) {

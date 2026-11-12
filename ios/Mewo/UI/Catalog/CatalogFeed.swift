@@ -13,8 +13,8 @@ enum RowOutcome: Equatable, Sendable {
     case openBook(String)
 }
 
-/// Catalog tab. Trending is remembered per token. A memo built from more than
-/// one page stays put; a single page is shown and quietly fetched again.
+/// Catalog tab. Browse pages are remembered per token and filter. A memo built
+/// from more than one page stays put; a single page is shown and quietly fetched again.
 @Observable
 @MainActor
 final class CatalogFeed {
@@ -23,12 +23,16 @@ final class CatalogFeed {
     var sheet: CatalogSheetModel?
     var notice: String?
     private(set) var query = ""
+    private(set) var filter = CatalogFilter()
+    /// Nil until `/v1/catalog/filters` answers. The filter row waits for it.
+    private(set) var filters: CatalogFilters?
 
     @ObservationIgnored private(set) var loadTask: Task<Void, Never>?
     @ObservationIgnored private var generation = 0
     @ObservationIgnored private var visible = false
     @ObservationIgnored private var sessionSeen: String?
-    @ObservationIgnored private var trending: [String: TrendingMemo] = [:]
+    @ObservationIgnored private var filtersTask: Task<Void, Never>?
+    @ObservationIgnored private var browse: [BrowseKey: BrowseMemo] = [:]
     @ObservationIgnored private let service: CatalogService
     @ObservationIgnored private let onImported: () -> Void
     @ObservationIgnored private let debounceNanos: UInt64
@@ -45,6 +49,7 @@ final class CatalogFeed {
         self.debounceNanos = debounceNanos
         self.pollNanos = pollNanos
         self.sessionSeen = service.token
+        self.filter = service.filter
     }
 
     var items: [CatalogWork] {
@@ -58,6 +63,11 @@ final class CatalogFeed {
     var failure: String? {
         if case .failed(let message) = phase { return message }
         return nil
+    }
+
+    var genreName: String? {
+        guard let genre = filter.genre else { return nil }
+        return filters?.genres.first { $0.id == genre }?.name
     }
 
     func shown(_ work: CatalogWork) -> BookRequest? {
@@ -79,10 +89,26 @@ final class CatalogFeed {
         start(append: false, debounce: true, quietMemo: false)
     }
 
+    /// Same flow as a query change. Another genre's rows do not stay under the new one.
+    func setFilter(_ filter: CatalogFilter) {
+        let mode = catalogQuery(query)
+        let changed = catalogSent(mode, filter) != catalogSent(mode, self.filter)
+        self.filter = filter
+        service.filter = filter
+        guard changed else { return }
+        overlay.removeAll()
+        notice = nil
+        close()
+        guard visible else { return }
+        phase = .loading(nil)
+        start(append: false, debounce: false, quietMemo: true)
+    }
+
     func show() {
         let opening = !visible
         visible = true
         guard opening else { return }
+        loadFilters()
         start(append: false, debounce: false, quietMemo: true)
     }
 
@@ -116,6 +142,7 @@ final class CatalogFeed {
         close()
         phase = .idle
         guard visible, token != nil else { return }
+        loadFilters()
         start(append: false, debounce: false, quietMemo: true)
     }
 
@@ -185,11 +212,23 @@ final class CatalogFeed {
         }
     }
 
+    /// Once per app session. A failure leaves `filters` nil, so the next show asks again.
+    private func loadFilters() {
+        guard filters == nil, filtersTask == nil else { return }
+        filtersTask = Task { [weak self] in
+            guard let self else { return }
+            let loaded = try? await self.service.filters()
+            self.filtersTask = nil
+            if let loaded { self.filters = loaded }
+        }
+    }
+
     private func start(append: Bool, debounce: Bool, quietMemo: Bool) {
         loadTask?.cancel()
         generation += 1
         let gen = generation
         let mode = catalogQuery(query)
+        let sent = catalogSent(mode, filter)
         let token = service.token
         guard service.access == .on, let token else {
             if !append { phase = .idle }
@@ -203,7 +242,7 @@ final class CatalogFeed {
             guard case .loaded(let page, false) = phase, let next = page.nextPage else { return }
             phase = .loaded(page, more: true)
             pageNumber = next
-        } else if quietMemo, case .browse = mode, let memo = trending[token] {
+        } else if quietMemo, case .browse = mode, let memo = browse[BrowseKey(token: token, filter: sent)] {
             phase = .loaded(memo.page, more: false)
             if memo.pages > 1 {
                 loadTask = nil
@@ -235,9 +274,9 @@ final class CatalogFeed {
             }
             guard !Task.isCancelled, gen == self.generation, self.service.token == token else { return }
             do {
-                let page = try await self.service.page(query: queryParam, page: pageNumber)
+                let page = try await self.service.page(query: queryParam, page: pageNumber, filter: sent)
                 guard !Task.isCancelled, gen == self.generation, self.service.token == token else { return }
-                self.deliver(page, mode: mode, token: token, append: append)
+                self.deliver(page, mode: mode, key: BrowseKey(token: token, filter: sent), append: append)
             } catch is CancellationError {
                 return
             } catch let url as URLError where url.code == .cancelled {
@@ -250,19 +289,19 @@ final class CatalogFeed {
         }
     }
 
-    private func deliver(_ page: CatalogPage, mode: CatalogQuery, token: String, append: Bool) {
+    private func deliver(_ page: CatalogPage, mode: CatalogQuery, key: BrowseKey, append: Bool) {
         let merged: CatalogPage
         let pages: Int
         if append, let current = shownPage {
             merged = CatalogPage(items: current.items + page.items, nextPage: page.nextPage)
-            pages = (trending[token]?.pages ?? 1) + 1
+            pages = (browse[key]?.pages ?? 1) + 1
         } else {
             merged = page
             pages = 1
         }
         phase = .loaded(merged, more: false)
         if case .browse = mode {
-            trending[token] = TrendingMemo(page: merged, pages: pages)
+            browse[key] = BrowseMemo(page: merged, pages: pages)
         }
     }
 
@@ -285,7 +324,12 @@ final class CatalogFeed {
     }
 }
 
-private struct TrendingMemo: Equatable, Sendable {
+private struct BrowseKey: Hashable, Sendable {
+    var token: String
+    var filter: CatalogFilter
+}
+
+private struct BrowseMemo: Equatable, Sendable {
     var page: CatalogPage
     var pages: Int
 }

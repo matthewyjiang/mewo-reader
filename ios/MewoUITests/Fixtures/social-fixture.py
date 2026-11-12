@@ -20,6 +20,8 @@ fail_search = False
 # rows | empty | fail. Screenshot tests flip this. Typed and browse search both honor it.
 library_mode = "rows"
 next_request = 0
+# Query string of the last /v1/catalog/search, so a test can check genre and sort.
+last_catalog = {}
 
 BOOK = {
     "id": "44444444-4444-4444-4444-444444444444",
@@ -126,6 +128,34 @@ WORKS = [
 ]
 WORK_BY_OLID = {item["workKey"].rsplit("/", 1)[-1]: item for item in WORKS}
 
+CATALOG_FILTERS = {
+    "genres": [
+        {"id": "fantasy", "name": "Fantasy"},
+        {"id": "science-fiction", "name": "Science fiction"},
+        {"id": "mystery", "name": "Mystery"},
+        {"id": "thriller", "name": "Thriller"},
+        {"id": "romance", "name": "Romance"},
+        {"id": "horror", "name": "Horror"},
+        {"id": "historical-fiction", "name": "Historical fiction"},
+        {"id": "young-adult", "name": "Young adult"},
+        {"id": "biography", "name": "Biography"},
+        {"id": "history", "name": "History"},
+        {"id": "self-help", "name": "Self-help"},
+        {"id": "poetry", "name": "Poetry"},
+    ],
+    "sorts": [
+        {"id": "popular", "name": "Popular"},
+        {"id": "rated", "name": "Top rated"},
+        {"id": "new", "name": "New"},
+    ],
+}
+# Poetry stays empty for the genre empty state. Other genres return these rows.
+GENRE_WORKS = {
+    "fantasy": ["OL1W", "OL2W", "OL6W"],
+    "science-fiction": ["OL1W", "OL3W", "OL7W"],
+    "poetry": [],
+}
+
 
 def phase_of(request):
     state = request["state"]
@@ -205,8 +235,14 @@ class Handler(BaseHTTPRequestHandler):
             self.search(query.get("type", ["accounts"])[0], query.get("q", [""])[0])
         elif path == "/v1/me":
             self.json_ok({"username": "ada", "isAdmin": False, "canRequest": True})
+        elif path == "/v1/catalog/filters":
+            self.json_ok(CATALOG_FILTERS)
         elif path == "/v1/catalog/search":
-            self.catalog_search(query.get("q", [""])[0])
+            self.catalog_search(
+                query.get("q", [""])[0],
+                query.get("genre", [None])[0],
+                query.get("sort", [None])[0],
+            )
         elif path.startswith("/v1/catalog/works/"):
             olid = path.rsplit("/", 1)[-1]
             item = WORK_BY_OLID.get(olid)
@@ -257,6 +293,7 @@ class Handler(BaseHTTPRequestHandler):
                     "feed_requests": feed_requests,
                     "fail_search": fail_search,
                     "library_mode": library_mode,
+                    "last_catalog": last_catalog,
                 }
             self.json_ok(body)
         else:
@@ -363,14 +400,21 @@ class Handler(BaseHTTPRequestHandler):
             items = [account for account in accounts if needle in account["username"].lower()]
         self.json_ok({"type": kind, "items": items, "nextCursor": None})
 
-    def catalog_search(self, query):
+    def catalog_search(self, query, genre=None, sort=None):
+        global last_catalog
         with lock:
             failing = fail_search
+            last_catalog = {"q": query, "genre": genre, "sort": sort}
         if failing:
             self.json_status(500, {"error": "Couldn't search the catalog right now."})
             return
         needle = query.strip().lower()
         items = list(WORKS)
+        if genre is not None:
+            keys = GENRE_WORKS.get(genre, [])
+            items = [item for item in items if item["workKey"].rsplit("/", 1)[-1] in keys]
+        if sort == "new":
+            items.sort(key=lambda item: item["year"] or 0, reverse=True)
         if needle:
             items = [
                 item for item in items

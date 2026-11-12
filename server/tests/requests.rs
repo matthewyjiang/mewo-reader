@@ -429,7 +429,10 @@ async fn library_search(
     let hit = if let Some(author) = query.get("author_key") {
         format!("author_key={author}")
     } else if let Some(q) = query.get("q") {
-        format!("q={q}")
+        match query.get("sort") {
+            Some(sort) => format!("q={q} sort={sort}"),
+            None => format!("q={q}"),
+        }
     } else {
         "other".into()
     };
@@ -1495,6 +1498,9 @@ async fn permissions() {
     assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
     assert_eq!(body["error"], "Requests are off.");
     let (status, body) = empty_req(&app, "GET", "/v1/catalog/works/OL1W", Some(&token)).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+    assert_eq!(body["error"], "Requests are off.");
+    let (status, body) = empty_req(&app, "GET", "/v1/catalog/filters", Some(&token)).await;
     assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
     assert_eq!(body["error"], "Requests are off.");
     let (status, body) = empty_req(&app, "GET", "/v1/requests", Some(&token)).await;
@@ -4371,6 +4377,164 @@ async fn catalog_browse_does_not_refetch_a_fresh_outage() {
         assert_eq!(body["error"], "Open Library is not answering. Try again.");
     }
     assert_eq!(catalog.lock().await.hits, vec!["trending".to_string()]);
+}
+
+#[tokio::test]
+async fn catalog_filters_lists_genres_and_sorts_in_table_order() {
+    let catalog = Arc::new(Mutex::new(Catalog::default()));
+    let (_state, app, _data, token) = catalog_app(Arc::clone(&catalog)).await;
+    let (status, body) = empty_req(&app, "GET", "/v1/catalog/filters", Some(&token)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let genres = body["genres"].as_array().unwrap();
+    assert_eq!(genres.len(), 12, "{body}");
+    assert_eq!(genres[0], json!({ "id": "fantasy", "name": "Fantasy" }));
+    assert_eq!(
+        genres[1],
+        json!({ "id": "science-fiction", "name": "Science fiction" })
+    );
+    assert_eq!(genres[11], json!({ "id": "poetry", "name": "Poetry" }));
+    assert_eq!(
+        body["sorts"],
+        json!([
+            { "id": "popular", "name": "Popular" },
+            { "id": "rated", "name": "Top rated" },
+            { "id": "new", "name": "New" }
+        ])
+    );
+    let (status, _) = empty_req(&app, "GET", "/v1/catalog/filters", None).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert!(catalog.lock().await.hits.is_empty());
+}
+
+fn current_year() -> i64 {
+    let days = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64
+        / 86_400;
+    // Days since 1970 to a civil year. Exact enough away from New Year.
+    1970 + (days * 400 + 200) / 146_097
+}
+
+#[tokio::test]
+async fn catalog_genre_search_scopes_the_typed_text_and_sends_no_sort() {
+    let catalog = Arc::new(Mutex::new(Catalog::default()));
+    let (_state, app, _data, token) = catalog_app(Arc::clone(&catalog)).await;
+    let path = format!(
+        "/v1/catalog/search?q={}&genre=poetry",
+        percent_encode("dune OR dragon")
+    );
+    let (status, body) = empty_req(&app, "GET", &path, Some(&token)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["items"][0]["title"], "Dune");
+    assert_eq!(
+        catalog.lock().await.hits,
+        vec![r#"q=(dune OR dragon) AND (subject_key:"poetry")"#.to_string()]
+    );
+}
+
+#[tokio::test]
+async fn catalog_genre_browse_sends_the_clause_languages_and_sort() {
+    let catalog = Arc::new(Mutex::new(Catalog::default()));
+    let (_state, app, _data, token) = catalog_app(Arc::clone(&catalog)).await;
+    let year = current_year();
+    for path in [
+        "/v1/catalog/search?genre=history",
+        "/v1/catalog/search?genre=history&sort=popular",
+        "/v1/catalog/search?genre=history&sort=rated",
+        "/v1/catalog/search?genre=history&sort=new",
+        "/v1/catalog/search?sort=rated",
+        "/v1/catalog/search?sort=new&page=2",
+    ] {
+        let (status, body) = empty_req(&app, "GET", path, Some(&token)).await;
+        assert_eq!(status, StatusCode::OK, "{path} {body}");
+        assert_eq!(body["items"][0]["title"], "Dune", "{path}");
+    }
+    let history = r#"(subject_key:"history") -subject_key:"fiction""#;
+    assert_eq!(
+        catalog.lock().await.hits,
+        vec![
+            format!("q={history} language:eng sort=readinglog"),
+            format!("q={history} language:eng sort=rating"),
+            format!(
+                "q={history} first_publish_year:[{} TO {year}] language:eng sort=readinglog",
+                year - 2
+            ),
+            "q=language:eng sort=rating".to_string(),
+            format!(
+                "q=first_publish_year:[{} TO {year}] language:eng sort=readinglog",
+                year - 2
+            ),
+        ],
+        "the second request is the first one's cache key"
+    );
+}
+
+#[tokio::test]
+async fn catalog_all_genres_popular_is_trending() {
+    let catalog = Arc::new(Mutex::new(Catalog::default()));
+    let (_state, app, _data, token) = catalog_app(Arc::clone(&catalog)).await;
+    for path in [
+        "/v1/catalog/search",
+        "/v1/catalog/search?sort=popular",
+        "/v1/catalog/search?q=%20&sort=popular&page=2",
+    ] {
+        let (status, body) = empty_req(&app, "GET", path, Some(&token)).await;
+        assert_eq!(status, StatusCode::OK, "{path} {body}");
+    }
+    assert_eq!(catalog.lock().await.hits, vec!["trending".to_string()]);
+}
+
+#[tokio::test]
+async fn catalog_rejects_unknown_filters_and_a_sort_with_a_search() {
+    let catalog = Arc::new(Mutex::new(Catalog::default()));
+    let (_state, app, _data, token) = catalog_app(Arc::clone(&catalog)).await;
+    for (path, error) in [
+        ("/v1/catalog/search?genre=westerns", "Unknown genre."),
+        ("/v1/catalog/search?genre=Fantasy&q=d", "Unknown genre."),
+        ("/v1/catalog/search?genre=", "Unknown genre."),
+        ("/v1/catalog/search?sort=rating", "Unknown sort."),
+        ("/v1/catalog/search?sort=newest&q=d", "Unknown sort."),
+        (
+            "/v1/catalog/search?sort=rated&q=d",
+            "Type at least 3 characters to search the catalog.",
+        ),
+        (
+            "/v1/catalog/search?q=dune&sort=popular",
+            "Sort works only without a search.",
+        ),
+        (
+            "/v1/catalog/search?q=dune&genre=fantasy&sort=new",
+            "Sort works only without a search.",
+        ),
+    ] {
+        let (status, body) = empty_req(&app, "GET", path, Some(&token)).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{path} {body}");
+        assert_eq!(body["error"], error, "{path}");
+    }
+    assert!(catalog.lock().await.hits.is_empty());
+}
+
+#[tokio::test]
+async fn catalog_browse_filters_on_every_accepted_language() {
+    let catalog = Arc::new(Mutex::new(Catalog::default()));
+    let (_state, app, _data, token) = catalog_app(Arc::clone(&catalog)).await;
+    let (status, body) = json_req(
+        &app,
+        "PATCH",
+        "/v1/admin/settings",
+        Some(&token),
+        json!({ "languages": ["fr", "en"] }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (status, body) =
+        empty_req(&app, "GET", "/v1/catalog/search?genre=poetry", Some(&token)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        catalog.lock().await.hits,
+        vec![r#"q=(subject_key:"poetry") language:(eng OR fre) sort=readinglog"#.to_string()]
+    );
 }
 
 async fn shelf_book(pool: &SqlitePool, id: &str, user_id: &str, shared: i64) {

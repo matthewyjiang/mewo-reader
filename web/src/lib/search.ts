@@ -1,4 +1,4 @@
-import type { BookRequest, SearchKind, SearchPage } from './models';
+import type { BookRequest, CatalogFilter, SearchKind, SearchPage } from './models';
 
 export const SEARCH_DEBOUNCE_MS = 250;
 export const CATALOG_DEBOUNCE_MS = 300;
@@ -6,6 +6,7 @@ export const BROWSE_REVALIDATE_MS = 60_000;
 /** Catalog search starts at three characters. Shorter text is the trending browse. */
 export const CATALOG_MIN_QUERY_CHARS = 3;
 const MEMO_LIMIT = 8;
+export const NO_FILTER: CatalogFilter = { genre: null, sort: null };
 
 /** No session. A signed-in empty field is a browse request, not this. */
 export interface SearchIdle {
@@ -37,6 +38,8 @@ export type SearchPhase = SearchIdle | SearchLoading | SearchLoaded | SearchFail
 export interface SearchState {
   query: string;
   kind: SearchKind;
+  /** Catalog genre and sort. Other kinds ignore it. */
+  filter: CatalogFilter;
   phase: SearchPhase;
   /** Bearer token, or null after sign-out. A response for another token is dropped. */
   session: string | null;
@@ -45,6 +48,8 @@ export interface SearchState {
 export interface SearchRequest {
   query: string;
   kind: SearchKind;
+  /** Sort is null while text searches: it applies to browse only. */
+  filter: CatalogFilter;
   cursor: string | null;
   session: string;
   signal: AbortSignal;
@@ -82,8 +87,31 @@ export function clearSearchMemos(): void {
   memos.clear();
 }
 
-function memoKey(kind: SearchKind, query: string): string {
-  return `${kind}\u0000${query}`;
+/** What a catalog page depends on. Sort applies to browse only, so typed text drops it. */
+export function catalogKey(query: string, filter: CatalogFilter): string {
+  return `${query}\u0000${filter.genre ?? ''}\u0000${query ? '' : (filter.sort ?? '')}`;
+}
+
+function memoKey(kind: SearchKind, query: string, filter: CatalogFilter): string {
+  return `${kind}\u0000${kind === 'catalog' ? catalogKey(query, filter) : query}`;
+}
+
+/** All genres and the first sort: the trending browse. */
+export function isDefaultCatalog(filter: CatalogFilter): boolean {
+  return filter.genre === null && filter.sort === null;
+}
+
+/** Empty catalog copy. `genre` is the selected genre's name, or null for All genres. */
+export function catalogEmptyText(
+  mode: 'noMatches' | 'nothingYet',
+  query: string,
+  genre: string | null,
+): string {
+  const quoted = `“${query.trim()}”`;
+  if (genre && mode === 'noMatches') return `Nothing in ${genre} matches ${quoted}. Try All genres.`;
+  if (genre) return `Nothing in ${genre} right now. Try another genre.`;
+  if (mode === 'noMatches') return `Nothing in Open Library matches ${quoted}. Try the author's name or fewer words.`;
+  return 'No trending books in your languages right now. Search above.';
 }
 
 export function visiblePage(state: SearchState): SearchPage | undefined {
@@ -169,13 +197,14 @@ export class SearchModel {
     kind: SearchKind = 'accounts',
     now: () => number = () => Date.now(),
     initialQuery = '',
+    initialFilter: CatalogFilter = NO_FILTER,
   ) {
     this.fetchPage = fetchPage;
     this.emit = emit;
     this.schedule = schedule;
     this.cancelTimer = cancelTimer;
     this.now = now;
-    this.state = { query: initialQuery, kind, phase: { status: 'idle' }, session };
+    this.state = { query: initialQuery, kind, filter: initialFilter, phase: { status: 'idle' }, session };
     if (session) this.publishCurrent();
   }
 
@@ -207,7 +236,7 @@ export class SearchModel {
       this.update({ ...this.state, query, phase: { status: 'idle' } });
       return;
     }
-    const hit = this.recall(this.state.kind, next);
+    const hit = this.recall(this.state.kind, next, this.state.filter);
     if (hit) {
       this.update({ ...this.state, query, phase: { status: 'loaded', page: hit.page, more: false } });
       if (this.stale(hit, next)) this.arm(null, true);
@@ -217,6 +246,34 @@ export class SearchModel {
     // Browse has its own heading. Another query's hits must not sit under it.
     const kept = next && previous?.type === this.state.kind ? previous : undefined;
     this.update({ ...this.state, query, phase: { status: 'loading', previous: kept } });
+    this.arm(null);
+  }
+
+  /** Same flow as a query change. Another genre's rows do not stay under the new one. */
+  setFilter(filter: CatalogFilter): void {
+    const query = this.asked();
+    const unchanged = this.state.kind !== 'catalog'
+      || catalogKey(query, filter) === catalogKey(query, this.state.filter);
+    if (unchanged) {
+      if (filter.genre !== this.state.filter.genre || filter.sort !== this.state.filter.sort) {
+        this.update({ ...this.state, filter });
+      }
+      return;
+    }
+    this.generation += 1;
+    this.stop();
+    this.pendingCursor = null;
+    if (!this.state.session) {
+      this.update({ ...this.state, filter, phase: { status: 'idle' } });
+      return;
+    }
+    const hit = this.recall(this.state.kind, query, filter);
+    if (hit) {
+      this.update({ ...this.state, filter, phase: { status: 'loaded', page: hit.page, more: false } });
+      if (this.stale(hit, query)) this.arm(null, true);
+      return;
+    }
+    this.update({ ...this.state, filter, phase: { status: 'loading' } });
     this.arm(null);
   }
 
@@ -230,7 +287,7 @@ export class SearchModel {
       return;
     }
     const trimmed = this.asked(this.state.query, kind);
-    const hit = this.recall(kind, trimmed);
+    const hit = this.recall(kind, trimmed, this.state.filter);
     if (hit) {
       this.update({ ...this.state, kind, phase: { status: 'loaded', page: hit.page, more: false } });
       if (this.stale(hit, trimmed)) this.arm(null, true);
@@ -252,7 +309,7 @@ export class SearchModel {
     this.generation += 1;
     this.stop();
     this.update({ ...this.state, phase: { status: 'loading', previous } });
-    void this.run(this.generation, session, query, this.state.kind, cursor, false);
+    void this.run(this.generation, session, query, this.state.kind, this.state.filter, cursor, false);
   }
 
   loadMore(): void {
@@ -266,7 +323,7 @@ export class SearchModel {
     this.stop();
     this.pendingCursor = cursor;
     this.update({ ...this.state, phase: { status: 'loaded', page: phase.page, more: true } });
-    void this.run(this.generation, session, query, this.state.kind, cursor, false);
+    void this.run(this.generation, session, query, this.state.kind, this.state.filter, cursor, false);
   }
 
   /** Keep a request the sheet learned about on the cached catalog page. */
@@ -308,7 +365,7 @@ export class SearchModel {
       return;
     }
     const trimmed = this.asked();
-    const hit = this.recall(this.state.kind, trimmed);
+    const hit = this.recall(this.state.kind, trimmed, this.state.filter);
     if (hit) {
       this.update({ ...this.state, phase: { status: 'loaded', page: hit.page, more: false } });
       if (this.stale(hit, trimmed)) this.arm(null, true);
@@ -318,10 +375,10 @@ export class SearchModel {
     this.arm(null);
   }
 
-  private recall(kind: SearchKind, query: string): MemoEntry | undefined {
+  private recall(kind: SearchKind, query: string, filter: CatalogFilter): MemoEntry | undefined {
     const session = this.state.session;
     if (!session) return undefined;
-    return searchMemo(session).get(memoKey(kind, query));
+    return searchMemo(session).get(memoKey(kind, query, filter));
   }
 
   /**
@@ -339,7 +396,7 @@ export class SearchModel {
   private remember(page: SearchPage, pages: number): void {
     const session = this.state.session;
     if (!session) return;
-    const key = memoKey(page.type, this.asked());
+    const key = memoKey(page.type, this.asked(), this.state.filter);
     const memo = searchMemo(session);
     if (memo.has(key)) memo.delete(key);
     memo.set(key, { page, at: this.now(), pages });
@@ -355,6 +412,7 @@ export class SearchModel {
     const session = this.state.session;
     const query = this.asked();
     const kind = this.state.kind;
+    const filter = this.state.filter;
     if (!session) return;
     this.pendingCursor = cursor;
     const delay = quiet || !query
@@ -363,7 +421,7 @@ export class SearchModel {
     this.timer = this.schedule(() => {
       this.timer = undefined;
       if (generation !== this.generation) return;
-      void this.run(generation, session, query, kind, cursor, quiet);
+      void this.run(generation, session, query, kind, filter, cursor, quiet);
     }, delay);
   }
 
@@ -372,24 +430,26 @@ export class SearchModel {
     session: string,
     query: string,
     kind: SearchKind,
+    filter: CatalogFilter,
     cursor: string | null,
     quiet: boolean,
   ): Promise<void> {
-    if (!this.current(generation, session, query, kind)) return;
+    if (!this.current(generation, session, query, kind, filter)) return;
     const abort = new AbortController();
     this.abort = abort;
     this.pendingCursor = cursor;
+    const sent = query ? { genre: filter.genre, sort: null } : filter;
     try {
-      const page = await this.fetchPage({ query, kind, cursor, session, signal: abort.signal });
-      if (abort.signal.aborted || !this.current(generation, session, query, kind)) return;
+      const page = await this.fetchPage({ query, kind, filter: sent, cursor, session, signal: abort.signal });
+      if (abort.signal.aborted || !this.current(generation, session, query, kind, filter)) return;
       if (page.type !== kind) return;
       const shown = visiblePage(this.state);
       const merged = cursor && shown && shown.type === page.type ? concatPages(shown, page) : page;
-      const prior = cursor ? (this.recall(kind, query)?.pages ?? 1) : 0;
+      const prior = cursor ? (this.recall(kind, query, filter)?.pages ?? 1) : 0;
       this.remember(merged, cursor ? prior + 1 : 1);
       this.update({ ...this.state, phase: { status: 'loaded', page: merged, more: false } });
     } catch (error) {
-      if (abort.signal.aborted || !this.current(generation, session, query, kind)) return;
+      if (abort.signal.aborted || !this.current(generation, session, query, kind, filter)) return;
       if (quiet && visiblePage(this.state)) return;
       const shown = visiblePage(this.state);
       // A failed catalog page replaces the list. Load-more keeps the page it was extending.
@@ -403,11 +463,18 @@ export class SearchModel {
     }
   }
 
-  private current(generation: number, session: string, query: string, kind: SearchKind): boolean {
+  private current(
+    generation: number,
+    session: string,
+    query: string,
+    kind: SearchKind,
+    filter: CatalogFilter,
+  ): boolean {
     return generation === this.generation
       && session === this.state.session
       && query === this.asked()
-      && kind === this.state.kind;
+      && kind === this.state.kind
+      && (kind !== 'catalog' || catalogKey(query, filter) === catalogKey(query, this.state.filter));
   }
 
   private asked(query = this.state.query, kind = this.state.kind): string {

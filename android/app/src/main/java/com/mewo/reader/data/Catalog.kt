@@ -152,6 +152,25 @@ data class CatalogPage(
     val nextPage: Int? = null,
 )
 
+/** One genre or sort from `GET /v1/catalog/filters`. The id is opaque. */
+@Serializable
+data class FilterOption(
+    val id: String,
+    val name: String,
+)
+
+@Serializable
+data class CatalogFilters(
+    val genres: List<FilterOption> = emptyList(),
+    val sorts: List<FilterOption> = emptyList(),
+)
+
+/** Null genre is All genres. Null sort is the first sort. */
+data class CatalogFilter(
+    val genre: String? = null,
+    val sort: String? = null,
+)
+
 @Serializable
 data class RequestBookBody(
     val workKey: String,

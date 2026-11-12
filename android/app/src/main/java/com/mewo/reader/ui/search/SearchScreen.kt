@@ -191,6 +191,7 @@ fun SearchScreen(
                 onDismissNotice = viewModel.catalog::dismissNotice,
                 onCloseSheet = viewModel.catalog::close,
                 onOpenBook = onOpenBook,
+                onFilter = viewModel.catalog::setFilter,
                 modifier = Modifier.weight(1f),
             )
             return@Column

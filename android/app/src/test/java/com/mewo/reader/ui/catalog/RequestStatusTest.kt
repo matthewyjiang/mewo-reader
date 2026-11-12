@@ -1,6 +1,7 @@
 package com.mewo.reader.ui.catalog
 
 import com.mewo.reader.data.BookRequest
+import com.mewo.reader.data.CatalogFilter
 import com.mewo.reader.data.CatalogPage
 import com.mewo.reader.data.CatalogWork
 import com.mewo.reader.data.Rating
@@ -137,11 +138,25 @@ class RequestStatusTest {
     fun trendingHeaderShowsForBrowseWhileLoadingOrFilled() {
         val rows = CatalogPage(items = listOf(CatalogWork(workKey = "/works/OL1W", title = "Dune")))
         val empty = CatalogPage()
-        assertTrue(showTrendingHeader("", CatalogPhase.Loading()))
-        assertTrue(showTrendingHeader("du", CatalogPhase.Loaded(rows)))
-        assertFalse(showTrendingHeader("", CatalogPhase.Loaded(empty)))
-        assertFalse(showTrendingHeader("", CatalogPhase.Failed("Couldn't load the catalog.")))
-        assertFalse(showTrendingHeader("dune", CatalogPhase.Loaded(rows)))
+        val all = CatalogFilter()
+        assertTrue(showTrendingHeader("", all, CatalogPhase.Loading()))
+        assertTrue(showTrendingHeader("du", all, CatalogPhase.Loaded(rows)))
+        assertFalse(showTrendingHeader("", all, CatalogPhase.Loaded(empty)))
+        assertFalse(showTrendingHeader("", all, CatalogPhase.Failed("Couldn't load the catalog.")))
+        assertFalse(showTrendingHeader("dune", all, CatalogPhase.Loaded(rows)))
+        assertFalse(showTrendingHeader("", CatalogFilter(genre = "fantasy"), CatalogPhase.Loaded(rows)))
+        assertFalse(showTrendingHeader("", CatalogFilter(sort = "rated"), CatalogPhase.Loaded(rows)))
+    }
+
+    @Test
+    fun emptyCopyNamesTheGenre() {
+        assertEquals("Nothing in Fantasy right now. Try another genre.", catalogEmptyText("du", "Fantasy"))
+        assertEquals("Nothing in Fantasy matches “dune”. Try All genres.", catalogEmptyText(" dune ", "Fantasy"))
+        assertEquals(
+            "Nothing in Open Library matches “dune”. Try the author's name or fewer words.",
+            catalogEmptyText("dune", null),
+        )
+        assertEquals("No trending books in your languages right now. Search above.", catalogEmptyText("", null))
     }
 
     @Test

@@ -48,6 +48,7 @@
 		66CAE5E7098F182C18FA5927 /* Forms.swift in Sources */ = {isa = PBXBuildFile; fileRef = 29DFEF201A6B13D3111189E1 /* Forms.swift */; };
 		683054B3267066C276AA4113 /* FeatureTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 08FFC5CC49EB3F660EC98301 /* FeatureTests.swift */; };
 		6B33ACDC00F3B735344DEE97 /* CatalogFeed.swift in Sources */ = {isa = PBXBuildFile; fileRef = 208D793C26948B880D2E52FC /* CatalogFeed.swift */; };
+		3F73186ADB1F4C64A3514835 /* CatalogFilterRow.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4C0B1186C065C8EAD7F37F77 /* CatalogFilterRow.swift */; };
 		6F3277E21AEF9848E3E12467 /* OnboardingScreen.swift in Sources */ = {isa = PBXBuildFile; fileRef = 31A3D4FF88DE8A3E4113E80E /* OnboardingScreen.swift */; };
 		789C0D5E0E7EA4118B3A74E2 /* ReadiumStreamer in Frameworks */ = {isa = PBXBuildFile; productRef = 3663EDCE82E6FCA3DDF30496 /* ReadiumStreamer */; };
 		7D72E5B13B510FAC10DE0E98 /* OfflinePreview.swift in Sources */ = {isa = PBXBuildFile; fileRef = 69978A6B50340F162131D462 /* OfflinePreview.swift */; };
@@ -128,6 +129,7 @@
 		1A7084DDB87996BA0246C106 /* LibraryLoad.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LibraryLoad.swift; sourceTree = "<group>"; };
 		1D7E81AD2EB646657CDED82C /* HomeFeedStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HomeFeedStore.swift; sourceTree = "<group>"; };
 		208D793C26948B880D2E52FC /* CatalogFeed.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CatalogFeed.swift; sourceTree = "<group>"; };
+		4C0B1186C065C8EAD7F37F77 /* CatalogFilterRow.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CatalogFilterRow.swift; sourceTree = "<group>"; };
 		208E4AA890DD37ADF433DC1F /* CatalogSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CatalogSheet.swift; sourceTree = "<group>"; };
 		23C4D1E9C6CD4D23A9541957 /* Mewo.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = Mewo.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		24F130ED8BD825E12B34F9E9 /* SearchBrowseTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SearchBrowseTests.swift; sourceTree = "<group>"; };
@@ -257,6 +259,7 @@
 			children = (
 				F2624BDCA242A465980881F2 /* CatalogCover.swift */,
 				208D793C26948B880D2E52FC /* CatalogFeed.swift */,
+				4C0B1186C065C8EAD7F37F77 /* CatalogFilterRow.swift */,
 				72CF4A3A5FBE4BB0EFEFE79F /* CatalogResults.swift */,
 				E58555497840EEDA8DCD0B6B /* CatalogRow.swift */,
 				208E4AA890DD37ADF433DC1F /* CatalogSheet.swift */,
@@ -665,6 +668,7 @@
 				EBDBC5CB60F65F6AC4E3D2AC /* BuildInfo.swift in Sources */,
 				81F035FDBB52EDA0AA3C6A1D /* CatalogCover.swift in Sources */,
 				6B33ACDC00F3B735344DEE97 /* CatalogFeed.swift in Sources */,
+				3F73186ADB1F4C64A3514835 /* CatalogFilterRow.swift in Sources */,
 				56B486A52464C8353BAF23B8 /* CatalogModels.swift in Sources */,
 				9A606058FD3B2E5E8B42F6BF /* CatalogResults.swift in Sources */,
 				D78475DC6CE9B3EC5BF2B57B /* CatalogRow.swift in Sources */,

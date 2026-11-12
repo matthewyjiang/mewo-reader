@@ -5,8 +5,11 @@ import Observation
 protocol CatalogService: AnyObject {
     var access: CatalogAccess { get }
     var token: String? { get }
+    /// Genre and sort picked on the Catalog tab. Kept for the app session.
+    var filter: CatalogFilter { get set }
     func refreshAccess() async
-    func page(query: String?, page: Int) async throws -> CatalogPage
+    func filters() async throws -> CatalogFilters
+    func page(query: String?, page: Int, filter: CatalogFilter) async throws -> CatalogPage
     func work(workKey: String) async throws -> WorkDetail
     func request(_ body: NewBookRequest) async throws -> BookRequest
     func cancel(id: String) async throws
@@ -18,6 +21,9 @@ protocol CatalogService: AnyObject {
 final class HostedCatalogService: CatalogService {
     private(set) var access: CatalogAccess = .unknown
     var token: String? { sessions.session.token }
+    var filter = CatalogFilter()
+    /// Fetched once per app session. A failure is not kept, so the next ask fetches again.
+    private var loadedFilters: CatalogFilters?
 
     private let sessions: HostedSessionStore
     private let client: HostedClient
@@ -48,7 +54,15 @@ final class HostedCatalogService: CatalogService {
         }
     }
 
-    func page(query: String?, page: Int) async throws -> CatalogPage {
+    func filters() async throws -> CatalogFilters {
+        if let loadedFilters { return loadedFilters }
+        let session = try requireSession()
+        let loaded = try await run(session) { try await self.client.catalogFilters($0) }
+        loadedFilters = loaded
+        return loaded
+    }
+
+    func page(query: String?, page: Int, filter: CatalogFilter) async throws -> CatalogPage {
         let sent: String?
         if let query, case .search(let text) = catalogQuery(query) {
             sent = text
@@ -56,7 +70,7 @@ final class HostedCatalogService: CatalogService {
             sent = nil
         }
         let session = try requireSession()
-        return try await run(session) { try await self.client.catalog($0, query: sent, page: page) }
+        return try await run(session) { try await self.client.catalog($0, query: sent, page: page, filter: filter) }
     }
 
     func work(workKey: String) async throws -> WorkDetail {

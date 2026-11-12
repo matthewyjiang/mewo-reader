@@ -117,6 +117,12 @@ async function answer(route: Route, state: ReturnType<typeof freshState>) {
     const kind = type === 'books' || type === 'posts' || type === 'accounts' ? type : 'accounts';
     return json({ type: kind, items: [], nextCursor: null });
   }
+  if (path === '/v1/catalog/filters') {
+    return json({
+      genres: [{ id: 'fantasy', name: 'Fantasy' }],
+      sorts: [{ id: 'popular', name: 'Popular' }, { id: 'rated', name: 'Top rated' }],
+    });
+  }
   if (path === '/v1/catalog/search') {
     return json({
       items: state.catalog ?? [{
