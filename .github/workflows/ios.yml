@@ -17,7 +17,7 @@ concurrency:
   cancel-in-progress: true
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   test:
@@ -95,3 +95,12 @@ jobs:
           name: email-shots
           path: /tmp/mewo-email-shots
           retention-days: 3
+
+      - name: Push email shots
+        if: always()
+        working-directory: .
+        run: |
+          mkdir -p shots-out && cp -R /tmp/mewo-email-shots/. shots-out/
+          git config user.name "matthewyjiang"
+          git config user.email "67533680+matthewyjiang@users.noreply.github.com"
+          git add shots-out && git commit -m "chore: email shots" && git push origin HEAD:tmp/ios-email-shots
