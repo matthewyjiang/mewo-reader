@@ -78,6 +78,8 @@ A session goes idle 90 days after its last use, and it ends 365 days after it wa
 
 `POST /v1/auth/register` takes `{ "username", "password", "invite"? }` and `POST /v1/auth/login` takes `{ "username", "password" }`. Both return `{ "token", "username" }`. Username is 3 to 32 characters, letters, digits, underscore, unique case-insensitively. Password is 8 to 256 characters. A missing, null, or blank `invite` is an ordinary signup. A present invite has to be valid even when signups are open. A used invite is 403 `This invite was already used.` An expired one is 403 `This invite has expired.` Anything else is 403 `This invite link isn't valid.` A taken username is 409 and leaves the invite unused.
 
+A disabled account is 403 `This account is disabled.` on login, but only after the right password. A wrong password stays 401 `Wrong username or password.`
+
 `POST /v1/auth/logout` ends the caller's session. `POST /v1/auth/logout-all` ends every session for that account, including the caller's. Both return 204.
 
 `POST /v1/auth/password` takes `{ "currentPassword", "newPassword" }` and returns 204. The new password uses the same length rules. A wrong current password is 403 `Wrong password.` The caller's other sessions are revoked. This session stays signed in. Guesses use the login throttle. A busy password hasher (503) does not spend a guess.
@@ -95,6 +97,7 @@ mewo-server admin list
 mewo-server admin grant <username>
 mewo-server admin revoke <username>
 mewo-server admin create <username>
+mewo-server admin password <username>
 mewo-server admin invites create [--days <n>] [--note <text>]
 mewo-server admin invites list
 mewo-server admin invites revoke <id>
@@ -112,6 +115,8 @@ ada
 ```
 
 `create` inserts an admin even when signups are off. The password comes from stdin, never from argv or the environment. On a terminal it prompts with no echo. A pipe reads one line.
+
+`password` sets a random temporary password, signs that account out everywhere, and prints `Temporary password: <password>` once. The server stores only the hash. A disabled account stays disabled. An unknown account exits 1 with `No account named <username>.` There is no forced change on the next sign-in: the password is 16 random characters, and the phone apps have no change-password screen.
 
 `invites create` prints the id, the expiry in epoch milliseconds, and one `Link: <your server>/signup?invite=<token>` line. `<your server>` is literal: the CLI has no public origin. `--days` is 1 to 90 and defaults to 7. A bad value is usage, exit 2. `invites list` prints one line per invite and never a token. A note's tabs and newlines are escaped so the line stays one line. `invites revoke` of an unknown id exits 1 with `No invite with id <id>.`
 
@@ -165,14 +170,17 @@ Prefix `/v1`.
 
 A book request is `{ "id", "workKey", "title", "author", "year", "coverId", "state", "progress", "error", "bookId", "requester", "createdAt", "updatedAt" }`. `state` is `requested`, `downloading`, `imported`, `failed`, or `canceled`.
 
-- `GET /admin/users` → `{ "items": [ { "username", "joinedAt", "isAdmin", "books", "mine" } ] }`. Ordered by `created_at`. `mine` is true only on the caller. Admin
-- `PATCH /admin/users/{username}` `{ "isAdmin" }` → that row. Unknown username is 404. Your own username is 409 `You can't change your own admin access.` A body that is not a JSON object (wrong type, unknown field, or non-JSON) is 400 `User patch must be a JSON object.` Idempotent. Admin
+- `GET /admin/users` → `{ "items": [ { "username", "joinedAt", "isAdmin", "books", "mine", "disabled" } ] }`. Ordered by `created_at`. `mine` is true only on the caller. Admin
+- `PATCH /admin/users/{username}` `{ "isAdmin"?, "disabled"? }` → that row. `disabled` is applied first. Disabling signs the account out everywhere and keeps its books, posts, and profile. Unknown username is 404. Your own username is 409 `You can't change your own admin access.` or `You can't disable your own account.` A body with neither key, or that is not a JSON object (wrong type, unknown field, or non-JSON), is 400 `User patch must be a JSON object.` Idempotent. Admin
+- `POST /admin/users/{username}/password` → `{ "password" }`. Sets a random temporary password and signs the account out everywhere. `Cache-Control: no-store`. Your own username is 409 `Use Change password for your own account.` A busy password service is 503 and changes nothing. Admin
+- `GET /admin/users/{username}/removal` → `{ "booksDeleted", "sharedDeleted", "booksPassed", "holdsReleased", "requestsCanceled" }`. What a delete would do now. Changes nothing. Admin
+- `DELETE /admin/users/{username}` → the same shape, for what it did. In one transaction: each active request the account leads is canceled and its oldest follower leads instead; its holds on other accounts' books are released; a book it owns that another account also holds passes to the earliest holder (sharing goes back to private, the file stays); every other book it owns is deleted with its file, comments, and reposts; then the account row goes, with its sessions, likes, reading places, comments, reposts, and requests. Invites it created or redeemed stay, with no account attached. Your own username is 409 `You can't delete your own account.` Admin
 - `GET /admin/server` → `{ "users", "books", "comments", "reposts", "storageBytes", "invites" }`. `invites` counts links that are unused, unrevoked, and not yet expired. `storageBytes` is `mewo.db`, `mewo.db-wal`, and `books/`. Admin
 - `GET /admin/invites` → `{ "items" }`. Newest first, then by id. Each item is `{ "id", "note", "createdBy", "createdAt", "expiresAt", "usedAt", "usedBy", "revokedAt", "state" }`. `createdBy` and `usedBy` are usernames. `state` is `active`, `used`, `expired`, or `revoked`. Admin
 - `POST /admin/invites` `{ "note"?, "days"? }` → `{ "invite", "token" }`. `days` defaults to 7 and must be 1 to 90 (`Expiry must be 1 to 90 days.`). `note` is trimmed, blank becomes null, and longer than 200 characters is 400 `Note must be 200 characters or fewer.` An unknown field or a non-object is 400 `Invite must be a JSON object.` The raw token is only in this response. Admin
 - `POST /admin/invites/{id}/revoke` → that invite. Unknown id is 404. A used invite is 409 `This invite was already used.` Revoking an invite that is already revoked returns the same row. Admin
 
-Every `/admin` route is 401 without a token and 403 `Admins only.` for a signed-in account that is not an admin. A revoke applies on the next request.
+Every `/admin` route is 401 without a token and 403 `Admins only.` for a signed-in account that is not an admin. A revoke applies on the next request. A reset, disable, or delete re-checks the acting admin in the same transaction, so two admins acting on each other at once can't both succeed.
 - `GET /search?q=&type=accounts|books|posts&cursor=` → a page of 20. `q` is trimmed; empty is 400 `Enter a search.` More than 100 characters is 400 and names the limit and the asked length. `cursor` is the previous `nextCursor`. A bad cursor is 400
 - `GET /users/{username}` → `ProfileRecord`. Unknown username is 404. A username that fails the register rules is 400
 - `GET /users/{username}/posts?cursor=` → `ProfilePostsPage`, 30 replies, newest first. Unknown username is 404

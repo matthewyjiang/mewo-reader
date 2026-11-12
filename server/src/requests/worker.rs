@@ -883,40 +883,7 @@ async fn sweep_inactive_leaders(state: &AppState, now_ms: i64) -> Result<(), Api
 
 async fn sweep_one(state: &AppState, leader_id: &str, now_ms: i64) -> Result<(), ApiError> {
     let mut tx = state.pool.begin_with("BEGIN IMMEDIATE").await?;
-    let row: Option<(String, String)> =
-        sqlx::query_as("SELECT state, work_key FROM book_requests WHERE id = ?")
-            .bind(leader_id)
-            .fetch_optional(&mut *tx)
-            .await?;
-    let Some((state_now, work_key)) = row else {
-        tx.commit().await?;
-        return Ok(());
-    };
-    if state_now != "canceled" && state_now != "failed" {
-        tx.commit().await?;
-        return Ok(());
-    }
-    let active: Option<String> = sqlx::query_scalar(
-        "SELECT id FROM book_requests
-         WHERE work_key = ? AND follows IS NULL AND state IN ('requested', 'downloading')
-         LIMIT 1",
-    )
-    .bind(&work_key)
-    .fetch_optional(&mut *tx)
-    .await?;
-    if let Some(active) = active {
-        sqlx::query(
-            "UPDATE book_requests SET follows = ?, updated_at = ?
-             WHERE follows = ? AND state = 'requested'",
-        )
-        .bind(&active)
-        .bind(now_ms)
-        .bind(leader_id)
-        .execute(&mut *tx)
-        .await?;
-    } else {
-        super::hand_off(&mut tx, leader_id, now_ms).await?;
-    }
+    super::adopt_followers(&mut tx, leader_id, now_ms).await?;
     tx.commit().await?;
     Ok(())
 }

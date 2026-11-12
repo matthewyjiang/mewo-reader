@@ -595,32 +595,34 @@ async fn cancel_request(
         return Err(ApiError::Conflict("That book is on your shelf.".into()));
     }
     let leading = follows.is_none() && matches!(state_now.as_str(), "requested" | "downloading");
-    let changed = sqlx::query(
-        "UPDATE book_requests
-         SET state = 'canceled', follows = NULL, error = NULL, download_id = NULL,
-             updated_at = ?, next_check_at = ?
-         WHERE id = ? AND user_id = ? AND state IN ('requested', 'downloading', 'failed')",
-    )
-    .bind(now)
-    .bind(now)
-    .bind(&row.id)
-    .bind(&row.user_id)
-    .execute(&mut *tx)
-    .await?
-    .rows_affected();
-    if changed == 0 {
-        let again = fetch(&state.pool, &row.id).await?;
-        if again.as_ref().is_some_and(|row| row.state == "canceled") {
-            return Ok(StatusCode::NO_CONTENT);
+    let download_id = if leading {
+        cancel_leading(&mut tx, &row.id, now).await?
+    } else {
+        let changed = sqlx::query(
+            "UPDATE book_requests
+             SET state = 'canceled', follows = NULL, error = NULL, download_id = NULL,
+                 updated_at = ?, next_check_at = ?
+             WHERE id = ? AND user_id = ? AND state IN ('requested', 'downloading', 'failed')",
+        )
+        .bind(now)
+        .bind(now)
+        .bind(&row.id)
+        .bind(&row.user_id)
+        .execute(&mut *tx)
+        .await?
+        .rows_affected();
+        if changed == 0 {
+            let again = fetch(&state.pool, &row.id).await?;
+            if again.as_ref().is_some_and(|row| row.state == "canceled") {
+                return Ok(StatusCode::NO_CONTENT);
+            }
+            if again.as_ref().is_some_and(|row| row.state == "imported") {
+                return Err(ApiError::Conflict("That book is on your shelf.".into()));
+            }
+            return Err(ApiError::NotFound);
         }
-        if again.as_ref().is_some_and(|row| row.state == "imported") {
-            return Err(ApiError::Conflict("That book is on your shelf.".into()));
-        }
-        return Err(ApiError::NotFound);
-    }
-    if leading {
-        hand_off(&mut tx, &row.id, now).await?;
-    }
+        download_id
+    };
     tx.commit().await?;
     if leading {
         if let Some(nzo) = download_id {
@@ -1299,6 +1301,83 @@ fn user_conflict(err: &sqlx::Error) -> bool {
     }
 }
 
+/// Cancels an active leader (`follows IS NULL`, requested or downloading) and
+/// hands its followers to the oldest one. Returns the SABnzbd job to delete
+/// after the caller commits. A row that is not an active leader is
+/// [`ApiError::NotFound`].
+pub(crate) async fn cancel_leading(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    request_id: &str,
+    now: i64,
+) -> Result<Option<String>, ApiError> {
+    let found: Option<Option<String>> = sqlx::query_scalar(
+        "SELECT download_id FROM book_requests
+         WHERE id = ? AND follows IS NULL AND state IN ('requested', 'downloading')",
+    )
+    .bind(request_id)
+    .fetch_optional(&mut **tx)
+    .await?;
+    let Some(download_id) = found else {
+        return Err(ApiError::NotFound);
+    };
+    sqlx::query(
+        "UPDATE book_requests
+         SET state = 'canceled', follows = NULL, error = NULL, download_id = NULL,
+             updated_at = ?, next_check_at = ?
+         WHERE id = ?",
+    )
+    .bind(now)
+    .bind(now)
+    .bind(request_id)
+    .execute(&mut **tx)
+    .await?;
+    hand_off(tx, request_id, now).await?;
+    Ok(download_id)
+}
+
+/// Followers still waiting on a canceled or failed row follow the work's
+/// active leader, or the oldest of them leads when there is none. Any other
+/// row is left alone. See `worker::sweep_inactive_leaders`.
+pub(crate) async fn adopt_followers(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    leader_id: &str,
+    now: i64,
+) -> Result<(), ApiError> {
+    let row: Option<(String, String)> =
+        sqlx::query_as("SELECT state, work_key FROM book_requests WHERE id = ?")
+            .bind(leader_id)
+            .fetch_optional(&mut **tx)
+            .await?;
+    let Some((state_now, work_key)) = row else {
+        return Ok(());
+    };
+    if state_now != "canceled" && state_now != "failed" {
+        return Ok(());
+    }
+    let active: Option<String> = sqlx::query_scalar(
+        "SELECT id FROM book_requests
+         WHERE work_key = ? AND follows IS NULL AND state IN ('requested', 'downloading')
+         LIMIT 1",
+    )
+    .bind(&work_key)
+    .fetch_optional(&mut **tx)
+    .await?;
+    if let Some(active) = active {
+        sqlx::query(
+            "UPDATE book_requests SET follows = ?, updated_at = ?
+             WHERE follows = ? AND state = 'requested'",
+        )
+        .bind(&active)
+        .bind(now)
+        .bind(leader_id)
+        .execute(&mut **tx)
+        .await?;
+    } else {
+        hand_off(tx, leader_id, now).await?;
+    }
+    Ok(())
+}
+
 /// The oldest follower becomes the leader. The caller's UPDATE of `leader_id`
 /// has to have left the active-leader index already; this fails if it has not.
 pub(crate) async fn hand_off(
@@ -1599,7 +1678,7 @@ async fn work_status(
     })
 }
 
-async fn delete_job(state: &AppState, nzo: &str) {
+pub(crate) async fn delete_job(state: &AppState, nzo: &str) {
     let Ok(settings) = settings::load(&state.pool).await else {
         return;
     };
@@ -1715,6 +1794,82 @@ mod tests {
 
     use super::prefer_copy;
     use super::ServerCopy;
+    use super::{cancel_leading, ApiError};
+    use sqlx::SqlitePool;
+
+    async fn request(pool: &SqlitePool, id: &str, follows: Option<&str>, at: i64) {
+        sqlx::query(
+            "INSERT INTO users (id, username, username_norm, password_hash, created_at)
+             VALUES (?, ?, ?, 'x', 1)",
+        )
+        .bind(id)
+        .bind(id)
+        .bind(id)
+        .execute(pool)
+        .await
+        .unwrap();
+        let state = if follows.is_some() {
+            "requested"
+        } else {
+            "downloading"
+        };
+        sqlx::query(
+            "INSERT INTO book_requests
+             (id, user_id, work_key, title, author, state, download_id, follows,
+              next_check_at, created_at, updated_at)
+             VALUES (?, ?, '/works/OL1W', 'Emma', 'Austen', ?, ?, ?, 0, ?, ?)",
+        )
+        .bind(id)
+        .bind(id)
+        .bind(state)
+        .bind(follows.map_or(Some("nzo"), |_| None))
+        .bind(follows)
+        .bind(at)
+        .bind(at)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn cancel_leading_promotes_the_oldest_follower() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let url = format!("sqlite://{}?mode=rwc", tmp.path().join("mewo.db").display());
+        let pool = crate::db::connect(&url, tmp.path()).await.unwrap();
+        request(&pool, "lead", None, 1).await;
+        request(&pool, "late", Some("lead"), 3).await;
+        request(&pool, "early", Some("lead"), 2).await;
+
+        let mut tx = pool.begin_with("BEGIN IMMEDIATE").await.unwrap();
+        let job = cancel_leading(&mut tx, "lead", 10).await.unwrap();
+        tx.commit().await.unwrap();
+        assert_eq!(job.as_deref(), Some("nzo"));
+
+        let rows: Vec<(String, String, Option<String>, Option<String>)> =
+            sqlx::query_as("SELECT id, state, follows, download_id FROM book_requests ORDER BY id")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            rows,
+            vec![
+                ("early".into(), "requested".into(), None, None),
+                (
+                    "late".into(),
+                    "requested".into(),
+                    Some("early".into()),
+                    None
+                ),
+                ("lead".into(), "canceled".into(), None, None),
+            ]
+        );
+
+        let mut tx = pool.begin_with("BEGIN IMMEDIATE").await.unwrap();
+        assert!(matches!(
+            cancel_leading(&mut tx, "late", 11).await,
+            Err(ApiError::NotFound)
+        ));
+    }
 
     fn copy(id: &str, mine: bool) -> ServerCopy {
         ServerCopy {

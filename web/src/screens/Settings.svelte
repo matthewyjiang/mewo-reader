@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import Avatar from '../components/Avatar.svelte';
+  import ChangePasswordSheet from '../components/ChangePasswordSheet.svelte';
   import DisplaySettings from '../components/DisplaySettings.svelte';
   import Icon from '../components/Icon.svelte';
   import { webCommit, webVersion } from '../lib/build';
@@ -14,6 +15,7 @@
     | { status: 'ok'; version: string; commit: string | null };
 
   let serverBuild = $state<ServerBuild>({ status: 'loading' });
+  let changingPassword = $state(false);
 
   function formatBuild(version: string, commit: string | null): string {
     return commit ? `${version} (${commit})` : version;
@@ -105,7 +107,11 @@
   <button class="settings-row" onclick={() => onprofile(store.session!.username)}>
     View profile
   </button>
+  <button class="settings-row" onclick={() => changingPassword = true}>Password</button>
   <button class="settings-row danger" onclick={onsignout}>Sign out</button>
+  {#if changingPassword}
+    <ChangePasswordSheet onclose={() => changingPassword = false} />
+  {/if}
 {:else if path === '/settings/library'}
   <div class="fact-row">
     <span>Server URL</span>

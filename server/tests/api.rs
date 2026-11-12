@@ -4778,6 +4778,7 @@ async fn admin_routes_require_admin() {
     let (app, tmp) = app().await;
     let matt = register(&app, "matt", "password1").await;
     let ada = register(&app, "ada", "password1").await;
+    register(&app, "bob", "password1").await;
     grant(tmp.path(), "matt").await;
     let (status, created) =
         json_req(&app, "POST", "/v1/admin/invites", Some(&matt), json!({})).await;
@@ -4799,6 +4800,15 @@ async fn admin_routes_require_admin() {
         ("GET", "/v1/admin/invites", None),
         ("POST", "/v1/admin/invites", Some(json!({}))),
         ("POST", revoke_path.as_str(), None),
+        (
+            "PATCH",
+            "/v1/admin/users/bob",
+            Some(json!({ "disabled": false })),
+        ),
+        ("POST", "/v1/admin/users/bob/password", None),
+        ("GET", "/v1/admin/users/bob/removal", None),
+        // Last: it deletes bob.
+        ("DELETE", "/v1/admin/users/bob", None),
     ];
     for (method, path, body) in cases {
         let (status, response) = match &body {
@@ -5121,6 +5131,7 @@ async fn admin_users_list_and_toggle() {
     assert_eq!(items[0]["isAdmin"], false);
     assert_eq!(items[0]["mine"], false);
     assert_eq!(items[0]["books"], 1);
+    assert_eq!(items[0]["disabled"], false);
     assert!(items[0]["joinedAt"].is_number());
     assert_eq!(items[1]["username"], "matt");
     assert_eq!(items[1]["isAdmin"], true);
@@ -5161,6 +5172,18 @@ async fn admin_users_list_and_toggle() {
     assert_eq!(status, StatusCode::OK, "{row}");
     assert_eq!(row["isAdmin"], false);
 
+    let (status, row) = json_req(
+        &app,
+        "PATCH",
+        "/v1/admin/users/ada",
+        Some(&matt),
+        json!({ "disabled": true, "isAdmin": true }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{row}");
+    assert_eq!(row["disabled"], true);
+    assert_eq!(row["isAdmin"], true);
+
     let (status, missing) = json_req(
         &app,
         "PATCH",
@@ -5192,6 +5215,8 @@ async fn user_patch_rejections_are_json() {
     for body in [
         r#"{"isAdmin":"no"}"#,
         r#"{"isAdmin":true,"extra":1}"#,
+        r#"{"disabled":"yes"}"#,
+        "{}",
         "not-json",
         "[1]",
     ] {
@@ -8618,4 +8643,451 @@ async fn post_check(
     let (status, headers, bytes) = call(app, with_ip(req, ip)).await;
     let body = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
     (status, headers, body)
+}
+
+async fn me_status(app: &axum::Router, token: &str) -> StatusCode {
+    empty_req(app, "GET", "/v1/me", Some(token)).await.0
+}
+
+async fn login_status(app: &axum::Router, username: &str, password: &str) -> (StatusCode, Value) {
+    json_req(
+        app,
+        "POST",
+        "/v1/auth/login",
+        None,
+        json!({ "username": username, "password": password }),
+    )
+    .await
+}
+
+async fn reset(app: &axum::Router, token: &str, username: &str) -> (StatusCode, Value) {
+    let req = Request::builder()
+        .method("POST")
+        .uri(format!("/v1/admin/users/{username}/password"))
+        .header(header::AUTHORIZATION, format!("Bearer {token}"))
+        .body(Body::empty())
+        .unwrap();
+    let (status, headers, bytes) = call(app, req).await;
+    assert_no_store(&headers);
+    (
+        status,
+        serde_json::from_slice(&bytes).unwrap_or(Value::Null),
+    )
+}
+
+async fn set_disabled(
+    app: &axum::Router,
+    token: &str,
+    username: &str,
+    disabled: bool,
+) -> (StatusCode, Value) {
+    json_req(
+        app,
+        "PATCH",
+        &format!("/v1/admin/users/{username}"),
+        Some(token),
+        json!({ "disabled": disabled }),
+    )
+    .await
+}
+
+async fn password_hash(path: &Path, username: &str) -> String {
+    let pool = open_db(path).await;
+    sqlx::query_scalar("SELECT password_hash FROM users WHERE username = ?")
+        .bind(username)
+        .fetch_one(&pool)
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn admin_reset_password_signs_the_account_out_and_shows_the_password_once() {
+    let (state, app, tmp) = auth_app(roomy_auth()).await;
+    let matt = register(&app, "matt", "password1").await;
+    let ada = register(&app, "ada", "password1").await;
+    let ada_phone = login(&app, "ada", "password1").await;
+    let bob = register(&app, "bob", "password1").await;
+    grant(tmp.path(), "matt").await;
+
+    let (status, body) = reset(&app, &matt, "Ada").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(object_keys(&body), vec!["password"]);
+    let password = body["password"].as_str().unwrap().to_string();
+    assert_eq!(password.len(), 19, "{password}");
+    assert_eq!(me_status(&app, &ada).await, StatusCode::UNAUTHORIZED);
+    assert_eq!(me_status(&app, &ada_phone).await, StatusCode::UNAUTHORIZED);
+    assert_eq!(me_status(&app, &matt).await, StatusCode::OK);
+    let (status, body) = login_status(&app, "ada", "password1").await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "{body}");
+    login(&app, "ada", &password).await;
+    let stored = password_hash(tmp.path(), "ada").await;
+    assert!(stored.starts_with("$argon2"), "{stored}");
+    assert!(!stored.contains(&password));
+
+    let (status, body) = reset(&app, &matt, "matt").await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_eq!(body["error"], "Use Change password for your own account.");
+    let (status, body) = reset(&app, &bob, "ada").await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+    assert_eq!(body["error"], "Admins only.");
+    let (status, _) = reset(&app, &matt, "nobody").await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+
+    let before = password_hash(tmp.path(), "bob").await;
+    state.passwords.fail_next_hash();
+    let (status, body) = reset(&app, &matt, "bob").await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+    assert_eq!(password_hash(tmp.path(), "bob").await, before);
+    assert_eq!(me_status(&app, &bob).await, StatusCode::OK);
+
+    let (status, body) = set_disabled(&app, &matt, "bob", true).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (status, body) = reset(&app, &matt, "bob").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (status, body) = login_status(&app, "bob", body["password"].as_str().unwrap()).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+    assert_eq!(body["error"], "This account is disabled.");
+}
+
+#[tokio::test]
+async fn admin_disable_blocks_sign_in_and_keeps_the_account_visible() {
+    let (state, app, tmp) = auth_app(roomy_auth()).await;
+    let matt = register(&app, "matt", "password1").await;
+    let ada = register(&app, "ada", "password1").await;
+    let bob = register(&app, "bob", "password1").await;
+    grant(tmp.path(), "matt").await;
+    let (status, book) = upload(&app, &ada, "Emma", "Austen", &common::epub(), None, false).await;
+    assert_eq!(status, StatusCode::OK, "{book}");
+    let book_id = book["id"].as_str().unwrap().to_string();
+    share(&app, &ada, &book_id).await;
+
+    let (status, row) = set_disabled(&app, &matt, "ada", true).await;
+    assert_eq!(status, StatusCode::OK, "{row}");
+    assert_eq!(row["disabled"], true);
+    assert_eq!(row["username"], "ada");
+    assert_eq!(me_status(&app, &ada).await, StatusCode::UNAUTHORIZED);
+    let (status, body) = login_status(&app, "ada", "password1").await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+    assert_eq!(body["error"], "This account is disabled.");
+    let (status, body) = login_status(&app, "ada", "wrong-password").await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "{body}");
+    assert_eq!(body["error"], "Wrong username or password.");
+
+    let (status, profile) = empty_req(&app, "GET", "/v1/users/ada", Some(&bob)).await;
+    assert_eq!(status, StatusCode::OK, "{profile}");
+    let (status, shared) =
+        empty_req(&app, "GET", &format!("/v1/books/{book_id}"), Some(&bob)).await;
+    assert_eq!(status, StatusCode::OK, "{shared}");
+
+    let (status, list) = empty_req(&app, "GET", "/v1/admin/users", Some(&matt)).await;
+    assert_eq!(status, StatusCode::OK, "{list}");
+    let disabled: Vec<(&str, bool)> = list["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|item| {
+            (
+                item["username"].as_str().unwrap(),
+                item["disabled"].as_bool().unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        disabled,
+        vec![("matt", false), ("ada", true), ("bob", false)]
+    );
+
+    let pool = open_db(tmp.path()).await;
+    let first: i64 = sqlx::query_scalar("SELECT disabled_at FROM users WHERE username = 'ada'")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    let (status, row) = set_disabled(&app, &matt, "ada", true).await;
+    assert_eq!(status, StatusCode::OK, "{row}");
+    let again: i64 = sqlx::query_scalar("SELECT disabled_at FROM users WHERE username = 'ada'")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(again, first);
+
+    // A login that verified the hash before the disable committed.
+    let ada_id = user_id(&pool, "ada").await;
+    let hash = password_hash(tmp.path(), "ada").await;
+    let raced =
+        session::issue_for_login(&state.pool, &ada_id, mewo_server::db::now_ms(), &hash).await;
+    assert!(raced.is_err(), "a disabled account got a session");
+    assert_eq!(
+        count(
+            &pool,
+            "SELECT COUNT(*) FROM sessions WHERE user_id = ?",
+            Some(&ada_id)
+        )
+        .await,
+        0
+    );
+
+    let (status, row) = set_disabled(&app, &matt, "ada", false).await;
+    assert_eq!(status, StatusCode::OK, "{row}");
+    assert_eq!(row["disabled"], false);
+    let (status, row) = set_disabled(&app, &matt, "ada", false).await;
+    assert_eq!(status, StatusCode::OK, "{row}");
+    assert_eq!(me_status(&app, &ada).await, StatusCode::UNAUTHORIZED);
+    let fresh = login(&app, "ada", "password1").await;
+    assert_eq!(me_status(&app, &fresh).await, StatusCode::OK);
+
+    let (status, body) = set_disabled(&app, &matt, "Matt", true).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_eq!(body["error"], "You can't disable your own account.");
+    let (status, body) = set_disabled(&app, &bob, "ada", true).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+    for patch in [json!({}), json!({ "disabled": true, "extra": 1 })] {
+        let (status, body) =
+            json_req(&app, "PATCH", "/v1/admin/users/ada", Some(&matt), patch).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        assert_eq!(body["error"], "User patch must be a JSON object.");
+    }
+}
+
+#[tokio::test]
+async fn admin_delete_removes_the_account_and_keeps_what_others_hold() {
+    let (app, tmp) = app().await;
+    let matt = register(&app, "matt", "password1").await;
+    grant(tmp.path(), "matt").await;
+    let joined = mint(&app, &matt, json!({ "note": "for ada" })).await;
+    register_with(&app, "ada", joined["token"].as_str().unwrap()).await;
+    let ada = login(&app, "ada", "password1").await;
+    let bob = register(&app, "bob", "password1").await;
+    let carol = register(&app, "carol", "password1").await;
+    let dan = register(&app, "dan", "password1").await;
+    grant(tmp.path(), "ada").await;
+    let made = mint(&app, &ada, json!({ "note": "from ada" })).await;
+    register_with(&app, "eve", made["token"].as_str().unwrap()).await;
+    let pool = open_db(tmp.path()).await;
+    let ada_id = user_id(&pool, "ada").await;
+    let bob_id = user_id(&pool, "bob").await;
+    let carol_id = user_id(&pool, "carol").await;
+
+    let mut ids = Vec::new();
+    for title in ["Private", "Shared", "Held", "Gift"] {
+        let (status, book) =
+            upload(&app, &ada, title, "Austen", &common::epub(), None, false).await;
+        assert_eq!(status, StatusCode::OK, "{book}");
+        ids.push(book["id"].as_str().unwrap().to_string());
+    }
+    let [private, shared, held, gift] = <[String; 4]>::try_from(ids).unwrap();
+    share(&app, &ada, &shared).await;
+    let (status, body) = json_req(
+        &app,
+        "POST",
+        &format!("/v1/books/{shared}/comments/0"),
+        Some(&bob),
+        json!({ "text": "from bob" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    insert_imported(&pool, "carol-held", &carol_id, "/works/held", &held, 1).await;
+
+    // A book ada passed on before: bob holds it, ada removes it, bob owns it.
+    insert_imported(&pool, "bob-gift", &bob_id, "/works/gift", &gift, 1).await;
+    let gift_dir = book_dir_for(&pool, tmp.path(), &gift).await;
+    let (status, body) = empty_req(&app, "DELETE", &format!("/v1/books/{gift}"), Some(&ada)).await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+
+    let (status, book) = upload(&app, &dan, "Dans", "Eliot", &common::epub(), None, false).await;
+    assert_eq!(status, StatusCode::OK, "{book}");
+    let dans = book["id"].as_str().unwrap().to_string();
+    insert_imported(&pool, "ada-dans", &ada_id, "/works/dans", &dans, 1).await;
+    for (text, then_share) in [("while private", true), ("while shared", false)] {
+        let (status, body) = json_req(
+            &app,
+            "POST",
+            &format!("/v1/books/{dans}/comments/0"),
+            Some(&ada),
+            json!({ "text": text }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        if then_share {
+            share(&app, &dan, &dans).await;
+        }
+    }
+    for book in [&shared, &dans] {
+        let (status, body) = empty_req(
+            &app,
+            "POST",
+            &format!("/v1/books/{book}/likes/p1"),
+            Some(&ada),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let (status, body) = json_req(
+            &app,
+            "PATCH",
+            &format!("/v1/books/{book}"),
+            Some(&ada),
+            json!({ "progressIndex": 1 }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let (status, body) = empty_req(
+            &app,
+            "PUT",
+            &format!("/v1/books/{book}/posts/0/repost"),
+            Some(&ada),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+    }
+    let private_dir = book_dir_for(&pool, tmp.path(), &private).await;
+    let shared_dir = book_dir_for(&pool, tmp.path(), &shared).await;
+    let held_dir = book_dir_for(&pool, tmp.path(), &held).await;
+    assert!(private_dir.is_dir() && shared_dir.is_dir() && gift_dir.is_dir());
+
+    let (status, preview) =
+        empty_req(&app, "GET", "/v1/admin/users/ada/removal", Some(&matt)).await;
+    assert_eq!(status, StatusCode::OK, "{preview}");
+    assert_eq!(
+        preview,
+        json!({
+            "booksDeleted": 2,
+            "sharedDeleted": 1,
+            "booksPassed": 1,
+            "holdsReleased": 1,
+            "requestsCanceled": 0,
+        })
+    );
+    let (status, body) = empty_req(&app, "DELETE", "/v1/admin/users/matt", Some(&matt)).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_eq!(body["error"], "You can't delete your own account.");
+    let (status, removed) = empty_req(&app, "DELETE", "/v1/admin/users/Ada", Some(&matt)).await;
+    assert_eq!(status, StatusCode::OK, "{removed}");
+    assert_eq!(removed, preview);
+
+    for book in [&private, &shared] {
+        assert_eq!(
+            count(&pool, "SELECT COUNT(*) FROM books WHERE id = ?", Some(book)).await,
+            0
+        );
+    }
+    assert!(!private_dir.exists() && !shared_dir.exists());
+    assert_eq!(
+        count(
+            &pool,
+            "SELECT COUNT(*) FROM comments WHERE book_id = ?",
+            Some(&shared)
+        )
+        .await,
+        0
+    );
+
+    let (status, book) = empty_req(&app, "GET", &format!("/v1/books/{held}"), Some(&carol)).await;
+    assert_eq!(status, StatusCode::OK, "{book}");
+    assert_eq!(book["ownerUsername"], "carol");
+    assert_eq!(book["mine"], true);
+    assert_eq!(book["shared"], false);
+    let (status, _) = empty_req(&app, "GET", &format!("/v1/books/{held}/epub"), Some(&carol)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(held_dir.is_dir());
+    assert!(gift_dir.is_dir());
+    let (status, _) = empty_req(&app, "GET", &format!("/v1/books/{gift}/epub"), Some(&bob)).await;
+    assert_eq!(status, StatusCode::OK);
+
+    for table in [
+        "sessions",
+        "books",
+        "book_requests",
+        "comments",
+        "reposts",
+        "likes",
+        "book_progress",
+    ] {
+        assert_eq!(
+            count(
+                &pool,
+                &format!("SELECT COUNT(*) FROM {table} WHERE user_id = ?"),
+                Some(&ada_id)
+            )
+            .await,
+            0,
+            "{table}"
+        );
+    }
+    let (status, book) = empty_req(&app, "GET", &format!("/v1/books/{dans}"), Some(&dan)).await;
+    assert_eq!(status, StatusCode::OK, "{book}");
+
+    let links: Vec<(Option<String>, Option<String>)> = sqlx::query_as(
+        "SELECT created_by, used_by_user_id FROM invites WHERE id IN (?, ?) ORDER BY created_at",
+    )
+    .bind(joined["invite"]["id"].as_str().unwrap())
+    .bind(made["invite"]["id"].as_str().unwrap())
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(links.len(), 2);
+    assert_eq!(links[0].1, None, "ada redeemed this one");
+    assert_eq!(links[1].0, None, "ada created this one");
+    let (status, list) = empty_req(&app, "GET", "/v1/admin/invites", Some(&matt)).await;
+    assert_eq!(status, StatusCode::OK, "{list}");
+    assert_eq!(list["items"].as_array().unwrap().len(), 2);
+
+    let (status, _) = empty_req(&app, "GET", "/v1/admin/users/ada/removal", Some(&matt)).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    register(&app, "ada", "password1").await;
+}
+
+#[tokio::test]
+async fn migration_013_adds_disabled_at_as_null() {
+    let tmp = TempDir::new().unwrap();
+    let url = format!("sqlite://{}?mode=rwc", tmp.path().join("mewo.db").display());
+    let pool = sqlx::SqlitePool::connect(&url).await.unwrap();
+    let migrator = sqlx::migrate!("./migrations");
+    let mut conn = pool.acquire().await.unwrap();
+    Migrate::ensure_migrations_table(&mut *conn).await.unwrap();
+    for migration in migrator.iter() {
+        if migration.version < 13 {
+            Migrate::apply(&mut *conn, migration).await.unwrap();
+        }
+    }
+    drop(conn);
+    sqlx::query(
+        "INSERT INTO users (id, username, username_norm, password_hash, created_at)
+         VALUES ('user', 'matt', 'matt', 'x', 1)",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    let before = sqlx::query_scalar::<_, Option<i64>>("SELECT disabled_at FROM users")
+        .fetch_one(&pool)
+        .await;
+    assert!(before.is_err(), "disabled_at exists before migration 013");
+    sqlx::migrate!("./migrations").run(&pool).await.unwrap();
+    let after: Option<i64> = sqlx::query_scalar("SELECT disabled_at FROM users")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(after, None);
+}
+
+#[tokio::test]
+async fn a_disabled_admin_cannot_demote_the_last_active_admin() {
+    let (app, tmp) = app().await;
+    let matt = register(&app, "matt", "password1").await;
+    register(&app, "bob", "password1").await;
+    grant(tmp.path(), "matt").await;
+    grant(tmp.path(), "bob").await;
+    let pool = open_db(tmp.path()).await;
+    // bob's disable of matt committed while matt's request was past the guard.
+    sqlx::query("UPDATE users SET disabled_at = 1 WHERE username = 'matt'")
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    for patch in [json!({ "disabled": true }), json!({ "isAdmin": false })] {
+        let (status, body) =
+            json_req(&app, "PATCH", "/v1/admin/users/bob", Some(&matt), patch).await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+        assert_eq!(body["error"], "Admins only.");
+    }
+    let active = "SELECT COUNT(*) FROM users WHERE is_admin = 1 AND disabled_at IS NULL";
+    assert_eq!(count(&pool, active, None).await, 1);
 }

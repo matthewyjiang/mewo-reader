@@ -268,6 +268,16 @@ export interface AdminUser {
   isAdmin: boolean;
   books: number;
   mine: boolean;
+  disabled: boolean;
+}
+
+/** What deleting an account removes. The preview and the delete return the same shape. */
+export interface AccountRemoval {
+  booksDeleted: number;
+  sharedDeleted: number;
+  booksPassed: number;
+  holdsReleased: number;
+  requestsCanceled: number;
 }
 
 export interface ServerInfo {

@@ -5792,3 +5792,257 @@ async fn download_tmp(world: &World) -> Vec<String> {
     }
     names
 }
+
+#[tokio::test]
+async fn deleting_an_account_hands_its_leading_request_to_the_oldest_follower() {
+    let world = world().await;
+    {
+        let mut prowl = world.prowlarr.lock().await;
+        prowl.key_ok = true;
+        let origin = prowl.origin.clone();
+        prowl.releases = two_releases(&origin);
+    }
+    let ada = account(&world, "ada").await;
+    let (status, body) = post_work(&world, &ada.token, "/works/OL893414W").await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    let leader = body["id"].as_str().unwrap().to_string();
+    let now = body["createdAt"].as_i64().unwrap();
+    worker::tick_at(&world.state, now).await.unwrap();
+    let nzo = world.sab.lock().await.adds[0].nzo.clone();
+    let bob = account(&world, "bob").await;
+    let (status, body) = post_work(&world, &bob.token, "/works/OL893414W").await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    let bob_request = body["id"].as_str().unwrap().to_string();
+    let carol = account(&world, "carol").await;
+    let (status, body) = post_work(&world, &carol.token, "/works/OL893414W").await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    let carol_request = body["id"].as_str().unwrap().to_string();
+    assert_eq!(
+        follows_of(&world.state.pool, &bob_request).await.as_deref(),
+        Some(leader.as_str())
+    );
+    // The download finished. Nothing may import it once ada is gone.
+    finish_job(&world, &nzo, &format!("/data/mewo-{leader}")).await;
+    write_epub(
+        &world.downloads.path().join(format!("mewo-{leader}")),
+        "Dune.epub",
+        &common::epub(),
+    );
+
+    let snapshot = || async {
+        sqlx::query_as::<_, (String, String, Option<String>, i64)>(
+            "SELECT id, state, follows, updated_at FROM book_requests ORDER BY id",
+        )
+        .fetch_all(&world.state.pool)
+        .await
+        .unwrap()
+    };
+    let before = snapshot().await;
+    let (status, preview) = empty_req(
+        &world.app,
+        "GET",
+        "/v1/admin/users/ada/removal",
+        Some(&world.token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{preview}");
+    assert_eq!(preview["requestsCanceled"], 1);
+    assert_eq!(snapshot().await, before);
+    assert!(world.sab.lock().await.deletes.is_empty());
+
+    let (status, removed) = empty_req(
+        &world.app,
+        "DELETE",
+        "/v1/admin/users/ada",
+        Some(&world.token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{removed}");
+    assert_eq!(removed, preview);
+    assert!(world.sab.lock().await.deletes.contains(&nzo));
+    let gone: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM book_requests WHERE user_id = ?")
+        .bind(&ada.id)
+        .fetch_one(&world.state.pool)
+        .await
+        .unwrap();
+    assert_eq!(gone, 0);
+    assert!(follows_of(&world.state.pool, &bob_request).await.is_none());
+    assert_eq!(
+        stored(&world.state.pool, &bob_request).await.state,
+        "requested"
+    );
+    assert_eq!(
+        follows_of(&world.state.pool, &carol_request)
+            .await
+            .as_deref(),
+        Some(bob_request.as_str())
+    );
+    let leaders: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM book_requests
+         WHERE work_key = '/works/OL893414W' AND follows IS NULL
+           AND state IN ('requested', 'downloading')",
+    )
+    .fetch_one(&world.state.pool)
+    .await
+    .unwrap();
+    assert_eq!(leaders, 1);
+
+    let promoted = stored(&world.state.pool, &bob_request).await;
+    worker::tick_at(&world.state, promoted.next_check_at + POLL * 2)
+        .await
+        .unwrap();
+    let books: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM books")
+        .fetch_one(&world.state.pool)
+        .await
+        .unwrap();
+    assert_eq!(books, 0);
+}
+
+async fn active_leaders(pool: &SqlitePool, work: &str) -> Vec<String> {
+    sqlx::query_scalar(
+        "SELECT id FROM book_requests
+         WHERE work_key = ? AND follows IS NULL AND state IN ('requested', 'downloading')",
+    )
+    .bind(work)
+    .fetch_all(pool)
+    .await
+    .unwrap()
+}
+
+/// ada leads, bob and carol follow. With `canceled`, ada's row is then
+/// canceled without a hand-off: the window `sweep_inactive_leaders` repairs on
+/// a later tick. With `other_leader`, dan already leads the same work by then.
+/// With `carol_downloading`, carol's follower row is `downloading` with a job:
+/// the worker's grab can land on a row that a cancel and retry made a follower.
+async fn delete_with_followers(canceled: bool, other_leader: bool, carol_downloading: bool) {
+    let work = "/works/OL893414W";
+    let world = world().await;
+    let ada = account(&world, "ada").await;
+    let (status, body) = post_work(&world, &ada.token, work).await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    let stranded = body["id"].as_str().unwrap().to_string();
+    let mut followers = Vec::new();
+    for name in ["bob", "carol"] {
+        let who = account(&world, name).await;
+        let (status, body) = post_work(&world, &who.token, work).await;
+        assert_eq!(status, StatusCode::CREATED, "{body}");
+        followers.push(body["id"].as_str().unwrap().to_string());
+    }
+    if carol_downloading {
+        sqlx::query(
+            "UPDATE book_requests SET state = 'downloading', download_id = 'carol-job' WHERE id = ?",
+        )
+        .bind(&followers[1])
+        .execute(&world.state.pool)
+        .await
+        .unwrap();
+    }
+    if canceled {
+        sqlx::query("UPDATE book_requests SET state = 'canceled' WHERE id = ?")
+            .bind(&stranded)
+            .execute(&world.state.pool)
+            .await
+            .unwrap();
+    }
+    let dan_request = if other_leader {
+        let dan = account(&world, "dan").await;
+        let (status, body) = post_work(&world, &dan.token, work).await;
+        assert_eq!(status, StatusCode::CREATED, "{body}");
+        let id = body["id"].as_str().unwrap().to_string();
+        assert!(follows_of(&world.state.pool, &id).await.is_none());
+        Some(id)
+    } else {
+        None
+    };
+
+    let (status, body) = empty_req(
+        &world.app,
+        "DELETE",
+        "/v1/admin/users/ada",
+        Some(&world.token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    let leaders = active_leaders(&world.state.pool, work).await;
+    assert_eq!(leaders.len(), 1, "{leaders:?}");
+    let leader = dan_request.unwrap_or_else(|| followers[0].clone());
+    assert_eq!(leaders[0], leader);
+    for follower in &followers {
+        if follower != &leader {
+            assert_eq!(
+                follows_of(&world.state.pool, follower).await.as_deref(),
+                Some(leader.as_str())
+            );
+            assert_eq!(stored(&world.state.pool, follower).await.state, "requested");
+        }
+    }
+    if carol_downloading {
+        assert!(world
+            .sab
+            .lock()
+            .await
+            .deletes
+            .iter()
+            .any(|nzo| nzo == "carol-job"));
+        assert_eq!(
+            stored(&world.state.pool, &followers[1]).await.download_id,
+            None
+        );
+    }
+}
+
+#[tokio::test]
+async fn deleting_an_account_promotes_followers_of_its_canceled_request() {
+    delete_with_followers(true, false, false).await;
+}
+
+#[tokio::test]
+async fn deleting_an_account_moves_stranded_followers_to_the_active_leader() {
+    delete_with_followers(true, true, false).await;
+}
+
+#[tokio::test]
+async fn deleting_an_account_moves_a_downloading_follower_of_its_active_request() {
+    delete_with_followers(false, false, true).await;
+}
+
+#[tokio::test]
+async fn deleting_an_account_moves_a_downloading_follower_of_its_canceled_request() {
+    delete_with_followers(true, true, true).await;
+}
+
+#[tokio::test]
+async fn deleting_an_account_deletes_the_job_of_its_demoted_follower() {
+    let work = "/works/OL893414W";
+    let world = world().await;
+    let (status, body) = post_work(&world, &world.token, work).await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    let ada = account(&world, "ada").await;
+    let (status, body) = post_work(&world, &ada.token, work).await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    let follower = body["id"].as_str().unwrap().to_string();
+    assert!(follows_of(&world.state.pool, &follower).await.is_some());
+    // A leader demoted to follower keeps its job until `clear_follower_jobs` runs.
+    sqlx::query("UPDATE book_requests SET download_id = 'ada-job' WHERE id = ?")
+        .bind(&follower)
+        .execute(&world.state.pool)
+        .await
+        .unwrap();
+
+    let (status, body) = empty_req(
+        &world.app,
+        "DELETE",
+        "/v1/admin/users/ada",
+        Some(&world.token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(world
+        .sab
+        .lock()
+        .await
+        .deletes
+        .iter()
+        .any(|nzo| nzo == "ada-job"));
+}

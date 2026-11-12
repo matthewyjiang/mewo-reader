@@ -1,3 +1,4 @@
+pub mod accounts;
 pub mod admin;
 mod anchors;
 pub mod auth;

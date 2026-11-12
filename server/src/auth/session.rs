@@ -99,11 +99,13 @@ async fn issue_in(
         pool.begin().await?
     };
     if let Some(expected) = password_hash {
-        let current: Option<String> =
-            sqlx::query_scalar("SELECT password_hash FROM users WHERE id = ?")
-                .bind(user_id)
-                .fetch_optional(&mut *tx)
-                .await?;
+        // A disable that committed after verify leaves no session either.
+        let current: Option<String> = sqlx::query_scalar(
+            "SELECT password_hash FROM users WHERE id = ? AND disabled_at IS NULL",
+        )
+        .bind(user_id)
+        .fetch_optional(&mut *tx)
+        .await?;
         if current.as_deref() != Some(expected) {
             return Err(ApiError::Unauthorized("Wrong username or password.".into()));
         }
