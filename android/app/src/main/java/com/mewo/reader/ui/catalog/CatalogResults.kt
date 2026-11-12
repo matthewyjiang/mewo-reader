@@ -38,6 +38,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.foundation.BorderStroke
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.mewo.reader.data.BookRequest
+import com.mewo.reader.data.CatalogFilter
 import com.mewo.reader.data.CatalogWork
 import com.mewo.reader.ui.components.BindListTop
 import com.mewo.reader.ui.components.SectionHeading
@@ -58,6 +59,7 @@ fun CatalogResults(
     onDismissNotice: () -> Unit,
     onCloseSheet: () -> Unit,
     onOpenBook: (String) -> Unit,
+    onFilter: (CatalogFilter) -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val phase = state.phase
@@ -84,7 +86,17 @@ fun CatalogResults(
                 .nestedScroll(hideOnScroll.connection),
         ) {
             val emptyPage = loaded != null && !loaded.more && page != null && page.items.isEmpty()
-            if (showTrendingHeader(query, phase)) {
+            state.filters?.let { filters ->
+                item(key = "filters") {
+                    CatalogFilterRow(
+                        filters = filters,
+                        filter = state.filter,
+                        searching = catalogQuery(query) is CatalogQuery.Search,
+                        onChange = onFilter,
+                    )
+                }
+            }
+            if (showTrendingHeader(query, state.filter, phase)) {
                 item(key = "trending") { SectionHeading("Trending on Open Library") }
             }
             if (failed != null) {
@@ -107,7 +119,7 @@ fun CatalogResults(
                     item(key = "more") { SpinnerStatus() }
                 }
                 if (emptyPage) {
-                    item(key = "empty") { CatalogEmpty(query) }
+                    item(key = "empty") { CatalogEmpty(query, genreName(state)) }
                 }
             }
         }
@@ -248,18 +260,17 @@ internal fun CatalogErrorRow(
 }
 
 @Composable
-internal fun CatalogEmpty(query: String) {
-    val asked = catalogQuery(query)
-    val text = if (asked is CatalogQuery.Search) {
-        "Nothing in Open Library matches “${asked.q}”. Try the author's name or fewer words."
-    } else {
-        "No trending books in your languages right now. Search above."
-    }
+internal fun CatalogEmpty(query: String, genre: String? = null) {
     Text(
-        text = text,
+        text = catalogEmptyText(query, genre),
         style = MaterialTheme.typography.headlineLarge,
         modifier = Modifier.padding(horizontal = 28.dp, vertical = 48.dp),
     )
+}
+
+internal fun genreName(state: CatalogListState): String? {
+    val id = state.filter.genre ?: return null
+    return state.filters?.genres?.firstOrNull { it.id == id }?.name
 }
 
 private fun requestOn(state: CatalogListState, work: CatalogWork): BookRequest? {

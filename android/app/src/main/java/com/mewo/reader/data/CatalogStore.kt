@@ -19,7 +19,9 @@ interface CatalogStore {
 
     suspend fun refreshAccess()
 
-    suspend fun page(query: String, page: Int): CatalogPage
+    suspend fun page(query: String, page: Int, filter: CatalogFilter): CatalogPage
+
+    suspend fun filters(): CatalogFilters
 
     suspend fun work(workKey: String): WorkDetail
 
@@ -88,8 +90,12 @@ class HostedCatalogStore(
         }
     }
 
-    override suspend fun page(query: String, page: Int): CatalogPage = call { session ->
-        client.catalog(session, query, page)
+    override suspend fun page(query: String, page: Int, filter: CatalogFilter): CatalogPage = call { session ->
+        client.catalog(session, query, page, filter)
+    }
+
+    override suspend fun filters(): CatalogFilters = call { session ->
+        client.catalogFilters(session)
     }
 
     override suspend fun work(workKey: String): WorkDetail = call { session ->
@@ -150,7 +156,9 @@ class DisabledCatalogStore : CatalogStore {
 
     override suspend fun refreshAccess() = Unit
 
-    override suspend fun page(query: String, page: Int): CatalogPage = off()
+    override suspend fun page(query: String, page: Int, filter: CatalogFilter): CatalogPage = off()
+
+    override suspend fun filters(): CatalogFilters = off()
 
     override suspend fun work(workKey: String): WorkDetail = off()
 

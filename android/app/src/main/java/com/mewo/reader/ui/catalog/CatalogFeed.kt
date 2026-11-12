@@ -2,6 +2,8 @@ package com.mewo.reader.ui.catalog
 
 import com.mewo.reader.data.BookRequest
 import com.mewo.reader.data.CatalogAccess
+import com.mewo.reader.data.CatalogFilter
+import com.mewo.reader.data.CatalogFilters
 import com.mewo.reader.data.CatalogPage
 import com.mewo.reader.data.CatalogStore
 import com.mewo.reader.data.CatalogWork
@@ -31,6 +33,9 @@ data class CatalogListState(
     val overlay: Map<String, BookRequest?> = emptyMap(),
     val sheet: CatalogSheetModel? = null,
     val notice: String? = null,
+    /** Genres and sorts. Null until `/v1/catalog/filters` answers; the row hides until then. */
+    val filters: CatalogFilters? = null,
+    val filter: CatalogFilter = CatalogFilter(),
 )
 
 sealed class RowOutcome {
@@ -43,8 +48,9 @@ private data class Memo(val page: CatalogPage, val pages: Int)
 private const val MEMO_LIMIT = 8
 
 /**
- * Open Library list for the Catalog tab. Trending (a blank query, or fewer
- * than [CATALOG_MIN_QUERY] Unicode scalars) is memoized per session. A memo
+ * Open Library list for the Catalog tab. Browse (a blank query, or fewer
+ * than [CATALOG_MIN_QUERY] Unicode scalars) is memoized per session and
+ * filter, as are searches. A memo
  * of a single page is refreshed in place; a longer one is left alone. A
  * failed load replaces whatever was on screen.
  *
@@ -64,6 +70,7 @@ class CatalogFeed(
     private var visible = false
     private var generation = 0L
     private var job: Job? = null
+    private var filtersJob: Job? = null
     private val memos = mutableMapOf<String, LinkedHashMap<String, Memo>>()
 
     fun setQuery(raw: String) {
@@ -76,6 +83,20 @@ class CatalogFeed(
         if (visible) publish()
     }
 
+    /** Same flow as a query change. Another genre's rows do not stay under the new one. */
+    fun setFilter(filter: CatalogFilter) {
+        val asked = catalogQuery(rawQuery)
+        val previous = _state.value.filter
+        if (previous == filter) return
+        if (asked.memoKey(filter) == asked.memoKey(previous)) {
+            _state.update { it.copy(filter = filter) }
+            return
+        }
+        _state.value.sheet?.stop()
+        _state.update { it.copy(overlay = emptyMap(), sheet = null, notice = null, filter = filter) }
+        if (visible) publish(keepShown = false)
+    }
+
     fun show() {
         if (visible) {
             if (store.access.value == CatalogAccess.On && _state.value.phase is CatalogPhase.Idle) publish()
@@ -83,7 +104,24 @@ class CatalogFeed(
         }
         visible = true
         if (store.access.value != CatalogAccess.On) return
+        loadFilters()
         publish()
+    }
+
+    /** Once per session. A failure loads again the next time the tab shows. */
+    private fun loadFilters() {
+        if (_state.value.filters != null || filtersJob?.isActive == true) return
+        val id = session ?: return
+        filtersJob = scope.launch {
+            try {
+                val filters = store.filters()
+                if (id == session) _state.update { it.copy(filters = filters) }
+            } catch (error: CancellationException) {
+                throw error
+            } catch (_: Exception) {
+                // The row stays hidden until the next show.
+            }
+        }
     }
 
     fun hide() {
@@ -99,9 +137,13 @@ class CatalogFeed(
         session = id
         generation += 1
         job?.cancel()
+        filtersJob?.cancel()
         _state.value.sheet?.stop()
         _state.value = CatalogListState()
-        if (visible && id != null && store.access.value == CatalogAccess.On) publish()
+        if (visible && id != null && store.access.value == CatalogAccess.On) {
+            loadFilters()
+            publish()
+        }
     }
 
     fun loadMore() {
@@ -109,21 +151,23 @@ class CatalogFeed(
         if (phase.more || phase.page.nextPage == null || !visible) return
         val id = session ?: return
         val asked = catalogQuery(rawQuery)
+        val filter = _state.value.filter
         val nextPage = phase.page.nextPage
         val gen = ++generation
         job?.cancel()
         _state.update { it.copy(phase = phase.copy(more = true)) }
-        job = scope.launch { fetch(gen, id, asked, nextPage, append = true) }
+        job = scope.launch { fetch(gen, id, asked, filter, nextPage, append = true) }
     }
 
     fun retry() {
         if (_state.value.phase !is CatalogPhase.Failed || !visible) return
         val id = session ?: return
         val asked = catalogQuery(rawQuery)
+        val filter = _state.value.filter
         val gen = ++generation
         job?.cancel()
         _state.update { it.copy(phase = CatalogPhase.Loading()) }
-        job = scope.launch { fetch(gen, id, asked, page = 1, append = false) }
+        job = scope.launch { fetch(gen, id, asked, filter, page = 1, append = false) }
     }
 
     fun dismissNotice() {
@@ -196,14 +240,15 @@ class CatalogFeed(
         _state.update { it.copy(overlay = it.overlay + (workKey to request)) }
     }
 
-    private fun publish() {
+    private fun publish(keepShown: Boolean = true) {
         if (!visible) return
         val id = session ?: return
         if (store.access.value != CatalogAccess.On) return
         val asked = catalogQuery(rawQuery)
+        val filter = _state.value.filter
         val gen = ++generation
         job?.cancel()
-        val hit = recall(id, asked.memoKey())
+        val hit = recall(id, asked.memoKey(filter))
         if (hit != null && hit.pages > 1) {
             _state.update { it.copy(phase = CatalogPhase.Loaded(hit.page, more = false)) }
             return
@@ -212,7 +257,7 @@ class CatalogFeed(
         if (hit != null) {
             _state.update { it.copy(phase = CatalogPhase.Loaded(hit.page, more = false)) }
         } else {
-            val previous = if (asked is CatalogQuery.Search) shownPage() else null
+            val previous = if (asked is CatalogQuery.Search && keepShown) shownPage() else null
             _state.update { it.copy(phase = CatalogPhase.Loading(previous)) }
         }
         val wait = when {
@@ -222,7 +267,7 @@ class CatalogFeed(
         }
         job = scope.launch {
             if (wait > 0) delay(wait)
-            fetch(gen, id, asked, page = 1, append = false)
+            fetch(gen, id, asked, filter, page = 1, append = false)
         }
     }
 
@@ -230,13 +275,16 @@ class CatalogFeed(
         gen: Long,
         id: String,
         asked: CatalogQuery,
+        filter: CatalogFilter,
         page: Int,
         append: Boolean,
     ) {
-        if (!current(gen, id, asked)) return
+        val key = asked.memoKey(filter)
+        if (!current(gen, id, key)) return
         try {
-            val next = store.page(asked.wireQuery(), page)
-            if (!current(gen, id, asked)) return
+            val sent = if (asked is CatalogQuery.Search) filter.copy(sort = null) else filter
+            val next = store.page(asked.wireQuery(), page, sent)
+            if (!current(gen, id, key)) return
             val merged = if (!append) {
                 next
             } else {
@@ -244,14 +292,14 @@ class CatalogFeed(
                 if (existing == null) next
                 else existing.copy(items = existing.items + next.items, nextPage = next.nextPage)
             }
-            val prior = if (append) recall(id, asked.memoKey())?.pages ?: 1 else 0
-            remember(id, asked.memoKey(), merged, if (append) prior + 1 else 1)
+            val prior = if (append) recall(id, key)?.pages ?: 1 else 0
+            remember(id, key, merged, if (append) prior + 1 else 1)
             _state.update { it.copy(phase = CatalogPhase.Loaded(merged, more = false)) }
         } catch (error: CancellationException) {
             throw error
         } catch (error: Exception) {
-            if (!current(gen, id, asked)) return
-            memos[id]?.remove(asked.memoKey())
+            if (!current(gen, id, key)) return
+            memos[id]?.remove(key)
             _state.update {
                 it.copy(phase = CatalogPhase.Failed(error.message ?: "Could not load the catalog."))
             }
@@ -264,8 +312,9 @@ class CatalogFeed(
         else -> null
     }
 
-    private fun current(gen: Long, id: String, asked: CatalogQuery): Boolean {
-        return gen == generation && id == session && visible && catalogQuery(rawQuery) == asked
+    private fun current(gen: Long, id: String, key: String): Boolean {
+        return gen == generation && id == session && visible &&
+            catalogQuery(rawQuery).memoKey(_state.value.filter) == key
     }
 
     private fun recall(id: String, key: String): Memo? = memos[id]?.get(key)
@@ -281,9 +330,13 @@ class CatalogFeed(
     }
 }
 
-private fun CatalogQuery.memoKey(): String = when (this) {
+/** What a page depends on. Sort applies to browse only, so a search drops it. */
+private fun CatalogQuery.memoKey(filter: CatalogFilter): String = when (this) {
+    CatalogQuery.Browse -> "\u0000${filter.genre.orEmpty()}\u0000${filter.sort.orEmpty()}"
+    is CatalogQuery.Search -> "$q\u0000${filter.genre.orEmpty()}\u0000"
+}
+
+private fun CatalogQuery.wireQuery(): String = when (this) {
     CatalogQuery.Browse -> ""
     is CatalogQuery.Search -> q
 }
-
-private fun CatalogQuery.wireQuery(): String = memoKey()

@@ -34,8 +34,11 @@ import com.mewo.reader.data.AccountHit
 import com.mewo.reader.data.BackendKind
 import com.mewo.reader.data.BookRecord
 import com.mewo.reader.data.BookRequest
+import com.mewo.reader.data.CatalogFilter
+import com.mewo.reader.data.CatalogFilters
 import com.mewo.reader.data.CatalogPage
 import com.mewo.reader.data.CatalogWork
+import com.mewo.reader.data.FilterOption
 import com.mewo.reader.data.Rating
 import com.mewo.reader.data.RequestDetail
 import com.mewo.reader.data.ServerCopy
@@ -57,6 +60,8 @@ import com.mewo.reader.data.ProfileRecord
 import com.mewo.reader.data.SearchKind
 import com.mewo.reader.ui.catalog.CatalogEmpty
 import com.mewo.reader.ui.catalog.CatalogErrorRow
+import com.mewo.reader.ui.catalog.CatalogFilterMenu
+import com.mewo.reader.ui.catalog.CatalogFilterRow
 import com.mewo.reader.ui.catalog.CatalogNotice
 import com.mewo.reader.ui.catalog.CatalogPhase
 import com.mewo.reader.ui.catalog.CatalogRow
@@ -559,6 +564,62 @@ class SurfaceScreenshots {
     }
 
     @Test
+    fun catalogFilters() = shoot("catalog-filters") {
+        SearchChrome("catalog", query = "", tabs = searchTabs(hosted = true, canRequest = true)) {
+            CatalogFilterRow(catalogFilters, CatalogFilter(), searching = false, onChange = {})
+            CatalogHeader("", trendingPhase())
+            CatalogRow(work = duneWork, request = null, onOpen = {}, onAct = {})
+            CatalogRow(work = emmaWork, request = null, onOpen = {}, onAct = {})
+        }
+    }
+
+    @Test
+    fun catalogGenreMenu() = shoot("catalog-genre-menu") {
+        SearchChrome("catalog", query = "", tabs = searchTabs(hosted = true, canRequest = true)) {
+            CatalogFilterRow(
+                catalogFilters,
+                CatalogFilter(),
+                searching = false,
+                onChange = {},
+                startOpen = CatalogFilterMenu.Genre,
+            )
+            CatalogHeader("", trendingPhase())
+            CatalogRow(work = duneWork, request = null, onOpen = {}, onAct = {})
+        }
+    }
+
+    @Test
+    fun catalogFantasyNew() = shoot("catalog-fantasy-new") {
+        val filter = CatalogFilter(genre = "fantasy", sort = "new")
+        SearchChrome("catalog", query = "", tabs = searchTabs(hosted = true, canRequest = true)) {
+            CatalogFilterRow(catalogFilters, filter, searching = false, onChange = {})
+            CatalogHeader("", trendingPhase(), filter)
+            CatalogRow(work = duneWork, request = null, onOpen = {}, onAct = {})
+            CatalogRow(work = emmaWork, request = null, onOpen = {}, onAct = {})
+        }
+    }
+
+    @Test
+    fun catalogGenreSearch() = shoot("catalog-genre-search") {
+        val filter = CatalogFilter(genre = "fantasy", sort = "new")
+        SearchChrome("catalog", query = "dune", tabs = searchTabs(hosted = true, canRequest = true)) {
+            CatalogFilterRow(catalogFilters, filter, searching = true, onChange = {})
+            CatalogHeader("dune", trendingPhase(), filter)
+            CatalogRow(work = duneWork, request = null, onOpen = {}, onAct = {})
+        }
+    }
+
+    @Test
+    fun catalogGenreEmpty() = shoot("catalog-genre-empty") {
+        val filter = CatalogFilter(genre = "poetry")
+        SearchChrome("catalog", query = "", tabs = searchTabs(hosted = true, canRequest = true)) {
+            CatalogFilterRow(catalogFilters, filter, searching = false, onChange = {})
+            CatalogHeader("", CatalogPhase.Loaded(CatalogPage()), filter)
+            CatalogEmpty("", "Poetry")
+        }
+    }
+
+    @Test
     fun catalogShortQuery() = shoot("catalog-short-query") {
         SearchChrome("catalog", query = "du", tabs = searchTabs(hosted = true, canRequest = true)) {
             CatalogHeader("du", trendingPhase())
@@ -755,11 +816,33 @@ class SurfaceScreenshots {
     }
 }
 
+private val catalogFilters = CatalogFilters(
+    genres = listOf(
+        "fantasy" to "Fantasy",
+        "science-fiction" to "Science fiction",
+        "mystery" to "Mystery",
+        "thriller" to "Thriller",
+        "romance" to "Romance",
+        "horror" to "Horror",
+        "historical-fiction" to "Historical fiction",
+        "young-adult" to "Young adult",
+        "biography" to "Biography",
+        "history" to "History",
+        "self-help" to "Self-help",
+        "poetry" to "Poetry",
+    ).map { (id, name) -> FilterOption(id, name) },
+    sorts = listOf(
+        FilterOption("popular", "Popular"),
+        FilterOption("rated", "Top rated"),
+        FilterOption("new", "New"),
+    ),
+)
+
 private fun trendingPhase() = CatalogPhase.Loaded(CatalogPage(items = listOf(duneWork)))
 
 @Composable
-private fun CatalogHeader(query: String, phase: CatalogPhase) {
-    if (showTrendingHeader(query, phase)) {
+private fun CatalogHeader(query: String, phase: CatalogPhase, filter: CatalogFilter = CatalogFilter()) {
+    if (showTrendingHeader(query, filter, phase)) {
         SectionHeading("Trending on Open Library")
     }
 }

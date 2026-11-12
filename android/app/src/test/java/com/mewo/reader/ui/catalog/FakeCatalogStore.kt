@@ -2,6 +2,8 @@ package com.mewo.reader.ui.catalog
 
 import com.mewo.reader.data.BookRequest
 import com.mewo.reader.data.CatalogAccess
+import com.mewo.reader.data.CatalogFilter
+import com.mewo.reader.data.CatalogFilters
 import com.mewo.reader.data.CatalogPage
 import com.mewo.reader.data.CatalogStore
 import com.mewo.reader.data.CatalogWork
@@ -20,6 +22,10 @@ class FakeCatalogStore : CatalogStore {
 
     val pageCalls = mutableListOf<Pair<String, Int>>()
     var pageHandler: suspend (String, Int) -> CatalogPage = { _, _ -> CatalogPage() }
+    val pageFilters = mutableListOf<CatalogFilter>()
+
+    var filterCalls = 0
+    var filtersHandler: suspend () -> CatalogFilters = { CatalogFilters() }
 
     val workCalls = mutableListOf<String>()
     var workHandler: suspend (String) -> WorkDetail = { WorkDetail(it) }
@@ -35,9 +41,15 @@ class FakeCatalogStore : CatalogStore {
 
     override suspend fun refreshAccess() = Unit
 
-    override suspend fun page(query: String, page: Int): CatalogPage {
+    override suspend fun page(query: String, page: Int, filter: CatalogFilter): CatalogPage {
         pageCalls += query to page
+        pageFilters += filter
         return pageHandler(query, page)
+    }
+
+    override suspend fun filters(): CatalogFilters {
+        filterCalls += 1
+        return filtersHandler()
     }
 
     override suspend fun work(workKey: String): WorkDetail {

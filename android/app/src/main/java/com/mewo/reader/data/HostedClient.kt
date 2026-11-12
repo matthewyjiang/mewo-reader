@@ -317,10 +317,17 @@ open class HostedClient(
     open fun me(session: HostedSession): Me = get(session, "/v1/me")
 
     /** Blank [query] is trending: `q` stays off the URL. */
-    open fun catalog(session: HostedSession, query: String, page: Int): CatalogPage {
+    open fun catalogFilters(session: HostedSession): CatalogFilters {
+        return get(session, "/v1/catalog/filters")
+    }
+
+    /** Sort applies to browse only, so it is not sent with typed text. */
+    open fun catalog(session: HostedSession, query: String, page: Int, filter: CatalogFilter): CatalogPage {
         val trimmed = query.trim()
         val q = if (trimmed.isEmpty()) "" else "&q=${android.net.Uri.encode(trimmed)}"
-        return get(session, "/v1/catalog/search?page=$page$q")
+        val genre = filter.genre?.let { "&genre=${android.net.Uri.encode(it)}" }.orEmpty()
+        val sort = filter.sort?.takeIf { trimmed.isEmpty() }?.let { "&sort=${android.net.Uri.encode(it)}" }.orEmpty()
+        return get(session, "/v1/catalog/search?page=$page$q$genre$sort")
     }
 
     open fun catalogWork(session: HostedSession, olid: String): WorkDetail {

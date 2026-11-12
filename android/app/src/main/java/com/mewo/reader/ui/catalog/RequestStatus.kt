@@ -1,6 +1,7 @@
 package com.mewo.reader.ui.catalog
 
 import com.mewo.reader.data.BookRequest
+import com.mewo.reader.data.CatalogFilter
 import com.mewo.reader.data.CatalogWork
 import com.mewo.reader.data.RequestDetail
 import com.mewo.reader.data.RequestPhase
@@ -34,14 +35,30 @@ fun catalogQuery(raw: String): CatalogQuery {
     return if (scalars < CATALOG_MIN_QUERY) CatalogQuery.Browse else CatalogQuery.Search(trimmed)
 }
 
-/** The trending heading is only for browse, and only while those rows are loading or on screen. */
-internal fun showTrendingHeader(query: String, phase: CatalogPhase): Boolean {
+/**
+ * The trending heading is only for the default browse (All genres, first sort),
+ * and only while those rows are loading or on screen.
+ */
+internal fun showTrendingHeader(query: String, filter: CatalogFilter, phase: CatalogPhase): Boolean {
     if (catalogQuery(query) !is CatalogQuery.Browse) return false
+    if (filter != CatalogFilter()) return false
     return when (phase) {
         CatalogPhase.Idle -> false
         is CatalogPhase.Failed -> false
         is CatalogPhase.Loading -> true
         is CatalogPhase.Loaded -> phase.more || phase.page.items.isNotEmpty()
+    }
+}
+
+/** Empty catalog copy. [genre] is the selected genre's name, or null for All genres. */
+fun catalogEmptyText(query: String, genre: String?): String {
+    val asked = catalogQuery(query)
+    return when {
+        genre != null && asked is CatalogQuery.Search -> "Nothing in $genre matches “${asked.q}”. Try All genres."
+        genre != null -> "Nothing in $genre right now. Try another genre."
+        asked is CatalogQuery.Search ->
+            "Nothing in Open Library matches “${asked.q}”. Try the author's name or fewer words."
+        else -> "No trending books in your languages right now. Search above."
     }
 }
 
