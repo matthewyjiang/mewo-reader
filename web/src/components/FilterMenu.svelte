@@ -169,6 +169,9 @@
   .menu button:hover,
   .menu button:focus-visible {
     background: color-mix(in srgb, var(--ink) 8%, var(--hover));
-    outline: none;
+  }
+
+  .menu button:focus-visible {
+    outline-offset: -2px;
   }
 </style>

@@ -1114,6 +1114,11 @@ test('catalog genre and sort menus filter browse and search', async ({ page }) =
   const all = menu.getByRole('menuitemradio', { name: 'All genres' });
   await expect(all).toHaveAttribute('aria-checked', 'true');
   await expect(all).toBeFocused();
+  // The ring sits inside the item, where the menu's scroll box cannot clip it.
+  expect(await all.evaluate((item) => {
+    const style = getComputedStyle(item);
+    return [style.outlineStyle, style.outlineWidth, style.outlineOffset];
+  })).toEqual(['solid', '2px', '-2px']);
   await expect(menu.getByRole('menuitemradio', { name: 'Fantasy' })).toHaveAttribute('aria-checked', 'false');
   await shot(page, 'catalog-genre-menu');
   await page.keyboard.press('Escape');
