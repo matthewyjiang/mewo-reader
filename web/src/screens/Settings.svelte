@@ -3,6 +3,7 @@
   import Avatar from '../components/Avatar.svelte';
   import ChangePasswordSheet from '../components/ChangePasswordSheet.svelte';
   import DisplaySettings from '../components/DisplaySettings.svelte';
+  import EmailSheet from '../components/EmailSheet.svelte';
   import Icon from '../components/Icon.svelte';
   import { webCommit, webVersion } from '../lib/build';
   import { router } from '../lib/router.svelte';
@@ -16,6 +17,10 @@
 
   let serverBuild = $state<ServerBuild>({ status: 'loading' });
   let changingPassword = $state(false);
+  let changingEmail = $state(false);
+  let emailTrail = $derived(
+    store.me?.pendingEmail ? 'Check inbox' : store.me?.email ?? 'Add',
+  );
 
   function formatBuild(version: string, commit: string | null): string {
     return commit ? `${version} (${commit})` : version;
@@ -104,6 +109,12 @@
     <Avatar name={store.session.username} size={40} />
     <strong>{store.session.username}</strong>
   </div>
+  {#if store.me?.passwordReset}
+    <button class="settings-row" onclick={() => changingEmail = true}>
+      <span>Email</span>
+      <span class="row-trail">{emailTrail}</span>
+    </button>
+  {/if}
   <button class="settings-row" onclick={() => onprofile(store.session!.username)}>
     View profile
   </button>
@@ -111,6 +122,9 @@
   <button class="settings-row danger" onclick={onsignout}>Sign out</button>
   {#if changingPassword}
     <ChangePasswordSheet onclose={() => changingPassword = false} />
+  {/if}
+  {#if changingEmail}
+    <EmailSheet onclose={() => changingEmail = false} />
   {/if}
 {:else if path === '/settings/library'}
   <div class="fact-row">
@@ -163,6 +177,14 @@
 
 .settings-row:hover:not(:disabled) {
   background: var(--hover);
+}
+
+.row-trail {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 400;
 }
 
 .settings-row.danger {

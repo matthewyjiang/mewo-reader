@@ -1,5 +1,6 @@
 <script lang="ts">
   import { checkHeading, type CheckStatus } from '../lib/invites';
+  import type { InstanceInfo } from '../lib/models';
   import { router } from '../lib/router.svelte';
   import { store, message } from '../lib/store.svelte';
   import Icon from './Icon.svelte';
@@ -9,9 +10,12 @@
   const usernameRule = '3–32 characters: letters, digits, underscore.';
   const passwordRule = 'At least 8 characters.';
 
-  let mode = $state<'login' | 'register'>('login');
+  let mode = $state<'login' | 'register' | 'reset'>('login');
   let username = $state('');
   let password = $state('');
+  let email = $state('');
+  let login = $state('');
+  let sent = $state(false);
   let busy = $state(false);
   let error = $state('');
   let ignoreInvite = $state(false);
@@ -28,11 +32,13 @@
     activeInvite && (check === 'used' || check === 'expired' || check === 'invalid') ? check : null,
   );
   // null while the instance call is in flight or failed: keep today's link.
-  let allowSignup = $state<boolean | null>(null);
+  let instance = $state<InstanceInfo | null>(null);
+  let allowSignup = $derived(instance?.allowSignup ?? null);
+  let passwordReset = $derived(instance?.passwordReset === true);
 
   $effect(() => {
     const controller = new AbortController();
-    allowSignup = null;
+    instance = null;
     void fetch('/v1/instance', { signal: controller.signal })
       .then(async (response) => {
         if (!response.ok) throw new Error(String(response.status));
@@ -41,13 +47,15 @@
           || typeof body.allowSignup !== 'boolean') {
           throw new Error('instance');
         }
-        return body.allowSignup;
+        // Older servers have no passwordReset.
+        const reset = 'passwordReset' in body && body.passwordReset === true;
+        return { allowSignup: body.allowSignup, passwordReset: reset };
       })
-      .then((open) => {
-        if (!controller.signal.aborted) allowSignup = open;
+      .then((info) => {
+        if (!controller.signal.aborted) instance = info;
       })
       .catch(() => {
-        if (!controller.signal.aborted) allowSignup = null;
+        if (!controller.signal.aborted) instance = null;
       });
     return () => controller.abort();
   });
@@ -84,9 +92,11 @@
     if (!valid || busy || checking) return;
     busy = true;
     error = '';
+    if (mode === 'reset') return;
     const token = mode === 'register' ? activeInvite ?? undefined : undefined;
+    const address = mode === 'register' && passwordReset ? email : undefined;
     try {
-      await store.signIn(mode, username, password, token);
+      await store.signIn(mode, username, password, token, address);
       if (token) router.go('/', true);
     } catch (err) {
       error = message(err);
@@ -99,6 +109,35 @@
     mode = mode === 'login' ? 'register' : 'login';
     error = '';
     store.notice = '';
+  }
+
+  function forgot(): void {
+    mode = 'reset';
+    login = username;
+    sent = false;
+    error = '';
+    store.notice = '';
+  }
+
+  function backToLogin(): void {
+    mode = 'login';
+    error = '';
+    store.notice = '';
+  }
+
+  async function sendLink(event: SubmitEvent): Promise<void> {
+    event.preventDefault();
+    if (!login.trim() || busy) return;
+    busy = true;
+    error = '';
+    try {
+      await store.api.requestReset(login);
+      sent = true;
+    } catch (err) {
+      error = message(err);
+    } finally {
+      busy = false;
+    }
   }
 
   function signInInstead(): void {
@@ -130,6 +169,34 @@
         Sign in
       </button>
     </div>
+  {:else if mode === 'reset'}
+  <form class="auth-form" onsubmit={sendLink}>
+    <h1>Reset password</h1>
+    <label for="login">Username or email</label>
+    <input
+      id="login"
+      name="login"
+      autocomplete="username"
+      autocapitalize="none"
+      spellcheck="false"
+      maxlength="320"
+      required
+      bind:value={login}
+      oninput={() => sent = false}
+      disabled={busy}
+    />
+    {#if error}
+      <p class="error" role="alert">{error}</p>
+    {:else if sent}
+      <p class="sent" role="status">If that account has an email, we sent a link.</p>
+    {/if}
+    <button type="submit" class="pill auth-submit" disabled={!login.trim() || busy}>
+      {busy ? 'Sending…' : 'Send link'}
+    </button>
+    <button type="button" class="text-button" disabled={busy} onclick={backToLogin}>
+      Sign in instead
+    </button>
+  </form>
   {:else}
   <form class="auth-form" onsubmit={submit}>
     <h1>{mode === 'register' ? 'Create account' : 'Sign in'}</h1>
@@ -168,12 +235,31 @@
     {#if passwordError}
       <p id="password-error" class="error">{passwordError}</p>
     {/if}
+    {#if mode === 'register' && passwordReset}
+      <label for="email">Email (optional)</label>
+      <input
+        id="email"
+        name="email"
+        type="email"
+        autocomplete="email"
+        autocapitalize="none"
+        spellcheck="false"
+        maxlength="254"
+        bind:value={email}
+        disabled={busy || checking}
+      />
+    {/if}
     {#if error || store.notice}
       <p class="error" role="alert">{error || store.notice}</p>
     {/if}
     <button type="submit" class="pill auth-submit" disabled={!valid || busy || checking}>
       {busy ? 'Connecting…' : mode === 'login' ? 'Sign in' : 'Create account'}
     </button>
+    {#if mode === 'login' && passwordReset}
+      <button type="button" class="text-button" disabled={busy} onclick={forgot}>
+        Forgot password?
+      </button>
+    {/if}
     {#if mode === 'register'}
       <button
         type="button"
@@ -245,7 +331,8 @@
   border-color: var(--accent);
 }
 
-.auth-form > .error {
+.auth-form > .error,
+.auth-form > .sent {
   margin-top: 6px;
 }
 

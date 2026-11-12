@@ -15,10 +15,10 @@ class HostedAuth(
         sessions.setSignedIn(res.username, res.token)
     }
 
-    suspend fun createAccount(username: String, password: String) {
+    suspend fun createAccount(username: String, password: String, email: String? = null) {
         val url = requireUrl()
         val res = withContext(Dispatchers.IO) {
-            client.register(url, username.trim(), password)
+            client.register(url, username.trim(), password, email)
         }
         sessions.setSignedIn(res.username, res.token)
     }

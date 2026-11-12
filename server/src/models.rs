@@ -123,6 +123,9 @@ pub struct RegisterRequest {
     pub password: String,
     #[serde(default)]
     pub invite: Option<String>,
+    /// Optional. Verified by mail before it is stored on the account.
+    #[serde(default)]
+    pub email: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -145,6 +148,12 @@ pub struct MeResponse {
     pub is_admin: bool,
     /// Catalog search and book requests are on. Every signed-in account.
     pub can_request: bool,
+    /// Verified address, or null.
+    pub email: Option<String>,
+    /// Address waiting on its verify link, or null.
+    pub pending_email: Option<String>,
+    /// This server can mail reset and verify links.
+    pub password_reset: bool,
 }
 
 /// Public `GET /v1/instance`. A future `name` is one more field.
@@ -152,6 +161,50 @@ pub struct MeResponse {
 #[serde(rename_all = "camelCase")]
 pub struct InstanceInfo {
     pub allow_signup: bool,
+    /// "Forgot password?" works here.
+    pub password_reset: bool,
+}
+
+/// `POST /v1/auth/reset/request`. A username or an email.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ResetRequest {
+    pub login: String,
+}
+
+/// `POST /v1/auth/reset`.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RedeemReset {
+    pub token: String,
+    pub new_password: String,
+}
+
+/// `POST /v1/auth/email/verify`.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct VerifyEmail {
+    pub token: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct VerifiedEmail {
+    pub email: String,
+}
+
+/// `PUT /v1/me/email`. `email: null` removes the address.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SetEmail {
+    pub email: Option<String>,
+    pub current_password: String,
+}
+
+/// `POST /v1/admin/mail/test`.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct MailTest {
+    pub to: String,
 }
 
 #[derive(Debug, Serialize)]

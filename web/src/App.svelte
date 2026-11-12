@@ -15,12 +15,15 @@
   import Home from './screens/Home.svelte';
   import Invites from './screens/Invites.svelte';
   import Likes from './screens/Likes.svelte';
+  import Mail from './screens/Mail.svelte';
   import Profile from './screens/Profile.svelte';
   import Reader from './screens/Reader.svelte';
   import Search from './screens/Search.svelte';
   import Requests from './screens/Requests.svelte';
+  import ResetPassword from './screens/ResetPassword.svelte';
   import Server from './screens/Server.svelte';
   import Settings from './screens/Settings.svelte';
+  import VerifyEmail from './screens/VerifyEmail.svelte';
   import { chrome } from './lib/chrome.svelte';
   import { inviteToken } from './lib/invites';
   import type { BookRecord, FeedPost, PostHit } from './lib/models';
@@ -76,6 +79,8 @@
       '/settings/library': 'Library', '/settings/about': 'About',
       '/settings/server': 'Server', '/settings/server/users': 'Users',
       '/settings/server/invites': 'Invites',
+      '/settings/server/mail': 'Mail',
+      '/reset': 'Reset password', '/verify-email': 'Email',
       '/settings/server/blocklist': 'Blocked releases',
       '/settings/requests': 'Requests',
     };
@@ -327,7 +332,11 @@
   }
 </script>
 
-{#if !store.session}
+{#if path === '/reset'}
+  <ResetPassword />
+{:else if path === '/verify-email'}
+  <VerifyEmail />
+{:else if !store.session}
   <SignIn invite={inviteToken(router.url)} />
 {:else}
   <div class="app-shell">
@@ -425,6 +434,8 @@
               <Invites scroller={main} />
             {:else if path === '/settings/server/blocklist'}
               <Blocklist scroller={main} />
+            {:else if path === '/settings/server/mail'}
+              <Mail scroller={main} />
             {:else if path === '/settings/server' || path === '/settings/server/users'}
               <Server {path} scroller={main} onprofile={openProfile} />
             {:else if path === '/settings/requests'}

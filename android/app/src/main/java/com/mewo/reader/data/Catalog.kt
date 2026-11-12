@@ -2,12 +2,19 @@ package com.mewo.reader.data
 
 import kotlinx.serialization.Serializable
 
-/** `GET /v1/me`. `canRequest` is the master switch for the catalog. */
+/**
+ * `GET /v1/me`. `canRequest` is the master switch for the catalog. `email` is
+ * verified. `pendingEmail` waits on its link. `passwordReset` means the server
+ * can mail links. Older servers omit the last three.
+ */
 @Serializable
 data class Me(
     val username: String = "",
     val isAdmin: Boolean = false,
     val canRequest: Boolean = false,
+    val email: String? = null,
+    val pendingEmail: String? = null,
+    val passwordReset: Boolean = false,
 )
 
 @Serializable

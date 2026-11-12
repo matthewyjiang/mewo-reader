@@ -43,11 +43,14 @@ import androidx.compose.ui.unit.dp
 import com.mewo.reader.BuildConfig
 import com.mewo.reader.data.BackendKind
 import com.mewo.reader.data.HostedClient
+import com.mewo.reader.data.InstanceInfo
+import com.mewo.reader.data.Me
 import com.mewo.reader.data.OfflineSummary
 import com.mewo.reader.data.LocalIdentity
 import com.mewo.reader.ui.LocalBackend
 import com.mewo.reader.ui.LocalHostedAuth
 import com.mewo.reader.ui.LocalProfile
+import com.mewo.reader.ui.components.HostedAuthMode
 import com.mewo.reader.ui.components.LibrarySettings
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -287,8 +290,9 @@ fun SettingsDisplayPage(onBack: () -> Unit) {
 @Composable
 fun SettingsLibraryPage(
     onBack: () -> Unit,
-    startOnCreate: Boolean = false,
-    signupsOpen: Boolean? = null,
+    startMode: HostedAuthMode = HostedAuthMode.SignIn,
+    instance: InstanceInfo? = null,
+    me: Me? = null,
     offlineSummary: OfflineSummary = OfflineSummary(downloaded = 0, total = 1, running = false),
     onDownloadAll: () -> Unit = {},
     unsentReplies: Int = 0,
@@ -297,8 +301,9 @@ fun SettingsLibraryPage(
     SettingsScaffold(title = "Library", onBack = onBack) {
         LibrarySettings(
             modifier = Modifier.padding(horizontal = 16.dp),
-            startOnCreate = startOnCreate,
-            signupsOpen = signupsOpen,
+            startMode = startMode,
+            instance = instance,
+            me = me,
             offlineSummary = offlineSummary,
             onDownloadAll = onDownloadAll,
             unsentReplies = unsentReplies,

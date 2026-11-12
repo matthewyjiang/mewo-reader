@@ -7,6 +7,7 @@ final class InstanceDecodingTests: XCTestCase {
         XCTAssertEqual(closed, InstanceInfo(allowSignup: false))
         let open = try decode(#"{"allowSignup":true,"name":"later"}"#)
         XCTAssertEqual(open, InstanceInfo(allowSignup: true))
+        XCTAssertFalse(open.passwordReset)
     }
 
     func testMissingOrNullSignupStaysOpen() throws {

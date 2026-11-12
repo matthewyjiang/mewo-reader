@@ -375,6 +375,37 @@ struct AuthRequest: Codable, Sendable {
     var password: String
 }
 
+/// `POST /v1/auth/register`. A nil email is left off the wire.
+struct RegisterRequest: Encodable, Sendable {
+    var username: String
+    var password: String
+    var email: String?
+}
+
+struct ResetRequest: Encodable, Sendable {
+    var login: String
+}
+
+/// `PUT /v1/me/email`. A nil email is sent as `null` and removes it.
+struct SetEmailRequest: Encodable, Sendable {
+    var email: String?
+    var currentPassword: String
+
+    enum CodingKeys: String, CodingKey {
+        case email, currentPassword
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        if let email {
+            try container.encode(email, forKey: .email)
+        } else {
+            try container.encodeNil(forKey: .email)
+        }
+        try container.encode(currentPassword, forKey: .currentPassword)
+    }
+}
+
 struct AuthResponse: Codable, Sendable {
     var token: String
     var username: String
@@ -383,13 +414,16 @@ struct AuthResponse: Codable, Sendable {
 /// Public `GET /v1/instance`. A future `name` is one more field.
 struct InstanceInfo: Codable, Equatable, Sendable {
     var allowSignup: Bool
+    /// "Forgot password?" works. Older servers omit it.
+    var passwordReset: Bool
 
-    init(allowSignup: Bool = true) {
+    init(allowSignup: Bool = true, passwordReset: Bool = false) {
         self.allowSignup = allowSignup
+        self.passwordReset = passwordReset
     }
 
     enum CodingKeys: String, CodingKey {
-        case allowSignup
+        case allowSignup, passwordReset
     }
 }
 
@@ -397,11 +431,13 @@ extension InstanceInfo {
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         allowSignup = try container.decodeIfPresent(Bool.self, forKey: .allowSignup) ?? true
+        passwordReset = try container.decodeIfPresent(Bool.self, forKey: .passwordReset) ?? false
     }
 
     func encode(to encoder: Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)
         try container.encode(allowSignup, forKey: .allowSignup)
+        try container.encode(passwordReset, forKey: .passwordReset)
     }
 }
 

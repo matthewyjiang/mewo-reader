@@ -53,6 +53,7 @@ pub(crate) fn router() -> Router<AppState> {
         .route("/v1/admin/blocklist", get(list_blocklist))
         .route("/v1/admin/blocklist/{id}", axum::routing::delete(unblock))
         .route("/v1/admin/requests/test", post(test_requests))
+        .route("/v1/admin/mail/test", post(test_mail))
         .route_layer(middleware::from_fn(require_admin))
         .merge(no_store_router())
 }
@@ -128,6 +129,14 @@ async fn test_requests(
     State(state): State<AppState>,
 ) -> Result<Json<crate::requests::Checks>, ApiError> {
     crate::requests::test_connection(&state).await
+}
+
+async fn test_mail(
+    State(state): State<AppState>,
+    body: Result<Json<crate::models::MailTest>, axum::extract::rejection::JsonRejection>,
+) -> Result<Json<crate::requests::Check>, ApiError> {
+    let body = crate::routes::json_body(body, "Mail test must be a JSON object with to.")?;
+    Ok(Json(crate::mail::test(&state, &body.to).await?))
 }
 
 async fn list_users(

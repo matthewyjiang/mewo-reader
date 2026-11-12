@@ -33,6 +33,37 @@ pub struct Settings {
     /// ISO 639-1 codes of books requests may download. Default English.
     #[serde(default = "default_languages")]
     pub languages: Vec<String>,
+    /// Origin the web app is served from. Mail links start here. "" = not set.
+    #[serde(default = "default_url")]
+    pub public_url: String,
+    /// "" = mail off. A bare host name or address, no scheme.
+    #[serde(default)]
+    pub smtp_host: String,
+    #[serde(default = "default_smtp_port")]
+    pub smtp_port: u16,
+    #[serde(default)]
+    pub smtp_tls: SmtpTls,
+    /// "" = no AUTH. The password is [`Secret::SmtpPassword`].
+    #[serde(default)]
+    pub smtp_username: String,
+    /// "" = not set. Parses as a mailbox, e.g. `Mewo <mewo@example.com>`.
+    #[serde(default)]
+    pub mail_from: String,
+}
+
+/// How the SMTP connection is secured. `None` is plain text and cannot carry
+/// a password.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SmtpTls {
+    #[default]
+    Starttls,
+    Tls,
+    None,
+}
+
+fn default_smtp_port() -> u16 {
+    587
 }
 
 fn default_requests_enabled() -> bool {
@@ -58,15 +89,21 @@ fn default_languages() -> Vec<String> {
 pub enum Secret {
     ProwlarrApiKey,
     SabnzbdApiKey,
+    SmtpPassword,
 }
 
 impl Secret {
-    pub const ALL: [Secret; 2] = [Secret::ProwlarrApiKey, Secret::SabnzbdApiKey];
+    pub const ALL: [Secret; 3] = [
+        Secret::ProwlarrApiKey,
+        Secret::SabnzbdApiKey,
+        Secret::SmtpPassword,
+    ];
 
     pub fn key(self) -> &'static str {
         match self {
             Secret::ProwlarrApiKey => "prowlarrApiKey",
             Secret::SabnzbdApiKey => "sabnzbdApiKey",
+            Secret::SmtpPassword => "smtpPassword",
         }
     }
 }
@@ -118,6 +155,12 @@ impl Default for Settings {
             sabnzbd_url: default_url(),
             sabnzbd_category: default_sabnzbd_category(),
             languages: default_languages(),
+            public_url: default_url(),
+            smtp_host: String::new(),
+            smtp_port: default_smtp_port(),
+            smtp_tls: SmtpTls::default(),
+            smtp_username: String::new(),
+            mail_from: String::new(),
         }
     }
 }
@@ -142,8 +185,43 @@ impl Settings {
         check_base("sabnzbdUrl", &self.sabnzbd_url)?;
         check_category(&self.sabnzbd_category)?;
         check_languages(&self.languages)?;
+        check_base("publicUrl", &self.public_url)?;
+        check_mail(self)?;
         Ok(())
     }
+}
+
+fn check_mail(settings: &Settings) -> Result<(), ApiError> {
+    let host = &settings.smtp_host;
+    if host.len() > 253 || host.contains("://") || host.chars().any(char::is_whitespace) {
+        return Err(ApiError::BadRequest(
+            "smtpHost must be a host name, without a scheme or spaces.".into(),
+        ));
+    }
+    if settings.smtp_port == 0 {
+        return Err(ApiError::BadRequest("smtpPort must be 1 to 65535.".into()));
+    }
+    if settings.smtp_username.chars().count() > 256 {
+        return Err(ApiError::BadRequest(
+            "smtpUsername must be 256 characters or fewer.".into(),
+        ));
+    }
+    if !settings.mail_from.is_empty()
+        && settings
+            .mail_from
+            .parse::<lettre::message::Mailbox>()
+            .is_err()
+    {
+        return Err(ApiError::BadRequest(
+            "mailFrom must be an email address, like Mewo <mewo@example.com>.".into(),
+        ));
+    }
+    if settings.smtp_tls == SmtpTls::None && !settings.smtp_username.is_empty() {
+        return Err(ApiError::BadRequest(
+            "Use STARTTLS or TLS to send a password.".into(),
+        ));
+    }
+    Ok(())
 }
 
 fn check_base(key: &str, raw: &str) -> Result<(), ApiError> {
@@ -836,5 +914,83 @@ mod tests {
             };
             assert!(settings.validate().is_ok());
         }
+    }
+
+    fn mail(patch: impl FnOnce(&mut Settings)) -> Result<(), ApiError> {
+        let mut settings = Settings::default();
+        patch(&mut settings);
+        settings.validate()
+    }
+
+    #[test]
+    fn mail_settings_default_off_and_validate() {
+        let defaults = Settings::default();
+        assert_eq!(defaults.smtp_port, 587);
+        assert_eq!(defaults.smtp_tls, SmtpTls::Starttls);
+        assert_eq!(defaults.public_url, "");
+        assert!(mail(|_| {}).is_ok());
+        assert!(mail(|s| {
+            s.public_url = "https://mewo.example".into();
+            s.smtp_host = "smtp.example.com".into();
+            s.smtp_port = 465;
+            s.smtp_tls = SmtpTls::Tls;
+            s.smtp_username = "mewo".into();
+            s.mail_from = "Mewo <mewo@example.com>".into();
+        })
+        .is_ok());
+        assert_eq!(
+            mail(|s| s.smtp_port = 0).unwrap_err().to_string(),
+            "smtpPort must be 1 to 65535."
+        );
+        for host in [
+            "smtp://smtp.example.com",
+            "smtp example.com",
+            &"a".repeat(254),
+        ] {
+            assert!(mail(|s| s.smtp_host = host.to_string()).is_err(), "{host}");
+        }
+        for from in ["not an address", "a@", "<>"] {
+            assert!(mail(|s| s.mail_from = from.to_string()).is_err(), "{from}");
+        }
+        assert!(mail(|s| s.mail_from = "mewo@example.com".into()).is_ok());
+        assert_eq!(
+            mail(|s| {
+                s.smtp_tls = SmtpTls::None;
+                s.smtp_username = "mewo".into();
+            })
+            .unwrap_err()
+            .to_string(),
+            "Use STARTTLS or TLS to send a password."
+        );
+        assert!(mail(|s| s.smtp_tls = SmtpTls::None).is_ok());
+        for url in [
+            "https://mewo.example/?a=1",
+            "https://mewo.example/#x",
+            "ftp://mewo.example",
+        ] {
+            assert!(mail(|s| s.public_url = url.to_string()).is_err(), "{url}");
+        }
+        assert!(mail(|s| s.smtp_username = "u".repeat(257)).is_err());
+        assert!(value_matches_field("smtpTls", &Value::from("tls")));
+        assert!(!value_matches_field("smtpTls", &Value::from("ssl")));
+        assert!(!value_matches_field("smtpPort", &Value::from(70_000)));
+    }
+
+    #[test]
+    fn smtp_password_shows_only_as_a_flag() {
+        let raw = apply_secrets("{}", &{
+            let mut patch = Map::new();
+            patch.insert("smtpPassword".into(), Value::from("hunter22"));
+            patch
+        })
+        .unwrap();
+        assert_eq!(
+            secret_value(&raw, Secret::SmtpPassword).as_deref(),
+            Some("hunter22")
+        );
+        let view = serde_json::to_value(admin_settings(Settings::default(), &raw)).unwrap();
+        assert_eq!(view["secrets"]["smtpPassword"], Value::Bool(true));
+        assert!(view.get("smtpPassword").is_none());
+        assert!(!view.to_string().contains("hunter22"));
     }
 }

@@ -49,12 +49,7 @@ pub async fn reset_password(
         "Use Change password for your own account.",
     )
     .await?;
-    sqlx::query("UPDATE users SET password_hash = ? WHERE id = ?")
-        .bind(&hash)
-        .bind(&target.id)
-        .execute(&mut *tx)
-        .await?;
-    session::revoke_all(&mut tx, &target.id, None).await?;
+    session::replace_password(&mut tx, &target.id, &hash, None).await?;
     tx.commit().await?;
     Ok(password)
 }

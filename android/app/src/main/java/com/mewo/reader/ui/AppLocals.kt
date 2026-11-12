@@ -18,7 +18,7 @@ data class HostedAuthController(
     val session: HostedSession,
     val setBaseUrl: (String) -> Unit,
     val signIn: suspend (username: String, password: String) -> Unit,
-    val createAccount: suspend (username: String, password: String) -> Unit,
+    val createAccount: suspend (username: String, password: String, email: String?) -> Unit,
     val signOut: suspend () -> Unit,
 )
 

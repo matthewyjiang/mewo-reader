@@ -22,10 +22,41 @@ struct CatalogError: LocalizedError, Equatable, Sendable {
     var errorDescription: String? { message }
 }
 
+/// `GET /v1/me`. `email` is verified. `pendingEmail` waits on its link.
+/// `passwordReset` means the server can mail links. Older servers omit the last three.
 struct Me: Decodable, Equatable, Sendable {
     var username: String
     var isAdmin: Bool
     var canRequest: Bool
+    var email: String? = nil
+    var pendingEmail: String? = nil
+    var passwordReset: Bool = false
+
+    enum CodingKeys: String, CodingKey {
+        case username, isAdmin, canRequest, email, pendingEmail, passwordReset
+    }
+}
+
+extension Me {
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        username = try container.decode(String.self, forKey: .username)
+        isAdmin = try container.decode(Bool.self, forKey: .isAdmin)
+        canRequest = try container.decode(Bool.self, forKey: .canRequest)
+        email = try container.decodeIfPresent(String.self, forKey: .email)
+        pendingEmail = try container.decodeIfPresent(String.self, forKey: .pendingEmail)
+        passwordReset = try container.decodeIfPresent(Bool.self, forKey: .passwordReset) ?? false
+    }
+}
+
+/// Trail of the Email row: pending first, then the verified address.
+func emailTrail(_ me: Me) -> String {
+    if me.pendingEmail != nil { return "Check inbox" }
+    return me.email ?? "Add"
+}
+
+func emailSentNotice(_ email: String) -> String {
+    "Check \(email.trimmingCharacters(in: .whitespacesAndNewlines)) for a link."
 }
 
 struct BookRequest: Decodable, Equatable, Sendable {

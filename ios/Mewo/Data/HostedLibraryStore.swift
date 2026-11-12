@@ -1739,9 +1739,14 @@ final class HostedAuth {
         await MainActor.run { sessions.setSignedIn(username: res.username, token: res.token) }
     }
 
-    func createAccount(username: String, password: String) async throws {
+    func createAccount(username: String, password: String, email: String? = nil) async throws {
         let url = try requireUrl()
-        let res = try await client.register(baseUrl: url, username: username.trimmingCharacters(in: .whitespacesAndNewlines), password: password)
+        let res = try await client.register(
+            baseUrl: url,
+            username: username.trimmingCharacters(in: .whitespacesAndNewlines),
+            password: password,
+            email: email
+        )
         await MainActor.run { sessions.setSignedIn(username: res.username, token: res.token) }
     }
 

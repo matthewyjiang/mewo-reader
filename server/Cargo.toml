@@ -9,6 +9,7 @@ argon2 = "0.5"
 base64 = "0.22"
 axum = { version = "0.8", features = ["multipart"] }
 hex = "0.4"
+lettre = { version = "0.11", default-features = false, features = ["builder", "hostname", "smtp-transport", "tokio1-rustls", "ring", "webpki-roots"] }
 rand = "0.8"
 rpassword = "7"
 roxmltree = "=0.20.0"
@@ -24,7 +25,7 @@ thiserror = "2"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "fs", "io-util", "sync", "time"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls-webpki-roots"] }
 rustix = { version = "1.1.4", features = ["fs"] }
-tokio-util = { version = "0.7", features = ["io"] }
+tokio-util = { version = "0.7", features = ["io", "rt"] }
 tower-http = { version = "0.6", features = ["trace", "fs", "compression-gzip"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
@@ -35,4 +36,5 @@ zip = { version = "9.0.5", default-features = false, features = ["deflate"] }
 http-body-util = "0.1"
 sha2 = "0.10"
 tempfile = "3"
+tokio = { version = "1", features = ["net"] }
 tower = { version = "0.5", features = ["util"] }

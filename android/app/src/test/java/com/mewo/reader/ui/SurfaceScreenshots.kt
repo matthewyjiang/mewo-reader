@@ -47,6 +47,8 @@ import com.mewo.reader.data.FeedPost
 import com.mewo.reader.data.hasReposted
 import com.mewo.reader.data.repostCount
 import com.mewo.reader.data.HostedSession
+import com.mewo.reader.data.InstanceInfo
+import com.mewo.reader.data.Me
 import com.mewo.reader.data.LocalProfile
 import com.mewo.reader.data.OfflineState
 import com.mewo.reader.data.OfflineSummary
@@ -86,6 +88,8 @@ import com.mewo.reader.ui.library.AddBookAnchor
 import com.mewo.reader.data.CommentStatus
 import com.mewo.reader.data.PostComment
 import com.mewo.reader.ui.components.DiscardUnsentDialog
+import com.mewo.reader.ui.components.EmailDialog
+import com.mewo.reader.ui.components.HostedAuthMode
 import com.mewo.reader.ui.components.DownloadAllRow
 import com.mewo.reader.ui.reader.ThreadReply
 import com.mewo.reader.ui.library.BookPost
@@ -177,22 +181,58 @@ class SurfaceScreenshots {
 
     @Test
     fun signIn() = shoot("sign-in", signedIn = false) {
-        SettingsLibraryPage(onBack = {}, signupsOpen = true)
+        SettingsLibraryPage(onBack = {}, instance = InstanceInfo(allowSignup = true))
     }
 
     @Test
     fun signInSignupsOff() = shoot("sign-in-closed", signedIn = false) {
-        SettingsLibraryPage(onBack = {}, signupsOpen = false)
+        SettingsLibraryPage(onBack = {}, instance = InstanceInfo(allowSignup = false))
     }
 
     @Test
     fun createAccount() = shoot("create-account", signedIn = false) {
-        SettingsLibraryPage(onBack = {}, startOnCreate = true, signupsOpen = true)
+        SettingsLibraryPage(
+            onBack = {},
+            startMode = HostedAuthMode.Create,
+            instance = InstanceInfo(allowSignup = true),
+        )
+    }
+
+    @Test
+    fun signInWithReset() = shoot("sign-in-reset", signedIn = false) {
+        SettingsLibraryPage(onBack = {}, instance = mailOn)
+    }
+
+    @Test
+    fun resetPassword() = shoot("reset-password", signedIn = false) {
+        SettingsLibraryPage(onBack = {}, startMode = HostedAuthMode.Reset, instance = mailOn)
+    }
+
+    @Test
+    fun createAccountWithEmail() = shoot("create-account-email", signedIn = false) {
+        SettingsLibraryPage(onBack = {}, startMode = HostedAuthMode.Create, instance = mailOn)
     }
 
     @Test
     fun libraryAccount() = shoot("library-account") {
         SettingsLibraryPage(onBack = {})
+    }
+
+    @Test
+    fun libraryAccountEmail() = shoot("library-account-email") {
+        SettingsLibraryPage(
+            onBack = {},
+            me = Me(username = "ada", email = "ada@example.com", passwordReset = true),
+        )
+    }
+
+    @Test
+    fun emailDialog() = shoot("email-dialog") {
+        EmailDialog(
+            me = Me(username = "ada", email = "ada@example.com", passwordReset = true),
+            onSave = { _, _ -> },
+            onDismiss = {},
+        )
     }
 
     @Test
@@ -908,6 +948,8 @@ private val phone = DeviceConfig.PIXEL_5.copy(softButtons = false)
 /** 320dp wide at the Pixel 5 density (440dpi). */
 private val narrow = phone.copy(screenWidth = 880)
 
+private val mailOn = InstanceInfo(allowSignup = true, passwordReset = true)
+
 private val devices = listOf(
     "phone" to phone,
     "narrow" to narrow,
@@ -948,7 +990,7 @@ private fun Frame(
             },
             setBaseUrl = {},
             signIn = { _, _ -> },
-            createAccount = { _, _ -> },
+            createAccount = { _, _, _ -> },
             signOut = {},
         ),
     ) {

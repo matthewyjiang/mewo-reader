@@ -454,6 +454,13 @@
       <Icon name="chevron" />
     </span>
   </button>
+  <button class="settings-row" onclick={() => router.go('/settings/server/mail')}>
+    <span>Mail</span>
+    <span class="row-trail">
+      <span class="count">{store.me?.passwordReset ? 'On' : 'Off'}</span>
+      <Icon name="chevron" />
+    </span>
+  </button>
   <label class="settings-row">
     <span>Max EPUB size</span>
     <span class="epub-field">

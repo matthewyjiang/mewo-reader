@@ -29,6 +29,8 @@ struct Inner {
     login_user: Mutex<Table>,
     register_ip: Mutex<Table>,
     register_user: Mutex<Table>,
+    mail_ip: Mutex<Table>,
+    mail_user: Mutex<Table>,
     trusted_proxy_hops: u8,
 }
 
@@ -73,6 +75,8 @@ impl Throttle {
                 login_user: table(cfg.login_user),
                 register_ip: table(cfg.register_ip),
                 register_user: table(cfg.register_user),
+                mail_ip: table(cfg.mail_ip),
+                mail_user: table(cfg.mail_user),
                 trusted_proxy_hops: cfg.trusted_proxy_hops,
             }),
         }
@@ -98,12 +102,26 @@ impl Throttle {
     /// Charges the login IP bucket only. A non-routable address is not limited.
     /// A public invite check does not spend a registration attempt.
     pub fn check_invite(&self, ip: ClientIp) -> Result<(), ApiError> {
-        let now = Instant::now();
-        let mut ips = lock(&self.inner.login_ip);
-        match client_key(ip) {
-            Some(key) => ips.take(key, now).map_err(too_many),
-            None => Ok(()),
-        }
+        take_ip(&self.inner.login_ip, ip)
+    }
+
+    /// Opening a reset or verify link. Charges the login IP bucket only, so
+    /// guessing tokens costs the same as guessing passwords.
+    pub fn redeem(&self, ip: ClientIp) -> Result<(), ApiError> {
+        take_ip(&self.inner.login_ip, ip)
+    }
+
+    /// Asking for a reset link. A non-routable address is not limited.
+    pub fn mail_ip(&self, ip: ClientIp) -> Result<(), ApiError> {
+        take_ip(&self.inner.mail_ip, ip)
+    }
+
+    /// One letter to this account. Keyed by user id, so a username and an
+    /// email for the same account share it.
+    pub fn mail_user(&self, user_id: &str) -> Result<(), ApiError> {
+        lock(&self.inner.mail_user)
+            .take(Key::User(user_id.to_owned()), Instant::now())
+            .map_err(too_many)
     }
 
     fn begin(
@@ -312,6 +330,13 @@ fn skips_ip_limit(ip: IpAddr) -> bool {
     }
 }
 
+fn take_ip(table: &Mutex<Table>, ip: ClientIp) -> Result<(), ApiError> {
+    match client_key(ip) {
+        Some(key) => lock(table).take(key, Instant::now()).map_err(too_many),
+        None => Ok(()),
+    }
+}
+
 fn charge_pair(
     ip_table: &Mutex<Table>,
     user_table: &Mutex<Table>,
@@ -490,6 +515,44 @@ mod tests {
         for _ in 0..5 {
             assert!(throttle.check_invite(loopback).is_ok());
         }
+    }
+
+    #[test]
+    fn redeem_shares_the_login_ip_bucket() {
+        let throttle = Throttle::new(&auth_cfg(2, 2));
+        let public = ClientIp::Addr(ip("203.0.113.7"));
+        assert!(throttle.redeem(public).is_ok());
+        assert!(throttle.check_invite(public).is_ok());
+        assert!(matches!(
+            throttle.redeem(public),
+            Err(ApiError::TooManyRequests { .. })
+        ));
+        assert!(throttle.redeem(ClientIp::Addr(ip("10.0.0.2"))).is_ok());
+    }
+
+    #[test]
+    fn mail_buckets_default_and_limit() {
+        let cfg = AuthConfig::default();
+        assert_eq!(cfg.mail_ip.burst, 5);
+        assert_eq!(cfg.mail_ip.every, Duration::from_secs(120));
+        assert_eq!(cfg.mail_user.burst, 3);
+        assert_eq!(cfg.mail_user.every, Duration::from_secs(1200));
+        let throttle = Throttle::new(&cfg);
+        let public = ClientIp::Addr(ip("203.0.113.7"));
+        for _ in 0..5 {
+            assert!(throttle.mail_ip(public).is_ok());
+        }
+        assert!(matches!(
+            throttle.mail_ip(public),
+            Err(ApiError::TooManyRequests { .. })
+        ));
+        // Mail requests do not spend login attempts.
+        assert!(throttle.check_invite(public).is_ok());
+        for _ in 0..3 {
+            assert!(throttle.mail_user("user-1").is_ok());
+        }
+        assert!(throttle.mail_user("user-1").is_err());
+        assert!(throttle.mail_user("user-2").is_ok());
     }
 
     #[test]

@@ -22,6 +22,19 @@ class InstanceTest {
             assertEquals("/v1/instance", request.path)
             assertNull(request.getHeader("Authorization"))
             assertFalse(info.allowSignup)
+            assertFalse(info.passwordReset)
+        } finally {
+            server.shutdown()
+        }
+    }
+
+    @Test
+    fun instanceReadsPasswordReset() {
+        val server = MockWebServer()
+        server.enqueue(MockResponse().setBody("""{"allowSignup":true,"passwordReset":true}"""))
+        server.start()
+        try {
+            assertTrue(HostedClient().instance(server.url("/").toString()).passwordReset)
         } finally {
             server.shutdown()
         }

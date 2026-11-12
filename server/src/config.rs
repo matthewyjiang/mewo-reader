@@ -96,6 +96,10 @@ pub struct AuthConfig {
     pub login_user: Rate,
     pub register_ip: Rate,
     pub register_user: Rate,
+    /// Reset-link requests per client IP.
+    pub mail_ip: Rate,
+    /// Reset and verify mail per account, keyed by user id.
+    pub mail_user: Rate,
     pub max_keys: usize,
     /// `MEWO_TRUSTED_PROXY_HOPS`. `0` ignores `X-Forwarded-For`.
     pub trusted_proxy_hops: u8,
@@ -121,6 +125,14 @@ impl Default for AuthConfig {
             register_user: Rate {
                 burst: 3,
                 every: Duration::from_secs(10 * 60),
+            },
+            mail_ip: Rate {
+                burst: 5,
+                every: Duration::from_secs(2 * 60),
+            },
+            mail_user: Rate {
+                burst: 3,
+                every: Duration::from_secs(20 * 60),
             },
             max_keys: 100_000,
             trusted_proxy_hops: 0,

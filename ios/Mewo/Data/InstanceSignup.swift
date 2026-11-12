@@ -4,12 +4,14 @@ import Observation
 /// Wait until the server URL stops changing before `GET /v1/instance`.
 let instanceSignupDebounceNanos: UInt64 = 400_000_000
 
-/// Loads `allowSignup` for the URL the user stopped typing.
+/// Loads `GET /v1/instance` for the URL the user stopped typing.
 /// A newer URL cancels the older request, and that response cannot publish.
 @Observable
 @MainActor
 final class InstanceSignupLoader {
-    private(set) var allowSignup: Bool?
+    private(set) var info: InstanceInfo?
+    var allowSignup: Bool? { info?.allowSignup }
+    var passwordReset: Bool { info?.passwordReset == true }
     @ObservationIgnored private var generation = 0
     @ObservationIgnored private var task: Task<Void, Never>?
     @ObservationIgnored private let debounceNanos: UInt64
@@ -38,7 +40,7 @@ final class InstanceSignupLoader {
         task?.cancel()
         generation += 1
         let token = generation
-        allowSignup = nil
+        info = nil
         let url = normalizeBaseUrl(raw)
         guard !url.isEmpty else {
             task = nil
@@ -59,14 +61,14 @@ final class InstanceSignupLoader {
             do {
                 let info = try await fetch(url)
                 guard !Task.isCancelled, token == self.generation else { return }
-                self.allowSignup = info.allowSignup
+                self.info = info
             } catch is CancellationError {
                 return
             } catch let error as URLError where error.code == .cancelled {
                 return
             } catch {
                 guard !Task.isCancelled, token == self.generation else { return }
-                self.allowSignup = nil
+                self.info = nil
             }
         }
     }

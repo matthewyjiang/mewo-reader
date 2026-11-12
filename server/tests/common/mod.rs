@@ -305,3 +305,151 @@ fn build(epub3: bool, padding: usize, chapter: &str, toc_override: Option<&str>)
         ("padding.bin", &padding),
     ])
 }
+
+/// One message the fake SMTP server accepted.
+#[allow(dead_code)]
+#[derive(Debug, Clone)]
+pub struct SentMail {
+    pub to: Vec<String>,
+    /// Headers and body as sent, dot-unstuffed, CRLF line endings.
+    pub data: String,
+}
+
+#[allow(dead_code)]
+impl SentMail {
+    /// The body, with quoted-printable soft breaks and escapes undone.
+    pub fn body(&self) -> String {
+        let (head, body) = self.data.split_once("\r\n\r\n").unwrap_or(("", &self.data));
+        if !head
+            .to_ascii_lowercase()
+            .contains("content-transfer-encoding: quoted-printable")
+        {
+            return body.to_string();
+        }
+        let joined = body.replace("=\r\n", "");
+        let bytes = joined.as_bytes();
+        let mut out = Vec::new();
+        let mut i = 0;
+        while i < bytes.len() {
+            if bytes[i] == b'=' && i + 2 < bytes.len() {
+                let hex = std::str::from_utf8(&bytes[i + 1..i + 3]).unwrap();
+                out.push(u8::from_str_radix(hex, 16).unwrap());
+                i += 3;
+            } else {
+                out.push(bytes[i]);
+                i += 1;
+            }
+        }
+        String::from_utf8(out).unwrap()
+    }
+
+    /// The token after `#token=` in the body.
+    pub fn token(&self) -> String {
+        let body = self.body();
+        let start = body.find("#token=").expect("a link with #token=") + "#token=".len();
+        body[start..]
+            .chars()
+            .take_while(|c| c.is_ascii_hexdigit())
+            .collect()
+    }
+}
+
+/// A plain-text SMTP listener on 127.0.0.1 that accepts every message:
+/// 220 greeting, 250 for commands, 354 for DATA, 221 for QUIT. After
+/// [`FakeSmtp::reject_recipients`] it answers RCPT with a 550 that echoes
+/// the address, as real servers do.
+#[allow(dead_code)]
+pub struct FakeSmtp {
+    pub port: u16,
+    rx: tokio::sync::Mutex<tokio::sync::mpsc::UnboundedReceiver<SentMail>>,
+    reject: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+#[allow(dead_code)]
+impl FakeSmtp {
+    pub async fn start() -> Self {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let reject = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let rejecting = reject.clone();
+        tokio::spawn(async move {
+            loop {
+                let Ok((stream, _)) = listener.accept().await else {
+                    return;
+                };
+                let tx = tx.clone();
+                let rejecting = rejecting.clone();
+                tokio::spawn(async move {
+                    let (read, mut write) = stream.into_split();
+                    let mut lines = BufReader::new(read);
+                    let _ = write.write_all(b"220 fake ESMTP\r\n").await;
+                    let mut to = Vec::new();
+                    let mut line = String::new();
+                    loop {
+                        line.clear();
+                        if lines.read_line(&mut line).await.unwrap_or(0) == 0 {
+                            return;
+                        }
+                        let upper = line.to_ascii_uppercase();
+                        if upper.starts_with("RCPT TO:") {
+                            let addr = line[8..].trim().trim_start_matches('<');
+                            let addr = addr.split('>').next().unwrap_or("").to_string();
+                            if rejecting.load(std::sync::atomic::Ordering::SeqCst) {
+                                let reply =
+                                    format!("550 5.1.1 <{addr}>: Recipient address rejected\r\n");
+                                let _ = write.write_all(reply.as_bytes()).await;
+                                continue;
+                            }
+                            to.push(addr);
+                            let _ = write.write_all(b"250 ok\r\n").await;
+                        } else if upper.starts_with("DATA") {
+                            let _ = write.write_all(b"354 go\r\n").await;
+                            let mut data = String::new();
+                            loop {
+                                line.clear();
+                                if lines.read_line(&mut line).await.unwrap_or(0) == 0 {
+                                    return;
+                                }
+                                if line == ".\r\n" {
+                                    break;
+                                }
+                                let unstuffed = line.strip_prefix('.').unwrap_or(&line);
+                                data.push_str(unstuffed);
+                            }
+                            let _ = tx.send(SentMail {
+                                to: std::mem::take(&mut to),
+                                data,
+                            });
+                            let _ = write.write_all(b"250 queued\r\n").await;
+                        } else if upper.starts_with("QUIT") {
+                            let _ = write.write_all(b"221 bye\r\n").await;
+                            return;
+                        } else {
+                            let _ = write.write_all(b"250 ok\r\n").await;
+                        }
+                    }
+                });
+            }
+        });
+        Self {
+            port,
+            rx: tokio::sync::Mutex::new(rx),
+            reject,
+        }
+    }
+
+    pub fn reject_recipients(&self) {
+        self.reject.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// The next message, or `None` after `timeout`.
+    pub async fn next(&self, timeout: std::time::Duration) -> Option<SentMail> {
+        let mut rx = self.rx.lock().await;
+        tokio::time::timeout(timeout, rx.recv())
+            .await
+            .ok()
+            .flatten()
+    }
+}
