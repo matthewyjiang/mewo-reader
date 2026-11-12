@@ -27,6 +27,8 @@ struct RootView: View {
         Group {
             if shots {
                 offlinePreview
+            } else if let state = emailShots {
+                emailPreview(state)
             } else if app.localProfile.profile.ready {
                 MewoNav()
             } else {
@@ -66,6 +68,22 @@ struct RootView: View {
     private var offlinePreview: some View {
         #if DEBUG
         OfflinePreview()
+        #endif
+    }
+
+    /// Screenshot launches only. Release builds do not contain the preview.
+    private var emailShots: String? {
+        #if DEBUG
+        EmailPreview.requested
+        #else
+        nil
+        #endif
+    }
+
+    @ViewBuilder
+    private func emailPreview(_ state: String) -> some View {
+        #if DEBUG
+        EmailPreview(state: state)
         #endif
     }
 }

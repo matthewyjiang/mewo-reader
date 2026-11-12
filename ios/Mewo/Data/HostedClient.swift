@@ -38,8 +38,49 @@ final class HostedClient: Sendable {
         }
     }
 
-    func register(baseUrl: String, username: String, password: String) async throws -> AuthResponse {
-        try await postAuth("\(baseUrl)/v1/auth/register", username: username, password: password)
+    func register(baseUrl: String, username: String, password: String, email: String? = nil) async throws -> AuthResponse {
+        guard let target = URL(string: "\(baseUrl)/v1/auth/register") else {
+            throw HostedException(message: "Set a server URL first.")
+        }
+        let trimmed = email?.trimmingCharacters(in: .whitespacesAndNewlines)
+        var request = URLRequest(url: target)
+        request.httpMethod = "POST"
+        request.setValue("application/json; charset=utf-8", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try JSONFiles.encoder.encode(RegisterRequest(
+            username: username,
+            password: password,
+            email: trimmed?.isEmpty == false ? trimmed : nil
+        ))
+        return try await decode(request)
+    }
+
+    /// No session. The server answers 202 whether or not a letter goes out.
+    func requestReset(baseUrl: String, login: String) async throws {
+        let base = normalizeBaseUrl(baseUrl)
+        guard !base.isEmpty, let url = URL(string: base + "/v1/auth/reset/request") else {
+            throw HostedException(message: "Set a server URL first.")
+        }
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("application/json; charset=utf-8", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try JSONFiles.encoder.encode(
+            ResetRequest(login: login.trimmingCharacters(in: .whitespacesAndNewlines))
+        )
+        _ = try await expectOk(request)
+    }
+
+    /// True when a verify link went out (202). False when removed or unchanged (204).
+    func setEmail(_ hosted: HostedSession, email: String?, currentPassword: String) async throws -> Bool {
+        var request = try authorized(hosted, path: "/v1/me/email")
+        request.httpMethod = "PUT"
+        request.setValue("application/json; charset=utf-8", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try JSONFiles.encoder.encode(SetEmailRequest(
+            email: email?.trimmingCharacters(in: .whitespacesAndNewlines),
+            currentPassword: currentPassword
+        ))
+        let (data, response) = try await session.data(for: request)
+        try expectOk(response, data: data)
+        return (response as? HTTPURLResponse)?.statusCode == 202
     }
 
     func login(baseUrl: String, username: String, password: String) async throws -> AuthResponse {

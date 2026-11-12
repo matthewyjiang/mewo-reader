@@ -80,20 +80,45 @@ extension String {
     }
 }
 
-private enum HostedAuthMode {
-    case signIn, create
+enum HostedAuthMode {
+    case signIn, create, reset
 }
+
+let resetSentLine = "If that account has an email, we sent a link."
 
 struct LibrarySettings: View {
     @Environment(\.mewo) private var mewo
     @Environment(\.app) private var app
-    @State private var mode = HostedAuthMode.signIn
+    /// A caller-supplied instance or account (screenshots) skips the network.
+    private let presetInstance: InstanceInfo?
+    private let presetMe: Me?
+    @State private var mode: HostedAuthMode
     @State private var username = ""
     @State private var password = ""
     @State private var busy = false
     @State private var error: String?
     @State private var signups = InstanceSignupLoader()
     @State private var discardCount = 0
+    @State private var email = ""
+    @State private var login = ""
+    @State private var sent = false
+    @State private var me: Me?
+    @State private var editingEmail = false
+    @State private var emailNotice: String?
+    @State private var sheetEmail = ""
+    @State private var sheetPassword = ""
+    @State private var sheetSaving = false
+    @State private var sheetError: String?
+
+    init(startMode: HostedAuthMode = .signIn, instance: InstanceInfo? = nil, me: Me? = nil) {
+        presetInstance = instance
+        presetMe = me
+        _mode = State(initialValue: startMode)
+        _me = State(initialValue: me)
+    }
+
+    private var info: InstanceInfo? { presetInstance ?? signups.info }
+    private var passwordReset: Bool { info?.passwordReset == true }
 
     private var signupTaskID: String {
         "\(app.hostedSession.session.signedIn)|\(app.hostedSession.session.baseUrl)"
@@ -151,6 +176,16 @@ struct LibrarySettings: View {
                     .font(MewoFont.bold(17))
                     .foregroundStyle(mewo.ink)
                     .frame(maxWidth: .infinity, minHeight: 52, alignment: .leading)
+                if let me, me.passwordReset {
+                    emailRow(me)
+                }
+                if let emailNotice {
+                    Text(emailNotice)
+                        .font(MewoFont.regular(15))
+                        .foregroundStyle(mewo.mute)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.bottom, 8)
+                }
                 DownloadAllRow(summary: app.hostedLibrary.offlineSummary) {
                     Task { await app.library.downloadAll() }
                 }
@@ -171,6 +206,8 @@ struct LibrarySettings: View {
                 .buttonStyle(.plain)
                 .disabled(busy)
                 .accessibilityIdentifier("hosted-sign-out")
+            } else if mode == .reset {
+                resetForm
             } else {
                 Text(mode == .signIn ? "Sign in" : "Create account")
                     .font(MewoFont.bold(22))
@@ -198,6 +235,15 @@ struct LibrarySettings: View {
                             error = nil
                         }
                     ), enabled: !busy, secret: true, id: "hosted-password", error: passError)
+                    if mode == .create && passwordReset {
+                        outlined("Email (optional)", text: Binding(
+                            get: { email },
+                            set: {
+                                email = $0
+                                error = nil
+                            }
+                        ), enabled: !busy, secret: false, id: "hosted-email-field", error: nil)
+                    }
                 }
                 if let error {
                     Text(error)
@@ -215,12 +261,24 @@ struct LibrarySettings: View {
                         if mode == .signIn {
                             try await app.hostedAuth.signIn(username: username, password: password)
                         } else {
-                            try await app.hostedAuth.createAccount(username: username, password: password)
+                            try await app.hostedAuth.createAccount(
+                                username: username,
+                                password: password,
+                                email: passwordReset ? email : nil
+                            )
                         }
                     }
                 }
                 .padding(.top, 12)
-                if mode == .create || showCreateAccount(signups.allowSignup) {
+                if mode == .signIn && passwordReset {
+                    textLink("Forgot password?", id: "hosted-forgot") {
+                        login = username.trimmingCharacters(in: .whitespacesAndNewlines)
+                        mode = .reset
+                        error = nil
+                        sent = false
+                    }
+                }
+                if mode == .create || showCreateAccount(info?.allowSignup) {
                     Button {
                         mode = mode == .signIn ? .create : .signIn
                         error = nil
@@ -240,7 +298,7 @@ struct LibrarySettings: View {
             username = app.hostedSession.session.username ?? app.hostedSession.session.expired?.username ?? ""
         }
         .task(id: signupTaskID) {
-            guard !app.hostedSession.session.signedIn else {
+            guard presetInstance == nil, !app.hostedSession.session.signedIn else {
                 signups.cancel()
                 return
             }
@@ -250,10 +308,209 @@ struct LibrarySettings: View {
             }
         }
         .onDisappear { signups.cancel() }
-        .onChange(of: signups.allowSignup) { _, open in
-            if open == false, mode == .create {
+        .task(id: app.hostedSession.session.token) {
+            guard presetMe == nil else { return }
+            guard app.hostedSession.session.signedIn else {
+                me = nil
+                emailNotice = nil
+                return
+            }
+            me = try? await app.client.me(app.hostedSession.session)
+        }
+        .onChange(of: info) { _, info in
+            if info?.allowSignup == false, mode == .create {
                 mode = .signIn
             }
+            if let info, !info.passwordReset, mode == .reset {
+                mode = .signIn
+            }
+        }
+        .sheet(isPresented: $editingEmail) {
+            emailSheet
+        }
+    }
+
+    private var resetForm: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            Text("Reset password")
+                .font(MewoFont.bold(22))
+                .foregroundStyle(mewo.ink)
+                .frame(maxWidth: .infinity, minHeight: 52, alignment: .leading)
+            VStack(alignment: .leading, spacing: 8) {
+                outlined("Server URL", text: Binding(
+                    get: { app.hostedSession.session.baseUrl },
+                    set: {
+                        app.hostedSession.setBaseUrl($0)
+                        error = nil
+                        sent = false
+                    }
+                ), enabled: !busy, secret: false, id: "server-url", error: nil)
+                outlined("Username or email", text: Binding(
+                    get: { login },
+                    set: {
+                        login = $0
+                        error = nil
+                        sent = false
+                    }
+                ), enabled: !busy, secret: false, id: "hosted-login", error: nil)
+            }
+            if let error {
+                Text(error)
+                    .font(MewoFont.regular(15))
+                    .foregroundStyle(mewo.like)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.top, 8)
+            } else if sent {
+                Text(resetSentLine)
+                    .font(MewoFont.regular(15))
+                    .foregroundStyle(mewo.ink)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.top, 8)
+                    .accessibilityIdentifier("hosted-reset-sent")
+            }
+            PillButton(
+                title: busy ? "Sending…" : "Send link",
+                enabled: !busy
+                    && !login.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                    && !normalizeBaseUrl(app.hostedSession.session.baseUrl).isEmpty,
+                fill: true
+            ) {
+                let base = app.hostedSession.session.baseUrl
+                let client = app.client
+                let login = login
+                run {
+                    try await client.requestReset(baseUrl: base, login: login)
+                    sent = true
+                }
+            }
+            .padding(.top, 12)
+            textLink("Sign in instead", id: "hosted-sign-in-instead") {
+                mode = .signIn
+                error = nil
+                sent = false
+            }
+        }
+    }
+
+    private func textLink(_ title: String, id: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Text(title)
+                .font(MewoFont.regular(17))
+                .foregroundStyle(mewo.accent)
+                .frame(maxWidth: .infinity, minHeight: 40)
+        }
+        .buttonStyle(.plain)
+        .disabled(busy)
+        .accessibilityIdentifier(id)
+    }
+
+    private func emailRow(_ me: Me) -> some View {
+        Button {
+            sheetEmail = me.pendingEmail ?? me.email ?? ""
+            sheetPassword = ""
+            sheetError = nil
+            editingEmail = true
+        } label: {
+            HStack(spacing: 16) {
+                Text("Email")
+                    .font(MewoFont.bold(17))
+                    .foregroundStyle(mewo.ink)
+                Spacer(minLength: 0)
+                Text(emailTrail(me))
+                    .font(MewoFont.regular(15))
+                    .foregroundStyle(mewo.mute)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+            }
+            .frame(maxWidth: .infinity, minHeight: 52, alignment: .leading)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityIdentifier("hosted-email")
+    }
+
+    private var emailSheet: some View {
+        let saved = me?.email != nil || me?.pendingEmail != nil
+        return VStack(alignment: .leading, spacing: 0) {
+            Text("Email")
+                .font(MewoFont.bold(22))
+                .foregroundStyle(mewo.ink)
+                .frame(maxWidth: .infinity, minHeight: 52, alignment: .leading)
+            VStack(alignment: .leading, spacing: 8) {
+                outlined("Email", text: Binding(
+                    get: { sheetEmail },
+                    set: {
+                        sheetEmail = $0
+                        sheetError = nil
+                    }
+                ), enabled: !sheetSaving, secret: false, id: "email-sheet-email", error: nil)
+                outlined("Current password", text: Binding(
+                    get: { sheetPassword },
+                    set: {
+                        sheetPassword = $0
+                        sheetError = nil
+                    }
+                ), enabled: !sheetSaving, secret: true, id: "email-sheet-password", error: nil)
+            }
+            if let sheetError {
+                Text(sheetError)
+                    .font(MewoFont.regular(15))
+                    .foregroundStyle(mewo.like)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.top, 8)
+            }
+            HStack(spacing: 12) {
+                if saved {
+                    Button {
+                        changeEmail(nil)
+                    } label: {
+                        Text("Remove email")
+                            .font(MewoFont.bold(14))
+                            .foregroundStyle(mewo.like)
+                            .padding(.vertical, 8)
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(sheetSaving)
+                    .accessibilityIdentifier("email-sheet-remove")
+                }
+                Spacer(minLength: 0)
+                PillButton(
+                    title: sheetSaving ? "Saving…" : "Save",
+                    enabled: !sheetSaving && !sheetEmail.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                ) {
+                    changeEmail(sheetEmail)
+                }
+            }
+            .padding(.top, 16)
+            Spacer(minLength: 0)
+        }
+        .padding(24)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .background(mewo.ground)
+        .presentationDetents([.medium])
+        .interactiveDismissDisabled(sheetSaving)
+    }
+
+    private func changeEmail(_ next: String?) {
+        guard !sheetPassword.isEmpty else {
+            sheetError = "Enter your current password."
+            return
+        }
+        let session = app.hostedSession.session
+        let client = app.client
+        let current = sheetPassword
+        Task {
+            sheetSaving = true
+            sheetError = nil
+            do {
+                let wasSent = try await client.setEmail(session, email: next, currentPassword: current)
+                emailNotice = wasSent ? next.map(emailSentNotice) : nil
+                editingEmail = false
+                me = try? await client.me(session)
+            } catch {
+                sheetError = error.localizedDescription
+            }
+            sheetSaving = false
         }
     }
 
