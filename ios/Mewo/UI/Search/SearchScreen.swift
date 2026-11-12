@@ -506,8 +506,12 @@ final class HostedRemoteSearch: RemoteSearch {
 private final class OffCatalogService: CatalogService {
     var access: CatalogAccess { .off }
     var token: String? { nil }
+    var filter = CatalogFilter()
     func refreshAccess() async {}
-    func page(query: String?, page: Int) async throws -> CatalogPage {
+    func filters() async throws -> CatalogFilters {
+        throw CatalogError(reason: .off, message: "Requests are off.")
+    }
+    func page(query: String?, page: Int, filter: CatalogFilter) async throws -> CatalogPage {
         throw CatalogError(reason: .off, message: "Requests are off.")
     }
     func work(workKey: String) async throws -> WorkDetail {

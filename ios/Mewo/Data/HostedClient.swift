@@ -275,8 +275,12 @@ final class HostedClient: Sendable {
         try await get(hosted, path: "/v1/me")
     }
 
-    func catalog(_ hosted: HostedSession, query: String?, page: Int) async throws -> CatalogPage {
-        try await get(hosted, path: catalogSearchPath(query: query, page: page))
+    func catalogFilters(_ hosted: HostedSession) async throws -> CatalogFilters {
+        try await get(hosted, path: "/v1/catalog/filters")
+    }
+
+    func catalog(_ hosted: HostedSession, query: String?, page: Int, filter: CatalogFilter) async throws -> CatalogPage {
+        try await get(hosted, path: catalogSearchPath(query: query, page: page, filter: filter))
     }
 
     func catalogWork(_ hosted: HostedSession, olid: String) async throws -> WorkDetail {
@@ -304,13 +308,22 @@ final class HostedClient: Sendable {
         return try await decode(request)
     }
 
-    func catalogSearchPath(query: String?, page: Int) -> String {
+    /// Sort applies to browse only, so it is not sent with typed text.
+    func catalogSearchPath(query: String?, page: Int, filter: CatalogFilter) -> String {
         var items = [URLQueryItem(name: "page", value: String(max(page, 1)))]
+        var searching = false
         if let query {
             let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
             if !trimmed.isEmpty {
                 items.append(URLQueryItem(name: "q", value: trimmed))
+                searching = true
             }
+        }
+        if let genre = filter.genre {
+            items.append(URLQueryItem(name: "genre", value: genre))
+        }
+        if !searching, let sort = filter.sort {
+            items.append(URLQueryItem(name: "sort", value: sort))
         }
         return pathWithQuery("/v1/catalog/search", items)
     }

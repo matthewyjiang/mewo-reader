@@ -288,17 +288,36 @@ final class CatalogCopyTests: XCTestCase {
         XCTAssertEqual(catalogQuery("📚📚"), .browse)
         XCTAssertEqual(catalogQuery("📚📚📚"), .search("📚📚📚"))
         XCTAssertEqual(catalogQuery("  dune  "), .search("dune"))
-        XCTAssertEqual(catalogHeading(""), "Trending on Open Library")
-        XCTAssertEqual(catalogHeading("   "), "Trending on Open Library")
-        XCTAssertEqual(catalogHeading("a"), "Trending on Open Library")
-        XCTAssertEqual(catalogHeading("ab"), "Trending on Open Library")
-        XCTAssertEqual(catalogHeading("du"), "Trending on Open Library")
-        XCTAssertEqual(catalogHeading("📚📚"), "Trending on Open Library")
-        XCTAssertNil(catalogHeading("dune"))
-        XCTAssertTrue(catalogEmptyCopy("dune").contains("“dune”"))
+        XCTAssertEqual(catalogHeading("", CatalogFilter()), "Trending on Open Library")
+        XCTAssertEqual(catalogHeading("   ", CatalogFilter()), "Trending on Open Library")
+        XCTAssertEqual(catalogHeading("a", CatalogFilter()), "Trending on Open Library")
+        XCTAssertEqual(catalogHeading("ab", CatalogFilter()), "Trending on Open Library")
+        XCTAssertEqual(catalogHeading("du", CatalogFilter()), "Trending on Open Library")
+        XCTAssertEqual(catalogHeading("📚📚", CatalogFilter()), "Trending on Open Library")
+        XCTAssertNil(catalogHeading("dune", CatalogFilter()))
+        XCTAssertTrue(catalogEmptyCopy("dune", nil).contains("“dune”"))
         XCTAssertEqual(catalogDebounceNanos, 300_000_000)
         XCTAssertEqual(catalogPollNanos, 10_000_000_000)
         XCTAssertEqual(catalogMinScalars, 3)
+    }
+
+    func testHeadingIsTrendingOnlyForAllGenresAndTheFirstSort() {
+        XCTAssertEqual(catalogHeading("du", CatalogFilter(genre: nil, sort: nil)), "Trending on Open Library")
+        XCTAssertNil(catalogHeading("", CatalogFilter(genre: "fantasy")))
+        XCTAssertNil(catalogHeading("", CatalogFilter(sort: "new")))
+        XCTAssertNil(catalogHeading("du", CatalogFilter(genre: "fantasy", sort: "new")))
+        XCTAssertNil(catalogHeading("dune", CatalogFilter(genre: "fantasy")))
+    }
+
+    func testEmptyCopyNamesTheGenre() {
+        XCTAssertEqual(catalogEmptyCopy("", nil), "No trending books in your languages right now. Search above.")
+        XCTAssertEqual(
+            catalogEmptyCopy(" dune ", nil),
+            "Nothing in Open Library matches “dune”. Try the author's name or fewer words."
+        )
+        XCTAssertEqual(catalogEmptyCopy("", "Poetry"), "Nothing in Poetry right now. Try another genre.")
+        XCTAssertEqual(catalogEmptyCopy("du", "Poetry"), "Nothing in Poetry right now. Try another genre.")
+        XCTAssertEqual(catalogEmptyCopy(" dune ", "Poetry"), "Nothing in Poetry matches “dune”. Try All genres.")
     }
 
     func testErrorTextNeverShowsARawStatus() {
@@ -394,6 +413,20 @@ final class CatalogDecodeTests: XCTestCase {
         XCTAssertNil(page.items[1].onServer)
         XCTAssertNil(page.items[1].year)
         XCTAssertNil(page.items[1].coverId)
+    }
+
+    func testCatalogFiltersDecode() throws {
+        let data = Data(#"""
+        {"genres":[{"id":"fantasy","name":"Fantasy"},{"id":"science-fiction","name":"Science fiction"}],
+         "sorts":[{"id":"popular","name":"Popular"},{"id":"rated","name":"Top rated"},{"id":"new","name":"New"}]}
+        """#.utf8)
+        let filters = try JSONFiles.decoder.decode(CatalogFilters.self, from: data)
+        XCTAssertEqual(filters.genres, [
+            FilterOption(id: "fantasy", name: "Fantasy"),
+            FilterOption(id: "science-fiction", name: "Science fiction"),
+        ])
+        XCTAssertEqual(filters.sorts.map(\.id), ["popular", "rated", "new"])
+        XCTAssertEqual(filters.sorts.map(\.name), ["Popular", "Top rated", "New"])
     }
 
     func testLibrarySearchRefusesACatalogPage() {
@@ -553,6 +586,115 @@ final class CatalogModelTests: XCTestCase {
         feed.noteSession(nil)
         XCTAssertEqual(feed.phase, .idle)
         XCTAssertTrue(feed.items.isEmpty)
+    }
+
+    func testBrowseMemoIsKeyedByFilter() async {
+        fake = FakeCatalog()
+        fake.pageResult = .success(CatalogPage(items: [work(title: "Dune")], nextPage: nil))
+        let feed = CatalogFeed(service: fake, debounceNanos: 0)
+        feed.show()
+        await waitPages(1)
+        await feed.loadTask?.value
+        XCTAssertEqual(feed.items.map(\.title), ["Dune"])
+
+        fake.pageResult = .success(CatalogPage(items: [work(title: "The Hobbit", key: "/works/OL2W")], nextPage: nil))
+        feed.setFilter(CatalogFilter(genre: "fantasy"))
+        XCTAssertTrue(feed.items.isEmpty, "another genre's rows do not stay under the new one")
+        await waitPages(2)
+        await feed.loadTask?.value
+        XCTAssertEqual(feed.items.map(\.title), ["The Hobbit"])
+        XCTAssertEqual(fake.filter, CatalogFilter(genre: "fantasy"))
+
+        fake.holdPages = true
+        feed.setFilter(CatalogFilter())
+        XCTAssertEqual(feed.items.map(\.title), ["Dune"])
+        await waitPages(3)
+        feed.setFilter(CatalogFilter(genre: "fantasy"))
+        XCTAssertEqual(feed.items.map(\.title), ["The Hobbit"])
+        await waitPages(4)
+        feed.setFilter(CatalogFilter(genre: "fantasy", sort: "new"))
+        XCTAssertTrue(feed.items.isEmpty)
+        await waitPages(5)
+        XCTAssertEqual(fake.pageLog.map(\.filter), [
+            CatalogFilter(),
+            CatalogFilter(genre: "fantasy"),
+            CatalogFilter(),
+            CatalogFilter(genre: "fantasy"),
+            CatalogFilter(genre: "fantasy", sort: "new"),
+        ])
+    }
+
+    func testStalePageForAnOlderFilterIsDropped() async {
+        fake = FakeCatalog()
+        fake.holdPages = true
+        let feed = CatalogFeed(service: fake, debounceNanos: 0)
+        feed.show()
+        await waitPages(1)
+        feed.setFilter(CatalogFilter(genre: "fantasy"))
+        await waitPages(2)
+        guard fake.pageLog.count >= 2 else { return }
+        fake.resumePage(.success(CatalogPage(items: [work(title: "Dune")], nextPage: nil)))
+        fake.resumePage(.success(CatalogPage(items: [work(title: "The Hobbit", key: "/works/OL2W")], nextPage: nil)))
+        await feed.loadTask?.value
+        XCTAssertEqual(feed.items.map(\.title), ["The Hobbit"])
+    }
+
+    func testSortIsIgnoredWhileSearching() async {
+        fake = FakeCatalog()
+        let feed = CatalogFeed(service: fake, debounceNanos: 0)
+        feed.setFilter(CatalogFilter(genre: "fantasy", sort: "new"))
+        feed.setQuery("dune")
+        feed.show()
+        await waitPages(1)
+        await feed.loadTask?.value
+        XCTAssertEqual(fake.pageLog.last?.query, "dune")
+        XCTAssertEqual(fake.pageLog.last?.filter, CatalogFilter(genre: "fantasy"))
+
+        feed.setFilter(CatalogFilter(genre: "fantasy"))
+        feed.setFilter(CatalogFilter(genre: "fantasy", sort: "new"))
+        try? await Task.sleep(nanoseconds: 50_000_000)
+        XCTAssertEqual(fake.pageLog.count, 1, "sort does not refetch a search")
+        XCTAssertEqual(feed.filter, CatalogFilter(genre: "fantasy", sort: "new"))
+
+        feed.setQuery("")
+        await waitPages(2)
+        XCTAssertNil(fake.pageLog.last?.query)
+        XCTAssertEqual(fake.pageLog.last?.filter, CatalogFilter(genre: "fantasy", sort: "new"))
+    }
+
+    func testFiltersLoadOnShowAndAgainAfterAFailure() async {
+        fake = FakeCatalog()
+        fake.filtersResult = .failure(CatalogError(reason: .network, message: "Couldn't load the catalog."))
+        let feed = CatalogFeed(service: fake, debounceNanos: 0)
+        XCTAssertEqual(fake.filtersCalls, 0)
+        feed.show()
+        await waitUntil { self.fake.filtersCalls == 1 }
+        try? await Task.sleep(nanoseconds: 50_000_000)
+        XCTAssertNil(feed.filters)
+
+        feed.hide()
+        fake.filtersResult = .success(sampleFilters)
+        feed.show()
+        await waitUntil { feed.filters != nil }
+        XCTAssertEqual(feed.filters, sampleFilters)
+        XCTAssertEqual(fake.filtersCalls, 2)
+
+        feed.hide()
+        feed.show()
+        try? await Task.sleep(nanoseconds: 50_000_000)
+        XCTAssertEqual(fake.filtersCalls, 2)
+
+        XCTAssertNil(feed.genreName)
+        feed.setFilter(CatalogFilter(genre: "poetry"))
+        XCTAssertEqual(feed.genreName, "Poetry")
+    }
+
+    func testFilterIsKeptForTheAppSession() {
+        fake = FakeCatalog()
+        let first = CatalogFeed(service: fake, debounceNanos: 0)
+        first.setFilter(CatalogFilter(genre: "fantasy", sort: "new"))
+        let second = CatalogFeed(service: fake, debounceNanos: 0)
+        XCTAssertEqual(second.filter, CatalogFilter(genre: "fantasy", sort: "new"))
     }
 
     func testBlurbOverflowComparesMeasuredHeights() {
@@ -930,6 +1072,14 @@ final class CatalogModelTests: XCTestCase {
         await fulfillment(of: [done], timeout: 2)
     }
 
+    private func waitUntil(_ condition: () -> Bool) async {
+        for _ in 0..<200 {
+            if condition() { return }
+            try? await Task.sleep(nanoseconds: 10_000_000)
+        }
+        XCTFail("condition never held")
+    }
+
     private func waitWorks(_ count: Int) async {
         if fake.workLog.count >= count { return }
         let done = expectation(description: "catalog works \(count)")
@@ -1039,10 +1189,10 @@ final class CatalogHTTPTests: XCTestCase {
         let service = makeService(hosted: true, signedIn: true)
         await settle(service)
 
-        _ = try await service.page(query: "a", page: 1)
-        _ = try await service.page(query: "ab", page: 1)
-        _ = try await service.page(query: "📚📚", page: 1)
-        _ = try await service.page(query: "  dune  ", page: 2)
+        _ = try await service.page(query: "a", page: 1, filter: CatalogFilter())
+        _ = try await service.page(query: "ab", page: 1, filter: CatalogFilter())
+        _ = try await service.page(query: "📚📚", page: 1, filter: CatalogFilter())
+        _ = try await service.page(query: "  dune  ", page: 2, filter: CatalogFilter())
         let searches = CatalogHTTP.calls.filter { $0.url.contains("/v1/catalog/search") }
         XCTAssertEqual(searches.count, 4)
         XCTAssertNil(queryValue(searches[0].url, "q"))
@@ -1053,7 +1203,7 @@ final class CatalogHTTPTests: XCTestCase {
 
         CatalogHTTP.reply("/v1/catalog/search", status: 403, body: Data(#"{"error":"Requests are off."}"#.utf8))
         do {
-            _ = try await service.page(query: "dune", page: 1)
+            _ = try await service.page(query: "dune", page: 1, filter: CatalogFilter())
             XCTFail("expected requests off")
         } catch let error as CatalogError {
             XCTAssertEqual(error.reason, .forbidden)
@@ -1068,7 +1218,7 @@ final class CatalogHTTPTests: XCTestCase {
         await service.refreshAccess()
         CatalogHTTP.reply("/v1/catalog/search", status: 502, body: Data())
         do {
-            _ = try await service.page(query: "dune", page: 1)
+            _ = try await service.page(query: "dune", page: 1, filter: CatalogFilter())
             XCTFail("expected a human error")
         } catch let error as CatalogError {
             XCTAssertEqual(error.message, "Couldn't load the catalog.")
@@ -1077,6 +1227,66 @@ final class CatalogHTTPTests: XCTestCase {
             throw error
         }
         XCTAssertEqual(service.access, .on)
+    }
+
+    func testSearchPathSendsGenreAndSortOnlyOnBrowse() {
+        let http = client()
+        let both = CatalogFilter(genre: "fantasy", sort: "new")
+        XCTAssertEqual(http.catalogSearchPath(query: nil, page: 1, filter: CatalogFilter()), "/v1/catalog/search?page=1")
+
+        let browse = http.catalogSearchPath(query: nil, page: 1, filter: both)
+        XCTAssertNil(queryValue(browse, "q"))
+        XCTAssertEqual(queryValue(browse, "genre"), "fantasy")
+        XCTAssertEqual(queryValue(browse, "sort"), "new")
+
+        let blank = http.catalogSearchPath(query: "   ", page: 1, filter: CatalogFilter(sort: "rated"))
+        XCTAssertNil(queryValue(blank, "genre"))
+        XCTAssertEqual(queryValue(blank, "sort"), "rated")
+
+        let search = http.catalogSearchPath(query: "  dune ", page: 2, filter: both)
+        XCTAssertEqual(queryValue(search, "q"), "dune")
+        XCTAssertEqual(queryValue(search, "page"), "2")
+        XCTAssertEqual(queryValue(search, "genre"), "fantasy")
+        XCTAssertNil(queryValue(search, "sort"))
+
+        let encoded = http.catalogSearchPath(query: "a b", page: 1, filter: CatalogFilter(genre: "sci fi é"))
+        XCTAssertFalse(encoded.contains(" "))
+        XCTAssertFalse(encoded.contains("é"))
+        XCTAssertEqual(queryValue(encoded, "q"), "a b")
+        XCTAssertEqual(queryValue(encoded, "genre"), "sci fi é")
+    }
+
+    func testFiltersAreFetchedOnceAndPagesCarryTheFilter() async throws {
+        CatalogHTTP.reset()
+        CatalogHTTP.reply("/v1/me", status: 200, body: meJSON(canRequest: true))
+        CatalogHTTP.reply("/v1/catalog/filters", status: 502, body: Data())
+        CatalogHTTP.reply("/v1/catalog/search", status: 200, body: Data(#"{"items":[],"nextPage":null}"#.utf8))
+        let service = makeService(hosted: true, signedIn: true)
+        await settle(service)
+
+        do {
+            _ = try await service.filters()
+            XCTFail("expected a failure")
+        } catch let error as CatalogError {
+            XCTAssertNil(error.message.range(of: #"Server returned|HTTP \d+"#, options: .regularExpression))
+        }
+        let filtersJSON = #"{"genres":[{"id":"fantasy","name":"Fantasy"}],"sorts":[{"id":"popular","name":"Popular"}]}"#
+        CatalogHTTP.reply("/v1/catalog/filters", status: 200, body: Data(filtersJSON.utf8))
+        let first = try await service.filters()
+        let second = try await service.filters()
+        XCTAssertEqual(first, second)
+        XCTAssertEqual(first.genres, [FilterOption(id: "fantasy", name: "Fantasy")])
+        XCTAssertEqual(CatalogHTTP.calls.filter { $0.url.contains("/v1/catalog/filters") }.count, 2)
+
+        let both = CatalogFilter(genre: "fantasy", sort: "new")
+        _ = try await service.page(query: nil, page: 1, filter: both)
+        _ = try await service.page(query: "du", page: 1, filter: both)
+        _ = try await service.page(query: "dune", page: 1, filter: both)
+        let searches = CatalogHTTP.calls.filter { $0.url.contains("/v1/catalog/search") }
+        XCTAssertEqual(searches.count, 3)
+        XCTAssertEqual(searches.map { queryValue($0.url, "genre") }, ["fantasy", "fantasy", "fantasy"])
+        XCTAssertEqual(searches.map { queryValue($0.url, "sort") }, ["new", "new", nil])
+        XCTAssertEqual(searches.map { queryValue($0.url, "q") }, [nil, nil, "dune"])
     }
 
     func testWorkCancelAndRetryUseTheCatalogRoutes() async throws {
@@ -1381,10 +1591,18 @@ private let bookJSON = """
 }
 """
 
+private let sampleFilters = CatalogFilters(
+    genres: [FilterOption(id: "fantasy", name: "Fantasy"), FilterOption(id: "poetry", name: "Poetry")],
+    sorts: [FilterOption(id: "popular", name: "Popular"), FilterOption(id: "new", name: "New")]
+)
+
 @MainActor
 private final class FakeCatalog: CatalogService {
     var access: CatalogAccess = .on
     var token: String? = "tok"
+    var filter = CatalogFilter()
+    var filtersResult: Result<CatalogFilters, Error> = .success(sampleFilters)
+    var filtersCalls = 0
     var pageLog: [PageCall] = []
     var workLog: [String] = []
     var requestLog: [NewBookRequest] = []
@@ -1407,6 +1625,7 @@ private final class FakeCatalog: CatalogService {
     struct PageCall: Equatable {
         var query: String?
         var page: Int
+        var filter = CatalogFilter()
     }
 
     private var pageWaiters: [CheckedContinuation<CatalogPage, Error>] = []
@@ -1416,8 +1635,13 @@ private final class FakeCatalog: CatalogService {
 
     func refreshAccess() async {}
 
-    func page(query: String?, page: Int) async throws -> CatalogPage {
-        pageLog.append(PageCall(query: query, page: page))
+    func filters() async throws -> CatalogFilters {
+        filtersCalls += 1
+        return try filtersResult.get()
+    }
+
+    func page(query: String?, page: Int, filter: CatalogFilter) async throws -> CatalogPage {
+        pageLog.append(PageCall(query: query, page: page, filter: filter))
         onPage?()
         if holdPages {
             return try await withCheckedThrowingContinuation { pageWaiters.append($0) }

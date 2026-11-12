@@ -40,18 +40,30 @@ func catalogQuery(_ raw: String) -> CatalogQuery {
     return .search(trimmed)
 }
 
+/// Sort applies to browse only, so a search drops it. A page depends on the query and this.
+func catalogSent(_ mode: CatalogQuery, _ filter: CatalogFilter) -> CatalogFilter {
+    if case .search = mode { return CatalogFilter(genre: filter.genre) }
+    return filter
+}
+
 /// Browse, including a 1–2 character field, is still the trending list.
-func catalogHeading(_ query: String) -> String? {
-    if case .browse = catalogQuery(query) { return "Trending on Open Library" }
+/// A genre or another sort is not trending, so it has no heading.
+func catalogHeading(_ query: String, _ filter: CatalogFilter) -> String? {
+    if case .browse = catalogQuery(query), filter == CatalogFilter() { return "Trending on Open Library" }
     return nil
 }
 
-func catalogEmptyCopy(_ query: String) -> String {
-    switch catalogQuery(query) {
-    case .browse:
+/// `genreName` is the selected genre's name, or nil for All genres.
+func catalogEmptyCopy(_ query: String, _ genreName: String?) -> String {
+    switch (catalogQuery(query), genreName) {
+    case (.browse, nil):
         return "No trending books in your languages right now. Search above."
-    case .search(let text):
+    case (.search(let text), nil):
         return "Nothing in Open Library matches “\(text)”. Try the author's name or fewer words."
+    case (.browse, let genre?):
+        return "Nothing in \(genre) right now. Try another genre."
+    case (.search(let text), let genre?):
+        return "Nothing in \(genre) matches “\(text)”. Try All genres."
     }
 }
 

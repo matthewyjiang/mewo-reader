@@ -120,6 +120,23 @@ struct CatalogPage: Decodable, Equatable, Sendable {
     var nextPage: Int?
 }
 
+/// One genre or sort from `GET /v1/catalog/filters`. The id is opaque.
+struct FilterOption: Decodable, Equatable, Identifiable, Sendable {
+    var id: String
+    var name: String
+}
+
+struct CatalogFilters: Decodable, Equatable, Sendable {
+    var genres: [FilterOption]
+    var sorts: [FilterOption]
+}
+
+/// Nil genre is All genres. Nil sort is the first sort.
+struct CatalogFilter: Hashable, Sendable {
+    var genre: String? = nil
+    var sort: String? = nil
+}
+
 struct Rating: Decodable, Equatable, Sendable {
     var average: Double
     var count: Int

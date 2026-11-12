@@ -31,17 +31,23 @@ struct CatalogResults: View {
     private var results: some View {
         Group {
             if let failure = feed.failure {
-                failureBlock(failure)
+                VStack(spacing: 0) {
+                    filterRow
+                    failureBlock(failure)
+                }
             } else if feed.items.isEmpty, case .loading = feed.phase {
                 skeleton
             } else if feed.items.isEmpty, case .loaded = feed.phase {
-                Text(catalogEmptyCopy(feed.query))
-                    .font(MewoFont.bold(22))
-                    .foregroundStyle(mewo.ink)
-                    .padding(.horizontal, 28)
-                    .padding(.vertical, 48)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-                    .accessibilityIdentifier("catalog-empty")
+                VStack(spacing: 0) {
+                    filterRow
+                    Text(catalogEmptyCopy(feed.query, feed.genreName))
+                        .font(MewoFont.bold(22))
+                        .foregroundStyle(mewo.ink)
+                        .padding(.horizontal, 28)
+                        .padding(.vertical, 48)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                        .accessibilityIdentifier("catalog-empty")
+                }
             } else if feed.items.isEmpty {
                 Color.clear
             } else {
@@ -79,6 +85,7 @@ struct CatalogResults: View {
     private var list: some View {
         ScrollView {
             LazyVStack(alignment: .leading, spacing: 0) {
+                filterRow
                 trendingHeader
                 if case .loading = feed.phase {
                     ProgressView()
@@ -117,8 +124,20 @@ struct CatalogResults: View {
     }
 
     @ViewBuilder
+    private var filterRow: some View {
+        if let filters = feed.filters {
+            CatalogFilterRow(
+                filters: filters,
+                filter: feed.filter,
+                searching: catalogQuery(feed.query) != .browse,
+                onChange: { feed.setFilter($0) }
+            )
+        }
+    }
+
+    @ViewBuilder
     private var trendingHeader: some View {
-        if let heading = catalogHeading(feed.query) {
+        if let heading = catalogHeading(feed.query, feed.filter) {
             Text(heading)
                 .font(MewoFont.bold(15))
                 .foregroundStyle(mewo.ink)
@@ -133,16 +152,19 @@ struct CatalogResults: View {
     private var skeleton: some View {
         ScrollView {
             LazyVStack(alignment: .leading, spacing: 0) {
-                trendingHeader
-                ForEach(0..<6, id: \.self) { _ in
-                    skeletonRow
-                    Hairline()
+                filterRow
+                VStack(alignment: .leading, spacing: 0) {
+                    trendingHeader
+                    ForEach(0..<6, id: \.self) { _ in
+                        skeletonRow
+                        Hairline()
+                    }
                 }
+                .accessibilityElement(children: .ignore)
+                .accessibilityLabel("Loading results…")
+                .accessibilityIdentifier("catalog-loading")
             }
         }
-        .accessibilityElement(children: .ignore)
-        .accessibilityLabel("Loading results…")
-        .accessibilityIdentifier("catalog-loading")
     }
 
     private var skeletonRow: some View {
