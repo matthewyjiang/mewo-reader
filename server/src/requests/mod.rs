@@ -3,6 +3,7 @@
 //! Prowlarr and SABnzbd stay inside the worker. Handlers only see [`BookRequest`].
 
 pub(crate) mod aliases;
+mod genres;
 pub(crate) mod languages;
 mod matching;
 mod openlibrary;
@@ -13,7 +14,7 @@ mod sabnzbd;
 pub mod worker;
 
 pub(crate) mod http;
-pub(crate) use openlibrary::{InfoCache, Limiter, TrendingCache, WorkCache};
+pub(crate) use openlibrary::{InfoCache, Limiter, ShelfCache, TrendingCache, WorkCache};
 
 use crate::visibility::BOOK_VISIBLE_TO;
 
@@ -41,6 +42,7 @@ const MAX_WORK_KEY: usize = 200;
 pub(crate) fn router() -> Router<AppState> {
     Router::new()
         .route("/v1/catalog/search", get(catalog_search))
+        .route("/v1/catalog/filters", get(catalog_filters))
         .route("/v1/catalog/works/{olid}", get(catalog_work))
         .route("/v1/requests", get(list_requests).post(create_request))
         .route("/v1/requests/{id}", delete(cancel_request))
@@ -163,6 +165,18 @@ pub struct RequestDetail {
 struct CatalogPage {
     items: Vec<CatalogWork>,
     next_page: Option<i64>,
+}
+
+#[derive(Serialize)]
+struct FilterOption {
+    id: &'static str,
+    name: &'static str,
+}
+
+#[derive(Serialize)]
+struct CatalogFilters {
+    genres: Vec<FilterOption>,
+    sorts: Vec<FilterOption>,
 }
 
 #[derive(Serialize)]
@@ -330,6 +344,8 @@ struct CatalogQuery {
     q: String,
     #[serde(default = "first_page")]
     page: i64,
+    genre: Option<String>,
+    sort: Option<String>,
 }
 
 fn first_page() -> i64 {
@@ -342,9 +358,30 @@ async fn catalog_search(
     Query(query): Query<CatalogQuery>,
 ) -> Result<Json<CatalogPage>, ApiError> {
     ensure_on(&state).await?;
+    let genre = match query.genre.as_deref() {
+        Some(id) => {
+            Some(genres::find(id).ok_or_else(|| ApiError::BadRequest("Unknown genre.".into()))?)
+        }
+        None => None,
+    };
+    let sort = match query.sort.as_deref() {
+        Some(id) => Some(
+            genres::Sort::parse(id).ok_or_else(|| ApiError::BadRequest("Unknown sort.".into()))?,
+        ),
+        None => None,
+    };
+    let page = query.page.max(1);
     let q = query.q.trim();
     if q.is_empty() {
-        return catalog_trending(state, authed, query.page).await;
+        if genre.is_none() && matches!(sort, None | Some(genres::Sort::Popular)) {
+            return catalog_trending(state, authed, query.page).await;
+        }
+        let settings = settings::load(&state.pool).await?;
+        let sort = sort.unwrap_or(genres::Sort::Popular);
+        let (works, next_page) = openlibrary::shelf(&state, genre, sort, &settings.languages, page)
+            .await
+            .map_err(search_upstream)?;
+        return catalog_items(&state, &authed.user_id, works, next_page).await;
     }
     let asked = q.chars().count();
     if asked < MIN_QUERY_CHARS {
@@ -357,11 +394,38 @@ async fn catalog_search(
             "Search is longer than {MAX_QUERY_CHARS} characters (asked {asked})."
         )));
     }
-    let page = query.page.max(1);
-    let (works, next_page) = openlibrary::search(&state, q, page)
+    if sort.is_some() {
+        return Err(ApiError::BadRequest(
+            "Sort works only without a search.".into(),
+        ));
+    }
+    let (works, next_page) = openlibrary::search(&state, q, genre, page)
         .await
         .map_err(search_upstream)?;
     catalog_items(&state, &authed.user_id, works, next_page).await
+}
+
+async fn catalog_filters(
+    State(state): State<AppState>,
+    _authed: Authed,
+) -> Result<Json<CatalogFilters>, ApiError> {
+    ensure_on(&state).await?;
+    Ok(Json(CatalogFilters {
+        genres: genres::GENRES
+            .iter()
+            .map(|genre| FilterOption {
+                id: genre.id,
+                name: genre.name,
+            })
+            .collect(),
+        sorts: genres::Sort::ALL
+            .into_iter()
+            .map(|sort| FilterOption {
+                id: sort.id(),
+                name: sort.name(),
+            })
+            .collect(),
+    }))
 }
 
 /// Open Library's status and error stay in the log. Callers see one sentence.

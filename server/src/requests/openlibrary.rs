@@ -1,6 +1,7 @@
 //! Open Library search. One in-flight request, 1 s apart. The User-Agent has
 //! no contact email, so the gap stays at a second.
 
+use crate::requests::genres::{Genre, Sort};
 use crate::requests::http::{self, base_url, UpstreamError};
 use crate::requests::languages;
 use crate::requests::matching::{
@@ -17,6 +18,8 @@ use tokio::sync::{Mutex, Semaphore};
 
 const CACHE_FOR: Duration = Duration::from_secs(24 * 60 * 60);
 const INFO_CAP: usize = 500;
+const SHELF_CAP: usize = 256;
+const SHELF_FOR: Duration = Duration::from_secs(60 * 60);
 const NEGATIVE_FOR: Duration = Duration::from_secs(60);
 const MISSING_FOR: Duration = Duration::from_secs(60 * 60);
 const FRESH_FOR: Duration = Duration::from_secs(6 * 60 * 60);
@@ -76,45 +79,137 @@ pub(crate) struct Work {
 pub(crate) async fn search(
     state: &AppState,
     q: &str,
+    genre: Option<&Genre>,
     page: i64,
 ) -> Result<(Vec<Work>, Option<i64>), UpstreamError> {
+    fetch_search(state, &scoped(q, genre), None, page).await
+}
+
+/// Typed text in parentheses, so an `OR` in it cannot escape the genre.
+fn scoped(q: &str, genre: Option<&Genre>) -> String {
+    match genre {
+        Some(genre) => format!("({q}) AND {}", genre.clause()),
+        None => q.to_string(),
+    }
+}
+
+type SearchPage = (Vec<Work>, Option<i64>);
+
+/// Genre and sort browse pages. Cached for an hour, or a minute after a
+/// failure, keyed by everything that shapes the query.
+pub(crate) struct ShelfCache {
+    inner: TtlCache<Result<SearchPage, UpstreamError>>,
+}
+
+impl ShelfCache {
+    pub(crate) fn new() -> Self {
+        Self {
+            inner: TtlCache::new(SHELF_CAP),
+        }
+    }
+}
+
+pub(crate) async fn shelf(
+    state: &AppState,
+    genre: Option<&Genre>,
+    sort: Sort,
+    accepted: &[String],
+    page: i64,
+) -> Result<SearchPage, UpstreamError> {
+    let year = utc_year(crate::db::now_ms());
+    let key = format!(
+        "{}|{}|{}|{year}|{page}",
+        genre.map_or("", |genre| genre.id),
+        sort.id(),
+        accepted.join(","),
+    );
+    let (q, ol_sort) = shelf_query(genre, sort, accepted, year);
+    let cache = Arc::clone(&state.shelves);
+    cache
+        .inner
+        .get_or_load(&key, || async {
+            let result = fetch_search(state, &q, Some(ol_sort), page).await;
+            let ttl = if result.is_ok() {
+                SHELF_FOR
+            } else {
+                NEGATIVE_FOR
+            };
+            (result, ttl)
+        })
+        .await
+}
+
+/// `q` and Open Library's `sort` for a browse page: the genre clause, a
+/// two-year window for New, then the language filter.
+fn shelf_query(
+    genre: Option<&Genre>,
+    sort: Sort,
+    accepted: &[String],
+    year: i64,
+) -> (String, &'static str) {
+    let mut parts = Vec::new();
+    if let Some(genre) = genre {
+        parts.push(genre.clause());
+    }
+    if sort == Sort::New {
+        parts.push(format!("first_publish_year:[{} TO {year}]", year - 2));
+    }
+    if let Some(languages) = languages::marc_clause(accepted) {
+        parts.push(languages);
+    }
+    let ol_sort = match sort {
+        Sort::Popular | Sort::New => "readinglog",
+        Sort::Rated => "rating",
+    };
+    (parts.join(" "), ol_sort)
+}
+
+/// Calendar year of a Unix time in milliseconds, in UTC.
+fn utc_year(ms: i64) -> i64 {
+    // Howard Hinnant's civil_from_days.
+    let z = ms.div_euclid(86_400_000) + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    yoe + era * 400 + i64::from(month <= 2)
+}
+
+async fn fetch_search(
+    state: &AppState,
+    q: &str,
+    sort: Option<&str>,
+    page: i64,
+) -> Result<SearchPage, UpstreamError> {
     state.catalog_limit.pace().await;
     let base = base_url(&state.openlibrary_url)?;
     let page_s = page.to_string();
+    let mut params = vec![
+        ("q", q),
+        ("page", page_s.as_str()),
+        ("limit", "20"),
+        ("fields", "key,title,author_name,first_publish_year,cover_i"),
+    ];
+    if let Some(sort) = sort {
+        params.push(("sort", sort));
+    }
     let body: OlSearch = state
         .upstream
-        .get_json(
-            &base,
-            "/search.json",
-            &[
-                ("q", q),
-                ("page", page_s.as_str()),
-                ("limit", "20"),
-                ("fields", "key,title,author_name,first_publish_year,cover_i"),
-            ],
-            &[],
-            2 * 1024 * 1024,
-        )
+        .get_json(&base, "/search.json", &params, &[], 2 * 1024 * 1024)
         .await?;
     let works = body
         .docs
         .into_iter()
         .filter_map(|doc| {
-            if !doc.key.starts_with("/works/") || doc.title.trim().is_empty() {
-                return None;
-            }
-            Some(Work {
-                work_key: doc.key,
-                title: doc.title.trim().to_string(),
-                author: doc
-                    .author_name
-                    .into_iter()
-                    .find(|name| !name.trim().is_empty())
-                    .map(|name| name.trim().to_string())
-                    .unwrap_or_else(|| "Unknown".into()),
-                year: doc.first_publish_year,
-                cover_id: doc.cover_i.filter(|id| *id >= 0),
-            })
+            work_from_parts(
+                doc.key,
+                doc.title,
+                doc.author_name,
+                doc.first_publish_year,
+                doc.cover_i,
+            )
         })
         .collect();
     let next = if page.saturating_mul(PAGE) < body.num_found {
@@ -1733,6 +1828,125 @@ mod tests {
         assert!(trending(&state).await.is_err());
         let slot = state.trending.slot.lock().await;
         assert_eq!(slot.as_ref().unwrap().works[0].work.title, "Old");
+        assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 2);
+    }
+
+    fn find_genre(id: &str) -> &'static Genre {
+        crate::requests::genres::find(id).unwrap()
+    }
+
+    #[test]
+    fn scoped_wraps_typed_text_so_an_or_stays_inside() {
+        assert_eq!(scoped("dune OR dragon", None), "dune OR dragon");
+        assert_eq!(
+            scoped("dune OR dragon", Some(find_genre("poetry"))),
+            r#"(dune OR dragon) AND (subject_key:"poetry")"#
+        );
+    }
+
+    #[test]
+    fn shelf_query_for_every_sort_with_and_without_a_genre() {
+        let en = vec!["en".to_string()];
+        let poetry = Some(find_genre("poetry"));
+        assert_eq!(
+            shelf_query(poetry, Sort::Popular, &en, 2026),
+            (
+                r#"(subject_key:"poetry") language:eng"#.to_string(),
+                "readinglog"
+            )
+        );
+        assert_eq!(
+            shelf_query(poetry, Sort::Rated, &en, 2026),
+            (
+                r#"(subject_key:"poetry") language:eng"#.to_string(),
+                "rating"
+            )
+        );
+        assert_eq!(
+            shelf_query(poetry, Sort::New, &en, 2026),
+            (
+                r#"(subject_key:"poetry") first_publish_year:[2024 TO 2026] language:eng"#
+                    .to_string(),
+                "readinglog"
+            )
+        );
+        assert_eq!(
+            shelf_query(None, Sort::Rated, &en, 2026),
+            ("language:eng".to_string(), "rating")
+        );
+        assert_eq!(
+            shelf_query(None, Sort::New, &["en".into(), "fr".into()], 2031),
+            (
+                "first_publish_year:[2029 TO 2031] language:(eng OR fre)".to_string(),
+                "readinglog"
+            )
+        );
+        assert_eq!(
+            shelf_query(None, Sort::Popular, &en, 2026),
+            ("language:eng".to_string(), "readinglog")
+        );
+    }
+
+    #[test]
+    fn utc_year_turns_at_midnight_utc() {
+        assert_eq!(utc_year(0), 1970);
+        // 2026-12-31T23:59:59.999Z and 2027-01-01T00:00:00Z.
+        assert_eq!(utc_year(1_798_761_599_999), 2026);
+        assert_eq!(utc_year(1_798_761_600_000), 2027);
+        // 2024-02-29T12:00:00Z.
+        assert_eq!(utc_year(1_709_208_000_000), 2024);
+    }
+
+    #[tokio::test]
+    async fn a_failed_shelf_is_refetched_after_a_minute() {
+        let hits = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let seen = Arc::clone(&hits);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let origin = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move {
+            let app = axum::Router::new().route(
+                "/search.json",
+                axum::routing::get(move || {
+                    let seen = Arc::clone(&seen);
+                    async move {
+                        seen.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        axum::http::StatusCode::INTERNAL_SERVER_ERROR
+                    }
+                }),
+            );
+            axum::serve(listener, app).await.unwrap();
+        });
+        let data = tempfile::TempDir::new().unwrap();
+        let state = crate::prepare(crate::config::Config {
+            listen: "127.0.0.1:0".into(),
+            data_dir: data.path().to_path_buf(),
+            web_dir: None,
+            allow_signup: true,
+            max_epub_bytes: 64 * 1024 * 1024,
+            downloads_dir: None,
+            openlibrary_url: origin,
+            auth: crate::config::AuthConfig::default(),
+            limits: crate::config::LimitsConfig {
+                min_free_bytes: 0,
+                ..crate::config::LimitsConfig::default()
+            },
+        })
+        .await
+        .unwrap();
+        let en = vec!["en".to_string()];
+        let fantasy = Some(find_genre("fantasy"));
+        assert!(shelf(&state, fantasy, Sort::Popular, &en, 1).await.is_err());
+        assert!(shelf(&state, fantasy, Sort::Popular, &en, 1).await.is_err());
+        assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 1);
+
+        {
+            let mut store = state.shelves.inner.store.lock().unwrap();
+            let slot = store.entries.values_mut().next().unwrap();
+            let left = slot.until.saturating_duration_since(Instant::now());
+            assert!(left <= NEGATIVE_FOR, "a failure is kept for {left:?}");
+            slot.until = Instant::now();
+        }
+        assert!(shelf(&state, fantasy, Sort::Popular, &en, 1).await.is_err());
         assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 2);
     }
 }

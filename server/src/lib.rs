@@ -71,6 +71,8 @@ pub struct AppState {
     pub(crate) trending: Arc<requests::TrendingCache>,
     /// Work sheet info, 24h, plus a short negative cache. Not durable.
     pub(crate) info_cache: Arc<requests::InfoCache>,
+    /// Genre and sort browse pages, 1h, or 60s after a failure. Not durable.
+    pub(crate) shelves: Arc<requests::ShelfCache>,
 }
 
 pub fn router(state: AppState) -> Router {
@@ -222,6 +224,7 @@ pub async fn prepare(config: Config) -> Result<AppState, sqlx::Error> {
         work_cache: Arc::new(requests::WorkCache::new()),
         trending: Arc::new(requests::TrendingCache::new()),
         info_cache: Arc::new(requests::InfoCache::new()),
+        shelves: Arc::new(requests::ShelfCache::new()),
     })
 }
 
