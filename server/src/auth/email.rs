@@ -144,7 +144,7 @@ pub async fn request_reset(state: &AppState, ip: ClientIp, login: &str) -> Resul
     let task = state.clone();
     mail::spawn(state, async move {
         if let Err(err) = send_reset(&task, &login).await {
-            tracing::warn!(kind = "reset", error = %err, "mail not sent");
+            tracing::warn!(kind = "reset", error = %err.brief(), "mail not sent");
         }
     });
     Ok(())
@@ -209,7 +209,7 @@ async fn send_reset(state: &AppState, login: &str) -> Result<(), mail::MailError
     let public_url = crate::settings::load(&state.pool).await?.public_url;
     let letter = mail::reset_letter(mailbox(email)?, &target.username, &public_url, &token);
     if let Err(err) = mail::send(state, letter).await {
-        tracing::warn!(user = %target.id, kind = "reset", error = %err, "mail not sent");
+        tracing::warn!(user = %target.id, kind = "reset", error = %err.brief(), "mail not sent");
     }
     Ok(())
 }
@@ -334,7 +334,7 @@ pub async fn start_signup_verify(state: &AppState, user_id: &str, email: &str) {
     let user_id = user_id.to_string();
     mail::spawn(state, async move {
         if let Err(err) = mail::send(&task, letter).await {
-            tracing::warn!(user = %user_id, kind = "verify", error = %err, "mail not sent");
+            tracing::warn!(user = %user_id, kind = "verify", error = %err.brief(), "mail not sent");
             // Only this letter's row: a newer request replaced the hash.
             let dropped = sqlx::query("DELETE FROM email_tokens WHERE token_hash = ?")
                 .bind(&token_hash)
@@ -410,7 +410,7 @@ pub async fn set_email(
     state.throttle.mail_user(&authed.user_id)?;
     let (letter, _) = start_verify(state, &authed.user_id, &email).await?;
     if let Err(err) = mail::send(state, letter).await {
-        tracing::warn!(user = %authed.user_id, kind = "verify", error = %err, "mail not sent");
+        tracing::warn!(user = %authed.user_id, kind = "verify", error = %err.brief(), "mail not sent");
         let mut conn = state.pool.acquire().await?;
         clear_pending(&mut conn, &authed.user_id).await?;
         return Err(ApiError::BadGateway("Couldn't send the email.".into()));

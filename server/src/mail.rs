@@ -2,8 +2,8 @@
 //!
 //! The transport is built per send from the settings row, so a saved change
 //! applies to the next message and nothing is cached. Logs name the user, the
-//! kind of letter and the error, never the address, the token, the link or
-//! the SMTP password. lettre's `tracing` feature stays off because it logs
+//! kind of letter and the error class, never the address, the token, the link
+//! or the SMTP password. lettre's `tracing` feature stays off because it logs
 //! the AUTH exchange.
 
 use crate::error::ApiError;
@@ -57,6 +57,35 @@ pub(crate) enum MailError {
     Smtp(#[from] lettre::transport::smtp::Error),
     #[error("{0}")]
     Api(#[from] ApiError),
+}
+
+impl MailError {
+    /// For logs: the error class and SMTP code. An SMTP reply's text can
+    /// echo the recipient's address, so it stays out.
+    pub(crate) fn brief(&self) -> String {
+        let MailError::Smtp(err) = self else {
+            return self.to_string();
+        };
+        let class = if err.is_permanent() {
+            "permanent"
+        } else if err.is_transient() {
+            "transient"
+        } else if err.is_response() {
+            "bad response"
+        } else if err.is_timeout() {
+            "timeout"
+        } else if err.is_tls() {
+            "tls"
+        } else if err.is_client() {
+            "client"
+        } else {
+            "connection"
+        };
+        match err.status() {
+            Some(code) => format!("smtp {class} ({code})"),
+            None => format!("smtp {class}"),
+        }
+    }
 }
 
 /// Reset and verify mail can go out: an SMTP host, a From address and a

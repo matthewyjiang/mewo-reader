@@ -9836,6 +9836,10 @@ async fn reset_logs_no_token_link_or_smtp_password() {
         redeem(&mail.app, &token, "newpassword").await.0,
         StatusCode::NO_CONTENT
     );
+    // A rejected recipient: the server's reply echoes the address.
+    mail.smtp.reject_recipients();
+    assert_eq!(ask_reset(&mail.app, "ada").await, StatusCode::ACCEPTED);
+    mail.settle().await;
     // A failed send logs too.
     patch_settings(&mail.state.pool, json!({ "smtpPort": 1 })).await;
     assert_eq!(ask_reset(&mail.app, "ada").await, StatusCode::ACCEPTED);
@@ -9847,6 +9851,7 @@ async fn reset_logs_no_token_link_or_smtp_password() {
         "the capture saw the requests"
     );
     assert!(logs.contains("mail not sent"), "{logs}");
+    assert!(logs.contains("(550)"), "{logs}");
     for secret in [
         token.as_str(),
         "#token=",
