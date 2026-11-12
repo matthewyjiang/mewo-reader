@@ -280,12 +280,13 @@ pub async fn redeem_reset(
 }
 
 /// Creates the verify row for `email` and returns the letter that carries
-/// its link. The caller sends it now or in the background.
+/// its link, with the row's token hash. The caller sends it now or in the
+/// background.
 pub(crate) async fn start_verify(
     state: &AppState,
     user_id: &str,
     email: &str,
-) -> Result<Letter, ApiError> {
+) -> Result<(Letter, Vec<u8>), ApiError> {
     let (email, norm) = normalize_email(email)?;
     let username: String = sqlx::query_scalar("SELECT username FROM users WHERE id = ?")
         .bind(user_id)
@@ -299,12 +300,8 @@ pub(crate) async fn start_verify(
     .await?;
     drop(conn);
     let public_url = crate::settings::load(&state.pool).await?.public_url;
-    Ok(mail::verify_letter(
-        mailbox(&email)?,
-        &username,
-        &public_url,
-        &token,
-    ))
+    let letter = mail::verify_letter(mailbox(&email)?, &username, &public_url, &token);
+    Ok((letter, session::hash_token(&token)))
 }
 
 /// Signup's optional email, checked before the account exists. Blank is no
@@ -326,8 +323,8 @@ pub async fn signup_email(state: &AppState, raw: Option<&str>) -> Result<Option<
 /// After signup commits. A failure here never fails the signup: the
 /// account just has no pending email.
 pub async fn start_signup_verify(state: &AppState, user_id: &str, email: &str) {
-    let letter = match start_verify(state, user_id, email).await {
-        Ok(letter) => letter,
+    let (letter, token_hash) = match start_verify(state, user_id, email).await {
+        Ok(started) => started,
         Err(err) => {
             tracing::warn!(user = %user_id, kind = "verify", error = %err, "mail not sent");
             return;
@@ -338,6 +335,14 @@ pub async fn start_signup_verify(state: &AppState, user_id: &str, email: &str) {
     mail::spawn(state, async move {
         if let Err(err) = mail::send(&task, letter).await {
             tracing::warn!(user = %user_id, kind = "verify", error = %err, "mail not sent");
+            // Only this letter's row: a newer request replaced the hash.
+            let dropped = sqlx::query("DELETE FROM email_tokens WHERE token_hash = ?")
+                .bind(&token_hash)
+                .execute(&task.pool)
+                .await;
+            if let Err(err) = dropped {
+                tracing::warn!(user = %user_id, kind = "verify", error = %err, "pending email kept");
+            }
         }
     });
 }
@@ -403,7 +408,7 @@ pub async fn set_email(
         return Err(taken());
     }
     state.throttle.mail_user(&authed.user_id)?;
-    let letter = start_verify(state, &authed.user_id, &email).await?;
+    let (letter, _) = start_verify(state, &authed.user_id, &email).await?;
     if let Err(err) = mail::send(state, letter).await {
         tracing::warn!(user = %authed.user_id, kind = "verify", error = %err, "mail not sent");
         let mut conn = state.pool.acquire().await?;

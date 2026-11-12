@@ -9644,6 +9644,28 @@ async fn set_email_reports_a_failed_send() {
 }
 
 #[tokio::test]
+async fn signup_drops_the_pending_email_when_the_send_fails() {
+    let mail = mail_app().await;
+    let closed = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = closed.local_addr().unwrap().port();
+    drop(closed);
+    patch_settings(&mail.state.pool, json!({ "smtpPort": port })).await;
+    let (status, body) = json_req(
+        &mail.app,
+        "POST",
+        "/v1/auth/register",
+        None,
+        json!({ "username": "ada", "password": "password1", "email": "ada@example.com" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    mail.settle().await;
+    let profile = me(&mail.app, body["token"].as_str().unwrap()).await;
+    assert_eq!(profile["email"], Value::Null);
+    assert_eq!(profile["pendingEmail"], Value::Null);
+}
+
+#[tokio::test]
 async fn password_reset_is_off_by_default_and_on_when_configured() {
     let (app, _tmp) = app().await;
     let (status, body) = empty_req(&app, "GET", "/v1/instance", None).await;
