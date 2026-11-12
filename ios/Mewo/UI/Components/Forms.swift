@@ -105,10 +105,6 @@ struct LibrarySettings: View {
     @State private var me: Me?
     @State private var editingEmail = false
     @State private var emailNotice: String?
-    @State private var sheetEmail = ""
-    @State private var sheetPassword = ""
-    @State private var sheetSaving = false
-    @State private var sheetError: String?
 
     init(startMode: HostedAuthMode = .signIn, instance: InstanceInfo? = nil, me: Me? = nil) {
         presetInstance = instance
@@ -326,7 +322,9 @@ struct LibrarySettings: View {
             }
         }
         .sheet(isPresented: $editingEmail) {
-            emailSheet
+            if let me {
+                EmailSheet(me: me, onSave: saveEmail)
+            }
         }
     }
 
@@ -406,9 +404,6 @@ struct LibrarySettings: View {
 
     private func emailRow(_ me: Me) -> some View {
         Button {
-            sheetEmail = me.pendingEmail ?? me.email ?? ""
-            sheetPassword = ""
-            sheetError = nil
             editingEmail = true
         } label: {
             HStack(spacing: 16) {
@@ -429,99 +424,51 @@ struct LibrarySettings: View {
         .accessibilityIdentifier("hosted-email")
     }
 
-    private var emailSheet: some View {
-        let saved = me?.email != nil || me?.pendingEmail != nil
-        return VStack(alignment: .leading, spacing: 0) {
-            Text("Email")
-                .font(MewoFont.bold(22))
-                .foregroundStyle(mewo.ink)
-                .frame(maxWidth: .infinity, minHeight: 52, alignment: .leading)
-            VStack(alignment: .leading, spacing: 8) {
-                outlined("Email", text: Binding(
-                    get: { sheetEmail },
-                    set: {
-                        sheetEmail = $0
-                        sheetError = nil
-                    }
-                ), enabled: !sheetSaving, secret: false, id: "email-sheet-email", error: nil)
-                outlined("Current password", text: Binding(
-                    get: { sheetPassword },
-                    set: {
-                        sheetPassword = $0
-                        sheetError = nil
-                    }
-                ), enabled: !sheetSaving, secret: true, id: "email-sheet-password", error: nil)
-            }
-            if let sheetError {
-                Text(sheetError)
-                    .font(MewoFont.regular(15))
-                    .foregroundStyle(mewo.like)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(.top, 8)
-            }
-            HStack(spacing: 12) {
-                if saved {
-                    Button {
-                        changeEmail(nil)
-                    } label: {
-                        Text("Remove email")
-                            .font(MewoFont.bold(14))
-                            .foregroundStyle(mewo.like)
-                            .padding(.vertical, 8)
-                    }
-                    .buttonStyle(.plain)
-                    .disabled(sheetSaving)
-                    .accessibilityIdentifier("email-sheet-remove")
-                }
-                Spacer(minLength: 0)
-                PillButton(
-                    title: sheetSaving ? "Saving…" : "Save",
-                    enabled: !sheetSaving && !sheetEmail.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                ) {
-                    changeEmail(sheetEmail)
-                }
-            }
-            .padding(.top, 16)
-            Spacer(minLength: 0)
-        }
-        .padding(24)
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-        .background(mewo.ground)
-        .presentationDetents([.medium])
-        .interactiveDismissDisabled(sheetSaving)
-    }
-
-    private func changeEmail(_ next: String?) {
-        guard !sheetPassword.isEmpty else {
-            sheetError = "Enter your current password."
-            return
-        }
+    /// Throws the server's message for the sheet to show.
+    private func saveEmail(_ next: String?, _ current: String) async throws {
         let session = app.hostedSession.session
-        let client = app.client
-        let current = sheetPassword
-        Task {
-            sheetSaving = true
-            sheetError = nil
-            do {
-                let wasSent = try await client.setEmail(session, email: next, currentPassword: current)
-                emailNotice = wasSent ? next.map(emailSentNotice) : nil
-                editingEmail = false
-                me = try? await client.me(session)
-            } catch {
-                sheetError = error.localizedDescription
-            }
-            sheetSaving = false
-        }
+        let wasSent = try await app.client.setEmail(session, email: next, currentPassword: current)
+        emailNotice = wasSent ? next.map(emailSentNotice) : nil
+        editingEmail = false
+        me = try? await app.client.me(session)
     }
 
     private func outlined(_ label: String, text: Binding<String>, enabled: Bool, secret: Bool, id: String, error: String?) -> some View {
+        OutlinedField(label: label, text: text, enabled: enabled, secret: secret, id: id, error: error)
+    }
+
+    private func run(_ block: @escaping () async throws -> Void) {
+        Task {
+            busy = true
+            error = nil
+            do {
+                try await block()
+                password = ""
+            } catch {
+                self.error = error.localizedDescription
+            }
+            busy = false
+        }
+    }
+}
+
+private struct OutlinedField: View {
+    @Environment(\.mewo) private var mewo
+    var label: String
+    @Binding var text: String
+    var enabled: Bool
+    var secret: Bool
+    var id: String
+    var error: String?
+
+    var body: some View {
         VStack(alignment: .leading, spacing: 4) {
             Text(label).font(MewoFont.regular(13)).foregroundStyle(error == nil ? mewo.mute : mewo.like)
             Group {
                 if secret {
-                    SecureField("", text: text).disabled(!enabled)
+                    SecureField("", text: $text).disabled(!enabled)
                 } else {
-                    TextField("", text: text)
+                    TextField("", text: $text)
                         .textInputAutocapitalization(.never)
                         .autocorrectionDisabled()
                         .disabled(!enabled)
@@ -537,18 +484,101 @@ struct LibrarySettings: View {
             }
         }
     }
+}
 
-    private func run(_ block: @escaping () async throws -> Void) {
+/// Add, change or remove the account email. Its fields start from `me`
+/// when the sheet opens. `onSave` throws the server's message.
+private struct EmailSheet: View {
+    @Environment(\.mewo) private var mewo
+    let me: Me
+    let onSave: (String?, String) async throws -> Void
+    @State private var email: String
+    @State private var password = ""
+    @State private var saving = false
+    @State private var error: String?
+
+    init(me: Me, onSave: @escaping (String?, String) async throws -> Void) {
+        self.me = me
+        self.onSave = onSave
+        _email = State(initialValue: me.pendingEmail ?? me.email ?? "")
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            Text("Email")
+                .font(MewoFont.bold(22))
+                .foregroundStyle(mewo.ink)
+                .frame(maxWidth: .infinity, minHeight: 52, alignment: .leading)
+            VStack(alignment: .leading, spacing: 8) {
+                OutlinedField(label: "Email", text: Binding(
+                    get: { email },
+                    set: {
+                        email = $0
+                        error = nil
+                    }
+                ), enabled: !saving, secret: false, id: "email-sheet-email", error: nil)
+                OutlinedField(label: "Current password", text: Binding(
+                    get: { password },
+                    set: {
+                        password = $0
+                        error = nil
+                    }
+                ), enabled: !saving, secret: true, id: "email-sheet-password", error: nil)
+            }
+            if let error {
+                Text(error)
+                    .font(MewoFont.regular(15))
+                    .foregroundStyle(mewo.like)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.top, 8)
+            }
+            HStack(spacing: 12) {
+                if me.email != nil || me.pendingEmail != nil {
+                    Button {
+                        change(nil)
+                    } label: {
+                        Text("Remove email")
+                            .font(MewoFont.bold(14))
+                            .foregroundStyle(mewo.like)
+                            .padding(.vertical, 8)
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(saving)
+                    .accessibilityIdentifier("email-sheet-remove")
+                }
+                Spacer(minLength: 0)
+                PillButton(
+                    title: saving ? "Saving…" : "Save",
+                    enabled: !saving && !email.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                ) {
+                    change(email)
+                }
+            }
+            .padding(.top, 16)
+            Spacer(minLength: 0)
+        }
+        .padding(24)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .background(mewo.ground)
+        .presentationDetents([.medium])
+        .interactiveDismissDisabled(saving)
+    }
+
+    private func change(_ next: String?) {
+        guard !password.isEmpty else {
+            error = "Enter your current password."
+            return
+        }
+        let current = password
         Task {
-            busy = true
+            saving = true
             error = nil
             do {
-                try await block()
-                password = ""
+                try await onSave(next, current)
             } catch {
                 self.error = error.localizedDescription
             }
-            busy = false
+            saving = false
         }
     }
 }

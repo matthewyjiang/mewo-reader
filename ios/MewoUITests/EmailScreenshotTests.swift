@@ -35,6 +35,8 @@ final class EmailScreenshotTests: XCTestCase {
         row.tap()
         XCTAssertTrue(account.buttons["email-sheet-remove"].waitForExistence(timeout: 5))
         XCTAssertTrue(account.secureTextFields["email-sheet-password"].exists)
+        // The sheet opens with the saved address, not an empty field.
+        XCTAssertEqual(account.textFields["email-sheet-email"].value as? String, "ada@example.com")
         shot(theme, "email-sheet")
     }
 
