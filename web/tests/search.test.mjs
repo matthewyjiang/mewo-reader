@@ -1,8 +1,8 @@
 import assert from 'node:assert/strict';
 import { describe, test } from 'node:test';
 import {
-  BROWSE_REVALIDATE_MS, CATALOG_DEBOUNCE_MS, clearSearchMemos, emptyKind, isBrowse,
-  SearchModel, SEARCH_DEBOUNCE_MS, searchMemo, searchedQuery, sectionFor, visiblePage,
+  BROWSE_REVALIDATE_MS, CATALOG_DEBOUNCE_MS, catalogEmptyText, catalogKey, clearSearchMemos, emptyKind,
+  isBrowse, isDefaultCatalog, SearchModel, SEARCH_DEBOUNCE_MS, searchMemo, searchedQuery, sectionFor, visiblePage,
 } from '../src/lib/search.ts';
 
 function deferred() {
@@ -16,10 +16,12 @@ function harness(session = 'token', kind = 'accounts', now = () => 0, keepMemo =
   if (session && !keepMemo) searchMemo(session).clear();
   const timers = [];
   const calls = [];
+  const filters = [];
   let pending = deferred();
   const model = new SearchModel(
     (request) => {
       calls.push({ query: request.query, kind: request.kind, cursor: request.cursor, session: request.session });
+      filters.push(request.filter);
       request.signal.addEventListener('abort', () => pending.reject(new DOMException('aborted', 'AbortError')));
       return pending.promise;
     },
@@ -41,6 +43,7 @@ function harness(session = 'token', kind = 'accounts', now = () => 0, keepMemo =
   return {
     model,
     calls,
+    filters,
     timers,
     replace() { pending = deferred(); },
     fire(ms) {
@@ -526,5 +529,92 @@ describe('SearchModel', { concurrency: false }, () => {
     assert.deepEqual(sectionFor('accounts'), { title: 'Suggested accounts' });
     assert.deepEqual(sectionFor('posts'), { title: 'Top posts' });
     assert.deepEqual(sectionFor('catalog'), { title: 'Trending on Open Library' });
+  });
+
+  test('a genre change shows its memo, drops a stale response, and ignores sort while searching', async () => {
+    const trending = { type: 'catalog', items: [{ workKey: '/works/OL1W', title: 'Dune' }], nextCursor: null };
+    const fantasy = { type: 'catalog', items: [{ workKey: '/works/OL2W', title: 'Earthsea' }], nextCursor: null };
+    const { model, calls, filters, timers, fire, settle, replace } = harness('genre', 'catalog');
+    fire(0);
+    await settle(trending);
+    assert.deepEqual(filters, [{ genre: null, sort: null }]);
+
+    replace();
+    model.setFilter({ genre: 'fantasy', sort: null });
+    assert.equal(model.state.phase.status, 'loading');
+    assert.equal(visiblePage(model.state), undefined, "another genre's rows do not stay");
+    fire(0);
+    const stale = settle(fantasy);
+    model.setFilter({ genre: 'fantasy', sort: 'new' });
+    replace();
+    await stale;
+    assert.equal(model.state.phase.status, 'loading', 'the fantasy-popular response is dropped');
+    fire(0);
+    await settle(fantasy);
+    assert.deepEqual(filters.at(-1), { genre: 'fantasy', sort: 'new' });
+
+    replace();
+    model.setFilter({ genre: null, sort: null });
+    assert.equal(model.state.phase.status, 'loaded');
+    assert.equal(model.state.phase.page, trending, 'the default browse comes from the memo');
+    fire(0);
+    await settle(trending);
+
+    replace();
+    model.setFilter({ genre: 'fantasy', sort: 'new' });
+    assert.equal(model.state.phase.page, fantasy, 'fantasy + new comes from the memo');
+    fire(0);
+    await settle(fantasy);
+
+    replace();
+    const before = calls.length;
+    model.setQuery('dune');
+    fire();
+    assert.deepEqual(filters.at(-1), { genre: 'fantasy', sort: null }, 'no sort with typed text');
+    await settle(fantasy);
+    model.setFilter({ genre: 'fantasy', sort: 'rated' });
+    assert.equal(timers.length, 0);
+    assert.equal(calls.length, before + 1, 'a sort change does not search again');
+    assert.deepEqual(model.state.filter, { genre: 'fantasy', sort: 'rated' });
+
+    replace();
+    model.setQuery('');
+    assert.equal(model.state.phase.status, 'loading', 'clearing brings back the chosen sort');
+    fire(0);
+    assert.deepEqual(filters.at(-1), { genre: 'fantasy', sort: 'rated' });
+  });
+});
+
+describe('catalog filters', () => {
+  test('catalogKey keeps the sort only for browse', () => {
+    assert.equal(catalogKey('', { genre: 'fantasy', sort: 'new' }), '\u0000fantasy\u0000new');
+    assert.equal(catalogKey('dune', { genre: 'fantasy', sort: 'new' }), 'dune\u0000fantasy\u0000');
+    assert.equal(
+      catalogKey('dune', { genre: null, sort: 'rated' }),
+      catalogKey('dune', { genre: null, sort: null }),
+    );
+    assert.notEqual(catalogKey('', { genre: null, sort: 'rated' }), catalogKey('', { genre: null, sort: null }));
+  });
+
+  test('isDefaultCatalog is All genres and the first sort', () => {
+    assert.equal(isDefaultCatalog({ genre: null, sort: null }), true);
+    assert.equal(isDefaultCatalog({ genre: 'poetry', sort: null }), false);
+    assert.equal(isDefaultCatalog({ genre: null, sort: 'rated' }), false);
+  });
+
+  test('catalogEmptyText names the genre', () => {
+    assert.equal(catalogEmptyText('nothingYet', '', 'Fantasy'), 'Nothing in Fantasy right now. Try another genre.');
+    assert.equal(
+      catalogEmptyText('noMatches', ' dune ', 'Fantasy'),
+      'Nothing in Fantasy matches “dune”. Try All genres.',
+    );
+    assert.equal(
+      catalogEmptyText('noMatches', 'dune', null),
+      "Nothing in Open Library matches “dune”. Try the author's name or fewer words.",
+    );
+    assert.equal(
+      catalogEmptyText('nothingYet', '', null),
+      'No trending books in your languages right now. Search above.',
+    );
   });
 });

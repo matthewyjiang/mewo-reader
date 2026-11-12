@@ -1,11 +1,14 @@
 <script lang="ts">
   import type { SearchKind } from '../lib/models';
   import { homeUrl, router } from '../lib/router.svelte';
+  import { catalogEmptyText } from '../lib/search';
 
-  let { kind, mode, query, canRequest, isAdmin, onkind, onadd }: {
+  let { kind, mode, query, genre = null, canRequest, isAdmin, onkind, onadd }: {
     kind: SearchKind;
     mode: 'noMatches' | 'nothingYet';
     query: string;
+    /** Selected catalog genre's name. Null is All genres. */
+    genre?: string | null;
     canRequest: boolean;
     isAdmin: boolean;
     onkind: (kind: SearchKind) => void;
@@ -42,10 +45,8 @@
   {:else if kind === 'posts'}
     <h2>No posts yet. Replies and reposts on books show up here.</h2>
     <button class="pill" type="button" onclick={() => router.go(homeUrl('books'))}>Go to your books</button>
-  {:else if mode === 'noMatches'}
-    <h2>Nothing in Open Library matches {quoted}. Try the author's name or fewer words.</h2>
   {:else}
-    <h2>No trending books in your languages right now. Search above.</h2>
+    <h2>{catalogEmptyText(mode, query, genre)}</h2>
   {/if}
 </div>
 

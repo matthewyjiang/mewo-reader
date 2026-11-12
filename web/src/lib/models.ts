@@ -85,6 +85,23 @@ export interface BookRequest {
   follows?: string;
 }
 
+/** One genre or sort from `GET /v1/catalog/filters`. The id is opaque. */
+export interface FilterOption {
+  id: string;
+  name: string;
+}
+
+export interface CatalogFilters {
+  genres: FilterOption[];
+  sorts: FilterOption[];
+}
+
+/** Null genre is All genres. Null sort is the first sort. */
+export interface CatalogFilter {
+  genre: string | null;
+  sort: string | null;
+}
+
 /** A copy of a catalog work this account can open. */
 export interface ServerCopy {
   bookId: string;

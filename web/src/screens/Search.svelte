@@ -1,6 +1,17 @@
+<script module lang="ts">
+  import type { CatalogFilter, CatalogFilters as Filters } from '../lib/models';
+  import { NO_FILTER } from '../lib/search';
+
+  /** Loaded once per app session. A failure loads again on the next Catalog show. */
+  let loadedFilters: Filters | null = null;
+  /** The selection lasts for the app session, across tab switches. */
+  let chosenFilter: CatalogFilter = NO_FILTER;
+</script>
+
 <script lang="ts">
   import { onMount, tick, untrack } from 'svelte';
   import BookRow from '../components/BookRow.svelte';
+  import CatalogFilterRow from '../components/CatalogFilters.svelte';
   import CatalogRow from '../components/CatalogRow.svelte';
   import CatalogSheet from '../components/CatalogSheet.svelte';
   import Post from '../components/Post.svelte';
@@ -16,7 +27,7 @@
   import { readerUrl, router } from '../lib/router.svelte';
   import { restoreScroll } from '../lib/screen';
   import type { FeedScreenProps } from '../lib/screen';
-  import { emptyKind, isBrowse, SearchModel, sectionFor, visiblePage } from '../lib/search';
+  import { emptyKind, isBrowse, isDefaultCatalog, SearchModel, sectionFor, visiblePage } from '../lib/search';
   import type { SearchState } from '../lib/search';
   import { readStored, writeStored } from '../lib/storage';
   import { store } from '../lib/store.svelte';
@@ -36,6 +47,7 @@
   let searchState = $state<SearchState>({
     query: initialQuery,
     kind: initialKind,
+    filter: chosenFilter,
     phase: { status: 'idle' },
     session: store.session?.token ?? null,
   });
@@ -55,6 +67,7 @@
         const result = await store.api.catalog(
           request.query,
           Number.isFinite(pageNumber) && pageNumber > 0 ? pageNumber : 1,
+          request.filter,
           request.signal,
         );
         return {
@@ -79,7 +92,10 @@
     initialKind,
     () => Date.now(),
     initialQuery,
+    chosenFilter,
   );
+  let filters = $state<Filters | null>(loadedFilters);
+  let loadingFilters = false;
 
   let canRequest = $derived(store.me?.canRequest === true);
   let isAdmin = $derived(store.me?.isAdmin === true);
@@ -94,6 +110,7 @@
   let section = $derived.by(() => {
     if (!browse || !searchState.session) return null;
     if (searchState.kind === 'catalog') {
+      if (!isDefaultCatalog(searchState.filter)) return null;
       const rows = page?.items.length ?? 0;
       const loadingBare = searchState.phase.status === 'loading' && !page;
       if (!loadingBare && rows === 0) return null;
@@ -101,6 +118,9 @@
     return sectionFor(searchState.kind);
   });
   let blank = $derived(emptyKind(searchState));
+  let genreName = $derived(
+    filters?.genres.find((genre) => genre.id === searchState.filter.genre)?.name ?? null,
+  );
   let showSkeleton = $derived(searchState.phase.status === 'loading' && !page);
 
   export function capture(): void {
@@ -136,6 +156,27 @@
       if (!can && searchState.kind === 'catalog') model.setKind('accounts');
     });
   });
+
+  let catalogShown = $derived(searchState.kind === 'catalog' && searchState.session !== null);
+  $effect(() => {
+    const show = catalogShown;
+    untrack(() => {
+      if (!show || filters || loadingFilters) return;
+      loadingFilters = true;
+      store.api.catalogFilters().then(
+        (loaded) => { loadedFilters = loaded; filters = loaded; },
+        () => {},
+      ).finally(() => { loadingFilters = false; });
+    });
+  });
+
+  function setFilter(next: CatalogFilter): void {
+    overrides = {};
+    openWork = null;
+    store.notice = '';
+    chosenFilter = next;
+    model.setFilter(next);
+  }
 
   $effect(() => {
     const kind = searchState.kind;
@@ -211,6 +252,9 @@
 
 <UnderlineTabs {tabs} selected={searchState.kind} fixed onselect={(id) => { void select(id); }} />
 
+{#if searchState.kind === 'catalog' && filters}
+  <CatalogFilterRow {filters} filter={searchState.filter} searching={!browse} onchange={setFilter} />
+{/if}
 {#if searchState.phase.status === 'failed'}
   <div class="status-row" class:catalog={searchState.kind === 'catalog'}>
     <span class="error" role="alert">{searchState.phase.error}</span>
@@ -275,6 +319,7 @@
     kind={searchState.kind}
     mode={blank}
     query={searchState.query}
+    genre={genreName}
     {canRequest}
     {isAdmin}
     onkind={(id) => { void select(id); }}

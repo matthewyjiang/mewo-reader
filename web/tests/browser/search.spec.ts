@@ -240,6 +240,28 @@ function detailFor(stage: string, info: boolean) {
 
 const shelfBook = book('book-dune', 'Dune', 'Frank Herbert');
 
+const CATALOG_FILTERS = {
+  genres: [
+    { id: 'fantasy', name: 'Fantasy' },
+    { id: 'science-fiction', name: 'Science fiction' },
+    { id: 'mystery', name: 'Mystery' },
+    { id: 'thriller', name: 'Thriller' },
+    { id: 'romance', name: 'Romance' },
+    { id: 'horror', name: 'Horror' },
+    { id: 'historical-fiction', name: 'Historical fiction' },
+    { id: 'young-adult', name: 'Young adult' },
+    { id: 'biography', name: 'Biography' },
+    { id: 'history', name: 'History' },
+    { id: 'self-help', name: 'Self-help' },
+    { id: 'poetry', name: 'Poetry' },
+  ],
+  sorts: [
+    { id: 'popular', name: 'Popular' },
+    { id: 'rated', name: 'Top rated' },
+    { id: 'new', name: 'New' },
+  ],
+};
+
 async function install(
   page: Page,
   options: {
@@ -283,6 +305,10 @@ async function install(
     requestPosts: [] as string[],
     details: null as null | Record<string, unknown>,
     shelf: false,
+    filters: true,
+    filterFetches: 0,
+    catalogParams: [] as { q: string; genre: string | null; sort: string | null }[],
+    emptyGenre: null as string | null,
   };
   state.booksGate = new Promise((resolve) => { state.releaseBooks = resolve; });
   await page.addInitScript(({ kind, theme }) => {
@@ -342,10 +368,18 @@ async function answer(route: Route, state: Awaited<ReturnType<typeof install>>) 
     if (type === 'posts') return json({ type, items: posts, nextCursor: null });
     return json({ type: 'accounts', items: state.accounts, nextCursor: null });
   }
+  if (path === '/v1/catalog/filters') {
+    state.filterFetches += 1;
+    if (!state.filters) return json({ error: 'Open Library is not answering.' }, 502);
+    return json(CATALOG_FILTERS);
+  }
   if (path === '/v1/catalog/search') {
     const q = url.searchParams.get('q') ?? '';
     const pageNo = Number(url.searchParams.get('page') ?? '1') || 1;
     state.catalogQueries.push(q);
+    const genre = url.searchParams.get('genre');
+    state.catalogParams.push({ q, genre, sort: url.searchParams.get('sort') });
+    if (genre && genre === state.emptyGenre) return json({ items: [], nextPage: null });
     if (state.failCatalogPage != null && pageNo === state.failCatalogPage) {
       return json({ error: "Couldn't search the catalog right now." }, 502);
     }
@@ -1052,4 +1086,121 @@ test('catalog parity shots', async ({ browser }) => {
     await shot(page, `add-menu-${theme}`);
     await context.close();
   }
+});
+
+test('catalog genre and sort menus filter browse and search', async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  const state = await install(page, { kind: 'catalog' });
+  await page.goto('/search');
+  const genre = page.getByTestId('catalog-genre');
+  const sort = page.getByTestId('catalog-sort');
+  await expect(genre).toHaveText('All genres');
+  await expect(sort).toHaveText('Popular');
+  await expect(genre).toHaveAttribute('aria-haspopup', 'menu');
+  await expectSection(page, 'Trending on Open Library');
+  await expect(page.getByRole('button', { name: 'Dune, Frank Herbert, 1965' })).toBeVisible();
+  expect(state.catalogParams.at(-1)).toEqual({ q: '', genre: null, sort: null });
+  const genreBox = await genre.boundingBox();
+  const sortBox = await sort.boundingBox();
+  expect(genreBox && sortBox).toBeTruthy();
+  expect(Math.abs((genreBox!.y + genreBox!.height / 2) - (sortBox!.y + sortBox!.height / 2))).toBeLessThan(1);
+  expect(genreBox!.height).toBe(sortBox!.height);
+  await shot(page, 'catalog-filters-default');
+
+  await genre.focus();
+  await page.keyboard.press('Enter');
+  const menu = page.getByRole('menu');
+  await expect(menu.getByRole('menuitemradio')).toHaveCount(13);
+  const all = menu.getByRole('menuitemradio', { name: 'All genres' });
+  await expect(all).toHaveAttribute('aria-checked', 'true');
+  await expect(all).toBeFocused();
+  await expect(menu.getByRole('menuitemradio', { name: 'Fantasy' })).toHaveAttribute('aria-checked', 'false');
+  await shot(page, 'catalog-genre-menu');
+  await page.keyboard.press('Escape');
+  await expect(menu).toHaveCount(0);
+
+  await genre.click();
+  await page.keyboard.press('ArrowDown');
+  await expect(menu.getByRole('menuitemradio', { name: 'Fantasy' })).toBeFocused();
+  await page.keyboard.press('Enter');
+  await expect(genre).toHaveText('Fantasy');
+  await expect.poll(() => state.catalogParams.at(-1)).toEqual({ q: '', genre: 'fantasy', sort: null });
+  await expect(page.locator('header.search-section')).toHaveCount(0);
+
+  await sort.click();
+  await expect(menu.getByRole('menuitemradio', { name: 'Popular' })).toHaveAttribute('aria-checked', 'true');
+  await menu.getByRole('menuitemradio', { name: 'New' }).click();
+  await expect(sort).toHaveText('New');
+  await expect.poll(() => state.catalogParams.at(-1)).toEqual({ q: '', genre: 'fantasy', sort: 'new' });
+  await expect(page.getByRole('button', { name: 'Dune, Frank Herbert, 1965' })).toBeVisible();
+  await expect(page.locator('header.search-section')).toHaveCount(0);
+  await shot(page, 'catalog-fantasy-new');
+
+  await page.getByPlaceholder('Search').fill('dune');
+  await expect(sort).toHaveCount(0);
+  await expect(genre).toHaveText('Fantasy');
+  await expect.poll(() => state.catalogParams.at(-1)).toEqual({ q: 'dune', genre: 'fantasy', sort: null });
+  await expect(page.getByRole('button', { name: 'Dune, Frank Herbert, 1965' })).toBeVisible();
+  await shot(page, 'catalog-fantasy-search');
+
+  await page.getByPlaceholder('Search').fill('');
+  await expect(sort).toHaveText('New');
+
+  await genre.click();
+  await menu.getByRole('menuitemradio', { name: 'All genres' }).click();
+  await sort.click();
+  await menu.getByRole('menuitemradio', { name: 'Popular' }).click();
+  await expect(sort).toHaveText('Popular');
+  await expectSection(page, 'Trending on Open Library');
+  await expect.poll(() => state.catalogParams.at(-1)).toEqual({ q: '', genre: null, sort: null });
+
+  await page.getByRole('tab', { name: 'Books' }).click();
+  await genre.waitFor({ state: 'detached' });
+  await page.getByRole('tab', { name: 'Catalog' }).click();
+  await expect(genre).toHaveText('All genres');
+  expect(state.filterFetches).toBe(1);
+});
+
+test('an empty genre names the genre and the row stays', async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  const state = await install(page, { kind: 'catalog', theme: 'x_lights_out' });
+  state.emptyGenre = 'poetry';
+  await page.goto('/search');
+  const genre = page.getByTestId('catalog-genre');
+  await genre.click();
+  await page.getByRole('menuitemradio', { name: 'Poetry' }).click();
+  await expect(page.getByRole('heading', { name: 'Nothing in Poetry right now. Try another genre.' }))
+    .toBeVisible();
+  await expect(genre).toHaveText('Poetry');
+  await expect(page.getByTestId('catalog-sort')).toBeVisible();
+  await shot(page, 'catalog-genre-empty-dark');
+
+  await page.getByPlaceholder('Search').fill('dune');
+  await expect(page.getByRole('heading', { name: 'Nothing in Poetry matches “dune”. Try All genres.' }))
+    .toBeVisible();
+  await expect(genre).toBeVisible();
+  await shot(page, 'catalog-genre-search-empty-dark');
+});
+
+test('the filter row waits for filters and loads them again after a failure', async ({ page }) => {
+  await page.setViewportSize({ width: 360, height: 780 });
+  const state = await install(page, { kind: 'catalog' });
+  state.filters = false;
+  await page.goto('/search');
+  await expectSection(page, 'Trending on Open Library');
+  await expect.poll(() => state.filterFetches).toBe(1);
+  await expect(page.getByTestId('catalog-genre')).toHaveCount(0);
+
+  state.filters = true;
+  await page.getByRole('tab', { name: 'Books' }).click();
+  await page.getByRole('tab', { name: 'Catalog' }).click();
+  await expect(page.getByTestId('catalog-genre')).toHaveText('All genres');
+  expect(state.filterFetches).toBe(2);
+  await page.getByTestId('catalog-genre').click();
+  await page.getByRole('menuitemradio', { name: 'Historical fiction' }).click();
+  await page.getByTestId('catalog-sort').click();
+  await page.getByRole('menuitemradio', { name: 'Top rated' }).click();
+  await expect(page.getByTestId('catalog-sort')).toHaveText('Top rated');
+  await expect(page.getByRole('button', { name: 'Dune, Frank Herbert, 1965' })).toBeVisible();
+  await shot(page, 'catalog-filters-360');
 });

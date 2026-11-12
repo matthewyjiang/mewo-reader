@@ -1,7 +1,8 @@
 import type { CheckStatus } from './invites';
 import type {
   AccountRemoval, AdminInvite, AdminUser, AuthResponse, BlockedRelease, BookRecord, BookRequest,
-  CatalogWork, CommentIndex, CreatedInvite, FeedPost, HomeFeedPage, Me, PostComment, ProfileBooks, ProfilePostsPage,
+  CatalogFilter, CatalogFilters, CatalogWork, CommentIndex, CreatedInvite, FeedPost, HomeFeedPage, Me,
+  PostComment, ProfileBooks, ProfilePostsPage,
   ProfileRecord, ProfileRepostsPage, RepostState, SearchKind, SearchPage, ServerInfo,
   ServerSettings, ServiceCheck, SettingsPatch, WorkDetail,
 } from './models';
@@ -327,14 +328,22 @@ export class HostedClient {
     return this.json(this.userPath(username, '/books'), 'GET', undefined, signal);
   }
 
+  catalogFilters(signal?: AbortSignal): Promise<CatalogFilters> {
+    return this.json('/catalog/filters', 'GET', undefined, signal);
+  }
+
+  /** Sort applies to browse only, so it is not sent with typed text. */
   catalog(
     q: string,
     page: number,
+    filter: CatalogFilter,
     signal?: AbortSignal,
   ): Promise<{ items: CatalogWork[]; nextPage: number | null }> {
     const params = new URLSearchParams({ page: String(page) });
     const trimmed = q.trim();
     if (trimmed) params.set('q', trimmed);
+    if (filter.genre) params.set('genre', filter.genre);
+    if (filter.sort && !trimmed) params.set('sort', filter.sort);
     return this.json(`/catalog/search?${params}`, 'GET', undefined, signal);
   }
 
