@@ -24,7 +24,7 @@ jobs:
     # macos-26 ships Xcode 26 and the iOS 26 SDK the project targets.
     runs-on: macos-26
     # Build + unit tests took 4m23s on run 38492130429; this is a hung-simulator tripwire.
-    timeout-minutes: 20
+    timeout-minutes: 40
     defaults:
       run:
         working-directory: ios
@@ -70,6 +70,7 @@ jobs:
             -destination "id=${{ steps.sim.outputs.udid }}" \
             -resultBundlePath "$RUNNER_TEMP/Mewo.xcresult" \
             -only-testing:MewoTests \
+            -only-testing:MewoUITests/EmailScreenshotTests \
             -jobs 8 \
             CODE_SIGNING_ALLOWED=NO \
             > "$RUNNER_TEMP/xcodebuild.log" 2>&1 || status=$?
@@ -86,3 +87,11 @@ jobs:
             ${{ runner.temp }}/Mewo.xcresult
             ${{ runner.temp }}/xcodebuild.log
           retention-days: 7
+
+      - name: Upload email shots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: email-shots
+          path: /tmp/mewo-email-shots
+          retention-days: 3
