@@ -88,9 +88,31 @@ pub(crate) async fn search(
 /// Typed text in parentheses, so an `OR` in it cannot escape the genre.
 fn scoped(q: &str, genre: Option<&Genre>) -> String {
     match genre {
-        Some(genre) => format!("({q}) AND {}", genre.clause()),
+        Some(genre) => format!("({}) AND {}", escape_syntax(q), genre.clause()),
         None => q.to_string(),
     }
+}
+
+/// Open Library recovers from bad syntax in a bare query, but inside the
+/// genre group a stray bracket, odd quote or trailing `:` makes it match
+/// nothing. `title:dune` and balanced quoted phrases keep working.
+fn escape_syntax(q: &str) -> String {
+    let odd_quotes = q.matches('"').count() % 2 == 1;
+    let mut out = String::with_capacity(q.len());
+    let mut chars = q.chars().peekable();
+    while let Some(c) = chars.next() {
+        let escape = match c {
+            '\\' | '(' | ')' | '[' | ']' | '{' | '}' => true,
+            '"' => odd_quotes,
+            ':' => chars.peek().is_none_or(|next| next.is_whitespace()),
+            _ => false,
+        };
+        if escape {
+            out.push('\\');
+        }
+        out.push(c);
+    }
+    out
 }
 
 type SearchPage = (Vec<Work>, Option<i64>);
@@ -1842,6 +1864,29 @@ mod tests {
             scoped("dune OR dragon", Some(find_genre("poetry"))),
             r#"(dune OR dragon) AND (subject_key:"poetry")"#
         );
+    }
+
+    #[test]
+    fn scoped_escapes_stray_syntax_so_the_genre_query_still_parses() {
+        let poetry = Some(find_genre("poetry"));
+        let cases = [
+            ("dune)", r"dune\)"),
+            ("dune:", r"dune\:"),
+            (r#"dune""#, r#"dune\""#),
+            ("a) OR (b", r"a\) OR \(b"),
+            (r"x\y [z] {w}", r"x\\y \[z\] \{w\}"),
+            ("Dune: Messiah", r"Dune\: Messiah"),
+            ("title:dune", "title:dune"),
+            (r#""dune messiah""#, r#""dune messiah""#),
+        ];
+        for (typed, escaped) in cases {
+            assert_eq!(
+                scoped(typed, poetry),
+                format!(r#"({escaped}) AND (subject_key:"poetry")"#),
+                "{typed}"
+            );
+        }
+        assert_eq!(scoped("dune)", None), "dune)");
     }
 
     #[test]
