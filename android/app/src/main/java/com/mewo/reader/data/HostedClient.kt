@@ -22,6 +22,26 @@ data class AuthRequest(
     val password: String,
 )
 
+/** `POST /v1/auth/register`. A null email is left off the wire. */
+@Serializable
+data class RegisterRequest(
+    val username: String,
+    val password: String,
+    val email: String? = null,
+)
+
+@Serializable
+data class ResetRequest(
+    val login: String,
+)
+
+/** `PUT /v1/me/email`. `email` has no default, so null is sent and removes it. */
+@Serializable
+data class SetEmailRequest(
+    val email: String?,
+    val currentPassword: String,
+)
+
 @Serializable
 data class AuthResponse(
     val token: String,
@@ -56,6 +76,8 @@ data class ServerVersion(
 @Serializable
 data class InstanceInfo(
     val allowSignup: Boolean = true,
+    /** "Forgot password?" works. Older servers omit it. */
+    val passwordReset: Boolean = false,
 )
 
 open class HostedClient(
@@ -70,8 +92,43 @@ open class HostedClient(
         encodeDefaults = false
     }
 
-    fun register(baseUrl: String, username: String, password: String): AuthResponse =
-        postAuth("$baseUrl/v1/auth/register", username, password)
+    fun register(
+        baseUrl: String,
+        username: String,
+        password: String,
+        email: String? = null,
+    ): AuthResponse {
+        val body = RegisterRequest(username, password, email?.trim()?.ifEmpty { null })
+        val req = Request.Builder()
+            .url("$baseUrl/v1/auth/register")
+            .post(json.encodeToString(body).toRequestBody(JSON))
+            .build()
+        return http.newCall(req).execute().use { it.decode() }
+    }
+
+    /** No session. The server answers 202 whether or not a letter goes out. */
+    fun requestReset(baseUrl: String, login: String) {
+        val base = normalizeBaseUrl(baseUrl).ifBlank {
+            throw HostedException("Set a server URL first.")
+        }
+        val req = Request.Builder()
+            .url("$base/v1/auth/reset/request")
+            .post(json.encodeToString(ResetRequest(login.trim())).toRequestBody(JSON))
+            .build()
+        http.newCall(req).execute().use { it.expectOk() }
+    }
+
+    /** True when a verify link went out (202). False when removed or unchanged (204). */
+    open fun setEmail(session: HostedSession, email: String?, currentPassword: String): Boolean {
+        val body = SetEmailRequest(email?.trim(), currentPassword)
+        val req = request(session.api("/v1/me/email"), session.token)
+            .put(json.encodeToString(body).toRequestBody(JSON))
+            .build()
+        return http.newCall(req).execute().use { response ->
+            response.expectOk()
+            response.code == 202
+        }
+    }
 
     fun login(baseUrl: String, username: String, password: String): AuthResponse =
         postAuth("$baseUrl/v1/auth/login", username, password)
