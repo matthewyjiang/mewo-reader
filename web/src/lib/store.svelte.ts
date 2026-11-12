@@ -139,8 +139,9 @@ class HostedStore {
     username: string,
     password: string,
     invite?: string,
+    email?: string,
   ): Promise<void> {
-    const session = await this.api.auth(mode, username.trim(), password, invite);
+    const session = await this.api.auth(mode, username.trim(), password, invite, email);
     this.clear();
     this.session = session;
     writeStored('mewo.session', session);

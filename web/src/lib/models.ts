@@ -233,6 +233,26 @@ export interface Me {
   username: string;
   isAdmin: boolean;
   canRequest: boolean;
+  /** Verified address. Older servers omit it. */
+  email?: string | null;
+  /** Address waiting on its verify link. Older servers omit it. */
+  pendingEmail?: string | null;
+  /** The server can mail reset and verify links. Older servers omit it. */
+  passwordReset?: boolean;
+}
+
+/** Public `GET /v1/instance`. */
+export interface InstanceInfo {
+  allowSignup: boolean;
+  passwordReset: boolean;
+}
+
+export type SmtpTls = 'starttls' | 'tls' | 'none';
+
+export interface ServiceCheck {
+  name: string;
+  ok: boolean;
+  detail: string;
 }
 
 export interface SupportedLanguage {
@@ -252,7 +272,13 @@ export interface ServerSettings {
   supportedLanguages: SupportedLanguage[];
   /** From `MEWO_DOWNLOADS_DIR`. Not a setting; PATCH rejects it. */
   downloadsDir: string | null;
-  secrets: { prowlarrApiKey: boolean; sabnzbdApiKey: boolean };
+  publicUrl: string;
+  smtpHost: string;
+  smtpPort: number;
+  smtpTls: SmtpTls;
+  smtpUsername: string;
+  mailFrom: string;
+  secrets: { prowlarrApiKey: boolean; sabnzbdApiKey: boolean; smtpPassword?: boolean };
 }
 
 export type SettingsPatch = Partial<
@@ -260,6 +286,7 @@ export type SettingsPatch = Partial<
 > & {
   prowlarrApiKey?: string | null;
   sabnzbdApiKey?: string | null;
+  smtpPassword?: string | null;
 };
 
 export interface AdminUser {

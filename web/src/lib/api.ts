@@ -3,7 +3,7 @@ import type {
   AccountRemoval, AdminInvite, AdminUser, AuthResponse, BlockedRelease, BookRecord, BookRequest,
   CatalogWork, CommentIndex, CreatedInvite, FeedPost, HomeFeedPage, Me, PostComment, ProfileBooks, ProfilePostsPage,
   ProfileRecord, ProfileRepostsPage, RepostState, SearchKind, SearchPage, ServerInfo,
-  ServerSettings, SettingsPatch, WorkDetail,
+  ServerSettings, ServiceCheck, SettingsPatch, WorkDetail,
 } from './models';
 
 export class ApiError extends Error {
@@ -67,10 +67,49 @@ export class HostedClient {
     username: string,
     password: string,
     invite?: string,
+    email?: string,
   ): Promise<AuthResponse> {
-    const body: { username: string; password: string; invite?: string } = { username, password };
+    const body: { username: string; password: string; invite?: string; email?: string } = {
+      username,
+      password,
+    };
     if (mode === 'register' && invite) body.invite = invite;
+    if (mode === 'register' && email?.trim()) body.email = email.trim();
     return this.json(`/auth/${mode}`, 'POST', body);
+  }
+
+  /** Always resolves the same way for any login the server accepts. */
+  async requestReset(login: string): Promise<void> {
+    await this.send('/auth/reset/request', 'POST', { login: login.trim() });
+  }
+
+  async redeemReset(token: string, newPassword: string): Promise<void> {
+    await this.send('/auth/reset', 'POST', { token, newPassword });
+  }
+
+  async verifyEmail(token: string): Promise<string> {
+    return (await this.json<{ email: string }>('/auth/email/verify', 'POST', { token })).email;
+  }
+
+  /** `sent`: a verify link went out. `done`: removed or already this address. */
+  async setEmail(email: string | null, currentPassword: string): Promise<'sent' | 'done'> {
+    const response = await this.send('/me/email', 'PUT', {
+      email: email === null ? null : email.trim(),
+      currentPassword,
+    });
+    return response.status === 202 ? 'sent' : 'done';
+  }
+
+  testMail(to: string): Promise<ServiceCheck> {
+    return this.json('/admin/mail/test', 'POST', { to: to.trim() });
+  }
+
+  private send(path: string, method: string, body: unknown): Promise<Response> {
+    return this.response(path, {
+      method,
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
   }
 
   async checkInvite(token: string, signal?: AbortSignal): Promise<CheckStatus> {
