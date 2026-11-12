@@ -11,8 +11,9 @@ use crate::models::{
     CommentRecord, CommentRow, CommentThread, FeedItem, FeedPage, InstanceInfo, InviteCheck,
     InviteCheckRequest, LibrarySnapshot, LikeSet, MeResponse, NewComment, PatchBook, ProfileBooks,
     ProfilePostRecord, ProfilePostsPage, ProfileRecord, ProfileReplies, ProfileReplyRecord,
-    ProfileReplyRow, ProfileRepostRecord, ProfileRepostsPage, RegisterRequest, RepostState,
-    SearchKind, SearchPage, MAX_COMMENT_CHARS, MAX_POST_ID_CHARS,
+    ProfileReplyRow, ProfileRepostRecord, ProfileRepostsPage, RedeemReset, RegisterRequest,
+    RepostState, ResetRequest, SearchKind, SearchPage, SetEmail, VerifiedEmail, VerifyEmail,
+    MAX_COMMENT_CHARS, MAX_POST_ID_CHARS,
 };
 use crate::search::{self, PROFILE_POSTS_LIMIT};
 use crate::version::VersionInfo;
@@ -39,6 +40,7 @@ pub async fn instance(State(state): State<AppState>) -> Result<Json<InstanceInfo
     let settings = crate::settings::load(&state.pool).await?;
     Ok(Json(InstanceInfo {
         allow_signup: settings.allow_signup,
+        password_reset: crate::mail::available(&state).await?,
     }))
 }
 
@@ -65,6 +67,7 @@ pub async fn register(
             return Err(ApiError::Forbidden("Signups are off.".into()));
         }
     }
+    let email = crate::auth::email::signup_email(&state, body.email.as_deref()).await?;
     // A taken name is rejected before Argon2. The UNIQUE index still decides a race.
     let taken = sqlx::query("SELECT id FROM users WHERE username_norm = ?")
         .bind(&norm)
@@ -117,6 +120,9 @@ pub async fn register(
         id
     };
     let token = session::issue(&state.pool, &id, now_ms()).await?;
+    if let Some(email) = email {
+        crate::auth::email::start_signup_verify(&state, &id, &email).await;
+    }
     Ok(Json(AuthResponse { token, username }))
 }
 
@@ -270,11 +276,74 @@ pub async fn me(
     authed: Authed,
 ) -> Result<Json<MeResponse>, ApiError> {
     let settings = crate::settings::load(&state.pool).await?;
+    let email = crate::auth::email::account_email(&state.pool, &authed.user_id).await?;
     Ok(Json(MeResponse {
         username: authed.username,
         is_admin: authed.is_admin,
         can_request: crate::requests::can_request(&settings),
+        email: email.email,
+        pending_email: email.pending,
+        password_reset: crate::mail::available(&state).await?,
     }))
+}
+
+/// Always 202 with an empty body, whether or not a letter goes out.
+pub async fn request_reset(
+    State(state): State<AppState>,
+    ip: ClientIp,
+    body: Result<Json<ResetRequest>, JsonRejection>,
+) -> Result<axum::http::StatusCode, ApiError> {
+    let body = json_body(body, "Reset request must be a JSON object with a login.")?;
+    crate::auth::email::request_reset(&state, ip, &body.login).await?;
+    Ok(axum::http::StatusCode::ACCEPTED)
+}
+
+pub async fn redeem_reset(
+    State(state): State<AppState>,
+    ip: ClientIp,
+    body: Result<Json<RedeemReset>, JsonRejection>,
+) -> Result<axum::http::StatusCode, ApiError> {
+    let body = json_body(
+        body,
+        "Reset must be a JSON object with a token and newPassword.",
+    )?;
+    crate::auth::email::redeem_reset(&state, ip, &body.token, &body.new_password).await?;
+    Ok(axum::http::StatusCode::NO_CONTENT)
+}
+
+pub async fn verify_email(
+    State(state): State<AppState>,
+    ip: ClientIp,
+    body: Result<Json<VerifyEmail>, JsonRejection>,
+) -> Result<Json<VerifiedEmail>, ApiError> {
+    let body = json_body(body, "Verify must be a JSON object with a token.")?;
+    let email = crate::auth::email::verify(&state, ip, &body.token).await?;
+    Ok(Json(VerifiedEmail { email }))
+}
+
+/// 202 when a verify link went out, 204 when nothing needs confirming.
+pub async fn set_email(
+    State(state): State<AppState>,
+    authed: Authed,
+    ip: ClientIp,
+    body: Result<Json<SetEmail>, JsonRejection>,
+) -> Result<axum::http::StatusCode, ApiError> {
+    let body = json_body(
+        body,
+        "Email change must be a JSON object with email and currentPassword.",
+    )?;
+    let change = crate::auth::email::set_email(
+        &state,
+        &authed,
+        ip,
+        body.email.as_deref(),
+        &body.current_password,
+    )
+    .await?;
+    Ok(match change {
+        crate::auth::email::EmailChange::Sent => axum::http::StatusCode::ACCEPTED,
+        crate::auth::email::EmailChange::Done => axum::http::StatusCode::NO_CONTENT,
+    })
 }
 
 pub async fn library(

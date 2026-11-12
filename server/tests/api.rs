@@ -163,6 +163,8 @@ fn roomy_auth() -> AuthConfig {
         login_user: rate,
         register_ip: rate,
         register_user: rate,
+        mail_ip: rate,
+        mail_user: rate,
         max_keys: 10_000,
         trusted_proxy_hops: 0,
     }
@@ -4752,10 +4754,10 @@ async fn instance_is_public_and_live() {
     let (app, tmp) = app().await;
     let (status, body) = empty_req(&app, "GET", "/v1/instance", None).await;
     assert_eq!(status, StatusCode::OK, "{body}");
-    assert_eq!(body, json!({ "allowSignup": true }));
+    assert_eq!(body, json!({ "allowSignup": true, "passwordReset": false }));
     let (status, body) = empty_req(&app, "GET", "/v1/instance", Some("not-a-session")).await;
     assert_eq!(status, StatusCode::OK, "{body}");
-    assert_eq!(body.as_object().unwrap().len(), 1);
+    assert_eq!(body.as_object().unwrap().len(), 2);
 
     let token = register(&app, "matt", "password1").await;
     grant(tmp.path(), "matt").await;
@@ -9090,4 +9092,833 @@ async fn a_disabled_admin_cannot_demote_the_last_active_admin() {
     }
     let active = "SELECT COUNT(*) FROM users WHERE is_admin = 1 AND disabled_at IS NULL";
     assert_eq!(count(&pool, active, None).await, 1);
+}
+
+// ---- Email and password reset ----
+
+const SETTLE: Duration = Duration::from_millis(300);
+
+struct MailApp {
+    state: mewo_server::AppState,
+    app: axum::Router,
+    tmp: TempDir,
+    smtp: common::FakeSmtp,
+}
+
+impl MailApp {
+    async fn settle(&self) {
+        self.state.mail.settle().await;
+    }
+
+    async fn next_mail(&self) -> common::SentMail {
+        self.settle().await;
+        self.smtp
+            .next(Duration::from_secs(5))
+            .await
+            .expect("a mail arrived")
+    }
+
+    async fn no_mail(&self) {
+        self.settle().await;
+        assert!(self.smtp.next(SETTLE).await.is_none(), "no mail expected");
+    }
+}
+
+/// An app that serves a web dir and points mail at a fake SMTP server.
+async fn mail_app_with(auth: AuthConfig) -> MailApp {
+    let tmp = TempDir::new().unwrap();
+    let web = tmp.path().join("web");
+    std::fs::create_dir_all(&web).unwrap();
+    std::fs::write(web.join("index.html"), "<!doctype html>").unwrap();
+    let state = prepare(Config {
+        web_dir: Some(web),
+        auth,
+        ..config_at(&tmp.path().join("data"), true, 1024 * 1024)
+    })
+    .await
+    .unwrap();
+    let smtp = common::FakeSmtp::start().await;
+    patch_settings(
+        &state.pool,
+        json!({
+            "publicUrl": "https://mewo.example",
+            "smtpHost": "127.0.0.1",
+            "smtpPort": smtp.port,
+            "smtpTls": "none",
+            "mailFrom": "Mewo <mewo@example.com>",
+        }),
+    )
+    .await;
+    let app = router(state.clone());
+    MailApp {
+        state,
+        app,
+        tmp,
+        smtp,
+    }
+}
+
+async fn mail_app() -> MailApp {
+    mail_app_with(roomy_auth()).await
+}
+
+async fn patch_settings(pool: &SqlitePool, patch: Value) {
+    sqlx::query("UPDATE settings SET doc = json_patch(doc, ?) WHERE id = 1")
+        .bind(patch.to_string())
+        .execute(pool)
+        .await
+        .unwrap();
+}
+
+async fn set_verified(pool: &SqlitePool, username: &str, email: &str) {
+    sqlx::query("UPDATE users SET email = ?, email_norm = lower(?) WHERE username_norm = lower(?)")
+        .bind(email)
+        .bind(email)
+        .bind(username)
+        .execute(pool)
+        .await
+        .unwrap();
+}
+
+async fn post_from(
+    app: &axum::Router,
+    path: &str,
+    ip: &str,
+    body: Value,
+) -> (StatusCode, axum::http::HeaderMap, Bytes) {
+    let req = Request::builder()
+        .method("POST")
+        .uri(path)
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(body.to_string()))
+        .unwrap();
+    let response = app.clone().oneshot(with_ip(req, ip)).await.unwrap();
+    let status = response.status();
+    let headers = response.headers().clone();
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    (status, headers, body)
+}
+
+async fn ask_reset(app: &axum::Router, login: &str) -> StatusCode {
+    let (status, body) = json_req(
+        app,
+        "POST",
+        "/v1/auth/reset/request",
+        None,
+        json!({ "login": login }),
+    )
+    .await;
+    assert_eq!(body, Value::Null);
+    status
+}
+
+async fn redeem(app: &axum::Router, token: &str, password: &str) -> (StatusCode, Value) {
+    json_req(
+        app,
+        "POST",
+        "/v1/auth/reset",
+        None,
+        json!({ "token": token, "newPassword": password }),
+    )
+    .await
+}
+
+/// A verified account and a fresh reset token for it.
+async fn reset_token(mail: &MailApp, username: &str) -> String {
+    assert_eq!(ask_reset(&mail.app, username).await, StatusCode::ACCEPTED);
+    mail.next_mail().await.token()
+}
+
+fn sha256(bytes: &[u8]) -> Vec<u8> {
+    use sha2::Digest;
+    sha2::Sha256::digest(bytes).to_vec()
+}
+
+fn file_contains(path: &Path, needle: &str) -> bool {
+    std::fs::read(path)
+        .map(|bytes| bytes.windows(needle.len()).any(|w| w == needle.as_bytes()))
+        .unwrap_or(false)
+}
+
+#[tokio::test]
+async fn reset_mails_one_link_and_stores_only_its_hash() {
+    let mail = mail_app().await;
+    register(&mail.app, "ada", "password1").await;
+    set_verified(&mail.state.pool, "ada", "Ada@Example.com").await;
+
+    assert_eq!(ask_reset(&mail.app, "ada").await, StatusCode::ACCEPTED);
+    let sent = mail.next_mail().await;
+    assert_eq!(sent.to, vec!["Ada@Example.com".to_string()]);
+    assert!(
+        sent.data.contains("Subject: Reset your Mewo password"),
+        "{}",
+        sent.data
+    );
+    let body = sent.body();
+    assert!(
+        body.contains("Someone asked to reset the password for @ada on mewo.example."),
+        "{body}"
+    );
+    assert!(body.contains("https://mewo.example/reset#token="), "{body}");
+    let token = sent.token();
+    assert_eq!(token.len(), 64);
+    mail.no_mail().await;
+
+    let stored: Vec<Vec<u8>> = sqlx::query_scalar("SELECT token_hash FROM email_tokens")
+        .fetch_all(&mail.state.pool)
+        .await
+        .unwrap();
+    assert_eq!(stored, vec![sha256(token.as_bytes())]);
+    let data = mail.tmp.path().join("data");
+    for file in ["mewo.db", "mewo.db-wal"] {
+        assert!(!file_contains(&data.join(file), &token), "{file}");
+    }
+
+    // An email works as the login too, in any case.
+    assert_eq!(
+        ask_reset(&mail.app, "ADA@example.com").await,
+        StatusCode::ACCEPTED
+    );
+    let again = mail.next_mail().await;
+    assert_ne!(again.token(), token);
+}
+
+#[tokio::test]
+async fn reset_replies_the_same_for_every_login() {
+    let mut auth = roomy_auth();
+    auth.mail_ip = rate(5, 120);
+    auth.mail_user = rate(1, 1200);
+    let mail = mail_app_with(auth).await;
+    let pool = &mail.state.pool;
+    register(&mail.app, "ada", "password1").await;
+    set_verified(pool, "ada", "ada@example.com").await;
+    register(&mail.app, "bob", "password1").await;
+    register(&mail.app, "dis", "password1").await;
+    set_verified(pool, "dis", "dis@example.com").await;
+    sqlx::query("UPDATE users SET disabled_at = 1 WHERE username = 'dis'")
+        .execute(pool)
+        .await
+        .unwrap();
+
+    let path = "/v1/auth/reset/request";
+    let reference = post_from(&mail.app, path, "203.0.113.1", json!({ "login": "ada" })).await;
+    assert_eq!(reference.0, StatusCode::ACCEPTED);
+    assert!(reference.2.is_empty());
+    assert_eq!(reference.1.get(header::CACHE_CONTROL).unwrap(), "no-store");
+    mail.next_mail().await;
+
+    // Unknown, no email, disabled, and an empty account bucket.
+    let cases = [
+        ("203.0.113.2", "nobody"),
+        ("203.0.113.3", "nobody@example.com"),
+        ("203.0.113.4", "bob"),
+        ("203.0.113.5", "dis"),
+        ("203.0.113.6", "ada"),
+    ];
+    for (ip, login) in cases {
+        let reply = post_from(&mail.app, path, ip, json!({ "login": login })).await;
+        assert_eq!(reply, reference, "{login}");
+    }
+    mail.no_mail().await;
+
+    // Mail off.
+    patch_settings(pool, json!({ "smtpHost": "" })).await;
+    let reply = post_from(&mail.app, path, "203.0.113.7", json!({ "login": "ada" })).await;
+    assert_eq!(reply, reference);
+    mail.no_mail().await;
+
+    for _ in 0..5 {
+        let reply = post_from(&mail.app, path, "198.51.100.9", json!({ "login": "x" })).await;
+        assert_eq!(reply.0, StatusCode::ACCEPTED);
+    }
+    let sixth = post_from(&mail.app, path, "198.51.100.9", json!({ "login": "x" })).await;
+    assert_eq!(sixth.0, StatusCode::TOO_MANY_REQUESTS);
+
+    for bad in [
+        json!({}),
+        json!({ "login": "ada", "extra": 1 }),
+        json!({ "login": "" }),
+    ] {
+        let reply = post_from(&mail.app, path, "203.0.113.8", bad.clone()).await;
+        assert_eq!(reply.0, StatusCode::BAD_REQUEST, "{bad}");
+    }
+}
+
+#[tokio::test]
+async fn redeem_sets_the_password_once_and_signs_out_everywhere() {
+    let mail = mail_app().await;
+    let first = register(&mail.app, "ada", "password1").await;
+    let second = login(&mail.app, "ada", "password1").await;
+    set_verified(&mail.state.pool, "ada", "ada@example.com").await;
+    let token = reset_token(&mail, "ada").await;
+
+    let (status, body) = redeem(&mail.app, &token, "short").await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    let (status, body) = redeem(&mail.app, &token, "newpassword").await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+    assert_eq!(
+        login_status(&mail.app, "ada", "newpassword").await.0,
+        StatusCode::OK
+    );
+    assert_eq!(
+        login_status(&mail.app, "ada", "password1").await.0,
+        StatusCode::UNAUTHORIZED
+    );
+    for old in [&first, &second] {
+        let (status, _) = empty_req(&mail.app, "GET", "/v1/me", Some(old)).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+    }
+    let (status, body) = redeem(&mail.app, &token, "another-one").await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["error"], "This link has expired.");
+
+    // A newer link kills the older one.
+    let older = reset_token(&mail, "ada").await;
+    let newer = reset_token(&mail, "ada").await;
+    assert_eq!(
+        redeem(&mail.app, &older, "password-x").await.0,
+        StatusCode::BAD_REQUEST
+    );
+    assert_eq!(
+        redeem(&mail.app, &newer, "password-x").await.0,
+        StatusCode::NO_CONTENT
+    );
+
+    // An expired link.
+    let token = reset_token(&mail, "ada").await;
+    sqlx::query("UPDATE email_tokens SET expires_at = 0")
+        .execute(&mail.state.pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        redeem(&mail.app, &token, "password-y").await.0,
+        StatusCode::BAD_REQUEST
+    );
+    assert_eq!(
+        redeem(&mail.app, "nope", "password-y").await.0,
+        StatusCode::BAD_REQUEST
+    );
+}
+
+#[tokio::test]
+async fn a_reset_link_dies_when_the_account_changes() {
+    let mail = mail_app().await;
+    register(&mail.app, "root", "password1").await;
+    grant(&mail.tmp.path().join("data"), "root").await;
+    let root = login(&mail.app, "root", "password1").await;
+    let ada = register(&mail.app, "ada", "password1").await;
+    set_verified(&mail.state.pool, "ada", "ada@example.com").await;
+
+    // Own password change.
+    let token = reset_token(&mail, "ada").await;
+    let (status, _) = json_req(
+        &mail.app,
+        "POST",
+        "/v1/auth/password",
+        Some(&ada),
+        json!({ "currentPassword": "password1", "newPassword": "password2" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    assert_eq!(
+        redeem(&mail.app, &token, "password3").await.0,
+        StatusCode::BAD_REQUEST
+    );
+
+    // Admin reset.
+    let token = reset_token(&mail, "ada").await;
+    let (status, temp) = empty_req(
+        &mail.app,
+        "POST",
+        "/v1/admin/users/ada/password",
+        Some(&root),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        redeem(&mail.app, &token, "password3").await.0,
+        StatusCode::BAD_REQUEST
+    );
+    let temp = temp["password"].as_str().unwrap().to_string();
+
+    // Email removed.
+    let ada = login(&mail.app, "ada", &temp).await;
+    let token = reset_token(&mail, "ada").await;
+    let (status, _) = json_req(
+        &mail.app,
+        "PUT",
+        "/v1/me/email",
+        Some(&ada),
+        json!({ "email": null, "currentPassword": temp }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    assert_eq!(
+        redeem(&mail.app, &token, "password3").await.0,
+        StatusCode::BAD_REQUEST
+    );
+
+    // Disabled after the link went out.
+    set_verified(&mail.state.pool, "ada", "ada@example.com").await;
+    let token = reset_token(&mail, "ada").await;
+    let (status, _) = json_req(
+        &mail.app,
+        "PATCH",
+        "/v1/admin/users/ada",
+        Some(&root),
+        json!({ "disabled": true }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, body) = redeem(&mail.app, &token, "password3").await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert_eq!(body["error"], "This account is disabled.");
+
+    // Busy hasher: 503 and the link still works.
+    let (status, _) = json_req(
+        &mail.app,
+        "PATCH",
+        "/v1/admin/users/ada",
+        Some(&root),
+        json!({ "disabled": false }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    mail.state.passwords.fail_next_hash();
+    assert_eq!(
+        redeem(&mail.app, &token, "password3").await.0,
+        StatusCode::SERVICE_UNAVAILABLE
+    );
+    assert_eq!(
+        redeem(&mail.app, &token, "password3").await.0,
+        StatusCode::NO_CONTENT
+    );
+
+    // Deleted.
+    let token = reset_token(&mail, "ada").await;
+    let (status, _) = empty_req(&mail.app, "DELETE", "/v1/admin/users/ada", Some(&root)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        redeem(&mail.app, &token, "password4").await.0,
+        StatusCode::BAD_REQUEST
+    );
+}
+
+async fn put_email(
+    app: &axum::Router,
+    token: &str,
+    email: Value,
+    password: &str,
+) -> (StatusCode, Value) {
+    json_req(
+        app,
+        "PUT",
+        "/v1/me/email",
+        Some(token),
+        json!({ "email": email, "currentPassword": password }),
+    )
+    .await
+}
+
+async fn verify_link(app: &axum::Router, token: &str) -> (StatusCode, Value) {
+    json_req(
+        app,
+        "POST",
+        "/v1/auth/email/verify",
+        None,
+        json!({ "token": token }),
+    )
+    .await
+}
+
+async fn me(app: &axum::Router, token: &str) -> Value {
+    let (status, body) = empty_req(app, "GET", "/v1/me", Some(token)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    body
+}
+
+#[tokio::test]
+async fn set_email_sends_a_verify_link_and_the_link_stores_it() {
+    let mail = mail_app().await;
+    let ada = register(&mail.app, "ada", "password1").await;
+    let bob = register(&mail.app, "bob", "password1").await;
+    register(&mail.app, "cat", "password1").await;
+    set_verified(&mail.state.pool, "cat", "cat@example.com").await;
+
+    let (status, body) = put_email(&mail.app, &ada, json!("ada@example.com"), "wrong-pass").await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert_eq!(body["error"], "Wrong password.");
+    let (status, body) = put_email(&mail.app, &ada, json!("not-an-email"), "password1").await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["error"], "Enter a valid email.");
+    let (status, body) = put_email(&mail.app, &ada, json!("CAT@example.com"), "password1").await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(body["error"], "That email is already in use.");
+    mail.no_mail().await;
+
+    let (status, body) = put_email(&mail.app, &ada, json!("ada@example.com"), "password1").await;
+    assert_eq!(status, StatusCode::ACCEPTED, "{body}");
+    let sent = mail.next_mail().await;
+    assert_eq!(sent.to, vec!["ada@example.com".to_string()]);
+    assert!(sent
+        .body()
+        .contains("https://mewo.example/verify-email#token="));
+    let ada_link = sent.token();
+    let profile = me(&mail.app, &ada).await;
+    assert_eq!(profile["email"], Value::Null);
+    assert_eq!(profile["pendingEmail"], "ada@example.com");
+    assert_eq!(profile["passwordReset"], true);
+
+    // bob asks for the same address while ada's is still pending.
+    let (status, _) = put_email(&mail.app, &bob, json!("ADA@example.com"), "password1").await;
+    assert_eq!(status, StatusCode::ACCEPTED);
+    let bob_link = mail.next_mail().await.token();
+
+    let (status, body) = verify_link(&mail.app, &ada_link).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body, json!({ "email": "ada@example.com" }));
+    let profile = me(&mail.app, &ada).await;
+    assert_eq!(profile["email"], "ada@example.com");
+    assert_eq!(profile["pendingEmail"], Value::Null);
+    assert_eq!(
+        verify_link(&mail.app, &ada_link).await.0,
+        StatusCode::BAD_REQUEST
+    );
+    let (status, body) = verify_link(&mail.app, &bob_link).await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(body["error"], "That email is already in use.");
+    assert_eq!(me(&mail.app, &bob).await["email"], Value::Null);
+
+    // Same address again is a no-op.
+    let (status, _) = put_email(&mail.app, &ada, json!("ada@example.com"), "password1").await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    mail.no_mail().await;
+
+    // null clears the address and a pending link.
+    let (status, _) = put_email(&mail.app, &ada, json!("ada2@example.com"), "password1").await;
+    assert_eq!(status, StatusCode::ACCEPTED);
+    let pending_link = mail.next_mail().await.token();
+    let (status, _) = put_email(&mail.app, &ada, Value::Null, "password1").await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let profile = me(&mail.app, &ada).await;
+    assert_eq!(profile["email"], Value::Null);
+    assert_eq!(profile["pendingEmail"], Value::Null);
+    assert_eq!(
+        verify_link(&mail.app, &pending_link).await.0,
+        StatusCode::BAD_REQUEST
+    );
+
+    // An expired verify link.
+    let (status, _) = put_email(&mail.app, &ada, json!("ada3@example.com"), "password1").await;
+    assert_eq!(status, StatusCode::ACCEPTED);
+    let link = mail.next_mail().await.token();
+    sqlx::query("UPDATE email_tokens SET expires_at = 0")
+        .execute(&mail.state.pool)
+        .await
+        .unwrap();
+    assert_eq!(me(&mail.app, &ada).await["pendingEmail"], Value::Null);
+    let (status, body) = verify_link(&mail.app, &link).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["error"], "This link has expired.");
+
+    // Mail off.
+    patch_settings(&mail.state.pool, json!({ "publicUrl": "" })).await;
+    let (status, body) = put_email(&mail.app, &ada, json!("ada@example.com"), "password1").await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(body["error"], "Mail isn't set up on this server.");
+    assert_eq!(me(&mail.app, &ada).await["passwordReset"], false);
+}
+
+#[tokio::test]
+async fn set_email_reports_a_failed_send() {
+    let mail = mail_app().await;
+    let ada = register(&mail.app, "ada", "password1").await;
+    let closed = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = closed.local_addr().unwrap().port();
+    drop(closed);
+    patch_settings(&mail.state.pool, json!({ "smtpPort": port })).await;
+    let (status, body) = put_email(&mail.app, &ada, json!("ada@example.com"), "password1").await;
+    assert_eq!(status, StatusCode::BAD_GATEWAY);
+    assert_eq!(body["error"], "Couldn't send the email.");
+    assert_eq!(me(&mail.app, &ada).await["pendingEmail"], Value::Null);
+}
+
+#[tokio::test]
+async fn password_reset_is_off_by_default_and_on_when_configured() {
+    let (app, _tmp) = app().await;
+    let (status, body) = empty_req(&app, "GET", "/v1/instance", None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["passwordReset"], false);
+    let ada = register(&app, "ada", "password1").await;
+    let profile = me(&app, &ada).await;
+    assert_eq!(profile["passwordReset"], false);
+    assert_eq!(profile["email"], Value::Null);
+    assert_eq!(profile["pendingEmail"], Value::Null);
+
+    let mail = mail_app().await;
+    let (_, body) = empty_req(&mail.app, "GET", "/v1/instance", None).await;
+    assert_eq!(body["passwordReset"], true);
+}
+
+#[tokio::test]
+async fn mail_test_is_admin_only_and_never_shows_the_password() {
+    let mail = mail_app().await;
+    let ada = register(&mail.app, "ada", "password1").await;
+    register(&mail.app, "root", "password1").await;
+    grant(&mail.tmp.path().join("data"), "root").await;
+    let root = login(&mail.app, "root", "password1").await;
+    let path = "/v1/admin/mail/test";
+
+    let (status, _) = json_req(
+        &mail.app,
+        "POST",
+        path,
+        Some(&ada),
+        json!({ "to": "a@b.c" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+
+    let (status, body) = json_req(
+        &mail.app,
+        "POST",
+        path,
+        Some(&root),
+        json!({ "to": "me@example.com" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        body,
+        json!({ "name": "mail", "ok": true, "detail": "Sent" })
+    );
+    let sent = mail.next_mail().await;
+    assert_eq!(sent.to, vec!["me@example.com".to_string()]);
+
+    let closed = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = closed.local_addr().unwrap().port();
+    drop(closed);
+    let (status, body) = json_req(
+        &mail.app,
+        "PATCH",
+        "/v1/admin/settings",
+        Some(&root),
+        json!({
+            "smtpPort": port,
+            "smtpTls": "tls",
+            "smtpUsername": "mewo",
+            "smtpPassword": "hunter2-secret",
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["secrets"]["smtpPassword"], true);
+    assert!(!body.to_string().contains("hunter2-secret"));
+    let (_, body) = empty_req(&mail.app, "GET", "/v1/admin/settings", Some(&root)).await;
+    assert_eq!(body["secrets"]["smtpPassword"], true);
+    assert_eq!(body["smtpTls"], "tls");
+    assert!(body.get("smtpPassword").is_none());
+    assert!(!body.to_string().contains("hunter2-secret"));
+
+    let (status, body) = json_req(
+        &mail.app,
+        "POST",
+        path,
+        Some(&root),
+        json!({ "to": "me@example.com" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["name"], "mail");
+    assert_eq!(body["ok"], false);
+    assert!(!body["detail"].as_str().unwrap().is_empty());
+    assert!(!body.to_string().contains("hunter2-secret"));
+
+    let (status, body) = json_req(
+        &mail.app,
+        "PATCH",
+        "/v1/admin/settings",
+        Some(&root),
+        json!({ "smtpTls": "none" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["error"], "Use STARTTLS or TLS to send a password.");
+}
+
+#[derive(Clone, Default)]
+struct Captured(Arc<std::sync::Mutex<Vec<u8>>>);
+
+impl std::io::Write for Captured {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn reset_logs_no_token_link_or_smtp_password() {
+    let captured = Captured::default();
+    let writer = captured.clone();
+    let subscriber = tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::TRACE)
+        .with_ansi(false)
+        .with_writer(move || writer.clone())
+        .finish();
+    let _guard = tracing::subscriber::set_default(subscriber);
+
+    let mail = mail_app().await;
+    sqlx::query("UPDATE settings SET secrets = ? WHERE id = 1")
+        .bind(json!({ "smtpPassword": "hunter2-secret" }).to_string())
+        .execute(&mail.state.pool)
+        .await
+        .unwrap();
+    register(&mail.app, "ada", "password1").await;
+    set_verified(&mail.state.pool, "ada", "ada@example.com").await;
+    let token = reset_token(&mail, "ada").await;
+    assert_eq!(
+        redeem(&mail.app, &token, "newpassword").await.0,
+        StatusCode::NO_CONTENT
+    );
+    // A failed send logs too.
+    patch_settings(&mail.state.pool, json!({ "smtpPort": 1 })).await;
+    assert_eq!(ask_reset(&mail.app, "ada").await, StatusCode::ACCEPTED);
+    mail.settle().await;
+
+    let logs = String::from_utf8(captured.0.lock().unwrap().clone()).unwrap();
+    assert!(
+        logs.contains("/v1/auth/reset"),
+        "the capture saw the requests"
+    );
+    assert!(logs.contains("mail not sent"), "{logs}");
+    for secret in [
+        token.as_str(),
+        "#token=",
+        "hunter2-secret",
+        "ada@example.com",
+    ] {
+        assert!(!logs.contains(secret), "{secret} in logs");
+    }
+}
+
+#[tokio::test]
+async fn signup_with_email_sends_a_verify_link() {
+    let mail = mail_app().await;
+    let (status, body) = json_req(
+        &mail.app,
+        "POST",
+        "/v1/auth/register",
+        None,
+        json!({ "username": "ada", "password": "password1", "email": "ada@example.com" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body.as_object().unwrap().len(), 2);
+    let token = body["token"].as_str().unwrap().to_string();
+    let sent = mail.next_mail().await;
+    assert_eq!(sent.to, vec!["ada@example.com".to_string()]);
+    assert!(sent.body().contains("/verify-email#token="));
+    mail.no_mail().await;
+    let profile = me(&mail.app, &token).await;
+    assert_eq!(profile["email"], Value::Null);
+    assert_eq!(profile["pendingEmail"], "ada@example.com");
+    let (status, _) = verify_link(&mail.app, &sent.token()).await;
+    assert_eq!(status, StatusCode::OK);
+
+    let users = "SELECT COUNT(*) FROM users";
+    let before = count(&mail.state.pool, users, None).await;
+    for (email, code, message) in [
+        ("nope", StatusCode::BAD_REQUEST, "Enter a valid email."),
+        (
+            "ADA@example.com",
+            StatusCode::CONFLICT,
+            "That email is already in use.",
+        ),
+    ] {
+        let (status, body) = json_req(
+            &mail.app,
+            "POST",
+            "/v1/auth/register",
+            None,
+            json!({ "username": "bob", "password": "password1", "email": email }),
+        )
+        .await;
+        assert_eq!(status, code, "{body}");
+        assert_eq!(body["error"], message);
+    }
+    assert_eq!(count(&mail.state.pool, users, None).await, before);
+
+    // No email, blank, and null are the ordinary signup.
+    for (name, email) in [
+        ("bob", None),
+        ("cat", Some(json!(""))),
+        ("dan", Some(Value::Null)),
+    ] {
+        let mut req = json!({ "username": name, "password": "password1" });
+        if let Some(email) = email {
+            req["email"] = email;
+        }
+        let (status, body) = json_req(&mail.app, "POST", "/v1/auth/register", None, req).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(
+            me(&mail.app, body["token"].as_str().unwrap()).await["pendingEmail"],
+            Value::Null
+        );
+    }
+    mail.no_mail().await;
+
+    let (app, _tmp) = app().await;
+    let (status, body) = json_req(
+        &app,
+        "POST",
+        "/v1/auth/register",
+        None,
+        json!({ "username": "eve", "password": "password1", "email": "eve@example.com" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(body["error"], "Mail isn't set up on this server.");
+    register(&app, "eve", "password1").await;
+}
+
+#[tokio::test]
+async fn migration_014_leaves_emails_null() {
+    let tmp = TempDir::new().unwrap();
+    let url = format!("sqlite://{}?mode=rwc", tmp.path().join("mewo.db").display());
+    let pool = sqlx::SqlitePool::connect(&url).await.unwrap();
+    let migrator = sqlx::migrate!("./migrations");
+    let mut conn = pool.acquire().await.unwrap();
+    Migrate::ensure_migrations_table(&mut *conn).await.unwrap();
+    for migration in migrator.iter() {
+        if migration.version < 14 {
+            Migrate::apply(&mut *conn, migration).await.unwrap();
+        }
+    }
+    drop(conn);
+    sqlx::query(
+        "INSERT INTO users (id, username, username_norm, password_hash, created_at)
+         VALUES ('user', 'matt', 'matt', 'x', 1)",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    let before = sqlx::query_scalar::<_, Option<String>>("SELECT email FROM users")
+        .fetch_one(&pool)
+        .await;
+    assert!(before.is_err(), "email exists before migration 014");
+    sqlx::migrate!("./migrations").run(&pool).await.unwrap();
+    let after: (Option<String>, Option<String>) =
+        sqlx::query_as("SELECT email, email_norm FROM users")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(after, (None, None));
+    assert_eq!(
+        count(&pool, "SELECT COUNT(*) FROM email_tokens", None).await,
+        0
+    );
 }

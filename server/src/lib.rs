@@ -11,6 +11,7 @@ pub mod error;
 pub mod feed;
 pub mod health;
 mod library;
+pub mod mail;
 pub mod models;
 pub mod parse_pool;
 mod reparse;
@@ -56,6 +57,8 @@ pub struct AppState {
     pub(crate) catalog_limit: Arc<requests::Limiter>,
     pub passwords: auth::Passwords,
     pub throttle: auth::Throttle,
+    /// Background mail sends.
+    pub mail: mail::Mailer,
     /// EPUB parse concurrency. Every parse takes a permit from here.
     pub parsers: parse_pool::ParsePool,
     /// Free-disk floor. `min_free_bytes == 0` allows every write.
@@ -88,7 +91,20 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/auth/logout", post(routes::logout))
         .route("/v1/auth/logout-all", post(routes::logout_all))
         .route("/v1/auth/password", post(routes::change_password))
+        .route(
+            "/v1/auth/reset/request",
+            post(routes::request_reset).layer(middleware::from_fn(routes::no_store)),
+        )
+        .route(
+            "/v1/auth/reset",
+            post(routes::redeem_reset).layer(middleware::from_fn(routes::no_store)),
+        )
+        .route(
+            "/v1/auth/email/verify",
+            post(routes::verify_email).layer(middleware::from_fn(routes::no_store)),
+        )
         .route("/v1/me", get(routes::me))
+        .route("/v1/me/email", put(routes::set_email))
         .route("/v1/library", get(routes::library))
         .route(
             "/v1/books",
@@ -199,6 +215,7 @@ pub async fn prepare(config: Config) -> Result<AppState, sqlx::Error> {
         catalog_limit: Arc::new(requests::Limiter::new()),
         passwords,
         throttle,
+        mail: mail::Mailer::new(),
         parsers: parse_pool::ParsePool::new(&config.limits),
         disk: disk::DiskGuard::new(config.limits.min_free_bytes),
         health,

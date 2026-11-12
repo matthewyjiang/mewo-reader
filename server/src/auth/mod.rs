@@ -1,3 +1,4 @@
+pub mod email;
 pub mod invite;
 pub mod passwords;
 pub mod session;

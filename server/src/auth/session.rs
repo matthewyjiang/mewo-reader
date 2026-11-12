@@ -62,13 +62,25 @@ pub async fn commit_password_change(
     if current.as_deref() != Some(verified_hash) {
         return Err(ApiError::Forbidden("Wrong password.".into()));
     }
+    replace_password(&mut tx, user_id, new_hash, Some(session_id)).await?;
+    tx.commit().await?;
+    Ok(())
+}
+
+/// Stores `new_hash` and signs the account out everywhere except `keep`.
+/// The caller owns the transaction and its checks.
+pub(crate) async fn replace_password(
+    conn: &mut SqliteConnection,
+    user_id: &str,
+    new_hash: &str,
+    keep: Option<&str>,
+) -> Result<(), ApiError> {
     sqlx::query("UPDATE users SET password_hash = ? WHERE id = ?")
         .bind(new_hash)
         .bind(user_id)
-        .execute(&mut *tx)
+        .execute(&mut *conn)
         .await?;
-    revoke_all(&mut tx, user_id, Some(session_id)).await?;
-    tx.commit().await?;
+    revoke_all(conn, user_id, keep).await?;
     Ok(())
 }
 
@@ -675,6 +687,39 @@ mod tests {
         assert!(resolve(&pool, &absolute, T0).await.unwrap().is_none());
         assert!(resolve(&pool, &kept, T0).await.unwrap().is_some());
         assert_eq!(prune(&pool, T0).await.unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn replace_password_keeps_exactly_keep() {
+        let (_tmp, pool) = fresh().await;
+        user(&pool, "user", "Matt").await;
+        user(&pool, "other", "ada").await;
+        let first = issue(&pool, "user", T0).await.unwrap();
+        let second = issue(&pool, "user", T0 + 1).await.unwrap();
+        let ada = issue(&pool, "other", T0).await.unwrap();
+        let keep = resolve(&pool, &second, T0 + 1).await.unwrap().unwrap();
+
+        let mut tx = pool.begin().await.unwrap();
+        replace_password(&mut tx, "user", "new-hash", Some(&keep.session_id))
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
+        let stored: String =
+            sqlx::query_scalar("SELECT password_hash FROM users WHERE id = 'user'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(stored, "new-hash");
+        assert!(resolve(&pool, &first, T0 + 1).await.unwrap().is_none());
+        assert!(resolve(&pool, &second, T0 + 1).await.unwrap().is_some());
+        assert!(resolve(&pool, &ada, T0 + 1).await.unwrap().is_some());
+
+        let mut conn = pool.acquire().await.unwrap();
+        replace_password(&mut conn, "user", "newer-hash", None)
+            .await
+            .unwrap();
+        assert!(resolve(&pool, &second, T0 + 1).await.unwrap().is_none());
+        assert!(resolve(&pool, &ada, T0 + 1).await.unwrap().is_some());
     }
 
     #[tokio::test]

@@ -146,19 +146,38 @@ Each account can have 5 active requests (`requested` or `downloading`), and one 
 
 API keys live in `settings.secrets`, not in the settings document. `GET` never returns them. `PATCH` accepts `prowlarrApiKey` and `sabnzbdApiKey` as a string of at most 256 characters, or `null` to clear.
 
+## Mail
+
+Settings > Server > Mail turns on "Forgot password?" and account email. Mail is on when the SMTP host, From and Public URL are set and the server serves the web app (`MEWO_WEB_DIR`), because the links open web pages. `GET /v1/instance` and `GET /v1/me` report it as `passwordReset`.
+
+- `publicUrl` — the origin people open, like `https://mewo.example`. Links are built from this value, never from the request's `Host` header. No path, query or fragment
+- `smtpHost`, `smtpPort` (default 587), `smtpUsername`, `mailFrom` (`Mewo <mewo@example.com>` or a bare address)
+- `smtpTls` — `starttls` (default, usually port 587), `tls` (implicit TLS, usually 465), or `none` (plain text, for a relay on the same host). `none` cannot carry a password
+- `smtpPassword` — a secret like the API keys. `GET` reports only `secrets.smtpPassword: true`
+
+`POST /v1/admin/mail/test` `{ "to" }` sends one message now and returns `{ "name": "mail", "ok", "detail" }`.
+
+A link is 32 random bytes after `#token=`, so it stays out of server logs and `Referer`. The database stores only its `sha256`. A reset link works once, for 30 minutes, and dies when the password or the email changes or a newer link is sent. A verify link works for 24 hours. A reset request answers 202 with an empty body for every input; the lookup and the send run afterwards. Requests are limited to 5 per IP (one more every 2 minutes) and 3 letters per account (one more every 20 minutes). Opening a link uses the login IP limit.
+
+Mail from your own domain lands in spam unless that domain's SPF record allows the SMTP server and the server signs with DKIM. A transactional provider (Postmark, SES, Mailgun) sets both up for you.
+
 ## Routes
 
 Prefix `/v1`.
 
 - `GET /version` → `{ "version", "commit" }`. `commit` is a string or null. Public
-- `GET /instance` → `{ "allowSignup" }`. Public. Read live from the settings row. A future `name` is one more field
+- `GET /instance` → `{ "allowSignup", "passwordReset" }`. Public. Read live from the settings row. A future `name` is one more field
 - `POST /invites/check` `{ "token" }` → `{ "status" }`. `status` is `valid`, `used`, `expired`, or `invalid`. Public. Unknown, malformed, and revoked are `invalid`. A body that is not a JSON object with `token` is 400 `Invite check must be a JSON object with a token.` A body over 1 MiB is 413. The check is limited per IP on the login IP bucket. `Cache-Control` is `no-store`
-- `POST /auth/register` `{ "username", "password", "invite"? }`
+- `POST /auth/register` `{ "username", "password", "invite"?, "email"? }`. A non-empty `email` gets a verify link once the account exists. 409 `Mail isn't set up on this server.` when mail is off, 400 `Enter a valid email.`, 409 `That email is already in use.`
+- `POST /auth/reset/request` `{ "login" }` → 202, empty. `login` is a username or an email. Public
+- `POST /auth/reset` `{ "token", "newPassword" }` → 204. Signs the account out everywhere and issues no session. A used, expired or stale link is 400 `This link has expired.` Public
+- `POST /auth/email/verify` `{ "token" }` → `{ "email" }`. 409 when another account verified that address first. Public
+- `PUT /me/email` `{ "email": string | null, "currentPassword" }` → 202 when a verify link went out, 204 when the address was removed or is unchanged. 403 `Wrong password.` 502 `Couldn't send the email.`
 - `POST /auth/login`
 - `POST /auth/logout` → 204
 - `POST /auth/logout-all` → 204. Ends every session for this account, including this one
 - `POST /auth/password` `{ "currentPassword", "newPassword" }` → 204. A wrong current password is 403 `Wrong password.` A `newPassword` shorter than 8 characters is 400. Other sessions for this account are revoked
-- `GET /me` → `{ "username", "isAdmin", "canRequest" }`. `canRequest` is true when book requests are enabled
+- `GET /me` → `{ "username", "isAdmin", "canRequest", "email", "pendingEmail", "passwordReset" }`. `canRequest` is true when book requests are enabled. `email` is the verified address or null. `pendingEmail` waits on an unexpired verify link
 - `GET /admin/settings` → `{ "allowSignup", "maxEpubBytes", "requestsEnabled", "prowlarrUrl", "sabnzbdUrl", "sabnzbdCategory", "downloadsDir", "secrets": { "prowlarrApiKey", "sabnzbdApiKey" } }`. The secret fields are booleans (set or not). `downloadsDir` is the `MEWO_DOWNLOADS_DIR` path, or null. Admin
 - `PATCH /admin/settings` JSON object of keys to change. Returns the full settings. An empty object is 200 and changes nothing. An unknown key, a wrong type, or an out-of-range value is 400 and names the key. `maxEpubBytes` must be 1 to 1024 MB (`maxEpubBytes must be 1 to 1024 MB.`). `prowlarrApiKey` and `sabnzbdApiKey` are a string or `null` and are not echoed back. `downloadsDir` is rejected
 - `GET /catalog/search?q=&page=` → `{ "items": [ { "workKey", "title", "author", "year", "coverId", "request" } ], "nextPage" }`. `request` is a book request or null. Empty `q` is 400 `Enter a search.` Page size is 20. 403 `Requests are off.` when requests are disabled. An Open Library failure is 502
@@ -166,6 +185,7 @@ Prefix `/v1`.
 - `GET /requests?all=` → `{ "items": [ BookRequest ] }`, newest first. `all=1` is admins only, otherwise 403 `Admins only.` 403 when requests are off
 - `DELETE /requests/{id}` → 204. Owner or admin. Anyone else is 404. An imported request is 409 `That book is on your shelf.`
 - `POST /requests/{id}/retry` → the book request. Failed or canceled only; otherwise 409 `Only a failed or canceled request can be retried.`
+- `POST /admin/mail/test` `{ "to" }` → `{ "name": "mail", "ok", "detail" }`. `detail` is `Sent` or the SMTP error. Admin
 - `POST /admin/requests/test` → `{ "checks": [ { "name": "prowlarr" | "sabnzbd" | "downloads", "ok", "detail" } ] }`. 200 even when a check fails. Admin, including while requests are off
 
 A book request is `{ "id", "workKey", "title", "author", "year", "coverId", "state", "progress", "error", "bookId", "requester", "createdAt", "updatedAt" }`. `state` is `requested`, `downloading`, `imported`, `failed`, or `canceled`.
