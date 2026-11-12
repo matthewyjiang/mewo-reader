@@ -2,7 +2,7 @@ import { expect, test, type Page, type Route } from '@playwright/test';
 import { mkdir } from 'node:fs/promises';
 
 const DAY = 86_400_000;
-const expires = Date.UTC(2026, 10, 12, 12, 0, 0);
+const expires = Date.UTC(2027, 10, 12, 12, 0, 0);
 
 interface Invite {
   id: string;
