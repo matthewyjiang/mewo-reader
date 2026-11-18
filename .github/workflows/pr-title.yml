@@ -1,0 +1,36 @@
+name: PR title
+
+on:
+  pull_request:
+    types: [opened, edited, synchronize, reopened]
+
+concurrency:
+  group: pr-title-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  title:
+    runs-on: ubuntu-latest
+    steps:
+      # The title becomes the squash subject, which scripts/release-notes.sh groups by type.
+      - name: Check conventional title
+        env:
+          TITLE: ${{ github.event.pull_request.title }}
+        run: |
+          pattern='^(feat|fix|perf|refactor|docs|test|build|ci|chore|style|revert)(\([a-z0-9-]+\))?!?: .+'
+          if ! [[ "$TITLE" =~ $pattern ]]; then
+            echo "PR title is not a Conventional Commit: $TITLE"
+            echo "Use <type>(<scope>): <description>, for example: fix(server): reject empty hosted handles"
+            exit 1
+          fi
+
+  release-notes:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Test release notes script
+        run: scripts/release-notes.test.sh
