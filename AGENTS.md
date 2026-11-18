@@ -30,6 +30,8 @@ ci(android): attach a signed apk on v* tags
 
 A breaking change uses `feat(android)!:` or a `BREAKING CHANGE:` footer.
 
+Pull request titles follow the same format. A pull request is squash-merged, so its title becomes the commit subject on `main`, and `scripts/release-notes.sh` groups those subjects by type into the release notes. A body in an annotated release tag, after the `Mewo X.Y.Z` line, becomes the release summary.
+
 ## Branches and pull requests
 
 Do the work on a branch and open a pull request.
